@@ -74,7 +74,7 @@ the port the Supervisor chose, not any arbitrary port.
 ## 1. Core Concept: How WASI Networking Works
 
 A Wasm module compiled to `wasm32-wasip2` does not access the network directly. All socket
-calls go through **WASI host functions**. When the Supervisor builds the `WasiEnv`, it configures
+calls go through **WASI host functions**. When the Supervisor builds the `WasiCtx`, it configures
 which network operations are permitted and on which addresses.
 
 ```
@@ -155,13 +155,13 @@ impl PortAllocator {
 
 ## 3. WASI Environment with Network Access
 
-`wasmer-wasix` allows configuring a virtual TCP socket environment.
-The key API is `WasiEnv::builder()` with `.net()` to specify a virtual network.
+`wasmtime-wasi` allows configuring a virtual TCP socket environment.
+The key API is `WasiCtx::builder()` with `.net()` to specify a virtual network.
 
 ```rust
 // crates/runtime/src/wasi.rs
-use wasmer_wasix::{WasiEnv, WasiEnvBuilder, WasiNetworkingExt};
-use wasmer::Store;
+use wasmtime_wasix::{WasiCtx, WasiCtxBuilder, WasiNetworkingExt};
+use wasmtime::Store;
 use common::error::PlatformError;
 
 pub struct WasiConfig {
@@ -173,15 +173,15 @@ pub struct WasiConfig {
     pub wasm_port: u16,
 }
 
-/// Build a WasiEnv that:
+/// Build a WasiCtx that:
 ///   1. Grants network access (TCP listen + connect).
 ///   2. Exposes env vars (including PORT) to the Wasm module.
 ///   3. Restricts the module to the allocated host_port.
 pub fn build_wasi_env(
     store: &mut Store,
     cfg: &WasiConfig,
-) -> Result<WasiEnv, PlatformError> {
-    let mut builder = WasiEnv::builder(&cfg.app_name);
+) -> Result<WasiCtx, PlatformError> {
+    let mut builder = WasiCtx::builder(&cfg.app_name);
 
     // Inject all env vars
     for (k, v) in &cfg.env_vars {
@@ -192,21 +192,21 @@ pub fn build_wasi_env(
     builder = builder.env("PORT", &cfg.wasm_port.to_string());
 
     // Enable TCP networking with the virtual IP stack
-    // wasmer-wasix will route the app's "bind 0.0.0.0:wasm_port" call
+    // wasmtime-wasi will route the app's "bind 0.0.0.0:wasm_port" call
     // to the host listener on host_port.
     //
-    // Note: exact API depends on wasmer-wasix version.
-    // In wasmer-wasix 0.19+, use the virtual-net feature:
+    // Note: exact API depends on wasmtime-wasi version.
+    // In wasmtime-wasi 0.19+, use the virtual-net feature:
     builder = builder
         .sandbox_fs(Default::default())
         // Allow outbound TCP connections (for DB calls etc.)
         .allow_connect(true)
         // Allow listening on exactly one port
-        .preopen_socket(cfg.host_port);
+        .socket_addr_check(custom_port_mapper);
 
     let wasi_env = builder
         .finalize(store)
-        .map_err(|e| PlatformError::Runtime(format!("WasiEnv finalize: {e}")))?;
+        .map_err(|e| PlatformError::Runtime(format!("WasiCtx finalize: {e}")))?;
 
     Ok(wasi_env)
 }
@@ -221,29 +221,29 @@ needs raw socket-creation rights — it just calls `accept()` on a pre-opened fd
 ```rust
 // Supervisor side (before calling build_wasi_env)
 use std::net::TcpListener;
-use wasmer_wasix::WasiEnvBuilder;
+use wasmtime_wasix::WasiCtxBuilder;
 
 pub fn build_wasi_env_prebound(
     store: &mut Store,
     cfg: &WasiConfig,
-) -> Result<WasiEnv, PlatformError> {
+) -> Result<WasiCtx, PlatformError> {
     // 1. Supervisor binds the port on the host OS
     let listener = TcpListener::bind(format!("0.0.0.0:{}", cfg.host_port))
         .map_err(|e| PlatformError::Runtime(format!("bind failed: {e}")))?;
     listener.set_nonblocking(true).ok();
 
     // 2. Pass the bound listener to the Wasm module as a preopened socket
-    let mut builder = WasiEnv::builder(&cfg.app_name);
+    let mut builder = WasiCtx::builder(&cfg.app_name);
     for (k, v) in &cfg.env_vars {
         builder = builder.env(k, v);
     }
     builder = builder
         .env("PORT", &cfg.wasm_port.to_string())
-        .preopened_socket(listener, cfg.wasm_port)  // maps fd to wasm_port
+        .socket_addr_check(listener, cfg.wasm_port)  // maps fd to wasm_port
         .sandbox_fs(Default::default());
 
     builder.finalize(store)
-        .map_err(|e| PlatformError::Runtime(format!("WasiEnv finalize: {e}")))
+        .map_err(|e| PlatformError::Runtime(format!("WasiCtx finalize: {e}")))
 }
 ```
 
@@ -254,7 +254,7 @@ pub fn build_wasi_env_prebound(
 | Traffic Direction | Allowed | Mechanism |
 |-------------------|---------|-----------|
 | Inbound from Pingora | Yes | Pre-bound TCP listener on allocated port |
-| Outbound to database | Yes (configurable) | `allow_connect(true)` in WasiEnv |
+| Outbound to database | Yes (configurable) | `allow_connect(true)` in WasiCtx |
 | Outbound to arbitrary internet | Configurable | Can be blocked by setting `allow_connect(false)` and routing through a sidecar proxy |
 | App A → App B (same node) | Via Supervisor | Supervisor routes NATS "local call" directly |
 | App A → App B (remote node) | Via direct TCP | Service discovery via NATS, then direct connection |

@@ -1,7 +1,7 @@
-# Step 03 — Wasm Runtime (Wasmer Integration)
+# Step 03 — Wasm Runtime (Wasmtime & WASI Preview 2 Integration)
 
 ## Goal
-Build the `runtime` crate that wraps `wasmer`. It handles:
+Build the `runtime` crate that wraps `wasmtime`. It handles:
 1. **AOT compilation** of raw `.wasm` bytes → native machine code artifact
 
 ---
@@ -19,20 +19,20 @@ translated to native machine code before it can run. There are two approaches:
 - **AOT (Ahead-of-Time)**: Translate once at deploy time. Store the native artifact. Every
   subsequent instantiation just loads the pre-compiled binary. Zero compilation cost at runtime.
 
-This platform uses **AOT via Cranelift**. The cold start target is < 10ms. JIT compilation
+This platform uses **AOT via Cranelift (Wasmtime Default)**. The cold start target is < 10ms. JIT compilation
 of a typical Axum app takes 500ms–2s. That alone would make the target impossible.
 
-### Why Cranelift as the AOT Backend?
+### Why Cranelift (Wasmtime Default) as the AOT Backend?
 
-Wasmer supports multiple compilers: Cranelift, LLVM, and Singlepass.
+Wasmtime supports multiple compilers: Cranelift (Wasmtime Default), LLVM, and Singlepass.
 
 | Backend    | Compile time | Code quality        | Notes                            |
 | ---------- | ------------ | ------------------- | -------------------------------- |
-| Cranelift  | ~200ms       | Within 5% of LLVM   | Best balance for servers         |
+| Cranelift (Wasmtime Default)  | ~200ms       | Within 5% of LLVM   | Best balance for servers         |
 | LLVM       | 2–30 seconds | Fastest runtime     | Too slow to compile at deploy    |
 | Singlepass | ~50ms        | 2–3x slower runtime | Designed for blockchain/metering |
 
-Cranelift was purpose-built for JIT/AOT in language runtimes (it powers Wasmtime and Firefox).
+Cranelift (Wasmtime Default) was purpose-built for JIT/AOT in language runtimes (it powers Wasmtime and Firefox).
 It produces excellent machine code quickly and its serialization format is stable.
 
 ### The Compile-Once, Run-Many Flow
@@ -43,8 +43,8 @@ Deploy time (once):                Runtime (every cold start):
 .wasm bytes                        redb artifact bytes
      │                                     │
      ▼                                     ▼
-Module::new(engine, bytes)         Module::deserialize(engine, bytes)
-  (Cranelift compiles to           (< 1ms — just maps bytes to memory)
+Component::new(engine, bytes)         Component::deserialize(engine, bytes)
+  (Cranelift (Wasmtime Default) compiles to           (< 1ms — just maps bytes to memory)
    native machine code)                    │
      │                                     ▼
      ▼                             Instance::new(store, module, imports)
@@ -54,7 +54,7 @@ Module::serialize()                (links WASI imports, initializes globals)
 Store in redb [artifacts]          _start() called → Axum server starts
 ```
 
-The key insight: `Module::deserialize()` is **not re-compilation**. It is loading a
+The key insight: `Component::deserialize()` is **not re-compilation**. It is loading a
 pre-compiled native binary from bytes into memory. This is the same operation as loading
 a shared library (`.so`) — nearly instantaneous.
 
@@ -85,7 +85,7 @@ This is the correct approach: isolation at the Wasm boundary, not the OS boundar
 
 ### Engine Sharing (Why One Engine per Process)
 
-A Wasmer `Engine` holds the Cranelift compiler state and a cache of compiled module
+A Wasmtime `Engine` holds the Cranelift (Wasmtime Default) compiler state and a cache of compiled module
 metadata. Creating an engine is expensive (tens of milliseconds). Sharing one `Arc<Engine>`
 across all instantiations means:
 
@@ -103,19 +103,19 @@ across all instantiations means:
 
 ## 1. Compiler Module
 
-Compiles `.wasm` bytecode to native machine code using Cranelift (AOT).
+Compiles `.wasm` bytecode to native machine code using Cranelift (Wasmtime Default) (AOT).
 The result is a serialized artifact that can be stored and later deserialized without re-compilation.
 
 ```rust
 // crates/runtime/src/compiler.rs
-use wasmer::{Engine, Module, Store};
-use wasmer_compiler_cranelift::Cranelift;
+use wasmtime::{Engine, Module, Store};
+use wasmtime_compiler_cranelift::Cranelift (Wasmtime Default);
 use common::error::PlatformError;
 
-/// Build a Cranelift-based AOT engine.
+/// Build a Cranelift (Wasmtime Default)-based AOT engine.
 /// Call once per process and share via Arc.
 pub fn build_engine() -> Engine {
-    let compiler = Cranelift::default();
+    let compiler = Cranelift (Wasmtime Default)::default();
     Engine::new(compiler.into(), Default::default())
 }
 
@@ -124,7 +124,7 @@ pub fn build_engine() -> Engine {
 ///
 /// Returns: serialized artifact bytes (store in redb).
 pub fn compile(engine: &Engine, wasm_bytes: &[u8]) -> Result<Vec<u8>, PlatformError> {
-    let module = Module::new(engine, wasm_bytes)
+    let module = Component::new(engine, wasm_bytes)
         .map_err(|e| PlatformError::Runtime(format!("compile error: {e}")))?;
 
     // Serialize the compiled module to bytes (portable Artifact format).
@@ -140,7 +140,7 @@ pub fn compile(engine: &Engine, wasm_bytes: &[u8]) -> Result<Vec<u8>, PlatformEr
 /// # Safety
 /// `artifact_bytes` must be produced by `compile()` with a compatible engine.
 pub unsafe fn deserialize(engine: &Engine, artifact_bytes: &[u8]) -> Result<Module, PlatformError> {
-    Module::deserialize(engine, artifact_bytes)
+    Component::deserialize(engine, artifact_bytes)
         .map_err(|e| PlatformError::Runtime(format!("deserialize error: {e}")))
 }
 ```
@@ -149,11 +149,11 @@ pub unsafe fn deserialize(engine: &Engine, artifact_bytes: &[u8]) -> Result<Modu
 
 ## 2. Resource Limits Module
 
-Configures per-instance fuel and memory limits using Wasmer Tunables.
+Configures per-instance fuel and memory limits using Wasmtime Tunables.
 
 ```rust
 // crates/runtime/src/limits.rs
-use wasmer::{Pages, Store};
+use wasmtime::{Pages, Store};
 use common::types::{FuelQuota, MemoryPages};
 use common::error::PlatformError;
 
@@ -171,9 +171,9 @@ pub fn configure_store(
     // Memory limit is enforced at the engine level via custom Tunables.
     // This prevents the Wasm module from growing its linear memory beyond the limit.
     // Implementation requires a custom Tunables struct wrapping BaseTunables.
-    // See: https://docs.rs/wasmer/latest/wasmer/trait.Tunables.html
+    // See: https://docs.rs/wasmtime/latest/wasmtime/trait.Tunables.html
     //
-    // For the initial implementation, use wasmer's built-in limit API:
+    // For the initial implementation, use wasmtime's built-in limit API:
     store.set_trap_on_out_of_fuel(true); // raise Trap instead of returning error
 
     tracing::debug!(
@@ -195,8 +195,8 @@ pub fn read_fuel_remaining(store: &Store) -> u64 {
 
 ```rust
 // crates/runtime/src/limits.rs (continued)
-use wasmer::{BaseTunables, Pages, Target, Tunables, MemoryError, MemoryStyle, TableStyle};
-use wasmer::vm::{VMMemoryDefinition, VMTableDefinition};
+use wasmtime::{BaseTunables, Pages, Target, Tunables, MemoryError, MemoryStyle, TableStyle};
+use wasmtime::vm::{VMMemoryDefinition, VMTableDefinition};
 use std::ptr::NonNull;
 
 /// Wraps BaseTunables to enforce a maximum linear memory size.
@@ -215,9 +215,9 @@ impl LimitedTunables {
 }
 
 impl Tunables for LimitedTunables {
-    fn memory_style(&self, memory: &wasmer::MemoryType) -> MemoryStyle {
+    fn memory_style(&self, memory: &wasmtime::MemoryType) -> MemoryStyle {
         // Clamp max pages to our limit
-        let adjusted = wasmer::MemoryType::new(
+        let adjusted = wasmtime::MemoryType::new(
             memory.minimum,
             Some(memory.maximum.unwrap_or(self.limit).min(self.limit)),
             memory.shared,
@@ -225,15 +225,15 @@ impl Tunables for LimitedTunables {
         self.base.memory_style(&adjusted)
     }
 
-    fn table_style(&self, table: &wasmer::TableType) -> TableStyle {
+    fn table_style(&self, table: &wasmtime::TableType) -> TableStyle {
         self.base.table_style(table)
     }
 
     fn create_host_memory(
         &self,
-        ty: &wasmer::MemoryType,
+        ty: &wasmtime::MemoryType,
         style: &MemoryStyle,
-    ) -> Result<wasmer::VMMemory, MemoryError> {
+    ) -> Result<wasmtime::VMMemory, MemoryError> {
         if ty.minimum > self.limit {
             return Err(MemoryError::Generic(format!(
                 "memory minimum {} exceeds limit {}",
@@ -245,27 +245,27 @@ impl Tunables for LimitedTunables {
 
     unsafe fn create_vm_memory(
         &self,
-        ty: &wasmer::MemoryType,
+        ty: &wasmtime::MemoryType,
         style: &MemoryStyle,
         vm_definition_location: NonNull<VMMemoryDefinition>,
-    ) -> Result<wasmer::VMMemory, MemoryError> {
+    ) -> Result<wasmtime::VMMemory, MemoryError> {
         self.base.create_vm_memory(ty, style, vm_definition_location)
     }
 
     unsafe fn create_vm_table(
         &self,
-        ty: &wasmer::TableType,
+        ty: &wasmtime::TableType,
         style: &TableStyle,
         vm_definition_location: NonNull<VMTableDefinition>,
-    ) -> Result<wasmer::VMTable, wasmer::TableError> {
+    ) -> Result<wasmtime::VMTable, wasmtime::TableError> {
         self.base.create_vm_table(ty, style, vm_definition_location)
     }
 
     fn create_host_table(
         &self,
-        ty: &wasmer::TableType,
+        ty: &wasmtime::TableType,
         style: &TableStyle,
-    ) -> Result<wasmer::VMTable, wasmer::TableError> {
+    ) -> Result<wasmtime::VMTable, wasmtime::TableError> {
         self.base.create_host_table(ty, style)
     }
 }
@@ -279,8 +279,8 @@ Instantiates a module and runs it. Captures resource usage after the run.
 
 ```rust
 // crates/runtime/src/executor.rs
-use wasmer::{Engine, Instance, Module, Store, imports};
-use wasmer_wasix::{WasiEnv, WasiEnvBuilder};
+use wasmtime::{Engine, Instance, Module, Store, imports};
+use wasmtime_wasix::{WasiEnv, WasiEnvBuilder};
 use common::{
     error::PlatformError,
     types::{AppConfig, FuelQuota, InstanceId},
@@ -433,7 +433,7 @@ pub mod limits;
 
 use common::{error::PlatformError, types::AppConfig};
 use executor::PreparedModule;
-use wasmer::Engine;
+use wasmtime::Engine;
 use std::sync::Arc;
 
 /// High-level runtime handle shared across the node.
@@ -517,7 +517,7 @@ mod tests {
 
 | Decision                     | Rationale                                                                                                             |
 | ---------------------------- | --------------------------------------------------------------------------------------------------------------------- |
-| AOT via Cranelift            | JIT (Singlepass) is faster to compile but slower to execute. Cranelift is the best AOT backend for Wasmer on servers. |
+| AOT via Cranelift (Wasmtime Default)            | JIT (Singlepass) is faster to compile but slower to execute. Cranelift (Wasmtime Default) is the best AOT backend for Wasmtime on servers. |
 | Engine shared via `Arc`      | Engine is thread-safe and expensive to create. Share one per process.                                                 |
 | `spawn_blocking` for compile | Compilation is synchronous and CPU-bound. Never block the Tokio reactor.                                              |
 | Fuel set per invocation      | This allows per-request quotas, not just per-instance quotas. Premium users can get more fuel.                        |
@@ -719,7 +719,7 @@ impl ExtendedLimitsConfig {
 ### 7.3 Execution Flow with I/O Tracking
 
 The `IoResourceTracker` is created alongside the Wasm `Store` and threaded through the
-WASI host function imports. The WASI host functions (provided by `wasmer_wasix`) are
+WASI host function imports. The WASI host functions (provided by `wasmtime_wasix`) are
 wrapped to call the tracker before forwarding to the real implementation.
 
 ```
@@ -730,7 +730,7 @@ spawn_instance()
    ├── IoResourceTracker::new(extended_limits)
    │
    ├── WasiEnv::builder()
-   │      └── .set_fd_limit(max_open_fds)  ← wasmer_wasix native support
+   │      └── .set_fd_limit(max_open_fds)  ← wasmtime_wasix native support
    │
    ├── Instance::new() with import wrappers
    │      └── fd_write   → tracker.track_fs_write(len) → real fd_write
