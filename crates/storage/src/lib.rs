@@ -8,6 +8,9 @@ pub mod metrics;
 pub mod secrets;
 pub mod tables;
 
+#[cfg(test)]
+mod tests;
+
 #[derive(Clone)]
 pub struct Store {
     pub db: Arc<Database>,
@@ -26,6 +29,9 @@ impl Store {
             tx.open_table(tables::CONFIGS)?;
             tx.open_table(tables::SECRETS)?;
             tx.open_table(tables::METRICS)?;
+            tx.open_table(tables::ROUTES)?;
+            tx.open_table(tables::RAW_WASM)?;
+            tx.open_table(tables::SCHEMA_META)?;
         }
         tx.commit()?;
 
