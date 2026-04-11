@@ -1,0 +1,16 @@
+
+[package]
+name = "supervisor"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+common = { path = "../common" }
+runtime = { path = "../runtime" }
+storage = { path = "../storage" }
+secrets = { path = "../secrets" }
+metrics = { path = "../metrics" }
+

@@ -1,0 +1,15 @@
+
+[package]
+name = "proxy"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+pingora = { workspace = true }
+pingora-proxy = { workspace = true }
+pingora-load-balancing = { workspace = true }
+pingora-core = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+common = { path = "../common" }
+

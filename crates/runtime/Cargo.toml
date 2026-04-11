@@ -1,0 +1,15 @@
+
+[package]
+name = "runtime"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+wasmtime = { workspace = true }
+wasmtime-wasi = { workspace = true }
+tokio = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+common = { path = "../common" }
+storage = { path = "../storage" }
+

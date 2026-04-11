@@ -1,0 +1,25 @@
+
+[package]
+name = "node"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "wasm-node"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+clap = { workspace = true }
+anyhow = { workspace = true }
+common = { path = "../common" }
+storage = { path = "../storage" }
+runtime = { path = "../runtime" }
+supervisor = { path = "../supervisor" }
+proxy = { path = "../proxy" }
+messaging = { path = "../messaging" }
+metrics = { path = "../metrics" }
+secrets = { path = "../secrets" }
+

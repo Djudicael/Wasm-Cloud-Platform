@@ -1,0 +1,19 @@
+
+[package]
+name = "hello-axum"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "hello-axum"
+path = "src/main.rs"
+
+[dependencies]
+axum = { workspace = true }
+tokio = { workspace = true }
+
+[profile.release]
+opt-level = 3
+lto = true
+strip = "symbols"
+
