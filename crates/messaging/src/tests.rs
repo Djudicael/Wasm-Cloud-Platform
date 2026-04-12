@@ -10,11 +10,14 @@ mod tests {
     #[tokio::test]
     async fn test_pub_sub_deploy_app() {
         let image = GenericImage::new("nats", "latest")
-            .with_exposed_port(ContainerPort::Tcp(4222))
+            .with_mapped_port(4222, ContainerPort::Tcp(4222))
             .with_cmd(vec!["-js"]); // enable JetStream
         let _container = image.start().await.expect("Failed to start NATS container");
-        let port = _container.get_host_port_ipv4(4222).await.unwrap();
-        let url = format!("nats://127.0.0.1:{}", port);
+
+        // Wait for NATS to boot up
+        tokio::time::sleep(Duration::from_secs(2)).await;
+
+        let url = "nats://127.0.0.1:4222".to_string();
         let bus = NatsBus::connect(&url)
             .await
             .expect("Failed to connect to NATS");
@@ -67,11 +70,14 @@ mod tests {
     #[tokio::test]
     async fn test_jetstream_durable_replay() {
         let image = GenericImage::new("nats", "latest")
-            .with_exposed_port(ContainerPort::Tcp(4222))
+            .with_mapped_port(4223, ContainerPort::Tcp(4222))
             .with_cmd(vec!["-js"]); // enable JetStream
         let _container = image.start().await.expect("Failed to start NATS container");
-        let port = _container.get_host_port_ipv4(4222).await.unwrap();
-        let url = format!("nats://127.0.0.1:{}", port);
+
+        // Wait for NATS to boot up
+        tokio::time::sleep(Duration::from_secs(2)).await;
+
+        let url = "nats://127.0.0.1:4223".to_string();
         let bus = NatsBus::connect(&url)
             .await
             .expect("Failed to connect to NATS");

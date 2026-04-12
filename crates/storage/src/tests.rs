@@ -53,13 +53,11 @@ fn test_artifact_survives_drop() {
 #[test]
 fn test_config_roundtrip() {
     let (store, _f) = make_store();
-    let config = AppConfig {
-        id: AppId::new("config-app", "v1"),
-        fuel_quota: FuelQuota(100),
-        memory_limit: MemoryPages(10),
-        env_vars: vec![("KEY".to_string(), "VAL".to_string())],
-        port: 8080,
-    };
+    let mut config = AppConfig::default_for(AppId::new("config-app", "v1"));
+    config.fuel_quota = FuelQuota(100);
+    config.memory_limit = MemoryPages(10);
+    config.env_vars = std::collections::HashMap::from([("KEY".to_string(), "VAL".to_string())]);
+    config.wasm_bind_port = 8080;
 
     store.save_config(&config).unwrap();
     let loaded = store.load_config(&config.id).unwrap().unwrap();
@@ -68,7 +66,7 @@ fn test_config_roundtrip() {
     assert_eq!(config.fuel_quota.0, loaded.fuel_quota.0);
     assert_eq!(config.memory_limit.0, loaded.memory_limit.0);
     assert_eq!(config.env_vars, loaded.env_vars);
-    assert_eq!(config.port, loaded.port);
+    assert_eq!(config.wasm_bind_port, loaded.wasm_bind_port);
 
     // List apps
     let apps = store.list_apps().unwrap();
@@ -76,10 +74,10 @@ fn test_config_roundtrip() {
 
     // Upsert
     let mut config2 = config.clone();
-    config2.port = 9090;
+    config2.wasm_bind_port = 9090;
     store.save_config(&config2).unwrap();
     let loaded2 = store.load_config(&config.id).unwrap().unwrap();
-    assert_eq!(loaded2.port, 9090);
+    assert_eq!(loaded2.wasm_bind_port, 9090);
 }
 
 #[test]
