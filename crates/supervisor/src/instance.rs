@@ -1,8 +1,30 @@
 // crates/supervisor/src/instance.rs
 use common::error::PlatformError;
+use common::types::{AppId, InstanceId, InstanceState};
+use runtime::executor::ExecutionStats;
 use std::net::SocketAddr;
+use std::time::Instant;
 use tokio::net::TcpStream;
+use tokio::sync::oneshot;
+use tokio::task::JoinHandle;
 use tokio::time::{sleep, timeout, Duration};
+
+/// A live Wasm instance managed by the Supervisor.
+pub struct ManagedInstance {
+    pub id: InstanceId,
+    pub app_id: AppId,
+    pub addr: SocketAddr,
+    pub state: InstanceState,
+    pub spawned_at: Instant,
+    pub last_request_at: Instant,
+    pub request_count: u64,
+
+    /// Handle to the Tokio task running the Wasm module.
+    pub task: JoinHandle<ExecutionStats>,
+
+    /// Send a signal to this handle to begin graceful shutdown.
+    pub shutdown_tx: oneshot::Sender<()>,
+}
 
 /// Wait until the TCP port is accepting connections.
 /// Polls every 5ms, gives up after `max_wait`.

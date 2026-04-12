@@ -99,6 +99,8 @@ pub struct AppConfig {
 
     #[serde(default)]
     pub extended_limits: Option<ExtendedLimitsConfig>,
+
+    pub health_check_path: Option<String>,
 }
 
 impl AppConfig {
@@ -114,6 +116,7 @@ impl AppConfig {
             env_vars: std::collections::HashMap::new(),
             secret_keys: Vec::new(),
             extended_limits: None,
+            health_check_path: None,
         }
     }
 }

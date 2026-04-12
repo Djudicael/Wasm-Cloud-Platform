@@ -115,6 +115,20 @@ mod tests {
 
     #[async_trait]
     impl SecretProvider for MockSecretProvider {
+        async fn set(
+            &self,
+            _app_id: &AppId,
+            _key: &str,
+            _value: &str,
+        ) -> Result<(), PlatformError> {
+            Ok(())
+        }
+        async fn delete(&self, _app_id: &AppId, _key: &str) -> Result<(), PlatformError> {
+            Ok(())
+        }
+        async fn list_keys(&self, _app_id: &AppId) -> Result<Vec<String>, PlatformError> {
+            Ok(vec![])
+        }
         async fn get(&self, _app_id: &AppId, key: &str) -> Result<String, PlatformError> {
             if key == "EXISTING_SECRET" {
                 Ok("secret_value".to_string())

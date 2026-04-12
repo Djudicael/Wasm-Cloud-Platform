@@ -8,6 +8,13 @@ use std::thread;
 use std::time::Duration;
 use tokio::net::TcpListener;
 
+use crate::instance::ManagedInstance;
+use crate::pool::InstancePool;
+use common::types::{AppConfig, InstanceId, InstanceState};
+use runtime::executor::PreparedModule;
+use std::time::Instant;
+use tokio::sync::oneshot;
+
 #[test]
 fn test_port_allocator_basic() {
     let addr = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1));

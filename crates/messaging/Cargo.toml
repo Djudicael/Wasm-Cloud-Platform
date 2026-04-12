@@ -12,3 +12,4 @@ secrets = { path = "../secrets" }
 tokio-stream = "0.1"
 serde_json = "1.0"
 tracing = { workspace = true }
+serde.workspace = true
