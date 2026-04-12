@@ -3,6 +3,7 @@ use clap::{Parser, Subcommand};
 
 mod cmds {
     pub mod deploy;
+    pub mod gc;
     pub mod list;
     pub mod logs;
     pub mod platform;
@@ -55,6 +56,8 @@ enum Commands {
     Status,
     /// Platform binary management and upgrades
     Platform(cmds::platform::PlatformArgs),
+    /// Garbage collection management
+    Gc(cmds::gc::GcArgs),
 }
 
 #[tokio::main]
@@ -77,6 +80,7 @@ async fn main() -> anyhow::Result<()> {
         Commands::Logs { app_id } => cmds::logs::run(&app_id, &cli.node_api, &http).await?,
         Commands::Status => cmds::status::run(&cli.node_api, &http).await?,
         Commands::Platform(args) => cmds::platform::run(args, &bus, &cli.node_api, &http).await?,
+        Commands::Gc(args) => cmds::gc::run(args, &bus, &cli.node_api, &http).await?,
     }
     Ok(())
 }

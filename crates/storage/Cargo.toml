@@ -14,6 +14,14 @@ tracing = { workspace = true }
 common = { path = "../common" }
 axum = { workspace = true }
 sha2 = "0.10"
+tokio = { workspace = true, features = ["full"] }
+prometheus = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+winapi = { version = "0.3", features = ["fileapi", "minwindef"] }
 
 [dev-dependencies]
 tempfile = "3.27.0"
