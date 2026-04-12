@@ -21,4 +21,12 @@ pub enum PlatformError {
     Proxy(String),
     #[error("Config validation error: {0}")]
     ConfigValidation(String),
+    #[error("Network error: {0}")]
+    Network(String),
+    #[error("Security error: {0}")]
+    Security(String),
+    #[error("IO error: {0}")]
+    Io(String),
+    #[error("Internal error: {0}")]
+    Internal(String),
 }

@@ -120,6 +120,7 @@ pub async fn run(
         extended_limits: None,
         health_check_path: None,
         db_max_connections: None,
+        rate_limit: None, // Use default rate limiting
     };
 
     // 5. Publish deploy event

@@ -14,6 +14,7 @@ pub struct Metrics {
     pub request_duration_seconds: HistogramVec,
     pub active_instances: GaugeVec,
     pub trap_total: IntCounterVec,
+    pub platform_info: IntCounterVec,
 }
 
 impl Metrics {
@@ -80,6 +81,16 @@ impl Metrics {
         .unwrap();
         registry.register(Box::new(trap_total.clone())).unwrap();
 
+        let platform_info = IntCounterVec::new(
+            Opts::new(
+                "wasm_platform_info",
+                "Platform version information (value is always 1)",
+            ),
+            &["node_id", "binary_version", "protocol_version"],
+        )
+        .unwrap();
+        registry.register(Box::new(platform_info.clone())).unwrap();
+
         Metrics {
             registry: Arc::new(registry),
             requests_total,
@@ -88,7 +99,15 @@ impl Metrics {
             request_duration_seconds,
             active_instances,
             trap_total,
+            platform_info,
         }
+    }
+
+    /// Set the platform version info metric. This should be called once at startup.
+    pub fn set_platform_info(&self, node_id: &str, binary_version: &str, protocol_version: u32) {
+        self.platform_info
+            .with_label_values(&[node_id, binary_version, &protocol_version.to_string()])
+            .inc();
     }
 
     pub fn record_execution(&self, sample: &super::ExecutionSample) {

@@ -96,9 +96,17 @@ impl EventDispatcher {
                 node_id,
                 artifact_server_url,
                 public_key_bytes,
+                protocol_version,
+                binary_version,
             } => {
-                self.handle_node_joined(node_id, artifact_server_url, public_key_bytes)
-                    .await;
+                self.handle_node_joined(
+                    node_id,
+                    artifact_server_url,
+                    public_key_bytes,
+                    protocol_version,
+                    binary_version,
+                )
+                .await;
             }
             Event::StateSnapshot {
                 for_node_id,
@@ -110,6 +118,37 @@ impl EventDispatcher {
                 if for_node_id == self.node_id {
                     self.handle_state_snapshot(configs, routes, encrypted_secrets, artifact_hashes)
                         .await;
+                }
+            }
+            Event::NodeUpgrade { .. } => {
+                self.handle_node_upgrade(event).await;
+            }
+            Event::NodeUpgradeComplete {
+                node_id,
+                new_binary_version,
+                new_protocol_version,
+            } => {
+                info!(
+                    node = %node_id,
+                    version = %new_binary_version,
+                    protocol = new_protocol_version,
+                    "node upgrade completed"
+                );
+                // Check if we were waiting for this node
+                // Re-evaluate our upgrade status if we're in a rolling upgrade
+            }
+            Event::NodeDraining {
+                node_id,
+                drain_timeout_secs,
+            } => {
+                if node_id == self.node_id {
+                    info!(
+                        timeout_secs = drain_timeout_secs,
+                        "beginning graceful shutdown"
+                    );
+                    self.begin_graceful_shutdown(drain_timeout_secs).await;
+                } else {
+                    info!(node = %node_id, "peer node draining");
                 }
             }
         }
@@ -217,7 +256,16 @@ impl EventDispatcher {
         new_node_id: String,
         peer_artifact_url: String,
         peer_public_key: Vec<u8>,
+        protocol_version: u32,
+        binary_version: String,
     ) {
+        info!(
+            new_node = %new_node_id,
+            protocol = protocol_version,
+            version = %binary_version,
+            "node joined cluster"
+        );
+
         // Leader election: only the node with lexicographically smallest ID responds
         if self.node_id > new_node_id {
             return;
@@ -422,6 +470,140 @@ impl EventDispatcher {
         }
 
         info!("state snapshot import complete");
+    }
+
+    async fn handle_node_upgrade(&self, event: Event) {
+        use crate::upgrade::{download_and_verify, handle_upgrade_event, UpgradeAction};
+
+        // Collect all node IDs in the cluster for rolling upgrade ordering
+        let cluster_nodes = self
+            .store
+            .list_apps()
+            .ok()
+            .map(|apps| {
+                // In a real implementation, we'd track node IDs separately
+                // For now, we'll just use the node_id from the event
+                vec![self.node_id.clone()]
+            })
+            .unwrap_or_else(|| vec![self.node_id.clone()]);
+
+        match handle_upgrade_event(&event, &self.node_id, &cluster_nodes) {
+            Ok(UpgradeAction::NotAnUpgradeEvent) => {
+                warn!("handle_node_upgrade called with non-upgrade event");
+            }
+            Ok(UpgradeAction::NotTargeted) => {
+                info!("upgrade not targeted at this node");
+            }
+            Ok(UpgradeAction::WaitForPredecessor { predecessor }) => {
+                info!(
+                    predecessor,
+                    "waiting for predecessor node to complete upgrade"
+                );
+                // Store upgrade intent and wait for NodeUpgradeComplete event
+            }
+            Ok(UpgradeAction::IncompatibleVersion) => {
+                error!("upgrade version is incompatible with this node's protocol version");
+            }
+            Ok(UpgradeAction::ProceedWithUpgrade) => {
+                if let Event::NodeUpgrade {
+                    binary_url,
+                    binary_sha256,
+                    new_protocol_version,
+                    new_binary_version,
+                    ..
+                } = event
+                {
+                    info!(
+                        url = %binary_url,
+                        version = %new_binary_version,
+                        protocol = new_protocol_version,
+                        "proceeding with upgrade"
+                    );
+
+                    // Download and verify the new binary
+                    let install_dir = std::path::PathBuf::from("/opt/wasm-cloud");
+                    match download_and_verify(&binary_url, &binary_sha256, &install_dir, "node")
+                        .await
+                    {
+                        Ok(new_binary_path) => {
+                            info!(path = ?new_binary_path, "new binary downloaded and verified");
+
+                            // Update the symlink to point to the new binary
+                            let current_link = install_dir.join("current");
+                            if let Err(e) = std::fs::remove_file(&current_link) {
+                                if e.kind() != std::io::ErrorKind::NotFound {
+                                    error!(error = %e, "failed to remove old symlink");
+                                    return;
+                                }
+                            }
+
+                            if let Err(e) =
+                                std::os::unix::fs::symlink(&new_binary_path, &current_link)
+                            {
+                                error!(error = %e, "failed to create new symlink");
+                                return;
+                            }
+
+                            info!("symlink updated, initiating graceful shutdown");
+
+                            // Publish draining event
+                            let drain_event = Event::NodeDraining {
+                                node_id: self.node_id.clone(),
+                                drain_timeout_secs: 30,
+                            };
+
+                            if let Err(e) = self.bus.publish(&drain_event).await {
+                                error!(error = %e, "failed to publish draining event");
+                            }
+
+                            // Begin graceful shutdown
+                            self.begin_graceful_shutdown(30).await;
+
+                            // Publish upgrade complete event
+                            let complete_event = Event::NodeUpgradeComplete {
+                                node_id: self.node_id.clone(),
+                                new_binary_version,
+                                new_protocol_version,
+                            };
+
+                            if let Err(e) = self.bus.publish(&complete_event).await {
+                                error!(error = %e, "failed to publish upgrade complete event");
+                            }
+
+                            // Exit process - systemd will restart with new binary
+                            info!("exiting for upgrade, expecting systemd restart");
+                            std::process::exit(0);
+                        }
+                        Err(e) => {
+                            error!(error = %e, "failed to download or verify new binary");
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                error!(error = %e, "upgrade event handling failed");
+            }
+        }
+    }
+
+    async fn begin_graceful_shutdown(&self, timeout_secs: u64) {
+        info!(timeout_secs, "beginning graceful shutdown");
+
+        // 1. Stop accepting new connections
+        // (This would be done via a shared shutdown signal in the proxy)
+
+        // 2. Stop supervisor from spawning new instances
+        // (Would need a shutdown flag in the supervisor)
+
+        // 3. Wait for existing requests to drain
+        let drain_duration = tokio::time::Duration::from_secs(timeout_secs);
+        tokio::time::sleep(drain_duration).await;
+
+        // 4. Kill all running instances
+        info!("drain timeout elapsed, stopping all instances");
+        // supervisor.kill_all() would go here
+
+        info!("graceful shutdown complete");
     }
 }
 

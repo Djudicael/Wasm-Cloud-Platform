@@ -240,6 +240,8 @@ async fn main() -> anyhow::Result<()> {
             node_id: args.node_id.clone(),
             artifact_server_url: artifact_server_url.clone(),
             public_key_bytes,
+            protocol_version: common::protocol::PROTOCOL_VERSION,
+            binary_version: common::protocol::BINARY_VERSION.to_string(),
         };
 
         bus.publish(&join_event).await?;
@@ -263,12 +265,39 @@ async fn main() -> anyhow::Result<()> {
             as futures::future::BoxFuture<'static, Option<std::net::SocketAddr>>
     });
 
+    // Initialize Prometheus metrics
+    let prom_metrics = Arc::new(metrics::exporter::Metrics::new());
+    prom_metrics.set_platform_info(
+        &args.node_id,
+        common::protocol::BINARY_VERSION,
+        common::protocol::PROTOCOL_VERSION,
+    );
+    info!(
+        node_id = %args.node_id,
+        binary_version = common::protocol::BINARY_VERSION,
+        protocol_version = common::protocol::PROTOCOL_VERSION,
+        "platform version metrics initialized"
+    );
+
+    let default_rate_config = proxy::rate_limiter::RateLimitConfig {
+        requests_per_second: 100,
+        burst_capacity: 100,
+        per_ip_limit: 10,
+    };
+
+    // Initialize rate limit metrics (register with the same registry)
+    let rate_limit_metrics = Arc::new(proxy::metrics::RateLimitMetrics::new(
+        &prom_metrics.registry,
+    ));
+
     let wasm_proxy = proxy::service::WasmProxy {
         router: host_router.clone(),
         upstream: upstream_registry.clone(),
-        rate_limiter: Arc::new(proxy::rate_limiter::RateLimiter::new(100.0, 100.0)),
+        rate_limiter: Arc::new(proxy::rate_limiter::RateLimiter::new(default_rate_config)),
         node_table: Arc::new(proxy::node_table::NodeLoadTable::default()),
         cold_start,
+        backpressure: proxy::backpressure::BackpressureSignal::new(),
+        metrics: Some(rate_limit_metrics),
     };
 
     let tls = match (&args.tls_cert, &args.tls_key) {
@@ -286,7 +315,7 @@ async fn main() -> anyhow::Result<()> {
         tls,
     );
 
-    // Admin API with pgBouncer status endpoint
+    // Admin API with pgBouncer status endpoint and Prometheus metrics
     let pgbouncer_check_addr = args.pgbouncer_addr.clone();
     let admin_app = axum::Router::new()
         .route("/health", axum::routing::get(|| async { "OK" }))
@@ -304,7 +333,8 @@ async fn main() -> anyhow::Result<()> {
                     }))
                 }
             }),
-        );
+        )
+        .merge(metrics::exporter::metrics_router(prom_metrics));
 
     let admin_addr = format!("0.0.0.0:{}", args.admin_port);
     tokio::spawn(async move {

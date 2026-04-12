@@ -4,19 +4,28 @@ use clap::{Parser, Subcommand};
 mod cmds {
     pub mod deploy;
     pub mod list;
+    pub mod logs;
+    pub mod platform;
     pub mod routes;
     pub mod secrets;
-    pub mod logs;
     pub mod status;
 }
 
 #[derive(Parser)]
 #[command(name = "wasm-ctl", about = "Wasm Cloud Platform CLI", version)]
 struct Cli {
-    #[arg(long, env = "WASM_CTL_NATS_URL", default_value = "nats://127.0.0.1:4222")]
+    #[arg(
+        long,
+        env = "WASM_CTL_NATS_URL",
+        default_value = "nats://127.0.0.1:4222"
+    )]
     nats_url: String,
 
-    #[arg(long, env = "WASM_CTL_NODE_API", default_value = "http://127.0.0.1:9090")]
+    #[arg(
+        long,
+        env = "WASM_CTL_NODE_API",
+        default_value = "http://127.0.0.1:9090"
+    )]
     node_api: String,
 
     #[arg(long, env = "WASM_CTL_NATS_CREDS")]
@@ -44,6 +53,8 @@ enum Commands {
     Logs { app_id: String },
     /// Show cluster health status
     Status,
+    /// Platform binary management and upgrades
+    Platform(cmds::platform::PlatformArgs),
 }
 
 #[tokio::main]
@@ -65,6 +76,7 @@ async fn main() -> anyhow::Result<()> {
         Commands::Secrets(args) => cmds::secrets::run(args, &bus).await?,
         Commands::Logs { app_id } => cmds::logs::run(&app_id, &cli.node_api, &http).await?,
         Commands::Status => cmds::status::run(&cli.node_api, &http).await?,
+        Commands::Platform(args) => cmds::platform::run(args, &bus, &cli.node_api, &http).await?,
     }
     Ok(())
 }
