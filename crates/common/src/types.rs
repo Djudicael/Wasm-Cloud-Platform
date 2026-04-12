@@ -15,9 +15,9 @@ impl InstanceId {
         InstanceId(Uuid::new_v4())
     }
 }
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub struct FuelQuota(pub u64);
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MemoryPages(pub u32);
 impl MemoryPages {
     pub fn to_bytes(self) -> usize {
@@ -69,15 +69,53 @@ impl ExtendedLimitsConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AppConfig {
+    /// Unique app identifier: "<name>:<version>"
     pub id: AppId,
+
+    /// Maximum Fuel units per execution.
     pub fuel_quota: FuelQuota,
+
+    /// Maximum linear memory pages (1 page = 64 KiB).
     pub memory_limit: MemoryPages,
-    pub env_vars: Vec<(String, String)>,
-    pub port: u16,
+
+    /// Maximum concurrent instances for this app on this node.
+    pub max_instances: u32,
+
+    /// Idle timeout: kill instance if no requests for this many seconds.
+    pub idle_timeout_secs: u64,
+
+    /// Port the Wasm app binds internally (usually 8080).
+    pub wasm_bind_port: u16,
+
+    /// Static environment variables (non-secret).
+    /// Secrets are stored separately in the [secrets] table.
+    pub env_vars: std::collections::HashMap<String, String>,
+
+    /// List of secret keys to inject (resolved from the secrets table).
+    /// e.g. ["DATABASE_URL", "STRIPE_KEY"]
+    pub secret_keys: Vec<String>,
+
     #[serde(default)]
     pub extended_limits: Option<ExtendedLimitsConfig>,
+}
+
+impl AppConfig {
+    /// Default safe config for a new app.
+    pub fn default_for(app_id: AppId) -> Self {
+        AppConfig {
+            id: app_id,
+            fuel_quota: FuelQuota(500_000_000), // ~500ms of compute
+            memory_limit: MemoryPages(2048),    // 128 MB
+            max_instances: 10,
+            idle_timeout_secs: 300,
+            wasm_bind_port: 8080,
+            env_vars: std::collections::HashMap::new(),
+            secret_keys: Vec::new(),
+            extended_limits: None,
+        }
+    }
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum InstanceState {

@@ -5,6 +5,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+async-trait = "0.1"
 tokio = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
@@ -14,3 +15,5 @@ storage = { path = "../storage" }
 secrets = { path = "../secrets" }
 metrics = { path = "../metrics" }
 
+[dev-dependencies]
+tempfile = "3.10"

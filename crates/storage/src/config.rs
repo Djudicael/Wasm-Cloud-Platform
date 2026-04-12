@@ -47,6 +47,16 @@ impl Store {
         }
     }
 
+    /// Update a single env var without touching the rest of the config.
+    /// Safe for live config updates without restart.
+    pub fn set_env_var(&self, id: &AppId, key: &str, value: &str) -> Result<(), PlatformError> {
+        let mut config = self
+            .load_config(id)?
+            .ok_or_else(|| PlatformError::AppNotFound(id.0.clone()))?;
+        config.env_vars.insert(key.to_string(), value.to_string());
+        self.save_config(&config)
+    }
+
     /// List all deployed app IDs.
     pub fn list_apps(&self) -> Result<Vec<AppId>, PlatformError> {
         let tx = self
