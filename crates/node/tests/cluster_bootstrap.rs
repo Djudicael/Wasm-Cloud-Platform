@@ -23,6 +23,7 @@ fn create_test_app_config(app_id: &str) -> AppConfig {
         secret_keys: vec![],
         extended_limits: None,
         health_check_path: None,
+        db_max_connections: None,
     }
 }
 

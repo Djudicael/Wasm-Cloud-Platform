@@ -47,7 +47,7 @@ fn test_compile_and_run_minimal() {
         .expect("Failed to prepare module");
 
     // 3. Spawn and Run
-    let mut instance = prepared.spawn_instance(vec![], 8080).expect("Spawn failed");
+    let (mut instance, _streams) = prepared.spawn_instance(vec![], 8080).expect("Spawn failed");
     let stats = instance.run();
 
     assert!(
@@ -87,7 +87,7 @@ fn test_fuel_exhaustion_trap() {
     config.fuel_quota = FuelQuota(1000); // Small fuel quota
 
     let prepared = runtime.prepare(&artifact, config).unwrap();
-    let mut instance = prepared.spawn_instance(vec![], 8080).unwrap();
+    let (mut instance, _streams) = prepared.spawn_instance(vec![], 8080).unwrap();
     let stats = instance.run();
 
     assert!(
@@ -122,7 +122,7 @@ fn test_zero_fuel_immediate_trap() {
     config.fuel_quota = FuelQuota(1); // MSVC Wasmtime panics on absolute 0.
 
     let prepared = runtime.prepare(&artifact, config).unwrap();
-    let mut instance = prepared.spawn_instance(vec![], 8080).unwrap();
+    let (mut instance, _streams) = prepared.spawn_instance(vec![], 8080).unwrap();
     let stats = instance.run();
 
     assert!(stats.trap.is_some(), "Zero fuel should trap immediately");
@@ -159,7 +159,7 @@ fn test_memory_limit_enforced() {
     config.memory_limit = MemoryPages(2); // Limit is 2 pages, growth of 10 should be rejected
 
     let prepared = runtime.prepare(&artifact, config).unwrap();
-    let mut instance = prepared.spawn_instance(vec![], 8080).unwrap();
+    let (mut instance, _streams) = prepared.spawn_instance(vec![], 8080).unwrap();
     let stats = instance.run();
 
     // No trap means the memory.grow returned -1!
@@ -192,7 +192,7 @@ fn test_concurrency() {
     let a1 = artifact.clone();
     let t1 = thread::spawn(move || {
         let prepared = r1.prepare(&a1, base_config()).unwrap();
-        let mut inst = prepared.spawn_instance(vec![], 8081).unwrap();
+        let (mut inst, _streams) = prepared.spawn_instance(vec![], 8081).unwrap();
         inst.run()
     });
 
@@ -200,7 +200,7 @@ fn test_concurrency() {
     let a2 = artifact.clone();
     let t2 = thread::spawn(move || {
         let prepared = r2.prepare(&a2, base_config()).unwrap();
-        let mut inst = prepared.spawn_instance(vec![], 8082).unwrap();
+        let (mut inst, _streams) = prepared.spawn_instance(vec![], 8082).unwrap();
         inst.run()
     });
 
@@ -315,7 +315,7 @@ fn test_default_extended_limits_applied() {
 
     let artifact = runtime.compile(&wasm_bytes).unwrap();
     let prepared = runtime.prepare(&artifact, config).unwrap();
-    let mut instance = prepared.spawn_instance(vec![], 8080).unwrap();
+    let (mut instance, _streams) = prepared.spawn_instance(vec![], 8080).unwrap();
     let stats = instance.run();
 
     assert!(stats.trap.is_none());

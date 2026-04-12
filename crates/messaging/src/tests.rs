@@ -44,6 +44,7 @@ mod tests {
             config: AppConfig::default_for(app_id),
             artifact_url: "http://example.com/test.wasm".to_string(),
             expected_hash: None,
+            size_bytes: 1024,
         };
 
         bus.publish(&event).await.unwrap();
@@ -93,6 +94,7 @@ mod tests {
             config: AppConfig::default_for(app_id.clone()),
             artifact_url: "http://example.com/durable.wasm".to_string(),
             expected_hash: None,
+            size_bytes: 1024,
         };
 
         bus.publish(&event).await.unwrap();
