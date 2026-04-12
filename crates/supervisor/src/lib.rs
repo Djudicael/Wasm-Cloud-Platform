@@ -18,7 +18,7 @@ use common::{
     types::{AppConfig, AppId, InstanceId, InstanceState},
 };
 use messaging::events::Event;
-use proxy::upstream::UpstreamRegistry;
+use proxy::{router::HostRouter, upstream::UpstreamRegistry};
 use runtime::{executor::PreparedModule, WasmRuntime};
 use std::{
     collections::HashMap,
@@ -35,6 +35,7 @@ pub struct Supervisor {
     runtime: WasmRuntime,
     port_alloc: Arc<PortAllocator>,
     upstream_registry: Arc<UpstreamRegistry>,
+    pub host_router: Arc<HostRouter>,
     service_registry: Arc<LocalServiceRegistry>,
     env_resolver: Arc<dyn Fn(&AppConfig, u16) -> Vec<(String, String)> + Send + Sync>,
 
@@ -51,6 +52,7 @@ impl Supervisor {
         runtime: WasmRuntime,
         port_alloc: Arc<PortAllocator>,
         upstream_registry: Arc<UpstreamRegistry>,
+        host_router: Arc<HostRouter>,
         service_registry: Arc<LocalServiceRegistry>,
         env_resolver: Arc<dyn Fn(&AppConfig, u16) -> Vec<(String, String)> + Send + Sync>,
         event_tx: mpsc::Sender<Event>,
@@ -60,6 +62,7 @@ impl Supervisor {
             runtime,
             port_alloc,
             upstream_registry,
+            host_router,
             service_registry,
             env_resolver,
             pools: Arc::new(RwLock::new(HashMap::new())),

@@ -12,4 +12,9 @@ pingora-core = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 common = { path = "../common" }
+async-trait = "0.1.89"
+futures = "0.3.32"
+pingora-http = "0.4.0"
+axum.workspace = true
+serde_json.workspace = true
 

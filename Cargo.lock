@@ -3200,7 +3200,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "27c6023962132f4b30eb4c172c91ce92d933da334c59c23cddee82358ddafb0b"
 dependencies = [
  "anyhow",
- "itertools 0.12.1",
+ "itertools 0.14.0",
  "proc-macro2",
  "quote",
  "syn 2.0.117",
@@ -3225,11 +3225,16 @@ checksum = "106dd99e98437432fed6519dedecfade6a06a73bb7b2a1e019fdd2bee5778d94"
 name = "proxy"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
+ "axum 0.7.9",
  "common",
+ "futures",
  "pingora",
  "pingora-core",
+ "pingora-http",
  "pingora-load-balancing",
  "pingora-proxy",
+ "serde_json",
  "tokio",
  "tracing",
 ]
