@@ -378,6 +378,4 @@ async fn main() -> anyhow::Result<()> {
 
     info!("All instances stopped — exiting");
     std::process::exit(0);
-
-    Ok(())
 }

@@ -47,6 +47,7 @@ fn create_test_config(app_id: AppId) -> AppConfig {
         extended_limits: None,
         health_check_path: None,
         db_max_connections: None,
+        rate_limit: None,
     }
 }
 

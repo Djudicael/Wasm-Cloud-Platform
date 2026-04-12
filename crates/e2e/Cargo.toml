@@ -1,0 +1,23 @@
+[package]
+name    = "e2e"
+version = "0.1.0"
+edition = "2021"
+
+# E2E tests are only run via `cargo test -p e2e`
+# They do not need to be a library
+
+[dev-dependencies]
+tokio         = { workspace = true }
+reqwest       = { workspace = true }
+assert_cmd    = "2"
+tempfile      = "3"
+async-nats    = { workspace = true }
+serde_json    = { workspace = true }
+sha2          = "0.10"
+hex           = "0.4"
+
+# Local crates
+common        = { path = "../common" }
+messaging     = { path = "../messaging" }
+storage       = { path = "../storage" }
+runtime       = { path = "../runtime" }

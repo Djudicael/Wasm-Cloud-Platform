@@ -489,7 +489,7 @@ impl EventDispatcher {
             .store
             .list_apps()
             .ok()
-            .map(|apps| {
+            .map(|_apps| {
                 // In a real implementation, we'd track node IDs separately
                 // For now, we'll just use the node_id from the event
                 vec![self.node_id.clone()]
@@ -546,9 +546,15 @@ impl EventDispatcher {
                                 }
                             }
 
-                            if let Err(e) =
-                                std::os::unix::fs::symlink(&new_binary_path, &current_link)
-                            {
+                            #[cfg(unix)]
+                            let symlink_result =
+                                std::os::unix::fs::symlink(&new_binary_path, &current_link);
+
+                            #[cfg(windows)]
+                            let symlink_result =
+                                std::os::windows::fs::symlink_file(&new_binary_path, &current_link);
+
+                            if let Err(e) = symlink_result {
                                 error!(error = %e, "failed to create new symlink");
                                 return;
                             }

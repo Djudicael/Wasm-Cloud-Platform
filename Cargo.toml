@@ -11,6 +11,7 @@ members = [
     "crates/metrics",
     "crates/common",
     "crates/ctl",
+    "crates/e2e",
     "apps/hello-axum"
 ]
 

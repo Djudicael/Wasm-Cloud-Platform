@@ -24,6 +24,7 @@ fn create_test_app_config(app_id: &str) -> AppConfig {
         extended_limits: None,
         health_check_path: None,
         db_max_connections: None,
+        rate_limit: None,
     }
 }
 
@@ -61,6 +62,8 @@ async fn test_fresh_node_publishes_node_joined() {
                 node_id,
                 artifact_server_url,
                 public_key_bytes,
+                protocol_version: _,
+                binary_version: _,
             } = event
             {
                 println!(
@@ -84,6 +87,8 @@ async fn test_fresh_node_publishes_node_joined() {
         node_id: "node-0".to_string(),
         artifact_server_url: "http://127.0.0.1:8080".to_string(),
         public_key_bytes: public_key_bytes.clone(),
+        protocol_version: common::protocol::PROTOCOL_VERSION,
+        binary_version: common::protocol::BINARY_VERSION.to_string(),
     };
 
     bus.publish(&join_event).await.unwrap();
@@ -334,6 +339,8 @@ async fn test_two_node_bootstrap_simulation() {
         node_id: "node-1".to_string(),
         artifact_server_url: "http://127.0.0.1:8081".to_string(),
         public_key_bytes: pubkey1.clone(),
+        protocol_version: common::protocol::PROTOCOL_VERSION,
+        binary_version: common::protocol::BINARY_VERSION.to_string(),
     };
     bus.publish(&join_event).await.unwrap();
     println!("✓ Node-1 published NodeJoined");

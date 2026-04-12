@@ -668,9 +668,9 @@ fn get_available_disk_space(path: &std::path::Path) -> Result<u64, PlatformError
     let result = unsafe {
         winapi::um::fileapi::GetDiskFreeSpaceExW(
             wide_path.as_ptr(),
-            &mut free_bytes as *mut u64 as *mut winapi::shared::minwindef::PULARGE_INTEGER,
-            &mut total_bytes as *mut u64 as *mut winapi::shared::minwindef::PULARGE_INTEGER,
-            &mut total_free_bytes as *mut u64 as *mut winapi::shared::minwindef::PULARGE_INTEGER,
+            &mut free_bytes as *mut u64 as winapi::um::winnt::PULARGE_INTEGER,
+            &mut total_bytes as *mut u64 as winapi::um::winnt::PULARGE_INTEGER,
+            &mut total_free_bytes as *mut u64 as winapi::um::winnt::PULARGE_INTEGER,
         )
     };
 
