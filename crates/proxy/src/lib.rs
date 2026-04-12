@@ -1,4 +1,7 @@
 pub mod admin;
+pub mod backpressure;
+pub mod config;
+pub mod metrics;
 pub mod node_table;
 pub mod rate_limiter;
 pub mod router;

@@ -20,7 +20,8 @@ mod tests;
 /// - 0: Fresh database (no schema version written yet)
 /// - 1: Initial schema with artifacts, configs, secrets, metrics, routes, raw_wasm, schema_meta tables
 /// - 2: Added db_max_connections field to AppConfig, added artifact_hashes table
-const CURRENT_SCHEMA_VERSION: u32 = 2;
+/// - 3: Added rate_limit field to AppConfig
+const CURRENT_SCHEMA_VERSION: u32 = 3;
 
 #[derive(Clone)]
 pub struct Store {
@@ -166,6 +167,11 @@ impl Store {
                 // This migration includes the version bump in the same transaction
                 self.migrate_v1_to_v2()?;
             }
+            3 => {
+                // v2 → v3: Add rate_limit field to all AppConfig records
+                // This migration includes the version bump in the same transaction
+                self.migrate_v2_to_v3()?;
+            }
             n => panic!("Unknown migration target: {n}"),
         }
         Ok(())
@@ -215,6 +221,57 @@ impl Store {
         write_tx.commit()?;
 
         tracing::info!("v1→v2: added db_max_connections to all app configs");
+        Ok(())
+    }
+
+    /// Migration v2 → v3: Add rate_limit field to all AppConfig records.
+    /// This migration is idempotent: records that already have the field are not modified.
+    /// The version bump is included in the same transaction for atomicity.
+    fn migrate_v2_to_v3(&self) -> Result<(), redb::Error> {
+        use crate::tables::CONFIGS;
+        use redb::ReadableTable;
+
+        let tx = self.db.begin_read()?;
+        let table = tx.open_table(CONFIGS)?;
+
+        // Read all existing records
+        let records: Vec<(String, String)> = table
+            .iter()?
+            .filter_map(|e: Result<_, _>| e.ok())
+            .map(|(k, v)| (k.value().to_string(), v.value().to_string()))
+            .collect();
+        drop(table);
+        drop(tx);
+
+        // Rewrite with new default field AND bump version in same transaction
+        let write_tx = self.db.begin_write()?;
+        {
+            // Update all config records
+            let mut table = write_tx.open_table(CONFIGS)?;
+            for (key, json_str) in records {
+                // Parse as generic JSON (schema-agnostic)
+                if let Ok(mut val) = serde_json::from_str::<serde_json::Value>(&json_str) {
+                    // Add the new field with default if it doesn't exist
+                    if val.get("rate_limit").is_none() {
+                        val["rate_limit"] = serde_json::json!({
+                            "requests_per_second": 1000,
+                            "burst_capacity": 50,
+                            "per_ip_limit": 100
+                        });
+                    }
+                    let new_json = serde_json::to_string(&val).expect("re-serialize failed");
+                    table.insert(key.as_str(), new_json.as_str())?;
+                }
+            }
+            drop(table);
+
+            // Bump schema version in the same transaction
+            let mut meta_table = write_tx.open_table(tables::SCHEMA_META)?;
+            meta_table.insert("version", "3")?;
+        }
+        write_tx.commit()?;
+
+        tracing::info!("v2→v3: added rate_limit to all app configs");
         Ok(())
     }
 }

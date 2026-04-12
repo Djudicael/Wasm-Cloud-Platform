@@ -297,17 +297,20 @@ fn test_migration_v1_to_v2_adds_db_max_connections() {
         tx.commit().unwrap();
     }
 
-    // Reopen, which should trigger migration
+    // Reopen, which should trigger migration (v1 -> v2 -> v3)
     let store = Store::open(&path).unwrap();
 
-    // Verify version upgraded to 2
+    // Verify version upgraded to current (v3)
     let version = store.read_schema_version().unwrap();
-    assert_eq!(version, 2);
+    assert_eq!(version, crate::CURRENT_SCHEMA_VERSION);
 
-    // Verify the config now has db_max_connections
+    // Verify the config now has db_max_connections (from v2 migration)
     let id = AppId::new("test-app", "v1");
     let config = store.load_config(&id).unwrap().unwrap();
     assert_eq!(config.db_max_connections, Some(10));
+
+    // Verify the config also has rate_limit (from v3 migration)
+    assert!(config.rate_limit.is_some());
 }
 
 #[test]

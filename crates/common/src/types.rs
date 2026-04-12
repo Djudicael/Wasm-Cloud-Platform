@@ -126,6 +126,33 @@ pub struct AppConfig {
     /// is done by pgBouncer via max_client_conn and per-user limits.
     #[serde(default)]
     pub db_max_connections: Option<u32>,
+
+    /// Rate limit configuration for this app.
+    #[serde(default)]
+    pub rate_limit: Option<AppRateLimitConfig>,
+}
+
+/// Rate limit configuration, stored as part of AppConfig.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AppRateLimitConfig {
+    /// Maximum sustained requests per second per node.
+    pub requests_per_second: u32,
+
+    /// Burst tolerance (number of requests above the sustained rate).
+    pub burst_capacity: u32,
+
+    /// Maximum requests per second from a single IP to this app.
+    pub per_ip_limit: u32,
+}
+
+impl Default for AppRateLimitConfig {
+    fn default() -> Self {
+        AppRateLimitConfig {
+            requests_per_second: 1_000,
+            burst_capacity: 50,
+            per_ip_limit: 100,
+        }
+    }
 }
 
 impl AppConfig {
@@ -143,6 +170,7 @@ impl AppConfig {
             extended_limits: None,
             health_check_path: None,
             db_max_connections: None,
+            rate_limit: None,
         }
     }
 }

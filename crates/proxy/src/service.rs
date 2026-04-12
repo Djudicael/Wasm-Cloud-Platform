@@ -1,6 +1,6 @@
 use super::{
-    node_table::NodeLoadTable, rate_limiter::RateLimiter, router::HostRouter,
-    upstream::UpstreamRegistry,
+    backpressure::BackpressureSignal, metrics::RateLimitMetrics, node_table::NodeLoadTable,
+    rate_limiter::RateLimiter, router::HostRouter, upstream::UpstreamRegistry,
 };
 use async_trait::async_trait;
 use common::types::AppId;
@@ -21,7 +21,9 @@ pub struct WasmProxy {
     pub router: Arc<HostRouter>,
     pub upstream: Arc<UpstreamRegistry>,
     pub rate_limiter: Arc<RateLimiter>,
+    pub backpressure: BackpressureSignal,
     pub node_table: Arc<NodeLoadTable>,
+    pub metrics: Option<Arc<RateLimitMetrics>>,
     /// Callback to trigger a cold-start when no instances are running.
     /// Returns the address of the newly spawned instance.
     pub cold_start: Arc<
@@ -96,11 +98,45 @@ impl ProxyHttp for WasmProxy {
             // Will result in a 502 from Pingora
         }
 
+        // Check backpressure first (node at capacity)
+        if !self.backpressure.is_accepting() {
+            tracing::warn!("node at capacity, rejecting request");
+            if let Some(ref metrics) = self.metrics {
+                metrics.record_rejection("*", "backpressure");
+            }
+            session.set_keepalive(None);
+            session.respond_error(503).await?;
+            return Ok(true); // true = abort the request
+        }
+
+        // Check per-app and per-IP rate limits
         if let Some(app_id) = &ctx.app_id {
-            if !self.rate_limiter.allow(&app_id.0).await {
-                session.set_keepalive(None);
-                session.respond_error(429).await?;
-                return Ok(true); // true = abort the request
+            // Extract source IP from session
+            let source_ip = session
+                .client_addr()
+                .map(|addr| addr.as_inet().map(|inet| inet.ip()))
+                .flatten()
+                .unwrap_or_else(|| std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)));
+
+            match self.rate_limiter.check_request(&app_id.0, source_ip).await {
+                Ok(()) => {
+                    // Rate limit passed, continue
+                }
+                Err(e) => {
+                    let reason = match e {
+                        crate::rate_limiter::RateLimitDenied::AppLimitExceeded { .. } => {
+                            "app_limit"
+                        }
+                        crate::rate_limiter::RateLimitDenied::IpLimitExceeded { .. } => "ip_limit",
+                    };
+                    tracing::warn!(app = %app_id.0, %source_ip, reason = %e, "rate limit exceeded");
+                    if let Some(ref metrics) = self.metrics {
+                        metrics.record_rejection(&app_id.0, reason);
+                    }
+                    session.set_keepalive(None);
+                    session.respond_error(429).await?;
+                    return Ok(true); // true = abort the request
+                }
             }
         }
 
@@ -191,9 +227,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_wasm_proxy_cold_start() {
+        use crate::rate_limiter::RateLimitConfig;
+
         let router = Arc::new(HostRouter::default());
         let upstream = Arc::new(UpstreamRegistry::default());
-        let rate_limiter = Arc::new(RateLimiter::new(10.0, 10.0));
+        let rate_limiter = Arc::new(RateLimiter::new(RateLimitConfig::default()));
 
         let cold_start_triggered = Arc::new(AtomicBool::new(false));
         let cold_start_triggered_clone = cold_start_triggered.clone();
@@ -210,7 +248,9 @@ mod tests {
             router,
             upstream,
             rate_limiter,
+            backpressure: crate::backpressure::BackpressureSignal::new(),
             node_table: Arc::new(crate::node_table::NodeLoadTable::default()),
+            metrics: None, // No metrics in test
             cold_start,
         };
 
