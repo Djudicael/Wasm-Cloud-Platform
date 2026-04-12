@@ -388,35 +388,35 @@ tokio::spawn(async move {
 **This step is done when all boxes are checked.**
 
 ### HTTP Artifact Server
-- [ ] `PUT /artifacts/:sha256` accepts a binary body and stores it in the `RAW_WASM` redb table
-- [ ] `PUT` returns `400 Bad Request` if the SHA-256 of the uploaded body does not match the URL parameter
-- [ ] `GET /artifacts/:sha256` returns the exact bytes that were previously uploaded
-- [ ] `GET` returns `404` for an unknown SHA-256
-- [ ] The server rejects bodies larger than `max_size_bytes` with `413 Payload Too Large`
-- [ ] The artifact server is reachable on its configured port from other nodes in the cluster
+- [x] `PUT /artifacts/:sha256` accepts a binary body and stores it in the `RAW_WASM` redb table
+- [x] `PUT` returns `400 Bad Request` if the SHA-256 of the uploaded body does not match the URL parameter
+- [x] `GET /artifacts/:sha256` returns the exact bytes that were previously uploaded
+- [x] `GET` returns `404` for an unknown SHA-256
+- [x] The server rejects bodies larger than `max_size_bytes` with `413 Payload Too Large`
+- [x] The artifact server is reachable on its configured port from other nodes in the cluster
 
 ### Raw Wasm Storage
-- [ ] `save_raw_wasm(sha256, bytes)` stores bytes in the `RAW_WASM` table
-- [ ] `load_raw_wasm(sha256)` returns `None` for an unknown hash
-- [ ] `raw_wasm_exists(sha256)` returns `true` after a store and `false` before
-- [ ] `delete_raw_wasm(sha256)` removes the entry
+- [x] `save_raw_wasm(sha256, bytes)` stores bytes in the `RAW_WASM` table
+- [x] `load_raw_wasm(sha256)` returns `None` for an unknown hash
+- [x] `raw_wasm_exists(sha256)` returns `true` after a store and `false` before
+- [x] `delete_raw_wasm(sha256)` removes the entry
 
 ### Deploy Event
-- [ ] `Event::DeployApp` carries `artifact_url` and `sha256` — no raw bytes embedded
-- [ ] A node that receives the event and already has the artifact (matching sha256) skips the download
-- [ ] A node that does not have the artifact fetches it via HTTP from `artifact_url`
-- [ ] A download failure (server unreachable, wrong hash) logs an error and aborts the deploy — no partial state
+- [x] `Event::DeployApp` carries `artifact_url` and `sha256` — no raw bytes embedded
+- [x] A node that receives the event and already has the artifact (matching sha256) skips the download
+- [x] A node that does not have the artifact fetches it via HTTP from `artifact_url`
+- [x] A download failure (server unreachable, wrong hash) logs an error and aborts the deploy — no partial state
 
 ### Integrity Verification
-- [ ] `fetch_artifact()` verifies the SHA-256 of downloaded bytes before storing or compiling
-- [ ] A tampered response (bytes modified in transit) is detected and rejected
+- [x] `fetch_artifact()` verifies the SHA-256 of downloaded bytes before storing or compiling
+- [x] A tampered response (bytes modified in transit) is detected and rejected
 
 ### Garbage Collection
-- [ ] `prune_raw_wasm_older_than()` removes raw bytes after they are no longer needed
-- [ ] Pruning raw bytes does not affect the compiled `ARTIFACTS` table
+- [x] `prune_raw_wasm_older_than()` removes raw bytes after they are no longer needed
+- [x] Pruning raw bytes does not affect the compiled `ARTIFACTS` table
 
 ### Tests
-- [ ] A test uploads a binary via `PUT`, then retrieves it via `GET`, verifying byte-for-byte equality
-- [ ] A test uploads a binary with a mismatched SHA-256 and verifies `400` is returned
-- [ ] A test verifies that a second node can successfully fetch an artifact from the first node's artifact server
+- [x] A test uploads a binary via `PUT`, then retrieves it via `GET`, verifying byte-for-byte equality
+- [x] A test uploads a binary with a mismatched SHA-256 and verifies `400` is returned
+- [x] A test verifies that a second node can successfully fetch an artifact from the first node's artifact server
 ```

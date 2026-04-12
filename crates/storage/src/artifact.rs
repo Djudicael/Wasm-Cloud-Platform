@@ -1,5 +1,8 @@
 // crates/storage/src/artifact.rs
-use crate::{tables::ARTIFACTS, Store};
+use crate::{
+    tables::{ARTIFACTS, RAW_WASM},
+    Store,
+};
 use common::{error::PlatformError, types::AppId};
 use redb::ReadableTable;
 
@@ -104,5 +107,163 @@ impl Store {
             self.delete_artifact(&id)?;
         }
         Ok(())
+    }
+
+    // ── Raw Wasm Storage ─────────────────────────────────────────────────────
+
+    /// Save raw .wasm bytes (pre-compilation) keyed by SHA-256.
+    pub fn save_raw_wasm(&self, sha256: &str, bytes: &[u8]) -> Result<(), PlatformError> {
+        let tx = self
+            .db
+            .begin_write()
+            .map_err(|e| PlatformError::Storage(e.to_string()))?;
+        {
+            let mut table = tx
+                .open_table(RAW_WASM)
+                .map_err(|e| PlatformError::Storage(e.to_string()))?;
+            table
+                .insert(sha256, bytes)
+                .map_err(|e| PlatformError::Storage(e.to_string()))?;
+        }
+        tx.commit()
+            .map_err(|e| PlatformError::Storage(e.to_string()))
+    }
+
+    /// Load raw .wasm bytes by SHA-256.
+    pub fn load_raw_wasm(&self, sha256: &str) -> Result<Option<Vec<u8>>, PlatformError> {
+        let tx = self
+            .db
+            .begin_read()
+            .map_err(|e| PlatformError::Storage(e.to_string()))?;
+        let table = tx
+            .open_table(RAW_WASM)
+            .map_err(|e| PlatformError::Storage(e.to_string()))?;
+        Ok(table
+            .get(sha256)
+            .map_err(|e| PlatformError::Storage(e.to_string()))?
+            .map(|v| v.value().to_vec()))
+    }
+
+    /// Check if raw wasm exists without loading the bytes.
+    pub fn raw_wasm_exists(&self, sha256: &str) -> Result<bool, PlatformError> {
+        Ok(self.load_raw_wasm(sha256)?.is_some())
+    }
+
+    /// Delete raw wasm bytes.
+    pub fn delete_raw_wasm(&self, sha256: &str) -> Result<(), PlatformError> {
+        let tx = self
+            .db
+            .begin_write()
+            .map_err(|e| PlatformError::Storage(e.to_string()))?;
+        {
+            let mut table = tx
+                .open_table(RAW_WASM)
+                .map_err(|e| PlatformError::Storage(e.to_string()))?;
+            table
+                .remove(sha256)
+                .map_err(|e| PlatformError::Storage(e.to_string()))?;
+        }
+        tx.commit()
+            .map_err(|e| PlatformError::Storage(e.to_string()))
+    }
+
+    /// Prune all raw wasm bytes (garbage collection).
+    /// Returns the number of entries deleted.
+    pub fn prune_raw_wasm_older_than(&self, _hours: u64) -> Result<u64, PlatformError> {
+        // For now: delete all raw wasm
+        // Future: add timestamp tracking in a metadata table
+        let tx = self
+            .db
+            .begin_read()
+            .map_err(|e| PlatformError::Storage(e.to_string()))?;
+        let raw_table = tx
+            .open_table(RAW_WASM)
+            .map_err(|e| PlatformError::Storage(e.to_string()))?;
+        let sha256s: Vec<String> = raw_table
+            .iter()
+            .map_err(|e| PlatformError::Storage(e.to_string()))?
+            .filter_map(|e| e.ok())
+            .map(|(k, _)| k.value().to_string())
+            .collect();
+        drop(raw_table);
+        drop(tx);
+
+        let mut deleted = 0u64;
+        for sha256 in sha256s {
+            self.delete_raw_wasm(&sha256)?;
+            deleted += 1;
+        }
+        Ok(deleted)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::NamedTempFile;
+
+    #[test]
+    fn test_raw_wasm_lifecycle() {
+        let temp_file = NamedTempFile::new().unwrap();
+        let store = Store::open(temp_file.path()).unwrap();
+
+        let wasm_bytes = b"fake wasm binary content";
+        let sha256 = "abc123def456";
+
+        // 1. Initially should not exist
+        assert!(!store.raw_wasm_exists(sha256).unwrap());
+        assert!(store.load_raw_wasm(sha256).unwrap().is_none());
+
+        // 2. Save and verify exists
+        store.save_raw_wasm(sha256, wasm_bytes).unwrap();
+        assert!(store.raw_wasm_exists(sha256).unwrap());
+
+        // 3. Load and verify content
+        let loaded = store.load_raw_wasm(sha256).unwrap().unwrap();
+        assert_eq!(loaded, wasm_bytes);
+
+        // 4. Delete and verify gone
+        store.delete_raw_wasm(sha256).unwrap();
+        assert!(!store.raw_wasm_exists(sha256).unwrap());
+        assert!(store.load_raw_wasm(sha256).unwrap().is_none());
+    }
+
+    #[test]
+    fn test_raw_wasm_persistence() {
+        let temp_file = NamedTempFile::new().unwrap();
+        let path = temp_file.path().to_path_buf();
+
+        let wasm_bytes = b"persistent wasm data";
+        let sha256 = "persistent123";
+
+        {
+            let store = Store::open(&path).unwrap();
+            store.save_raw_wasm(sha256, wasm_bytes).unwrap();
+        }
+
+        // Reopen and verify data survived
+        let store = Store::open(&path).unwrap();
+        let loaded = store.load_raw_wasm(sha256).unwrap().unwrap();
+        assert_eq!(loaded, wasm_bytes);
+    }
+
+    #[test]
+    fn test_prune_raw_wasm() {
+        let temp_file = NamedTempFile::new().unwrap();
+        let store = Store::open(temp_file.path()).unwrap();
+
+        // Add multiple entries
+        store.save_raw_wasm("sha1", b"data1").unwrap();
+        store.save_raw_wasm("sha2", b"data2").unwrap();
+        store.save_raw_wasm("sha3", b"data3").unwrap();
+
+        // Prune all
+        let deleted = store.prune_raw_wasm_older_than(24).unwrap();
+        assert_eq!(deleted, 3);
+
+        // Verify all gone
+        assert!(!store.raw_wasm_exists("sha1").unwrap());
+        assert!(!store.raw_wasm_exists("sha2").unwrap());
+        assert!(!store.raw_wasm_exists("sha3").unwrap());
     }
 }

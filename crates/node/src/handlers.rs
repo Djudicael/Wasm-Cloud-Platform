@@ -25,8 +25,9 @@ impl EventDispatcher {
                 config,
                 artifact_url,
                 expected_hash,
+                size_bytes,
             } => {
-                self.handle_deploy(app_id, config, artifact_url, expected_hash)
+                self.handle_deploy(app_id, config, artifact_url, expected_hash, size_bytes)
                     .await
             }
             Event::RemoveApp { app_id } => self.handle_remove(app_id).await,
@@ -94,49 +95,64 @@ impl EventDispatcher {
         config: common::types::AppConfig,
         artifact_url: String,
         expected_hash: Option<String>,
+        size_bytes: u64,
     ) {
-        info!(app = %app_id.0, url = %artifact_url, "fetching artifact for deployment");
-
-        let wasm_bytes = match reqwest::get(&artifact_url).await {
-            Ok(resp) => match resp.bytes().await {
-                Ok(b) => b.to_vec(),
-                Err(e) => {
-                    error!(app = %app_id.0, error = %e, "failed to read artifact body");
-                    return;
-                }
-            },
-            Err(e) => {
-                error!(app = %app_id.0, error = %e, "failed to fetch artifact");
+        let sha256 = match &expected_hash {
+            Some(h) => h.clone(),
+            None => {
+                error!(app = %app_id.0, "deploy event missing expected_hash");
                 return;
             }
         };
 
-        info!(app = %app_id.0, bytes = wasm_bytes.len(), "artifact downloaded");
+        info!(
+            app = %app_id.0,
+            url = %artifact_url,
+            size_mb = size_bytes as f64 / 1_048_576.0,
+            "deploying artifact"
+        );
 
-        if let Some(expected) = expected_hash {
-            let mut hasher = Sha256::new();
-            hasher.update(&wasm_bytes);
-            let actual = format!("{:x}", hasher.finalize());
-            if actual != expected {
-                error!(
-                    app = %app_id.0,
-                    expected,
-                    actual,
-                    "SECURITY: Wasm binary hash mismatch! Rejecting deploy."
-                );
-                return;
+        // 1. Check local cache first (another node may have already stored it)
+        let wasm_bytes = if self.store.raw_wasm_exists(&sha256).unwrap_or(false) {
+            info!(sha256, "artifact already in local cache");
+            match self.store.load_raw_wasm(&sha256) {
+                Ok(Some(bytes)) => bytes,
+                Ok(None) => {
+                    error!(sha256, "artifact vanished between exists and load");
+                    return;
+                }
+                Err(e) => {
+                    error!(sha256, error = %e, "failed to load cached artifact");
+                    return;
+                }
             }
-        }
+        } else {
+            // 2. Fetch from the source node
+            info!(url = %artifact_url, "fetching artifact via HTTP");
+            match fetch_artifact(&artifact_url, &sha256).await {
+                Ok(bytes) => {
+                    // 3. Store raw bytes for future use
+                    if let Err(e) = self.store.save_raw_wasm(&sha256, &bytes) {
+                        error!(sha256, error = %e, "failed to cache raw wasm");
+                    }
+                    bytes
+                }
+                Err(e) => {
+                    error!(url = %artifact_url, error = %e, "artifact fetch failed");
+                    return;
+                }
+            }
+        };
 
-        // 1. Compile (CPU-intensive — spawn_blocking)
+        info!(app = %app_id.0, bytes = wasm_bytes.len(), "artifact ready, compiling");
+
+        // 4. Compile (CPU-intensive — spawn_blocking)
         let runtime = self.runtime.clone();
-        let wasm_bytes_clone = wasm_bytes.clone();
-        let artifact =
-            tokio::task::spawn_blocking(move || runtime.compile(&wasm_bytes_clone)).await;
+        let artifact = tokio::task::spawn_blocking(move || runtime.compile(&wasm_bytes)).await;
 
         match artifact {
             Ok(Ok(artifact_bytes)) => {
-                // 2. Store artifact and config
+                // 5. Store compiled artifact and config
                 if let Err(e) = self.store.store_artifact(&app_id, &artifact_bytes) {
                     error!(app = %app_id.0, error = %e, "failed to store artifact");
                     return;
@@ -166,4 +182,33 @@ impl EventDispatcher {
     fn our_node_id(&self) -> String {
         std::env::var("NODE_ID").unwrap_or_else(|_| "node-0".to_string())
     }
+}
+
+/// Fetch an artifact from a URL and verify its SHA-256 hash.
+async fn fetch_artifact(url: &str, expected_sha256: &str) -> Result<Vec<u8>, String> {
+    let resp = reqwest::get(url)
+        .await
+        .map_err(|e| format!("HTTP GET failed: {e}"))?;
+
+    if !resp.status().is_success() {
+        return Err(format!("artifact server returned {}", resp.status()));
+    }
+
+    let bytes = resp
+        .bytes()
+        .await
+        .map_err(|e| format!("failed to read body: {e}"))?
+        .to_vec();
+
+    // Verify integrity
+    let mut hasher = Sha256::new();
+    hasher.update(&bytes);
+    let actual = format!("{:x}", hasher.finalize());
+    if actual != expected_sha256 {
+        return Err(format!(
+            "SHA-256 mismatch: expected {expected_sha256}, got {actual}"
+        ));
+    }
+
+    Ok(bytes)
 }

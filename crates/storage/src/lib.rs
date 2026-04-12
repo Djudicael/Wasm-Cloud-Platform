@@ -3,6 +3,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 pub mod artifact;
+pub mod artifact_server;
 pub mod config;
 pub mod metrics;
 pub mod routes;

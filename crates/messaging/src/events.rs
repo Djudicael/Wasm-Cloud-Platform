@@ -10,9 +10,14 @@ pub enum Event {
     DeployApp {
         app_id: AppId,
         config: AppConfig,
-        /// The URL where the compiled .wasm artifact can be securely fetched.
+        /// The URL where the .wasm artifact can be fetched.
+        /// Format: "http://<node-ip>:<port>/artifacts/<sha256>"
         artifact_url: String,
+        /// SHA-256 hex string of the raw .wasm bytes.
         expected_hash: Option<String>,
+        /// Size in bytes (for logging and progress tracking).
+        #[serde(default)]
+        size_bytes: u64,
     },
     RemoveApp {
         app_id: AppId,

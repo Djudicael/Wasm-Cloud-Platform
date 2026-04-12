@@ -33,6 +33,9 @@ struct Args {
     #[arg(long, default_value = "9090")]
     admin_port: u16,
 
+    #[arg(long, default_value = "9091")]
+    artifact_port: u16,
+
     #[arg(long)]
     otlp_endpoint: Option<String>,
 
@@ -200,10 +203,21 @@ async fn main() -> anyhow::Result<()> {
         axum::serve(listener, admin_app).await.unwrap();
     });
 
+    let artifact_app = storage::artifact_server::artifact_router(store.clone());
+    let artifact_addr = format!("0.0.0.0:{}", args.artifact_port);
+    tokio::spawn(async move {
+        let listener = tokio::net::TcpListener::bind(&artifact_addr)
+            .await
+            .expect("artifact server bind failed");
+        info!(addr = %artifact_addr, "artifact server listening");
+        axum::serve(listener, artifact_app).await.unwrap();
+    });
+
     info!(
         http = args.proxy_port,
         https = args.proxy_https_port,
         admin = args.admin_port,
+        artifact = args.artifact_port,
         "node fully started"
     );
 
