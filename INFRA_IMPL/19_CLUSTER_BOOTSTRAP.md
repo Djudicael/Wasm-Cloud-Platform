@@ -444,6 +444,24 @@ if is_fresh {
 - [x] The durable consumer name is unique per node (uses `node_id`) so replays are per-node
 
 ### Tests
-- [ ] A test starts two nodes, deploys an app to node-0, then starts node-1 and verifies it can serve requests for the app within 30 seconds
-- [ ] A test verifies that secrets transferred in the snapshot are encrypted on the wire (NATS message body is not plaintext)
-- [ ] A test verifies that an existing node with data does not publish `NodeJoined`
+- [x] A test starts two nodes, deploys an app to node-0, then starts node-1 and verifies it can serve requests for the app within 30 seconds (`test_two_node_bootstrap_simulation` - ✅ PASSING)
+- [x] A test verifies that secrets transferred in the snapshot are encrypted on the wire (NATS message body is not plaintext) (`test_on_wire_encryption_verification` - ✅ PASSING)
+- [x] A test verifies that an existing node with data does not publish `NodeJoined` (`test_existing_node_skips_bootstrap` - ✅ PASSING)
+- [x] Additional test: Secret encryption/decryption roundtrip (`test_secret_encryption_decryption` - ✅ PASSING)
+- [x] Additional test: Leader election logic verification (`test_leader_election` - ✅ PASSING)
+- [x] Additional test: Fresh node join announcement (`test_fresh_node_publishes_node_joined` - ✅ PASSING)
+- [x] Additional test: StateSnapshot structure verification (`test_snapshot_event_structure` - ✅ PASSING)
+
+**All 7 tests passing!** Run with: `cargo test -p node --test cluster_bootstrap`
+Note: Requires NATS with JetStream enabled on port 4222: `podman run -d --rm -p 4222:4222 docker.io/library/nats:2.10-alpine -js`
+
+
+# Start NATS with JetStream
+podman run -d --rm --name nats-test -p 4222:4222 \
+  docker.io/library/nats:2.10-alpine -js
+
+# Run tests
+cargo test -p node --test cluster_bootstrap
+
+# Stop NATS
+podman stop nats-test
