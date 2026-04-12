@@ -4,6 +4,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::info;
 
+pub mod db_config;
 pub mod handlers;
 
 #[derive(Parser, Debug)]
@@ -53,6 +54,24 @@ struct Args {
 
     #[arg(long)]
     key_file: Option<String>,
+
+    #[arg(long, default_value = "postgres://127.0.0.1:5432")]
+    database_url: String,
+
+    #[arg(long, default_value = "127.0.0.1:5432")]
+    pgbouncer_addr: String,
+
+    #[arg(long)]
+    enable_db_proxy: bool,
+
+    #[arg(long, default_value = "127.0.0.1:5433")]
+    db_proxy_addr: String,
+
+    #[arg(long, default_value = "db.internal:5432")]
+    db_backend_addr: String,
+
+    #[arg(long, default_value = "20")]
+    db_proxy_max_connections: usize,
 }
 
 #[tokio::main]
@@ -96,10 +115,31 @@ async fn main() -> anyhow::Result<()> {
 
     let (event_tx, _event_rx) = mpsc::channel::<messaging::events::Event>(1000);
 
-    let env_resolver = Arc::new(|config: &common::types::AppConfig, _host_port: u16| {
+    // Initialize database manager
+    let db_config = db_config::DatabaseConfig {
+        default_database_url: args.database_url.clone(),
+        health_check_addr: args.pgbouncer_addr.clone(),
+        health_check_interval_secs: 30,
+        enable_builtin_proxy: args.enable_db_proxy,
+        builtin_proxy_addr: args.db_proxy_addr.clone(),
+        builtin_proxy_backend: args.db_backend_addr.clone(),
+        builtin_proxy_max_connections: args.db_proxy_max_connections,
+    };
+
+    let db_manager = db_config::DatabaseManager::new(db_config.clone());
+    db_manager.initialize().await?;
+
+    let env_resolver = Arc::new(move |config: &common::types::AppConfig, _host_port: u16| {
         let mut vars = Vec::new();
         for (k, v) in &config.env_vars {
             vars.push((k.clone(), v.clone()));
+        }
+        // Inject DATABASE_URL if not already provided in env_vars
+        if !config.env_vars.contains_key("DATABASE_URL") {
+            vars.push((
+                "DATABASE_URL".to_string(),
+                db_config.default_database_url.clone(),
+            ));
         }
         vars
     });
@@ -245,7 +285,25 @@ async fn main() -> anyhow::Result<()> {
         tls,
     );
 
-    let admin_app = axum::Router::new().route("/health", axum::routing::get(|| async { "OK" }));
+    // Admin API with pgBouncer status endpoint
+    let pgbouncer_check_addr = args.pgbouncer_addr.clone();
+    let admin_app = axum::Router::new()
+        .route("/health", axum::routing::get(|| async { "OK" }))
+        .route(
+            "/status/pgbouncer",
+            axum::routing::get(move || {
+                let addr = pgbouncer_check_addr.clone();
+                async move {
+                    let available = supervisor::db_proxy::check_pgbouncer(&addr).await;
+                    let status = if available { "healthy" } else { "unavailable" };
+                    axum::Json(serde_json::json!({
+                        "status": status,
+                        "address": addr,
+                        "available": available,
+                    }))
+                }
+            }),
+        );
 
     let admin_addr = format!("0.0.0.0:{}", args.admin_port);
     tokio::spawn(async move {

@@ -120,6 +120,12 @@ pub struct AppConfig {
     pub extended_limits: Option<ExtendedLimitsConfig>,
 
     pub health_check_path: Option<String>,
+
+    /// Maximum simultaneous database connections this app is allowed to hold.
+    /// This is used for documentation/audit purposes. The actual enforcement
+    /// is done by pgBouncer via max_client_conn and per-user limits.
+    #[serde(default)]
+    pub db_max_connections: Option<u32>,
 }
 
 impl AppConfig {
@@ -136,6 +142,7 @@ impl AppConfig {
             secret_keys: Vec::new(),
             extended_limits: None,
             health_check_path: None,
+            db_max_connections: None,
         }
     }
 }

@@ -2845,6 +2845,7 @@ dependencies = [
  "reqwest 0.12.28",
  "runtime",
  "secrets",
+ "serde",
  "serde_json",
  "sha2",
  "storage",

@@ -91,7 +91,9 @@ pub async fn run(
     let pb = ProgressBar::new(size_bytes);
     pb.set_style(
         ProgressStyle::default_bar()
-            .template("[{elapsed_precise}] {bar:40.cyan/blue} {bytes}/{total_bytes} ({bytes_per_sec})")
+            .template(
+                "[{elapsed_precise}] {bar:40.cyan/blue} {bytes}/{total_bytes} ({bytes_per_sec})",
+            )
             .unwrap()
             .progress_chars("=>-"),
     );
@@ -117,6 +119,7 @@ pub async fn run(
         secret_keys: args.secret_keys,
         extended_limits: None,
         health_check_path: None,
+        db_max_connections: None,
     };
 
     // 5. Publish deploy event

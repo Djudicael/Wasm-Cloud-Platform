@@ -1,5 +1,6 @@
 pub mod audit;
 pub mod config_validator;
+pub mod db_proxy;
 pub mod deployment;
 pub mod env_resolver;
 pub mod instance;
