@@ -5,11 +5,15 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-wasmtime = { workspace = true }
+wasmtime = { workspace = true, features = ["component-model"] }
 wasmtime-wasi = { workspace = true }
 tokio = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 common = { path = "../common" }
 storage = { path = "../storage" }
+anyhow.workspace = true
+
+[dev-dependencies]
+wat = "1.246.2"
 

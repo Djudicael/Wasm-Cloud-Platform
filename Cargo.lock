@@ -2787,6 +2787,7 @@ dependencies = [
 name = "runtime"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "common",
  "storage",
  "thiserror",
@@ -2794,6 +2795,7 @@ dependencies = [
  "tracing",
  "wasmtime",
  "wasmtime-wasi",
+ "wat",
 ]
 
 [[package]]
