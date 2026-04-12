@@ -1,0 +1,9 @@
+# Cargo configuration for the Wasm Cloud Platform
+
+[env]
+# Configure testcontainers to work with Podman on WSL
+# This allows the messaging tests to run with Podman instead of Docker
+TESTCONTAINERS_RYUK_DISABLED = "true"
+
+# For WSL users with Podman, uncomment the line below:
+# DOCKER_HOST = "unix:///run/user/1000/podman/podman.sock"

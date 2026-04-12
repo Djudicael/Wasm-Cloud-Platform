@@ -7,8 +7,31 @@ mod tests {
     use tokio::sync::mpsc;
     use tokio::time::timeout;
 
+    /// Configure Podman socket if available (for WSL users)
+    /// This ensures testcontainers can find Podman
+    fn setup_container_runtime() {
+        // Check if DOCKER_HOST is already set
+        if std::env::var("DOCKER_HOST").is_ok() {
+            return;
+        }
+
+        // Try to detect Podman socket on WSL
+        let podman_socket = std::path::Path::new("/run/user/1000/podman/podman.sock");
+        if podman_socket.exists() {
+            std::env::set_var("DOCKER_HOST", "unix:///run/user/1000/podman/podman.sock");
+            eprintln!("✓ Configured testcontainers to use Podman");
+        }
+
+        // Ensure Ryuk is disabled (often needed for Podman)
+        if std::env::var("TESTCONTAINERS_RYUK_DISABLED").is_err() {
+            std::env::set_var("TESTCONTAINERS_RYUK_DISABLED", "true");
+        }
+    }
+
     #[tokio::test]
     async fn test_pub_sub_deploy_app() {
+        setup_container_runtime();
+
         let image = GenericImage::new("nats", "latest")
             .with_mapped_port(4222, ContainerPort::Tcp(4222))
             .with_cmd(vec!["-js"]); // enable JetStream
@@ -71,6 +94,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_jetstream_durable_replay() {
+        setup_container_runtime();
+
         let image = GenericImage::new("nats", "latest")
             .with_mapped_port(4223, ContainerPort::Tcp(4222))
             .with_cmd(vec!["-js"]); // enable JetStream
