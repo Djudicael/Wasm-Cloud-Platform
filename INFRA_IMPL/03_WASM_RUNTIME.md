@@ -39,7 +39,7 @@ It produces excellent machine code quickly and its serialization format is stabl
 
 ```
 Deploy time (once):                Runtime (every cold start):
-                                   
+
 .wasm bytes                        redb artifact bytes
      │                                     │
      ▼                                     ▼
@@ -280,7 +280,7 @@ Instantiates a module and runs it. Captures resource usage after the run.
 ```rust
 // crates/runtime/src/executor.rs
 use wasmtime::{Engine, Instance, Module, Store, imports};
-use wasmtime_wasix::{WasiEnv, WasiEnvBuilder};
+use wasmtime_wasi::WasiCtxBuilder;
 use common::{
     error::PlatformError,
     types::{AppConfig, FuelQuota, InstanceId},
@@ -719,7 +719,7 @@ impl ExtendedLimitsConfig {
 ### 7.3 Execution Flow with I/O Tracking
 
 The `IoResourceTracker` is created alongside the Wasm `Store` and threaded through the
-WASI host function imports. The WASI host functions (provided by `wasmtime_wasix`) are
+WASI host function imports. The WASI host functions (provided by `wasmtime_wasi`) are
 wrapped to call the tracker before forwarding to the real implementation.
 
 ```
@@ -729,8 +729,8 @@ spawn_instance()
    │
    ├── IoResourceTracker::new(extended_limits)
    │
-   ├── WasiEnv::builder()
-   │      └── .set_fd_limit(max_open_fds)  ← wasmtime_wasix native support
+   ├── WasiCtxBuilder::new()
+   │      └── .set_fd_limit(max_open_fds)  ← wasmtime_wasi native support
    │
    ├── Instance::new() with import wrappers
    │      └── fd_write   → tracker.track_fs_write(len) → real fd_write

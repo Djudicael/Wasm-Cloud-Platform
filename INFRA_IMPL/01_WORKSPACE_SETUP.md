@@ -50,7 +50,7 @@ common ◄──── storage ◄──── runtime ◄──── superviso
 - `common` has zero internal dependencies — it defines shared types (`AppId`, `FuelQuota`, etc.)
   and the unified `PlatformError` enum. **Every other crate depends on it.**
 - `storage` only knows about `common`. It does not know about Wasm or NATS.
-- `runtime` wraps Wasmer. It only knows about `common` and `storage` (to load artifacts).
+- `runtime` wraps Wasmtime. It only knows about `common` and `storage` (to load artifacts).
 - `supervisor` is the coordinator: it knows about `runtime`, `storage`, `secrets`, `metrics`.
 - `proxy` knows only about `common` and the upstream registry it shares with `supervisor`.
 - `node` knows about everything — it is the wiring layer.
@@ -73,8 +73,8 @@ this by being the one crate everyone can depend on without creating cycles.
   or environment variables. Axum cannot run.
 - `wasm32-wasi` (Preview 1): Legacy WASI. Has TCP listener support but Preview 1 is being
   deprecated. Many Tokio APIs do not work.
-- `wasm32-wasip2` (Preview 2): The current standard. Full networking support (TCP listen +
-  connect), async Tokio compatibility, and is what `wasmer-wasix` targets.
+- `wasm32-wasip2` (Preview 2): The current standard Component Model. Full networking support
+  (TCP listen + connect), async Tokio compatibility, natively supported by Wasmtime 20.
 
 ---
 
@@ -97,7 +97,7 @@ my-wasm-cloud-platform/
 │   │       ├── instance.rs     ← spawn / prune / health
 │   │       ├── pool.rs         ← hot-standby pool
 │   │       └── port_alloc.rs   ← dynamic port allocation
-│   ├── runtime/                ← Wasmer wrapper
+│   ├── runtime/                ← Wasmtime wrapper
 │   │   ├── Cargo.toml
 │   │   └── src/
 │   │       ├── lib.rs
@@ -189,9 +189,8 @@ tracing               = "0.1"
 tracing-subscriber    = { version = "0.3", features = ["env-filter", "json"] }
 
 # Wasm runtime
-wasmer                    = { version = "4", features = ["cranelift"] }
-wasmer-compiler-cranelift = "4"
-wasmer-wasix              = "0.19"
+wasmtime              = { version = "20.0" }
+wasmtime-wasi         = { version = "20.0" }
 
 # Proxy
 pingora               = "0.4"
@@ -272,9 +271,8 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-wasmer                    = { workspace = true }
-wasmer-compiler-cranelift = { workspace = true }
-wasmer-wasix              = { workspace = true }
+wasmtime                  = { workspace = true }
+wasmtime-wasi             = { workspace = true }
 tokio                     = { workspace = true }
 thiserror                 = { workspace = true }
 tracing                   = { workspace = true }

@@ -2,7 +2,7 @@ use redb::TableDefinition;
 
 // ── ARTIFACT STORE ────────────────────────────────────────────────────────────
 // Key   : app_id as &str  (e.g. "api-users:v1")
-// Value : raw bytes of the AOT-compiled Wasmer artifact (can be several MB)
+// Value : raw bytes of the AOT-compiled Wasmtime artifact (can be several MB)
 pub const ARTIFACTS: TableDefinition<&str, &[u8]> = TableDefinition::new("artifacts");
 
 // ── APP CONFIG ────────────────────────────────────────────────────────────────

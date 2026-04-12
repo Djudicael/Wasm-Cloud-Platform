@@ -173,7 +173,7 @@ async fn shutdown_signal() {
     // on the next .accept() call. Tokio's runtime will then return from main().
     // No explicit signal handling needed — axum handles this automatically.
     //
-    // As a safety net, also handle WASI-level ctrl_c (available in wasmer-wasix):
+    // As a safety net, also handle WASI-level ctrl_c (available in wasmtime-wasi):
     tokio::signal::ctrl_c().await.ok();
 }
 ```
@@ -191,16 +191,15 @@ use a **shared flag** in the Wasm linear memory that the Supervisor writes to.
 // The Supervisor writes 1 to it when it wants the app to stop.
 
 pub struct ShutdownFlag {
-    pub memory: wasmer::Memory,
+    pub memory: wasmtime::Memory,
     pub offset: u32, // byte offset in the Wasm linear memory
 }
 
 impl ShutdownFlag {
     /// Signal the Wasm module to shut down.
-    pub fn signal(&self, store: &mut wasmer::Store) {
-        let view = self.memory.view(store);
+    pub fn signal(&self, store: &mut wasmtime::Store<()>) {
         // Write 1 at the shutdown offset
-        view.write(self.offset as u64, &[1u8]).ok();
+        self.memory.write(store, self.offset as usize, &[1u8]).ok();
     }
 }
 ```

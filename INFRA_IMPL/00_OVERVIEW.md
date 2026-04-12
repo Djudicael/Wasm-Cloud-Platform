@@ -142,7 +142,7 @@ Supervisor::ensure_instance("api-users:v2")
        │  1. Loads compiled artifact from redb (< 1ms)
        │  2. Allocates host port 10347 from PortAllocator
        │  3. Resolves env vars: static config + decrypted secrets
-       │  4. Calls spawn_blocking → Wasmer deserializes artifact, creates WASI env
+       │  4. Calls spawn_blocking → Wasmtime deserializes artifact, creates WASI Preview 2 Component env
        │  5. Wasm module starts its internal Tokio runtime, binds to port 10347
        │  6. Supervisor probes TCP port 10347 until it accepts connections
        │  7. Registers port 10347 in UpstreamRegistry for "api-users:v2"
@@ -217,7 +217,7 @@ Deploy protocol begins:
 │             │ (UpstreamRegistry)          │ (WasmRuntime)            │
 │             │                             │                          │
 │             │         ┌───────────────────▼──────────────────────┐  │
-│             │         │           WASMER ENGINE                   │  │
+│             │         │           WASMTIME ENGINE                 │  │
 │             │         │  (Cranelift AOT — shared per process)     │  │
 │             │         │                                           │  │
 │             │         │  PreparedModule             Wasm Instance │  │
@@ -266,11 +266,11 @@ Containers start in seconds, use hundreds of MB per instance, and share the kern
 Wasm modules start in milliseconds, use single-digit MB, and are hardware-isolated via
 Software Fault Isolation (SFI). For high-density multi-tenant HTTP serving, Wasm wins.
 
-### Why Wasmer (not Wasmtime)?
-Both are production-grade. Wasmer's AOT serialization format (`Module::serialize()`) is
-very stable and portable — the same artifact can be deserialized on any node with the
-same Cranelift version. Wasmer's `wasmer-wasix` crate also has the most complete WASI
-Preview 2 networking support, which is required for Axum apps.
+### Why Wasmtime (not Wasmer)?
+Both are production-grade. Wasmtime natively supports the modern WASI Preview 2 (Component Model),
+which offers much better native capability-based network security. We switched from Wasmer/WASIX
+(a legacy extension) because Wasmtime's Component Model aligns strictly with standards, enforcing
+network access cleanly via mechanisms like `socket_addr_check`.
 
 ### Why Cranelift (not LLVM)?
 LLVM produces faster code but takes 5–30 seconds to compile a typical Axum app. Cranelift
@@ -334,8 +334,8 @@ See [02_STORAGE_REDB.md](02_STORAGE_REDB.md) for the full comparison table.
 | --- | --------------------------------- | -------------------------------------------------------------------- | -------------- |
 | 01  | `01_WORKSPACE_SETUP.md`           | Cargo workspace, crates layout, all dependencies                     | —              |
 | 02  | `02_STORAGE_REDB.md`              | Local persistent store (artifacts, config, metrics, secrets)         | 01             |
-| 03  | `03_WASM_RUNTIME.md`              | Wasmer integration — AOT compile, fuel metering, memory limits       | 02             |
-| 04  | `04_WASI_NETWORKING.md`           | WASI virtual sockets — port allocation and binding                   | 03             |
+| 03  | `03_WASM_RUNTIME.md`              | Wasmtime integration — AOT compile, fuel metering, memory limits     | 02             |
+| 04  | `04_WASI_NETWORKING.md`           | WASI Preview 2 components — virtual sockets, port allocation/binding | 03             |
 | 05  | `05_ENV_CONFIG.md`                | Environment variable injection into WasiEnv                          | 03, 02         |
 | 06  | `06_SECRETS.md`                   | Encrypted secret store, DEK/KEK hierarchy, NATS rotation             | 02             |
 | 07  | `07_SUPERVISOR_CORE.md`           | Supervisor lifecycle — spawn, health, prune, scaling loop            | 03, 04, 05, 06 |
@@ -378,8 +378,8 @@ See [02_STORAGE_REDB.md](02_STORAGE_REDB.md) for the full comparison table.
 
 | Purpose              | Crate                                                |
 | -------------------- | ---------------------------------------------------- |
-| Wasm runtime         | `wasmer`, `wasmer-compiler-cranelift`                |
-| WASI support         | `wasmer-wasix`                                       |
+| Wasm runtime         | `wasmtime`                                           |
+| WASI support         | `wasmtime-wasi`                                      |
 | Proxy                | `pingora`, `pingora-proxy`, `pingora-load-balancing` |
 | Async runtime        | `tokio` (full features)                              |
 | Local DB             | `redb`                                               |

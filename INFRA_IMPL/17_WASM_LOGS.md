@@ -34,7 +34,7 @@ This gives per-app log isolation while allowing flexible forwarding.
 
 ### The WASI Pipe Mechanism
 
-`wasmer-wasix` provides `WasiPipe` — a pair of connected `Read`/`Write` ends:
+`wasmtime-wasi` provides pipe streams — a pair of connected `Read`/`Write` ends:
 - The **write end** is given to the Wasm module as its `stdout`/`stderr`
 - The **read end** is held by the Supervisor
 
@@ -92,11 +92,11 @@ This file covers:
 
 ## 1. How WASI Captures stdout/stderr
 
-`wasmer-wasix` allows substituting custom `Write` implementors for stdout and stderr.
+`wasmtime-wasi` allows substituting custom streams for stdout and stderr.
 
 ```rust
 // crates/runtime/src/wasi.rs (extend build_wasi_env)
-use wasmer_wasix::WasiPipe;
+use wasmtime_wasi::pipe::MemoryOutputPipe;
 use tokio::sync::mpsc;
 
 pub struct WasiStreams {
@@ -107,16 +107,16 @@ pub struct WasiStreams {
 }
 
 pub fn build_wasi_env_with_capture(
-    store: &mut wasmer::Store,
+    store: &mut wasmtime::Store<()>,
     cfg: &WasiConfig,
-) -> Result<(wasmer_wasix::WasiEnv, WasiStreams), common::error::PlatformError> {
+) -> Result<(wasmtime_wasi::WasiCtx, WasiStreams), common::error::PlatformError> {
     let (stdout_tx, stdout_rx) = mpsc::channel::<Vec<u8>>(512);
     let (stderr_tx, stderr_rx) = mpsc::channel::<Vec<u8>>(512);
 
-    // WasiPipe is a Read+Write pair provided by wasmer-wasix.
-    // The Write end goes into WasiEnv; the Read end is drained by the Supervisor.
-    let (stdout_read, stdout_write) = WasiPipe::channel();
-    let (stderr_read, stderr_write) = WasiPipe::channel();
+    // MemoryOutputPipe is a memory buffer provided by wasmtime-wasi.
+    // The Write end goes into WasiCtx; the Read end is drained by the Supervisor.
+    let stdout_write = MemoryOutputPipe::new(10000);
+    let stderr_write = MemoryOutputPipe::new(10000);
 
     // Spawn tasks that drain the pipes and push into the mpsc channels
     let app_id = cfg.app_name.clone();
@@ -129,9 +129,9 @@ pub fn build_wasi_env_with_capture(
         drain_pipe(stderr_read, stderr_tx, &app_id_err, "stderr");
     });
 
-    let mut builder = wasmer_wasix::WasiEnv::builder(&cfg.app_name);
+    let mut builder = wasmtime_wasi::WasiCtxBuilder::new();
     for (k, v) in &cfg.env_vars {
-        builder = builder.env(k, v);
+        builder.env(k, v);
     }
     builder = builder
         .env("PORT", &cfg.wasm_port.to_string())
@@ -148,7 +148,7 @@ pub fn build_wasi_env_with_capture(
 }
 
 fn drain_pipe(
-    mut pipe: wasmer_wasix::WasiPipe,
+    pipe: wasmtime_wasi::pipe::MemoryOutputPipe,
     tx: mpsc::Sender<Vec<u8>>,
     app_id: &str,
     stream: &str,

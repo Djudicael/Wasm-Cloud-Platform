@@ -108,7 +108,7 @@ use redb::{TableDefinition, MultimapTableDefinition};
 
 // ── ARTIFACT STORE ────────────────────────────────────────────────────────────
 // Key   : app_id as &str  (e.g. "api-users:v1")
-// Value : raw bytes of the AOT-compiled Wasmer artifact (can be several MB)
+// Value : raw bytes of the AOT-compiled Wasmtime artifact (can be several MB)
 pub const ARTIFACTS: TableDefinition<&str, &[u8]> =
     TableDefinition::new("artifacts");
 
@@ -186,7 +186,7 @@ use common::{error::PlatformError, types::AppId};
 
 impl Store {
     /// Persist a compiled Wasm artifact.
-    /// `bytes` is the serialized Wasmer Artifact (output of Module::serialize()).
+    /// `bytes` is the serialized Wasmtime Engine Artifact.
     pub fn store_artifact(&self, id: &AppId, bytes: &[u8]) -> Result<(), PlatformError> {
         let tx = self.db.begin_write()
             .map_err(|e| PlatformError::Storage(e.to_string()))?;

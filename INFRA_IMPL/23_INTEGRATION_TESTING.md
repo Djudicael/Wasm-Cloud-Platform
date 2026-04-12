@@ -21,7 +21,7 @@ This is slow, error-prone, and breaks as the codebase grows.
 
 A comprehensive test suite makes it safe to:
 - Refactor internal crate boundaries without breaking behavior
-- Upgrade dependencies (Wasmer, async-nats, redb) with confidence
+- Upgrade dependencies (Wasmtime, async-nats, redb) with confidence
 - Add new features without regressions
 - Verify security properties automatically
 
@@ -47,7 +47,7 @@ and tests the real code path.
 - Use `nats-server` embedded in tests or spin up a local NATS server in CI
 
 **Problem with mocking the Wasm runtime**:
-- Mocking Wasmer would mean the tests never actually run Wasm
+- Mocking Wasmtime would mean the tests never actually run Wasm
 - Fuel metering, memory limits, and WASI networking cannot be tested through a mock
 - The `apps/hello-axum` test binary provides a real Wasm target for integration tests
 
@@ -105,7 +105,7 @@ crates/
 ├── storage/tests/
 │   └── storage_integration.rs    ← real redb, no mocks
 ├── runtime/tests/
-│   └── runtime_integration.rs    ← real Wasmer, real .wasm files
+│   └── runtime_integration.rs    ← real Wasmtime, real .wasm files
 ├── supervisor/tests/
 │   └── supervisor_integration.rs ← real supervisor with embedded NATS
 └── e2e/                          ← new crate
@@ -231,7 +231,7 @@ fn test_metrics_write_and_prune() {
 }
 ```
 
-### Runtime (Wasmer)
+### Runtime (Wasmtime)
 
 ```rust
 // crates/runtime/tests/runtime_integration.rs
@@ -319,7 +319,7 @@ fn test_memory_limit_enforced() {
     let mut instance = prepared.spawn_instance(vec![], 9997).unwrap();
     let stats = instance.run();
     // memory.grow returns -1 when it fails — no trap, but memory did not grow
-    // (exact behavior depends on Wasmer version)
+    // (exact behavior depends on Wasmtime version)
     println!("RAM after OOM attempt: {} bytes", stats.ram_bytes);
 }
 ```
@@ -517,7 +517,7 @@ oha -n 100 -c 10 http://127.0.0.1:8180/
 oha -n 10000 -c 100 -H "Host: localhost" http://127.0.0.1:8180/
 
 # Expected results:
-# p99 latency: < 50ms (most time = Wasmer instance startup for cold requests)
+# p99 latency: < 50ms (most time = Wasmtime instance startup for cold requests)
 # Error rate: 0%
 # Throughput: depends on the app (a simple hello-world: ~5,000 req/s)
 ```
@@ -576,7 +576,7 @@ jobs:
 - [ ] `cargo test -p supervisor` — spawn, kill, idle prune, and ensure_instance tests pass
 - [ ] `cargo test -p proxy` — upstream registry round-robin, host router, and cold-start trigger tests pass
 - [ ] `cargo test -p messaging` — publish, subscribe, and durable consumer tests pass
-- [ ] All unit tests use real dependencies (real redb, real Wasmer) — no mocks
+- [ ] All unit tests use real dependencies (real redb, real Wasmtime) — no mocks
 
 ### Integration Tests
 - [ ] `test_deploy_and_serve_http` — deploys `hello-axum.wasm`, sends a request, gets 200 ✓

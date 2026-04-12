@@ -56,7 +56,7 @@ Two separate redb tables:
 
 **Why keep raw bytes at all?** Two reasons:
 1. Other nodes need to fetch the binary (they fetch from the `[raw_wasm]` table via HTTP)
-2. If a future Wasmer version requires re-compilation (e.g., a Cranelift security patch
+2. If a future Wasmtime version requires re-compilation (e.g., a Cranelift security patch
    that invalidates all existing artifacts), the raw bytes are available without needing
    another upload from the operator
 

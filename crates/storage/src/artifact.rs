@@ -4,7 +4,7 @@ use common::{error::PlatformError, types::AppId};
 
 impl Store {
     /// Persist a compiled Wasm artifact.
-    /// `bytes` is the serialized Wasmer Artifact (output of Module::serialize()).
+    /// `bytes` is the serialized Wasmtime Engine Artifact.
     pub fn store_artifact(&self, id: &AppId, bytes: &[u8]) -> Result<(), PlatformError> {
         let tx = self
             .db

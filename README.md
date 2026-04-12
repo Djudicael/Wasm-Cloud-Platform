@@ -33,8 +33,8 @@ The implementation plan is split into ordered chapters in `INFRA_IMPL`:
 - `00_OVERVIEW.md` — Master plan and architecture summary
 - `01_WORKSPACE_SETUP.md` — Cargo workspace and crate structure
 - `02_STORAGE_REDB.md` — Local persistent storage design using `redb`
-- `03_WASM_RUNTIME.md` — Wasmer integration, AOT compile, fuel and memory limits
-- `04_WASI_NETWORKING.md` — WASI socket model and port allocation
+- `03_WASM_RUNTIME.md` — Wasmtime integration, AOT compile, fuel and memory limits
+- `04_WASI_NETWORKING.md` — WASI Preview 2 socket model and port allocation
 - `05_ENV_CONFIG.md` — Environment variable and secret injection for Wasm apps
 - `06_SECRETS.md` — Encrypted secret storage and rotation
 - `07_SUPERVISOR_CORE.md` — Supervisor lifecycle, health loop, spawn/prune

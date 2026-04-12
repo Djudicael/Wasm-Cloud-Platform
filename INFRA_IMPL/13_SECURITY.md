@@ -28,12 +28,12 @@ These are all kernel-level mechanisms. A kernel exploit can bypass all of them. 
 assumption "the kernel is trusted" breaks badly when the attacker controls the workload.
 
 Wasm isolation relies on **Software Fault Isolation (SFI)**:
-- The Wasm binary is compiled to native code by Wasmer with inserted memory boundary checks
+- The Wasm binary is compiled to native code by Wasmtime with inserted memory boundary checks
 - Every memory access is verified at the CPU instruction level: if address is outside
   the module's linear memory, it triggers a trap (not a segfault that could be exploited)
 - No kernel involvement: the isolation is in the compiled machine code itself
 
-An attacker inside a Wasm module would need to find a bug in Wasmer's SFI implementation
+An attacker inside a Wasm module would need to find a bug in Wasmtime's SFI implementation
 (a very narrow attack surface, written in Rust) rather than a kernel syscall that bypasses
 namespaces.
 
@@ -103,9 +103,9 @@ to the rest of the cluster.
 
 | Threat | Mitigation | Layer |
 |--------|-----------|-------|
-| Malicious Wasm code (infinite loop) | Fuel metering → process killed, not just throttled | Wasmer |
-| Memory overflow | Linear memory limit via Tunables | Wasmer |
-| App A reads App B's data | Separate Stores (no shared memory unless explicitly granted) | Wasmer |
+| Malicious Wasm code (infinite loop) | Fuel metering → process killed, not just throttled | Wasmtime |
+| Memory overflow | Linear memory limit via Tunables | Wasmtime |
+| App A reads App B's data | Separate Stores (no shared memory unless explicitly granted) | Wasmtime |
 | App A binds arbitrary ports | Pre-bound sockets via WASI; app only gets its assigned fd | WASI |
 | App A calls external malicious host | Outbound connections restricted via WASI config | WASI |
 | Secret leakage between apps | Per-app DEK encryption; secrets never written to disk unencrypted | Secrets layer |
@@ -119,7 +119,7 @@ to the rest of the cluster.
 
 ## 2. Wasm Software Fault Isolation (SFI)
 
-Wasmer enforces SFI automatically. Each module gets:
+Wasmtime enforces SFI automatically. Each module gets:
 - Its own linear memory (no access to host memory or other modules' memory)
 - Its own call stack
 - A restricted set of imported host functions (only what the Supervisor explicitly provides)
@@ -143,14 +143,14 @@ Only expose the minimum required host functions to the Wasm module.
 
 ```rust
 // crates/runtime/src/executor.rs (security-hardened import object)
-use wasmer::{imports, Function, Store};
-use wasmer_wasix::WasiEnv;
+use wasmtime::{Linker, Store};
+use wasmtime_wasi::WasiCtx;
 
 pub fn build_minimal_imports(
     store: &mut Store,
-    wasi_env: &WasiEnv,
-    module: &wasmer::Module,
-) -> Result<wasmer::Imports, common::error::PlatformError> {
+    wasi_env: &WasiCtx,
+    module: &wasmtime::Module,
+) -> Result<Linker<WasiCtx>, common::error::PlatformError> {
     // Start with the WASI-provided imports (file I/O, clocks, random, network)
     let mut import_object = wasi_env.import_object(store, module)
         .map_err(|e| common::error::PlatformError::Runtime(e.to_string()))?;
@@ -170,7 +170,7 @@ pub fn build_minimal_imports(
 
 ```rust
 // crates/runtime/src/wasi.rs (extended security policy)
-use wasmer_wasix::WasiEnvBuilder;
+use wasmtime_wasi::WasiCtxBuilder;
 
 pub struct NetworkPolicy {
     /// Allow the module to open outbound TCP connections.
@@ -194,13 +194,13 @@ impl Default for NetworkPolicy {
     }
 }
 
-pub fn apply_network_policy(builder: WasiEnvBuilder, policy: &NetworkPolicy) -> WasiEnvBuilder {
+pub fn apply_network_policy(builder: WasiCtxBuilder, policy: &NetworkPolicy) -> WasiCtxBuilder {
     if policy.allow_outbound_tcp {
         builder.allow_connect(true)
     } else {
         builder.allow_connect(false)
     }
-    // Future: wasmer-wasix may support CIDR filtering directly
+    // Future: wasmtime-wasi may support CIDR filtering directly
 }
 ```
 

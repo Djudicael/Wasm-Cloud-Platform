@@ -88,7 +88,7 @@ which network operations are permitted and on which addresses.
                            │
                            ▼
 ┌─────────────────────────────────────────────────────┐
-│              WASMER WASI HOST (Supervisor)          │
+│              WASMTIME WASI HOST (Supervisor)        │
 │                                                     │
 │   Maps virtual "0.0.0.0:8080" inside Wasm to        │
 │   real host port 9347 (allocated by Supervisor)     │
@@ -160,7 +160,7 @@ The key API is `WasiCtx::builder()` with `.net()` to specify a virtual network.
 
 ```rust
 // crates/runtime/src/wasi.rs
-use wasmtime_wasix::{WasiCtx, WasiCtxBuilder, WasiNetworkingExt};
+use wasmtime_wasi::WasiCtxBuilder;
 use wasmtime::Store;
 use common::error::PlatformError;
 
@@ -221,7 +221,7 @@ needs raw socket-creation rights — it just calls `accept()` on a pre-opened fd
 ```rust
 // Supervisor side (before calling build_wasi_env)
 use std::net::TcpListener;
-use wasmtime_wasix::WasiCtxBuilder;
+use wasmtime_wasi::WasiCtxBuilder;
 
 pub fn build_wasi_env_prebound(
     store: &mut Store,

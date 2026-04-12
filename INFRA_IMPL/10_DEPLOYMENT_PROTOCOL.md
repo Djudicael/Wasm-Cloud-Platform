@@ -287,7 +287,7 @@ impl Supervisor {
         if let Some(pool) = pools.get_mut(&app_id.0) {
             let instances = std::mem::take(&mut pool.instances);
             for inst in instances {
-                if let common::types::InstanceState::Ready { addr } | 
+                if let common::types::InstanceState::Ready { addr } |
                        common::types::InstanceState::Starting = &inst.state {
                     // Already removed from upstream above in drain_app
                     self.port_alloc.release(inst.addr.port());
@@ -454,7 +454,7 @@ Immediately terminates an instance due to an out-of-fuel trap, OOM, or admin com
 ```rust
 // crates/supervisor/src/lib.rs
 impl Supervisor {
-    /// Called when Wasmer raises a Trap (OOM / out of fuel / illegal instruction).
+    /// Called when Wasmtime raises a Trap (OOM / out of fuel / illegal instruction).
     pub async fn handle_trap(
         &self,
         app_id: &AppId,
