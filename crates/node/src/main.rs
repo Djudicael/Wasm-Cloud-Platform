@@ -42,6 +42,8 @@ pub fn load_master_key(config: &NodeConfig) -> SymmetricKey {
     }
 }
 
+pub mod handlers;
+
 fn main() {
     println!("Node started");
 }

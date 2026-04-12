@@ -275,7 +275,7 @@ impl Supervisor {
                 .event_tx
                 .send(Event::InstanceDead {
                     app_id: app_id.clone(),
-                    instance_id: id.clone(),
+                    addr: inst.addr,
                     node_id: self.node_id(),
                 })
                 .await;
