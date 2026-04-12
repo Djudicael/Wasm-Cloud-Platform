@@ -6,6 +6,7 @@ use tracing::info;
 
 pub mod db_config;
 pub mod handlers;
+pub mod upgrade;
 
 #[derive(Parser, Debug)]
 #[command(name = "wasm-node", about = "Wasm Cloud Platform Node")]

@@ -3,6 +3,11 @@ use common::types::{AppConfig, AppId};
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 
+/// Default protocol version for deserialization of old messages without the field.
+fn default_protocol_version() -> u32 {
+    1
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Event {
@@ -71,6 +76,12 @@ pub enum Event {
         /// A one-time public key for encrypting the secret transfer.
         /// (Ephemeral X25519 key, used only for this bootstrap session.)
         public_key_bytes: Vec<u8>,
+        /// Protocol version of the joining node (for compatibility checks).
+        #[serde(default = "default_protocol_version")]
+        protocol_version: u32,
+        /// Binary version string (e.g., "0.4.0").
+        #[serde(default)]
+        binary_version: String,
     },
     StateSnapshot {
         /// Recipient node ID.
@@ -84,6 +95,30 @@ pub enum Event {
         encrypted_secrets: Vec<(String, String, Vec<u8>)>,
         /// SHA-256 of each app's .wasm (so node can fetch artifacts).
         artifact_hashes: Vec<(String, String)>, // (app_id, sha256)
+    },
+
+    // ── Platform Upgrades ──────────────────────────────────────────
+    NodeUpgrade {
+        /// Which node should upgrade. Use "*" for all nodes (rolling).
+        target_node: String,
+        /// URL to download the new binary from the artifact registry.
+        binary_url: String,
+        /// Expected SHA-256 hash of the new binary.
+        binary_sha256: String,
+        /// The new binary's protocol version. Used for compatibility checks.
+        new_protocol_version: u32,
+        /// The new binary version string (e.g., "0.5.0").
+        new_binary_version: String,
+    },
+    NodeUpgradeComplete {
+        node_id: String,
+        new_binary_version: String,
+        new_protocol_version: u32,
+    },
+    NodeDraining {
+        node_id: String,
+        /// Expected time until shutdown (seconds).
+        drain_timeout_secs: u64,
     },
 }
 
@@ -119,6 +154,19 @@ impl Event {
             }
             Event::StateSnapshot { for_node_id, .. } => {
                 format!("cluster.snapshot.{}", for_node_id)
+            }
+            Event::NodeUpgrade { target_node, .. } => {
+                if target_node == "*" {
+                    "platform.upgrade.rolling".to_string()
+                } else {
+                    format!("platform.upgrade.{}", target_node)
+                }
+            }
+            Event::NodeUpgradeComplete { node_id, .. } => {
+                format!("platform.upgrade_complete.{}", node_id)
+            }
+            Event::NodeDraining { node_id, .. } => {
+                format!("platform.draining.{}", node_id)
             }
         }
     }
