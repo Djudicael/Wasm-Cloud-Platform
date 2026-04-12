@@ -25,11 +25,15 @@ fn test_compile_and_run_minimal() {
     let runtime = WasmRuntime::new();
     let wasm_bytes = wat::parse_str(
         r#"
-        (module
-            (memory (export "memory") 1)
-            (func (export "_start")
-                nop
+        (component
+            (core module $m
+                (memory (export "memory") 1)
+                (func (export "run")
+                    nop
+                )
             )
+            (core instance $i (instantiate $m))
+            (func (export "run") (canon lift (core func $i "run")))
         )
         "#,
     )
@@ -64,13 +68,17 @@ fn test_fuel_exhaustion_trap() {
     // Infinite loop
     let wasm_bytes = wat::parse_str(
         r#"
-        (module
-            (memory (export "memory") 1)
-            (func (export "_start")
-                (loop $my_loop
-                    br $my_loop
+        (component
+            (core module $m
+                (memory (export "memory") 1)
+                (func (export "run")
+                    (loop $my_loop
+                        br $my_loop
+                    )
                 )
             )
+            (core instance $i (instantiate $m))
+            (func (export "run") (canon lift (core func $i "run")))
         )
         "#,
     )
@@ -96,11 +104,15 @@ fn test_zero_fuel_immediate_trap() {
     let runtime = WasmRuntime::new();
     let wasm_bytes = wat::parse_str(
         r#"
-        (module
-            (memory (export "memory") 1)
-            (func (export "_start")
-                nop
+        (component
+            (core module $m
+                (memory (export "memory") 1)
+                (func (export "run")
+                    nop
+                )
             )
+            (core instance $i (instantiate $m))
+            (func (export "run") (canon lift (core func $i "run")))
         )
         "#,
     )
@@ -125,15 +137,19 @@ fn test_memory_limit_enforced() {
     // If it fails (returns -1), it exits cleanly.
     let wasm_bytes = wat::parse_str(
         r#"
-        (module
-            (memory (export "memory") 1)
-            (func (export "_start")
-                (local $res i32)
-                (local.set $res (memory.grow (i32.const 10)))
-                (if (i32.ne (local.get $res) (i32.const -1))
-                    (then (unreachable))
+        (component
+            (core module $m
+                (memory (export "memory") 1)
+                (func (export "run")
+                    (local $res i32)
+                    (local.set $res (memory.grow (i32.const 10)))
+                    (if (i32.ne (local.get $res) (i32.const -1))
+                        (then (unreachable))
+                    )
                 )
             )
+            (core instance $i (instantiate $m))
+            (func (export "run") (canon lift (core func $i "run")))
         )
         "#,
     )
@@ -159,9 +175,13 @@ fn test_concurrency() {
     let runtime = WasmRuntime::new();
     let wasm_bytes = wat::parse_str(
         r#"
-        (module
-            (memory (export "memory") 1)
-            (func (export "_start") nop)
+        (component
+            (core module $m
+                (memory (export "memory") 1)
+                (func (export "run") nop)
+            )
+            (core instance $i (instantiate $m))
+            (func (export "run") (canon lift (core func $i "run")))
         )
         "#,
     )
@@ -282,9 +302,13 @@ fn test_default_extended_limits_applied() {
     let runtime = WasmRuntime::new();
     let wasm_bytes = wat::parse_str(
         r#"
-        (module
-            (memory (export "memory") 1)
-            (func (export "_start") nop)
+        (component
+            (core module $m
+                (memory (export "memory") 1)
+                (func (export "run") nop)
+            )
+            (core instance $i (instantiate $m))
+            (func (export "run") (canon lift (core func $i "run")))
         )
         "#,
     )
