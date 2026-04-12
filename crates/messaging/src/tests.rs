@@ -43,6 +43,7 @@ mod tests {
             app_id: app_id.clone(),
             config: AppConfig::default_for(app_id),
             wasm_bytes: vec![10, 20, 30],
+            expected_hash: None,
         };
 
         bus.publish(&event).await.unwrap();
@@ -91,6 +92,7 @@ mod tests {
             app_id: app_id.clone(),
             config: AppConfig::default_for(app_id.clone()),
             wasm_bytes: vec![99, 99, 99],
+            expected_hash: None,
         };
 
         bus.publish(&event).await.unwrap();

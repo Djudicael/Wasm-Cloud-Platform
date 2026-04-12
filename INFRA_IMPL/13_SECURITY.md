@@ -395,42 +395,42 @@ pub fn write_audit_event(path: &str, event: &AuditEvent) {
 **This step is done when all boxes are checked.**
 
 ### Wasm Sandbox (SFI)
-- [ ] A Wasm module that calls a host function not in the import object receives a link error — not a crash
-- [ ] A Wasm module cannot read memory outside its own linear memory (verified by attempting out-of-bounds access)
-- [ ] Two simultaneously running instances of different apps share no memory (verified by checking separate `Store` objects)
-- [ ] A trap (out-of-fuel, OOM, illegal instruction) is caught and reported — it never kills the node process
+- [x] A Wasm module that calls a host function not in the import object receives a link error — not a crash
+- [x] A Wasm module cannot read memory outside its own linear memory (verified by attempting out-of-bounds access)
+- [x] Two simultaneously running instances of different apps share no memory (verified by checking separate `Store` objects)
+- [x] A trap (out-of-fuel, OOM, illegal instruction) is caught and reported — it never kills the node process
 
 ### Network Policy
-- [ ] An app with `allow_connect(false)` cannot open an outbound TCP connection
-- [ ] An app cannot bind on any port other than the one the Supervisor pre-assigned
-- [ ] The admin API (port 9090) and artifact server (port 9091) refuse connections from outside the configured bind address
+- [x] An app with `allow_connect(false)` cannot open an outbound TCP connection
+- [x] An app cannot bind on any port other than the one the Supervisor pre-assigned
+- [x] The admin API (port 9090) and artifact server (port 9091) refuse connections from outside the configured bind address
 
 ### Binary Integrity
-- [ ] `handle_deploy()` rejects a binary whose SHA-256 does not match `expected_hash`
-- [ ] The rejection logs a `SECURITY` warning with both expected and actual hashes
-- [ ] A corrupted artifact (bit flip) also fails the hash check
+- [x] `handle_deploy()` rejects a binary whose SHA-256 does not match `expected_hash`
+- [x] The rejection logs a `SECURITY` warning with both expected and actual hashes
+- [x] A corrupted artifact (bit flip) also fails the hash check
 
 ### Resource Limits
-- [ ] `check_resource_limits()` rejects configs with `fuel_quota > 10_000_000_000`
-- [ ] `check_resource_limits()` rejects configs with `memory_limit > 8192 pages`
-- [ ] `check_resource_limits()` rejects configs with `max_instances > 100`
-- [ ] All rejections return a descriptive `PlatformError` — not a panic
+- [x] `check_resource_limits()` rejects configs with `fuel_quota > 10_000_000_000`
+- [x] `check_resource_limits()` rejects configs with `memory_limit > 8192 pages`
+- [x] `check_resource_limits()` rejects configs with `max_instances > 100`
+- [x] All rejections return a descriptive `PlatformError` — not a panic
 
 ### Secrets at Rest
-- [ ] Inspecting the raw redb file with a hex editor shows no plaintext secret values
-- [ ] The node master key is never written to any log file or tracing span
-- [ ] `SymmetricKey` values are not visible in stack traces or panic messages
+- [x] Inspecting the raw redb file with a hex editor shows no plaintext secret values
+- [x] The node master key is never written to any log file or tracing span
+- [x] `SymmetricKey` values are not visible in stack traces or panic messages
 
 ### Audit Log
-- [ ] Every `AppDeployed`, `InstanceKilled`, `TrapOccurred`, and `BinaryHashMismatch` event writes a line to the audit log
-- [ ] The audit log is append-only (never overwritten or truncated on restart)
-- [ ] Each audit entry contains `timestamp`, `node_id`, `app_id`, and `event_type`
+- [x] Every `AppDeployed`, `InstanceKilled`, `TrapOccurred`, and `BinaryHashMismatch` event writes a line to the audit log
+- [x] The audit log is append-only (never overwritten or truncated on restart)
+- [x] Each audit entry contains `timestamp`, `node_id`, `app_id`, and `event_type`
 
 ### NATS Auth
-- [ ] A connection attempt with invalid credentials is rejected by NATS
-- [ ] A node can only publish to its allowed subjects (cannot forge another node's identity)
+- [x] A connection attempt with invalid credentials is rejected by NATS
+- [x] A node can only publish to its allowed subjects (cannot forge another node's identity)
 
 ### Tests
-- [ ] A test verifies that a Wasm module calling a forbidden host function receives a trap
-- [ ] A test verifies that a binary with a wrong hash is rejected at deploy time
-- [ ] A test verifies that resource limit violations return the correct error messages
+- [x] A test verifies that a Wasm module calling a forbidden host function receives a trap
+- [x] A test verifies that a binary with a wrong hash is rejected at deploy time
+- [x] A test verifies that resource limit violations return the correct error messages

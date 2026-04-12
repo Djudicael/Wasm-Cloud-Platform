@@ -210,7 +210,7 @@ mod tests {
             router,
             upstream,
             rate_limiter,
-            node_table: Arc::new(super::node_table::NodeLoadTable::default()),
+            node_table: Arc::new(crate::node_table::NodeLoadTable::default()),
             cold_start,
         };
 

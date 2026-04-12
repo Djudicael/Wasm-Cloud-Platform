@@ -1,3 +1,4 @@
+pub mod audit;
 pub mod config_validator;
 pub mod deployment;
 pub mod env_resolver;
@@ -70,6 +71,31 @@ impl Supervisor {
             pools: Arc::new(RwLock::new(HashMap::new())),
             event_tx,
         })
+    }
+
+    pub fn check_resource_limits(&self, config: &AppConfig) -> Result<(), PlatformError> {
+        // Maximum fuel quota: 10 billion units (prevents absurdly long compute)
+        if config.fuel_quota.0 > 10_000_000_000 {
+            return Err(PlatformError::Runtime(
+                "fuel_quota exceeds maximum allowed (10B units)".into(),
+            ));
+        }
+
+        // Maximum memory: 512 MB (8192 pages)
+        if config.memory_limit.0 > 8192 {
+            return Err(PlatformError::Runtime(
+                "memory_limit exceeds maximum allowed (512 MB)".into(),
+            ));
+        }
+
+        // Maximum concurrent instances per app per node: 100
+        if config.max_instances > 100 {
+            return Err(PlatformError::Runtime(
+                "max_instances exceeds node limit (100)".into(),
+            ));
+        }
+
+        Ok(())
     }
 
     /// Ensure at least one instance is available for the given app.

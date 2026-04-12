@@ -2,6 +2,7 @@ use common::types::AppId;
 use messaging::events::Event;
 use proxy::upstream::UpstreamRegistry;
 use runtime::WasmRuntime;
+use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use storage::Store;
 use supervisor::Supervisor;
@@ -21,7 +22,11 @@ impl EventDispatcher {
                 app_id,
                 config,
                 wasm_bytes,
-            } => self.handle_deploy(app_id, config, wasm_bytes).await,
+                expected_hash,
+            } => {
+                self.handle_deploy(app_id, config, wasm_bytes, expected_hash)
+                    .await
+            }
             Event::RemoveApp { app_id } => self.handle_remove(app_id).await,
             Event::InstanceReady {
                 app_id,
@@ -74,8 +79,24 @@ impl EventDispatcher {
         app_id: AppId,
         config: common::types::AppConfig,
         wasm_bytes: Vec<u8>,
+        expected_hash: Option<String>,
     ) {
         info!(app = %app_id.0, bytes = wasm_bytes.len(), "deploying app");
+
+        if let Some(expected) = expected_hash {
+            let mut hasher = Sha256::new();
+            hasher.update(&wasm_bytes);
+            let actual = format!("{:x}", hasher.finalize());
+            if actual != expected {
+                error!(
+                    app = %app_id.0,
+                    expected,
+                    actual,
+                    "SECURITY: Wasm binary hash mismatch! Rejecting deploy."
+                );
+                return;
+            }
+        }
 
         // 1. Compile (CPU-intensive — spawn_blocking)
         let runtime = self.runtime.clone();

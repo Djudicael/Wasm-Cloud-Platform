@@ -13,6 +13,7 @@ pub enum Event {
         /// The raw .wasm bytes (base64-encoded for JSON transport).
         /// For large binaries, prefer a separate artifact fetch via `artifact_url`.
         wasm_bytes: Vec<u8>,
+        expected_hash: Option<String>,
     },
     RemoveApp {
         app_id: AppId,
