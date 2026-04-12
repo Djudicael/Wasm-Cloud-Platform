@@ -5,6 +5,7 @@ use std::sync::Arc;
 pub mod artifact;
 pub mod config;
 pub mod metrics;
+pub mod routes;
 pub mod secrets;
 pub mod tables;
 

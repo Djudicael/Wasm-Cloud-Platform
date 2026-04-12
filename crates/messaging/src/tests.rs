@@ -42,7 +42,7 @@ mod tests {
         let event = Event::DeployApp {
             app_id: app_id.clone(),
             config: AppConfig::default_for(app_id),
-            wasm_bytes: vec![10, 20, 30],
+            artifact_url: "http://example.com/test.wasm".to_string(),
             expected_hash: None,
         };
 
@@ -58,11 +58,11 @@ mod tests {
         match received {
             Event::DeployApp {
                 app_id: recv_id,
-                wasm_bytes,
+                artifact_url,
                 ..
             } => {
                 assert_eq!(recv_id.0, "test-app:v1");
-                assert_eq!(wasm_bytes, vec![10, 20, 30]);
+                assert_eq!(artifact_url, "http://example.com/test.wasm");
             }
             _ => panic!("Received unexpected event variant"),
         }
@@ -91,7 +91,7 @@ mod tests {
         let event = Event::DeployApp {
             app_id: app_id.clone(),
             config: AppConfig::default_for(app_id.clone()),
-            wasm_bytes: vec![99, 99, 99],
+            artifact_url: "http://example.com/durable.wasm".to_string(),
             expected_hash: None,
         };
 
@@ -124,11 +124,11 @@ mod tests {
         match received {
             Event::DeployApp {
                 app_id: recv_id,
-                wasm_bytes,
+                artifact_url,
                 ..
             } => {
                 assert_eq!(recv_id.0, "durable-app:v1");
-                assert_eq!(wasm_bytes, vec![99, 99, 99]);
+                assert_eq!(artifact_url, "http://example.com/durable.wasm");
             }
             _ => panic!("Received unexpected event variant from JetStream"),
         }

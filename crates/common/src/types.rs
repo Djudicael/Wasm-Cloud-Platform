@@ -2,6 +2,25 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct AppId(pub String);
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct Route {
+    /// The Host header value to match. Supports exact match only for now.
+    /// e.g. "api.myapp.com" or "myapp.com"
+    pub host: String,
+
+    /// The target app. Must exist in the [configs] table.
+    pub app_id: AppId,
+
+    /// Optional path prefix (default "/").
+    pub path_prefix: String,
+
+    /// If true, strip the path_prefix before forwarding.
+    pub strip_prefix: bool,
+
+    pub created_at: u64,
+    pub updated_at: u64,
+}
 impl AppId {
     pub fn new(name: &str, version: &str) -> Self {
         AppId(format!("{name}:{version}"))

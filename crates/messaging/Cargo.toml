@@ -15,5 +15,5 @@ tracing = { workspace = true }
 serde.workspace = true
 
 [dev-dependencies]
-testcontainers = "0.27.2"
+testcontainers = { workspace = true }
 uuid.workspace = true

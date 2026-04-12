@@ -10,13 +10,20 @@ pub enum Event {
     DeployApp {
         app_id: AppId,
         config: AppConfig,
-        /// The raw .wasm bytes (base64-encoded for JSON transport).
-        /// For large binaries, prefer a separate artifact fetch via `artifact_url`.
-        wasm_bytes: Vec<u8>,
+        /// The URL where the compiled .wasm artifact can be securely fetched.
+        artifact_url: String,
         expected_hash: Option<String>,
     },
     RemoveApp {
         app_id: AppId,
+    },
+
+    // ── Routing ────────────────────────────────────────────────────
+    RouteAdd {
+        route: common::types::Route,
+    },
+    RouteRemove {
+        host: String,
     },
 
     // ── Instance Lifecycle ─────────────────────────────────────────
@@ -58,6 +65,8 @@ impl Event {
         match self {
             Event::DeployApp { .. } => "deploy.app.new".to_string(),
             Event::RemoveApp { .. } => "deploy.app.remove".to_string(),
+            Event::RouteAdd { .. } => "routes.add".to_string(),
+            Event::RouteRemove { .. } => "routes.remove".to_string(),
             Event::InstanceReady {
                 app_id, node_id, ..
             } => {

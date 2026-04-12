@@ -61,3 +61,7 @@ clap = { version = "4", features = ["derive"] }
 # Utils
 uuid   = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
+
+# Testing
+reqwest = { version = "0.12", features = ["json"] }
+testcontainers = "0.27.2"

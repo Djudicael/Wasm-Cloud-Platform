@@ -1,5 +1,6 @@
 use common::types::AppId;
 use messaging::events::Event;
+use proxy::router::HostRouter;
 use proxy::upstream::UpstreamRegistry;
 use runtime::WasmRuntime;
 use sha2::{Digest, Sha256};
@@ -11,6 +12,7 @@ use tracing::{error, info};
 pub struct EventDispatcher {
     pub supervisor: Arc<Supervisor>,
     pub upstream: Arc<UpstreamRegistry>,
+    pub host_router: Arc<HostRouter>,
     pub store: Store,
     pub runtime: WasmRuntime,
 }
@@ -21,13 +23,25 @@ impl EventDispatcher {
             Event::DeployApp {
                 app_id,
                 config,
-                wasm_bytes,
+                artifact_url,
                 expected_hash,
             } => {
-                self.handle_deploy(app_id, config, wasm_bytes, expected_hash)
+                self.handle_deploy(app_id, config, artifact_url, expected_hash)
                     .await
             }
             Event::RemoveApp { app_id } => self.handle_remove(app_id).await,
+            Event::RouteAdd { route } => {
+                self.store.save_route(&route).ok();
+                self.host_router
+                    .add_route(route.host.clone(), route.app_id.clone())
+                    .await;
+                info!(host = %route.host, app = %route.app_id.0, "route added");
+            }
+            Event::RouteRemove { host } => {
+                self.store.delete_route(&host).ok();
+                self.host_router.remove_route(&host).await;
+                info!(host, "route removed");
+            }
             Event::InstanceReady {
                 app_id,
                 addr,
@@ -78,10 +92,26 @@ impl EventDispatcher {
         &self,
         app_id: AppId,
         config: common::types::AppConfig,
-        wasm_bytes: Vec<u8>,
+        artifact_url: String,
         expected_hash: Option<String>,
     ) {
-        info!(app = %app_id.0, bytes = wasm_bytes.len(), "deploying app");
+        info!(app = %app_id.0, url = %artifact_url, "fetching artifact for deployment");
+
+        let wasm_bytes = match reqwest::get(&artifact_url).await {
+            Ok(resp) => match resp.bytes().await {
+                Ok(b) => b.to_vec(),
+                Err(e) => {
+                    error!(app = %app_id.0, error = %e, "failed to read artifact body");
+                    return;
+                }
+            },
+            Err(e) => {
+                error!(app = %app_id.0, error = %e, "failed to fetch artifact");
+                return;
+            }
+        };
+
+        info!(app = %app_id.0, bytes = wasm_bytes.len(), "artifact downloaded");
 
         if let Some(expected) = expected_hash {
             let mut hasher = Sha256::new();

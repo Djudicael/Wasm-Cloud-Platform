@@ -30,10 +30,16 @@ impl HostRouter {
         self.routes.write().await.remove(host);
     }
 
-    pub async fn load_from_store<S: IntoIterator<Item = (String, AppId)>>(&self, store: S) {
-        let mut routes = self.routes.write().await;
-        for (host, app_id) in store {
-            routes.insert(host, app_id);
+    pub async fn load_routes_from_store(&self, store: &storage::Store) {
+        match store.list_routes() {
+            Ok(routes) => {
+                let mut map = self.routes.write().await;
+                for r in routes {
+                    map.insert(r.host, r.app_id);
+                }
+                tracing::info!(count = map.len(), "routes loaded from storage");
+            }
+            Err(e) => tracing::error!(error = %e, "failed to load routes"),
         }
     }
 }

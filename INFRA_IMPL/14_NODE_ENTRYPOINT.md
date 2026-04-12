@@ -500,36 +500,36 @@ echo "Admin:   http://localhost:9090/upstreams"
 **This step is done when all boxes are checked.**
 
 ### Binary & Startup
-- [ ] `cargo build --release -p node` produces a single `wasm-node` binary
-- [ ] `wasm-node --help` prints all CLI arguments with descriptions
-- [ ] The binary starts and reaches "node fully started" log line within 3 seconds
-- [ ] All 14+ startup steps complete in order without error on a fresh database
+- [x] `cargo build --release -p node` produces a single `wasm-node` binary
+- [x] `wasm-node --help` prints all CLI arguments with descriptions
+- [x] The binary starts and reaches "node fully started" log line within 3 seconds
+- [x] All 14+ startup steps complete in order without error on a fresh database
 
 ### Component Wiring
-- [ ] `Store`, `WasmRuntime`, `PortAllocator`, `UpstreamRegistry`, `HostRouter`, `NatsBus`, `Supervisor`, `LogDispatcher`, and `MetricsCollector` are all initialized and wired together in `main.rs`
-- [ ] The `cold_start` callback passed to the proxy correctly calls `supervisor.ensure_instance()`
-- [ ] The `EventDispatcher` is constructed with references to all components it needs (supervisor, upstream, host_router, store, runtime, secret_provider)
+- [x] `Store`, `WasmRuntime`, `PortAllocator`, `UpstreamRegistry`, `HostRouter`, `NatsBus`, `Supervisor`, `LogDispatcher`, and `MetricsCollector` are all initialized and wired together in `main.rs`
+- [x] The `cold_start` callback passed to the proxy correctly calls `supervisor.ensure_instance()`
+- [x] The `EventDispatcher` is constructed with references to all components it needs (supervisor, upstream, host_router, store, runtime, secret_provider)
 
 ### Listeners
-- [ ] HTTP proxy is reachable on `--proxy-port` (default 8080)
-- [ ] HTTPS proxy is reachable on `--proxy-https-port` when cert and key are provided
-- [ ] Admin API is reachable on `--admin-port` (default 9090)
-- [ ] Artifact server is reachable on `--artifact-port` (default 9091)
+- [x] HTTP proxy is reachable on `--proxy-port` (default 8080)
+- [x] HTTPS proxy is reachable on `--proxy-https-port` when cert and key are provided
+- [x] Admin API is reachable on `--admin-port` (default 9090)
+- [x] Artifact server is reachable on `--artifact-port` (default 9091)
 
 ### State Restore
-- [ ] On restart with an existing database, all previously deployed apps are restored
-- [ ] Routes loaded from redb are immediately active in the proxy (no traffic gap)
-- [ ] Secrets are available from redb immediately after startup (no remote fetch needed)
+- [x] On restart with an existing database, all previously deployed apps are restored
+- [x] Routes loaded from redb are immediately active in the proxy (no traffic gap)
+- [x] Secrets are available from redb immediately after startup (no remote fetch needed)
 
 ### Signal Handling
-- [ ] `Ctrl-C` or `SIGTERM` triggers the graceful drain of all instances before process exit
-- [ ] The node exits with code 0 after a clean shutdown
+- [x] `Ctrl-C` or `SIGTERM` triggers the graceful drain of all instances before process exit
+- [x] The node exits with code 0 after a clean shutdown
 
 ### systemd
-- [ ] The systemd unit file installs and enables without errors
-- [ ] `systemctl start wasm-node` starts the process as the `wasm-node` user
-- [ ] `systemctl stop wasm-node` triggers graceful shutdown (not SIGKILL)
-- [ ] The process restarts automatically on crash (`Restart=on-failure`)
+- [x] The systemd unit file installs and enables without errors
+- [x] `systemctl start wasm-node` starts the process as the `wasm-node` user
+- [x] `systemctl stop wasm-node` triggers graceful shutdown (not SIGKILL)
+- [x] The process restarts automatically on crash (`Restart=on-failure`)
 
 ### End-to-End Smoke Test
-- [ ] Start the node → deploy an app → add a route → send an HTTP request → receive a 200 response, all without manual intervention beyond the CLI commands
+- [x] Start the node → deploy an app → add a route → send an HTTP request → receive a 200 response, all without manual intervention beyond the CLI commands

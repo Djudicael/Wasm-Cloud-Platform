@@ -304,29 +304,29 @@ impl Store {
 **This step is done when all boxes are checked.**
 
 ### Storage
-- [ ] `ROUTES` table is created in redb on `Store::open()`
-- [ ] `save_route()` persists a `Route` and `list_routes()` returns it
-- [ ] `delete_route(host)` removes the entry; subsequent `list_routes()` excludes it
-- [ ] `save_route_if_newer()` ignores an update with an older `updated_at` timestamp
-- [ ] Routes survive a `Store` drop and re-open (data is persistent)
+- [x] `ROUTES` table is created in redb on `Store::open()`
+- [x] `save_route()` persists a `Route` and `list_routes()` returns it
+- [x] `delete_route(host)` removes the entry; subsequent `list_routes()` excludes it
+- [x] `save_route_if_newer()` ignores an update with an older `updated_at` timestamp
+- [x] Routes survive a `Store` drop and re-open (data is persistent)
 
 ### HostRouter
-- [ ] `add_route(host, app_id)` makes `resolve(host)` return the correct `AppId`
-- [ ] `remove_route(host)` causes `resolve(host)` to return `None`
-- [ ] `load_from_store(store)` populates all routes from redb on startup and logs the count
-- [ ] `add_route` and `resolve` are safe to call concurrently from multiple threads
+- [x] `add_route(host, app_id)` makes `resolve(host)` return the correct `AppId`
+- [x] `remove_route(host)` causes `resolve(host)` to return `None`
+- [x] `load_from_store(store)` populates all routes from redb on startup and logs the count
+- [x] `add_route` and `resolve` are safe to call concurrently from multiple threads
 
 ### NATS Integration
-- [ ] Publishing `Event::RouteAdd` causes every node to call `save_route()` and `host_router.add_route()`
-- [ ] Publishing `Event::RouteRemove` causes every node to call `delete_route()` and `host_router.remove_route()`
-- [ ] `routes.>` subjects are covered by the JetStream `DEPLOY` stream (durable, replayed on restart)
+- [x] Publishing `Event::RouteAdd` causes every node to call `save_route()` and `host_router.add_route()`
+- [x] Publishing `Event::RouteRemove` causes every node to call `delete_route()` and `host_router.remove_route()`
+- [x] `routes.>` subjects are covered by the JetStream `DEPLOY` stream (durable, replayed on restart)
 
 ### Bootstrap
-- [ ] On node restart, `host_router.load_from_store()` is called before Pingora starts accepting traffic
-- [ ] A fresh node that joins the cluster receives routes via JetStream replay within 10 seconds
-- [ ] After route loading, `resolve("api.myapp.com")` returns the correct app without any NATS message
+- [x] On node restart, `host_router.load_from_store()` is called before Pingora starts accepting traffic
+- [x] A fresh node that joins the cluster receives routes via JetStream replay within 10 seconds
+- [x] After route loading, `resolve("api.myapp.com")` returns the correct app without any NATS message
 
 ### Tests
-- [ ] A test adds a route, resolves it, removes it, and verifies it is gone
-- [ ] A test verifies that after a Store re-open, all previously saved routes are still present
-- [ ] A test verifies that `RouteAdd` NATS events correctly populate the HostRouter
+- [x] A test adds a route, resolves it, removes it, and verifies it is gone
+- [x] A test verifies that after a Store re-open, all previously saved routes are still present
+- [x] A test verifies that `RouteAdd` NATS events correctly populate the HostRouter

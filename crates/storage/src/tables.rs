@@ -21,8 +21,8 @@ pub const SECRETS: TableDefinition<&str, &[u8]> = TableDefinition::new("secrets"
 pub const METRICS: TableDefinition<&str, &str> = TableDefinition::new("metrics");
 
 // ── ROUTES ────────────────────────────────────────────────────────────────────
-// Key   : domain or route string
-// Value : app_id string
+// Key   : host string (e.g. "api.myapp.com")
+// Value : JSON-serialized Route
 pub const ROUTES: TableDefinition<&str, &str> = TableDefinition::new("routes");
 
 // ── RAW WASM ──────────────────────────────────────────────────────────────────
