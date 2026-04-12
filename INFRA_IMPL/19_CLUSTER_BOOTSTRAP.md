@@ -417,31 +417,31 @@ if is_fresh {
 **This step is done when all boxes are checked.**
 
 ### Join Detection
-- [ ] A node with an empty redb detects it is fresh and publishes `Event::NodeJoined`
-- [ ] A node with existing data in redb skips the join handshake entirely
-- [ ] `Event::NodeJoined` contains the node's artifact server URL and X25519 public key
+- [x] A node with an empty redb detects it is fresh and publishes `Event::NodeJoined`
+- [x] A node with existing data in redb skips the join handshake entirely
+- [x] `Event::NodeJoined` contains the node's artifact server URL and X25519 public key
 
 ### Leader Selection
-- [ ] Only the node with the lexicographically smallest `node_id` responds to `NodeJoined`
-- [ ] If the leader node is offline, another node takes over (fallback: any node that is alive responds after a delay)
-- [ ] A node does not respond to its own `NodeJoined` event
+- [x] Only the node with the lexicographically smallest `node_id` responds to `NodeJoined`
+- [x] If the leader node is offline, another node takes over (fallback: any node that is alive responds after a delay)
+- [x] A node does not respond to its own `NodeJoined` event
 
 ### Snapshot Transfer
-- [ ] The leader sends `Event::StateSnapshot` containing all configs, routes, and encrypted secrets
-- [ ] The snapshot is targeted (`for_node_id` matches the joining node) and other nodes ignore it
-- [ ] Secrets are encrypted with the joining node's X25519 public key (not sent in plaintext)
-- [ ] The leader pushes all `.wasm` artifacts to the joining node's artifact server via HTTP
+- [x] The leader sends `Event::StateSnapshot` containing all configs, routes, and encrypted secrets
+- [x] The snapshot is targeted (`for_node_id` matches the joining node) and other nodes ignore it
+- [x] Secrets are encrypted with the joining node's X25519 public key (not sent in plaintext)
+- [x] The leader pushes all `.wasm` artifacts to the joining node's artifact server via HTTP
 
 ### New Node Processing
-- [ ] The joining node writes all received configs to redb
-- [ ] The joining node writes all received routes to redb and loads them into the HostRouter
-- [ ] The joining node decrypts and stores all received secrets in redb
-- [ ] The joining node fetches (or confirms receipt of) artifacts and compiles them
-- [ ] After snapshot processing, any of the deployed apps can be cold-started on the first request
+- [x] The joining node writes all received configs to redb
+- [x] The joining node writes all received routes to redb and loads them into the HostRouter
+- [x] The joining node decrypts and stores all received secrets in redb
+- [x] The joining node fetches (or confirms receipt of) artifacts and compiles them
+- [x] After snapshot processing, any of the deployed apps can be cold-started on the first request
 
 ### JetStream Safety Net
-- [ ] A node that was previously connected and restarted receives missed deploy/route events via JetStream replay without needing a full snapshot
-- [ ] The durable consumer name is unique per node (uses `node_id`) so replays are per-node
+- [x] A node that was previously connected and restarted receives missed deploy/route events via JetStream replay without needing a full snapshot
+- [x] The durable consumer name is unique per node (uses `node_id`) so replays are per-node
 
 ### Tests
 - [ ] A test starts two nodes, deploys an app to node-0, then starts node-1 and verifies it can serve requests for the app within 30 seconds

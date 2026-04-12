@@ -1,6 +1,6 @@
 // crates/storage/src/artifact.rs
 use crate::{
-    tables::{ARTIFACTS, RAW_WASM},
+    tables::{ARTIFACTS, ARTIFACT_HASHES, RAW_WASM},
     Store,
 };
 use common::{error::PlatformError, types::AppId};
@@ -194,6 +194,59 @@ impl Store {
             deleted += 1;
         }
         Ok(deleted)
+    }
+
+    // ── Artifact Hash Metadata ───────────────────────────────────────────────
+
+    /// Save the SHA-256 hash associated with an app_id.
+    pub fn save_artifact_hash(&self, app_id: &AppId, sha256: &str) -> Result<(), PlatformError> {
+        let tx = self
+            .db
+            .begin_write()
+            .map_err(|e| PlatformError::Storage(e.to_string()))?;
+        {
+            let mut table = tx
+                .open_table(ARTIFACT_HASHES)
+                .map_err(|e| PlatformError::Storage(e.to_string()))?;
+            table
+                .insert(app_id.0.as_str(), sha256)
+                .map_err(|e| PlatformError::Storage(e.to_string()))?;
+        }
+        tx.commit()
+            .map_err(|e| PlatformError::Storage(e.to_string()))
+    }
+
+    /// Load the SHA-256 hash associated with an app_id.
+    pub fn get_artifact_sha256(&self, app_id: &AppId) -> Result<Option<String>, PlatformError> {
+        let tx = self
+            .db
+            .begin_read()
+            .map_err(|e| PlatformError::Storage(e.to_string()))?;
+        let table = tx
+            .open_table(ARTIFACT_HASHES)
+            .map_err(|e| PlatformError::Storage(e.to_string()))?;
+        Ok(table
+            .get(app_id.0.as_str())
+            .map_err(|e| PlatformError::Storage(e.to_string()))?
+            .map(|v| v.value().to_string()))
+    }
+
+    /// Delete artifact hash metadata.
+    pub fn delete_artifact_hash(&self, app_id: &AppId) -> Result<(), PlatformError> {
+        let tx = self
+            .db
+            .begin_write()
+            .map_err(|e| PlatformError::Storage(e.to_string()))?;
+        {
+            let mut table = tx
+                .open_table(ARTIFACT_HASHES)
+                .map_err(|e| PlatformError::Storage(e.to_string()))?;
+            table
+                .remove(app_id.0.as_str())
+                .map_err(|e| PlatformError::Storage(e.to_string()))?;
+        }
+        tx.commit()
+            .map_err(|e| PlatformError::Storage(e.to_string()))
     }
 }
 

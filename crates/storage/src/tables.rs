@@ -34,3 +34,8 @@ pub const RAW_WASM: TableDefinition<&str, &[u8]> = TableDefinition::new("raw_was
 // Key   : metadata key
 // Value : metadata value
 pub const SCHEMA_META: TableDefinition<&str, &str> = TableDefinition::new("schema_meta");
+
+// ── ARTIFACT METADATA ─────────────────────────────────────────────────────────
+// Key   : app_id
+// Value : SHA-256 hex string of the raw .wasm bytes
+pub const ARTIFACT_HASHES: TableDefinition<&str, &str> = TableDefinition::new("artifact_hashes");

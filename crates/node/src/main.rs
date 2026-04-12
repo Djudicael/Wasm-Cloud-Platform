@@ -123,12 +123,41 @@ async fn main() -> anyhow::Result<()> {
     host_router.load_routes_from_store(&store).await;
     info!("routes loaded from local storage");
 
+    // Initialize secret provider with KEK
+    let kek = if let Some(_key_file) = &args.key_file {
+        // TODO: Implement loading from file
+        // For now, just generate a new key (will be persisted in storage)
+        secrets::crypto::SymmetricKey::generate()
+    } else {
+        secrets::crypto::SymmetricKey::generate()
+    };
+    let secret_provider = Arc::new(secrets::LocalSecretProvider::new(store.clone(), kek));
+
+    // Check if this is a fresh node (no apps in storage)
+    let is_fresh = store.list_apps()?.is_empty();
+
+    // Generate bootstrap keypair if fresh (for receiving encrypted secrets)
+    let bootstrap_keypair = if is_fresh {
+        Some(secrets::BootstrapKeyPair::generate())
+    } else {
+        None
+    };
+
+    // Use localhost for artifact server URL
+    // TODO: In production, this should be the node's publicly accessible IP
+    let artifact_server_url = format!("http://127.0.0.1:{}", args.artifact_port);
+
     let dispatcher = Arc::new(handlers::EventDispatcher {
         supervisor: supervisor.clone(),
         upstream: upstream_registry.clone(),
         host_router: host_router.clone(),
         store: store.clone(),
         runtime: runtime.clone(),
+        node_id: args.node_id.clone(),
+        artifact_server_url: artifact_server_url.clone(),
+        secret_provider: secret_provider.clone(),
+        bootstrap_keypair,
+        bus: bus.clone(),
     });
 
     {
@@ -146,6 +175,7 @@ async fn main() -> anyhow::Result<()> {
         "secrets.update.>",
         "config.update.>",
         "node.load.>",
+        "cluster.>", // Subscribe to cluster bootstrap events
     ] {
         let d = dispatcher.clone();
         bus.subscribe(subject, move |event| {
@@ -153,6 +183,29 @@ async fn main() -> anyhow::Result<()> {
             async move { d.handle(event).await }
         })
         .await?;
+    }
+
+    // If this is a fresh node, request state snapshot from cluster
+    if is_fresh {
+        info!("fresh node detected — requesting state snapshot from cluster");
+
+        let public_key_bytes = dispatcher
+            .bootstrap_keypair
+            .as_ref()
+            .map(|kp| kp.public_bytes())
+            .unwrap_or_default();
+
+        let join_event = messaging::events::Event::NodeJoined {
+            node_id: args.node_id.clone(),
+            artifact_server_url: artifact_server_url.clone(),
+            public_key_bytes,
+        };
+
+        bus.publish(&join_event).await?;
+        info!("NodeJoined event published, waiting for snapshot");
+
+        // Give the cluster a few seconds to respond
+        tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
     }
 
     supervisor::scaling::start_load_reporter(

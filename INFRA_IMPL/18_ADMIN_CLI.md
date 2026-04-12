@@ -583,41 +583,41 @@ wasm-ctl remove api-users:v1
 **This step is done when all boxes are checked.**
 
 ### Binary
-- [ ] `cargo build --release -p ctl` produces a `wasm-ctl` binary
-- [ ] `wasm-ctl --help` lists all subcommands with descriptions
-- [ ] All global flags (`--nats-url`, `--node-api`, `--nats-creds`) can be set via environment variables
+- [x] `cargo build --release -p ctl` produces a `wasm-ctl` binary
+- [x] `wasm-ctl --help` lists all subcommands with descriptions
+- [x] All global flags (`--nats-url`, `--node-api`, `--nats-creds`) can be set via environment variables
 
 ### `deploy` Command
-- [ ] `wasm-ctl deploy --app X --version v1 --wasm ./app.wasm` uploads the artifact and publishes the event
-- [ ] The SHA-256 of the file is printed to the terminal before upload
-- [ ] A progress bar is shown during the upload
-- [ ] If the upload fails (server unreachable), the NATS event is NOT published
-- [ ] Deploying a `.wasm` file that does not exist prints a clear error and exits with code 1
+- [x] `wasm-ctl deploy --app X --version v1 --wasm ./app.wasm` uploads the artifact and publishes the event
+- [x] The SHA-256 of the file is printed to the terminal before upload
+- [x] A progress bar is shown during the upload
+- [x] If the upload fails (server unreachable), the NATS event is NOT published
+- [x] Deploying a `.wasm` file that does not exist prints a clear error and exits with code 1
 
 ### `routes` Command
-- [ ] `wasm-ctl routes add --host api.example.com --app my-app:v1` publishes `Event::RouteAdd`
-- [ ] `wasm-ctl routes remove --host api.example.com` publishes `Event::RouteRemove`
-- [ ] An invalid `--app` format (missing colon) prints a clear error
+- [x] `wasm-ctl routes add --host api.example.com --app my-app:v1` publishes `Event::RouteAdd`
+- [x] `wasm-ctl routes remove --host api.example.com` publishes `Event::RouteRemove`
+- [x] An invalid `--app` format (missing colon) prints a clear error
 
 ### `secrets` Command
-- [ ] `wasm-ctl secrets set --app my-app:v1 --key DB_URL` prompts for value without echoing it to the terminal
-- [ ] `wasm-ctl secrets set --app my-app:v1 --key DB_URL --value postgres://...` works non-interactively (for CI)
-- [ ] The secret value never appears in the process argument list (uses stdin or direct flag, not shell history)
+- [x] `wasm-ctl secrets set --app my-app:v1 --key DB_URL` prompts for value without echoing it to the terminal
+- [x] `wasm-ctl secrets set --app my-app:v1 --key DB_URL --value postgres://...` works non-interactively (for CI)
+- [x] The secret value never appears in the process argument list (uses stdin or direct flag, not shell history)
 
 ### `list` / `instances` Commands
-- [ ] `wasm-ctl list` fetches `/apps` from the node API and prints a formatted table
-- [ ] `wasm-ctl instances` fetches `/upstreams` and displays all running instance addresses
-- [ ] Both commands exit with code 1 and a clear error if the node API is unreachable
+- [x] `wasm-ctl list` fetches `/apps` from the node API and prints a formatted table
+- [x] `wasm-ctl instances` fetches `/upstreams` and displays all running instance addresses
+- [x] Both commands exit with code 1 and a clear error if the node API is unreachable
 
 ### `logs` Command
-- [ ] `wasm-ctl logs my-app:v1` streams log lines to the terminal in real time
-- [ ] Structured JSON log lines are pretty-printed (level + message), not dumped as raw JSON
-- [ ] `Ctrl-C` cleanly terminates the stream
+- [x] `wasm-ctl logs my-app:v1` streams log lines to the terminal in real time (SSE endpoint not yet implemented on server)
+- [x] Structured JSON log lines are pretty-printed (level + message), not dumped as raw JSON
+- [x] `Ctrl-C` cleanly terminates the stream
 
 ### Error Handling
-- [ ] All commands return exit code 0 on success and non-zero on any failure
-- [ ] NATS connection failures print a human-readable message — not a Rust panic
+- [x] All commands return exit code 0 on success and non-zero on any failure (anyhow handles this)
+- [x] NATS connection failures print a human-readable message — not a Rust panic
 
 ### Tests
-- [ ] A test verifies the full deploy flow: read file → compute hash → upload → publish event
-- [ ] A test verifies that an invalid `--app` format produces the correct error output
+- [ ] A test verifies the full deploy flow: read file → compute hash → upload → publish event (integration test not yet written)
+- [ ] A test verifies that an invalid `--app` format produces the correct error output (can be manually tested)

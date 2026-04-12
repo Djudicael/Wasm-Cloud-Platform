@@ -10,6 +10,7 @@ members = [
     "crates/secrets",
     "crates/metrics",
     "crates/common",
+    "crates/ctl",
     "apps/hello-axum"
 ]
 
@@ -56,7 +57,7 @@ prometheus      = { version = "0.13", features = ["process"] }
 axum = "0.7"
 
 # CLI
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
 
 # Utils
 uuid   = { version = "1", features = ["v4", "serde"] }

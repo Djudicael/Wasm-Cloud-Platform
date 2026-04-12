@@ -62,6 +62,29 @@ pub enum Event {
         fuel_budget_used_percent: f32,
         active_instances: u32,
     },
+
+    // ── Cluster Bootstrap ──────────────────────────────────────────
+    NodeJoined {
+        node_id: String,
+        /// The node's artifact server URL so other nodes can push artifacts to it.
+        artifact_server_url: String,
+        /// A one-time public key for encrypting the secret transfer.
+        /// (Ephemeral X25519 key, used only for this bootstrap session.)
+        public_key_bytes: Vec<u8>,
+    },
+    StateSnapshot {
+        /// Recipient node ID.
+        for_node_id: String,
+        /// All app configs (JSON).
+        configs: Vec<AppConfig>,
+        /// All routes.
+        routes: Vec<common::types::Route>,
+        /// Secrets encrypted with the joining node's one-time public key.
+        /// Format: Vec<(app_id, key, encrypted_value)>
+        encrypted_secrets: Vec<(String, String, Vec<u8>)>,
+        /// SHA-256 of each app's .wasm (so node can fetch artifacts).
+        artifact_hashes: Vec<(String, String)>, // (app_id, sha256)
+    },
 }
 
 impl Event {
@@ -90,6 +113,12 @@ impl Event {
             }
             Event::NodeLoad { node_id, .. } => {
                 format!("node.load.{}", node_id)
+            }
+            Event::NodeJoined { node_id, .. } => {
+                format!("cluster.node_joined.{}", node_id)
+            }
+            Event::StateSnapshot { for_node_id, .. } => {
+                format!("cluster.snapshot.{}", for_node_id)
             }
         }
     }
