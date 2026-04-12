@@ -1,10 +1,6 @@
-use async_trait::async_trait;
-use common::error::PlatformError;
-use common::types::AppId;
+pub mod crypto;
+pub mod local_provider;
+pub mod provider;
 
-#[async_trait]
-pub trait SecretProvider: Send + Sync {
-    async fn get(&self, app_id: &AppId, key: &str) -> Result<String, PlatformError>;
-}
-
-pub fn noop() {}
+pub use local_provider::LocalSecretProvider;
+pub use provider::SecretProvider;

@@ -9,6 +9,7 @@ name = "wasm-node"
 path = "src/main.rs"
 
 [dependencies]
+hex = "0.4"
 tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
@@ -22,4 +23,3 @@ proxy = { path = "../proxy" }
 messaging = { path = "../messaging" }
 metrics = { path = "../metrics" }
 secrets = { path = "../secrets" }
-

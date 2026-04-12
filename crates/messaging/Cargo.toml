@@ -8,4 +8,7 @@ edition = "2021"
 async-nats = { workspace = true }
 tokio = { workspace = true }
 common = { path = "../common" }
-
+secrets = { path = "../secrets" }
+tokio-stream = "0.1"
+serde_json = "1.0"
+tracing = { workspace = true }
