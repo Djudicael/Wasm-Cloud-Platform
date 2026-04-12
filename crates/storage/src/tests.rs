@@ -226,3 +226,220 @@ fn test_prune_old_versions() {
         .artifact_exists(&AppId::new("app-prune", "v5"))
         .unwrap());
 }
+
+// ── SCHEMA MIGRATION TESTS ────────────────────────────────────────────────────
+
+#[test]
+fn test_fresh_database_has_current_schema_version() {
+    let f = NamedTempFile::new().unwrap();
+    let store = Store::open(f.path()).unwrap();
+
+    // Fresh database should be migrated to current version
+    let version = store.read_schema_version().unwrap();
+    assert_eq!(version, crate::CURRENT_SCHEMA_VERSION);
+}
+
+#[test]
+fn test_schema_version_persistence() {
+    let f = NamedTempFile::new().unwrap();
+    let path = f.path().to_path_buf();
+
+    {
+        let store = Store::open(&path).unwrap();
+        let version = store.read_schema_version().unwrap();
+        assert_eq!(version, crate::CURRENT_SCHEMA_VERSION);
+    }
+
+    // Reopen and verify version persisted
+    let store2 = Store::open(&path).unwrap();
+    let version2 = store2.read_schema_version().unwrap();
+    assert_eq!(version2, crate::CURRENT_SCHEMA_VERSION);
+}
+
+#[test]
+fn test_migration_v1_to_v2_adds_db_max_connections() {
+    let f = NamedTempFile::new().unwrap();
+    let path = f.path().to_path_buf();
+
+    // Create a v1 database manually
+    {
+        let store = Store::open(&path).unwrap();
+
+        // Manually set version to 1
+        store.write_schema_version(1).unwrap();
+
+        // Create an old-format config without db_max_connections
+        let id = AppId::new("test-app", "v1");
+        let old_config_json = serde_json::json!({
+            "id": "test-app:v1",
+            "fuel_quota": 500_000_000,
+            "memory_limit": 2048,
+            "max_instances": 10,
+            "idle_timeout_secs": 300,
+            "wasm_bind_port": 8080,
+            "env_vars": {},
+            "secret_keys": [],
+            "extended_limits": null,
+            "health_check_path": null
+            // NOTE: db_max_connections is intentionally missing
+        });
+
+        let tx = store.db.begin_write().unwrap();
+        {
+            let mut table = tx.open_table(crate::tables::CONFIGS).unwrap();
+            table
+                .insert(
+                    id.0.as_str(),
+                    serde_json::to_string(&old_config_json).unwrap().as_str(),
+                )
+                .unwrap();
+        }
+        tx.commit().unwrap();
+    }
+
+    // Reopen, which should trigger migration
+    let store = Store::open(&path).unwrap();
+
+    // Verify version upgraded to 2
+    let version = store.read_schema_version().unwrap();
+    assert_eq!(version, 2);
+
+    // Verify the config now has db_max_connections
+    let id = AppId::new("test-app", "v1");
+    let config = store.load_config(&id).unwrap().unwrap();
+    assert_eq!(config.db_max_connections, Some(10));
+}
+
+#[test]
+fn test_migration_is_idempotent() {
+    let f = NamedTempFile::new().unwrap();
+    let path = f.path().to_path_buf();
+
+    // Create a v1 database with a config that already has db_max_connections
+    {
+        let store = Store::open(&path).unwrap();
+        store.write_schema_version(1).unwrap();
+
+        let id = AppId::new("idempotent-app", "v1");
+        let config_json = serde_json::json!({
+            "id": "idempotent-app:v1",
+            "fuel_quota": 500_000_000,
+            "memory_limit": 2048,
+            "max_instances": 10,
+            "idle_timeout_secs": 300,
+            "wasm_bind_port": 8080,
+            "env_vars": {},
+            "secret_keys": [],
+            "extended_limits": null,
+            "health_check_path": null,
+            "db_max_connections": 25  // Already set to custom value
+        });
+
+        let tx = store.db.begin_write().unwrap();
+        {
+            let mut table = tx.open_table(crate::tables::CONFIGS).unwrap();
+            table
+                .insert(
+                    id.0.as_str(),
+                    serde_json::to_string(&config_json).unwrap().as_str(),
+                )
+                .unwrap();
+        }
+        tx.commit().unwrap();
+    }
+
+    // Reopen and run migration
+    let store = Store::open(&path).unwrap();
+
+    // Verify the custom value is preserved (not overwritten)
+    let id = AppId::new("idempotent-app", "v1");
+    let config = store.load_config(&id).unwrap().unwrap();
+    assert_eq!(config.db_max_connections, Some(25));
+}
+
+#[test]
+fn test_backup_created_before_migration() {
+    let f = NamedTempFile::new().unwrap();
+    let path = f.path().to_path_buf();
+
+    // Create a v1 database
+    {
+        let store = Store::open(&path).unwrap();
+        store.write_schema_version(1).unwrap();
+    }
+
+    // Verify no backup exists yet
+    let backup_path = path.with_extension("redb.v1.bak");
+    assert!(!backup_path.exists());
+
+    // Reopen (triggers migration and backup)
+    let _store = Store::open(&path).unwrap();
+
+    // Verify backup was created
+    assert!(backup_path.exists());
+
+    // Cleanup
+    std::fs::remove_file(backup_path).ok();
+}
+
+#[test]
+fn test_backup_not_overwritten() {
+    let f = NamedTempFile::new().unwrap();
+    let path = f.path().to_path_buf();
+
+    // Create a v1 database
+    {
+        let store = Store::open(&path).unwrap();
+        store.write_schema_version(1).unwrap();
+    }
+
+    // Manually create a backup file
+    let backup_path = path.with_extension("redb.v1.bak");
+    std::fs::write(&backup_path, b"original backup").unwrap();
+
+    // Reopen (should NOT overwrite existing backup)
+    let _store = Store::open(&path).unwrap();
+
+    // Verify backup was not overwritten
+    let backup_content = std::fs::read(&backup_path).unwrap();
+    assert_eq!(backup_content, b"original backup");
+
+    // Cleanup
+    std::fs::remove_file(backup_path).ok();
+}
+
+#[test]
+#[should_panic(expected = "Database schema version 99 is NEWER than the binary supports")]
+fn test_downgrade_not_supported() {
+    let f = NamedTempFile::new().unwrap();
+    let path = f.path().to_path_buf();
+
+    // Create a database with a future version
+    {
+        let store = Store::open(&path).unwrap();
+        store.write_schema_version(99).unwrap();
+    }
+
+    // Reopen should panic
+    let _store = Store::open(&path).unwrap();
+}
+
+#[test]
+fn test_no_migration_when_already_current() {
+    let f = NamedTempFile::new().unwrap();
+    let path = f.path().to_path_buf();
+
+    // Create a database at current version
+    {
+        let _store = Store::open(&path).unwrap();
+        // Already at current version
+    }
+
+    // Verify no backup is created on second open
+    let backup_path = path.with_extension(format!("redb.v{}.bak", crate::CURRENT_SCHEMA_VERSION));
+
+    let _store2 = Store::open(&path).unwrap();
+
+    // No backup should be created since no migration was needed
+    assert!(!backup_path.exists());
+}
