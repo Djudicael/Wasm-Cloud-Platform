@@ -47,6 +47,9 @@ pub struct Supervisor {
 
     /// Channel to publish events to NATS
     event_tx: mpsc::Sender<Event>,
+
+    /// Channel to send log records
+    log_tx: Option<mpsc::Sender<metrics::WasmLogRecord>>,
 }
 
 impl Supervisor {
@@ -70,7 +73,12 @@ impl Supervisor {
             env_resolver,
             pools: Arc::new(RwLock::new(HashMap::new())),
             event_tx,
+            log_tx: None,
         })
+    }
+
+    pub fn set_log_dispatcher(&mut self, log_tx: mpsc::Sender<metrics::WasmLogRecord>) {
+        self.log_tx = Some(log_tx);
     }
 
     pub fn check_resource_limits(&self, config: &AppConfig) -> Result<(), PlatformError> {
@@ -149,10 +157,59 @@ impl Supervisor {
         let config_clone = config.clone();
 
         let prepared_clone = prepared.clone();
+        let instance_id = InstanceId(uuid::Uuid::new_v4());
+        let log_tx_clone = self.log_tx.clone();
+        let app_id_log = app_id.clone();
+        let instance_id_log = instance_id.clone();
+
         let task = tokio::task::spawn_blocking(move || {
-            let mut instance = prepared_clone
+            let (mut instance, mut streams) = prepared_clone
                 .spawn_instance(env_vars, config_clone.wasm_bind_port)
                 .expect("failed to spawn instance");
+
+            // Spawn tasks to drain stdout/stderr
+            if let Some(log_tx) = log_tx_clone {
+                let app_id_stdout = app_id_log.0.clone();
+                let instance_id_stdout = instance_id_log.0.to_string();
+                let log_tx_stdout = log_tx.clone();
+
+                std::thread::spawn(move || {
+                    while let Some(data) = streams.stdout_rx.blocking_recv() {
+                        for line in data.split(|&b| b == b'\n') {
+                            if !line.is_empty() {
+                                let record = metrics::WasmLogRecord::from_line(
+                                    &app_id_stdout,
+                                    &instance_id_stdout,
+                                    "stdout",
+                                    line,
+                                    None,
+                                );
+                                let _ = log_tx_stdout.blocking_send(record);
+                            }
+                        }
+                    }
+                });
+
+                let app_id_stderr = app_id_log.0.clone();
+                let instance_id_stderr = instance_id_log.0.to_string();
+
+                std::thread::spawn(move || {
+                    while let Some(data) = streams.stderr_rx.blocking_recv() {
+                        for line in data.split(|&b| b == b'\n') {
+                            if !line.is_empty() {
+                                let record = metrics::WasmLogRecord::from_line(
+                                    &app_id_stderr,
+                                    &instance_id_stderr,
+                                    "stderr",
+                                    line,
+                                    None,
+                                );
+                                let _ = log_tx.blocking_send(record);
+                            }
+                        }
+                    }
+                });
+            }
 
             // The run() call blocks until the Wasm module exits or is killed
             let stats = instance.run();
@@ -177,7 +234,6 @@ impl Supervisor {
         // 8. Register with local service registry
         self.service_registry.register(app_id, addr).await;
 
-        let instance_id = InstanceId(uuid::Uuid::new_v4());
         let managed = ManagedInstance {
             id: instance_id.clone(),
             app_id: app_id.clone(),

@@ -4,12 +4,19 @@ use crate::limits::{
 };
 use common::{
     error::PlatformError,
-    types::{AppConfig, FuelQuota, InstanceId},
+    types::{AppConfig, InstanceId},
 };
 use std::time::Instant;
+use tokio::sync::mpsc;
 use wasmtime::component::{Component, Instance, Linker};
 use wasmtime::{Engine, Store};
 use wasmtime_wasi::{ResourceTable, SocketAddrUse, WasiCtx, WasiCtxBuilder, WasiView};
+
+/// Channels for capturing Wasm stdout/stderr.
+pub struct WasiStreams {
+    pub stdout_rx: mpsc::UnboundedReceiver<Vec<u8>>,
+    pub stderr_rx: mpsc::UnboundedReceiver<Vec<u8>>,
+}
 
 /// The internal state of our Wasmtime Store.
 pub struct StoreState {
@@ -68,12 +75,17 @@ impl PreparedModule {
         &self,
         env_vars: Vec<(String, String)>,
         port: u16,
-    ) -> Result<RunningInstance, PlatformError> {
+    ) -> Result<(RunningInstance, WasiStreams), PlatformError> {
         let id = InstanceId::new();
+
+        // Create custom pipes for capturing stdout/stderr
+        let (stdout_pipe, stdout_rx) = crate::custom_pipe::ChannelPipe::new();
+        let (stderr_pipe, stderr_rx) = crate::custom_pipe::ChannelPipe::new();
 
         // Build WASI environment (Preview 2)
         let mut builder = WasiCtxBuilder::new();
-        builder.inherit_stdio(); // For debugging
+        builder.stdout(stdout_pipe);
+        builder.stderr(stderr_pipe);
         builder.inherit_network(); // Give network access handled by address checks
 
         for (k, v) in env_vars {
@@ -91,6 +103,12 @@ impl PreparedModule {
             .as_ref()
             .map(|c| c.to_limits())
             .unwrap_or_default();
+
+        // Create streams with the receivers
+        let streams = WasiStreams {
+            stdout_rx,
+            stderr_rx,
+        };
 
         let state = StoreState {
             ctx: builder.build(),
@@ -116,13 +134,16 @@ impl PreparedModule {
             .instantiate(&mut store, &self.module)
             .map_err(|e| PlatformError::Runtime(format!("instantiation error: {e}")))?;
 
-        Ok(RunningInstance {
-            id,
-            instance,
-            store,
-            config: self.config.clone(),
-            started_at: Instant::now(),
-        })
+        Ok((
+            RunningInstance {
+                id,
+                instance,
+                store,
+                config: self.config.clone(),
+                started_at: Instant::now(),
+            },
+            streams,
+        ))
     }
 }
 

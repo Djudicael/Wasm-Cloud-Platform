@@ -2646,12 +2646,15 @@ version = "0.1.0"
 dependencies = [
  "async-nats",
  "axum 0.7.9",
+ "chrono",
  "common",
  "opentelemetry",
  "opentelemetry-otlp",
  "opentelemetry_sdk",
  "prometheus",
+ "reqwest 0.12.28",
  "serde",
+ "serde_json",
  "storage",
  "tempfile",
  "tokio",
@@ -3979,6 +3982,8 @@ name = "runtime"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
+ "bytes",
  "common",
  "storage",
  "thiserror 1.0.69",

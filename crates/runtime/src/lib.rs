@@ -1,4 +1,5 @@
 pub mod compiler;
+pub mod custom_pipe;
 pub mod executor;
 pub mod limits;
 
