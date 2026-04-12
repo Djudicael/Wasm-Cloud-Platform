@@ -1,6 +1,7 @@
 // crates/storage/src/artifact.rs
 use crate::{tables::ARTIFACTS, Store};
 use common::{error::PlatformError, types::AppId};
+use redb::ReadableTable;
 
 impl Store {
     /// Persist a compiled Wasm artifact.
@@ -61,5 +62,47 @@ impl Store {
         }
         tx.commit()
             .map_err(|e| PlatformError::Storage(e.to_string()))
+    }
+
+    /// Enforce max N versions. Deletes oldest when exceeded.
+    pub fn prune_old_versions(
+        &self,
+        app_name: &str,
+        keep: usize,
+        active_versions: &[&str],
+    ) -> Result<(), PlatformError> {
+        let prefix = format!("{app_name}:");
+        let tx = self
+            .db
+            .begin_read()
+            .map_err(|e| PlatformError::Storage(e.to_string()))?;
+        let table = tx
+            .open_table(crate::tables::ARTIFACTS)
+            .map_err(|e| PlatformError::Storage(e.to_string()))?;
+
+        let mut versions: Vec<String> = table
+            .iter()
+            .map_err(|e| PlatformError::Storage(e.to_string()))?
+            .filter_map(|e| e.ok())
+            .filter(|(k, _)| k.value().starts_with(&prefix))
+            .map(|(k, _)| k.value().to_string())
+            .collect();
+
+        versions.sort(); // Assumes version suffix is lexicographically ordered (v1, v2, v10...)
+        let to_delete: Vec<_> = versions
+            .into_iter()
+            .rev()
+            .skip(keep)
+            .filter(|v| !active_versions.contains(&v.as_str()))
+            .collect();
+
+        drop(table);
+        drop(tx);
+
+        for key in to_delete {
+            let id = AppId(key);
+            self.delete_artifact(&id)?;
+        }
+        Ok(())
     }
 }

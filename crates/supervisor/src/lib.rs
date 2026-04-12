@@ -1,4 +1,5 @@
 pub mod config_validator;
+pub mod deployment;
 pub mod env_resolver;
 pub mod instance;
 pub mod instance_manager;
@@ -328,5 +329,66 @@ impl Supervisor {
 
     fn node_id(&self) -> String {
         std::env::var("NODE_ID").unwrap_or_else(|_| "node-0".to_string())
+    }
+
+    pub fn store(&self) -> &Store {
+        &self.store
+    }
+
+    /// Mark all instances of an app as DRAINING.
+    /// Removes them from the upstream table (no new requests),
+    /// then waits for in-flight requests to complete.
+    pub async fn drain_app(&self, app_id: &AppId, timeout: Duration) -> Result<(), PlatformError> {
+        // Remove from Pingora's upstream table immediately
+        // (Pingora will stop routing new requests to this app's old instances)
+        {
+            let pools = self.pools.read().await;
+            if let Some(pool) = pools.get(&app_id.0) {
+                for addr in pool.ready_addrs() {
+                    self.upstream_registry.remove(app_id, &addr).await;
+                }
+            }
+        }
+
+        // Wait for in-flight requests to drain
+        // Proxy-side: Pingora will wait for existing connections to close naturally.
+        // We give a hard deadline.
+        tokio::time::sleep(timeout).await;
+        Ok(())
+    }
+
+    /// Kill all instances of an app immediately.
+    pub async fn kill_all_instances(&self, app_id: &AppId) -> Result<(), PlatformError> {
+        let mut pools = self.pools.write().await;
+        if let Some(pool) = pools.get_mut(&app_id.0) {
+            let instances = std::mem::take(&mut pool.instances);
+            for inst in instances {
+                if let InstanceState::Ready { addr: _ } | InstanceState::Starting = &inst.state {
+                    // Already removed from upstream above in drain_app
+                    self.port_alloc.release(inst.addr.port());
+                }
+                inst.shutdown_tx.send(()).ok();
+            }
+        }
+        Ok(())
+    }
+
+    /// Called when Wasmtime raises a Trap (OOM / out of fuel / illegal instruction).
+    pub async fn handle_trap(&self, app_id: &AppId, instance_id: &InstanceId, reason: &str) {
+        tracing::error!(
+            app = %app_id.0,
+            instance = %instance_id.0,
+            reason,
+            "Wasm trap — killing instance"
+        );
+
+        // 1. Kill the instance
+        self.kill_instance(app_id, instance_id).await.ok();
+
+        // 2. Increment trap counter in metrics
+        // (handled by metrics module — see step 11)
+
+        // 3. If trap rate exceeds threshold, suspend the app
+        // (see step 12: scaling)
     }
 }

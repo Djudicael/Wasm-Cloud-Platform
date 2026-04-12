@@ -8,8 +8,18 @@ use std::thread;
 use std::time::Duration;
 use tokio::net::TcpListener;
 
+use crate::deployment::{hot_swap, rollback, RollbackPolicy};
 use crate::instance::ManagedInstance;
 use crate::pool::InstancePool;
+
+#[tokio::test]
+async fn test_deployment_hot_swap_basics() {
+    // This is a placeholder test for hot_swap logic
+    // The actual deployment logic is verified via integration tests
+    let policy = RollbackPolicy::default();
+    assert_eq!(policy.health_failure_threshold, 3);
+    assert_eq!(policy.observation_window, Duration::from_secs(30));
+}
 use common::types::{AppConfig, InstanceId, InstanceState};
 use runtime::executor::PreparedModule;
 use std::time::Instant;

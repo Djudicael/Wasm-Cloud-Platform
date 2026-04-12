@@ -184,3 +184,45 @@ fn test_concurrency() {
     let existing = table.get("concurrent:v1").unwrap().unwrap();
     assert_eq!(existing.value(), b"init");
 }
+
+#[test]
+fn test_prune_old_versions() {
+    let (store, _f) = make_store();
+
+    store
+        .store_artifact(&AppId::new("app-prune", "v1"), b"v1")
+        .unwrap();
+    store
+        .store_artifact(&AppId::new("app-prune", "v2"), b"v2")
+        .unwrap();
+    store
+        .store_artifact(&AppId::new("app-prune", "v3"), b"v3")
+        .unwrap();
+    store
+        .store_artifact(&AppId::new("app-prune", "v4"), b"v4")
+        .unwrap();
+    store
+        .store_artifact(&AppId::new("app-prune", "v5"), b"v5")
+        .unwrap();
+
+    // Keep the latest 3, but mark v1 as active so it won't be deleted
+    store
+        .prune_old_versions("app-prune", 3, &["app-prune:v1"])
+        .unwrap();
+
+    assert!(store
+        .artifact_exists(&AppId::new("app-prune", "v1"))
+        .unwrap());
+    assert!(!store
+        .artifact_exists(&AppId::new("app-prune", "v2"))
+        .unwrap());
+    assert!(store
+        .artifact_exists(&AppId::new("app-prune", "v3"))
+        .unwrap());
+    assert!(store
+        .artifact_exists(&AppId::new("app-prune", "v4"))
+        .unwrap());
+    assert!(store
+        .artifact_exists(&AppId::new("app-prune", "v5"))
+        .unwrap());
+}
