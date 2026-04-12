@@ -10,10 +10,14 @@ path = "src/main.rs"
 
 [dependencies]
 axum = { workspace = true }
+
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
 tokio = { workspace = true }
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+tokio = { version = "1", features = ["sync", "macros", "io-util", "rt", "time"] }
 
 [profile.release]
 opt-level = 3
 lto = true
 strip = "symbols"
-

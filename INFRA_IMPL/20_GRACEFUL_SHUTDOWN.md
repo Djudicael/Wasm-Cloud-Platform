@@ -385,30 +385,30 @@ Add Mechanism 3 as an optional enhancement for apps that opt in.
 **This step is done when all boxes are checked.**
 
 ### Mechanism 1 — TCP Close
-- [ ] `InstanceHandle::initiate_shutdown()` closes the pre-bound TCP listener
-- [ ] The Wasm Axum server detects the closed listener and exits its accept loop
-- [ ] `wait_for_exit(timeout)` returns `Some(stats)` when the Wasm task exits cleanly
-- [ ] `wait_for_exit(timeout)` returns `None` and logs a warning when the timeout is exceeded
-- [ ] The port is released to the pool after the instance exits regardless of how it exited
+- [x] `InstanceHandle::initiate_shutdown()` closes the pre-bound TCP listener
+- [x] The Wasm Axum server detects the closed listener and exits its accept loop
+- [x] `wait_for_exit(timeout)` returns `Some(stats)` when the Wasm task exits cleanly
+- [x] `wait_for_exit(timeout)` returns `None` and logs a warning when the timeout is exceeded
+- [x] The port is released to the pool after the instance exits regardless of how it exited
 
 ### Mechanism 3 — HTTP Shutdown Endpoint (opt-in)
-- [ ] `POST /_platform/shutdown` on a running instance causes `axum::serve` to stop accepting new requests
-- [ ] In-flight requests complete after the shutdown signal before the server exits
-- [ ] `initiate_http_shutdown(addr)` returns `Ok` when the endpoint responds and `Err` on timeout/unreachable
+- [x] `POST /_platform/shutdown` on a running instance causes `axum::serve` to stop accepting new requests
+- [x] In-flight requests complete after the shutdown signal before the server exits
+- [x] `initiate_http_shutdown(addr)` returns `Ok` when the endpoint responds and `Err` on timeout/unreachable
 
 ### Graceful Drain Flow
-- [ ] `kill_instance_gracefully()` removes the instance from the upstream registry first (no new requests)
-- [ ] It then sends the HTTP shutdown signal (if app opts in)
-- [ ] It then waits `drain_timeout` for in-flight requests to finish
-- [ ] It then calls `initiate_shutdown()` (TCP close) as a fallback
+- [x] `kill_instance_gracefully()` removes the instance from the upstream registry first (no new requests)
+- [x] It then sends the HTTP shutdown signal (if app opts in)
+- [x] It then waits `drain_timeout` for in-flight requests to finish
+- [x] It then calls `initiate_shutdown()` (TCP close) as a fallback
 - [ ] Zero requests return 5xx during a graceful kill (verified with concurrent load test)
 
 ### Node Shutdown (SIGTERM)
-- [ ] `Ctrl-C` or `SIGTERM` triggers the drain of all instances across all apps
-- [ ] The drain respects a hard timeout (e.g. 30s) — the process exits even if some instances are stuck
-- [ ] The process exits with code 0 on clean shutdown
+- [x] `Ctrl-C` or `SIGTERM` triggers the drain of all instances across all apps
+- [x] The drain respects a hard timeout (e.g. 30s) — the process exits even if some instances are stuck
+- [x] The process exits with code 0 on clean shutdown
 
 ### Tests
-- [ ] A test spawns an instance, sends a graceful kill, and verifies the instance exits without hard abort
-- [ ] A test sends 10 concurrent requests, initiates shutdown halfway through, and verifies all 10 complete
-- [ ] A test verifies the port is released after shutdown so it can be reallocated immediately
+- [x] A test spawns an instance, sends a graceful kill, and verifies the instance exits without hard abort
+- [x] A test sends 10 concurrent requests, initiates shutdown halfway through, and verifies all 10 complete
+- [x] A test verifies the port is released after shutdown so it can be reallocated immediately

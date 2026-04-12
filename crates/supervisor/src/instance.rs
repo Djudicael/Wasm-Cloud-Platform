@@ -26,6 +26,63 @@ pub struct ManagedInstance {
     pub shutdown_tx: oneshot::Sender<()>,
 }
 
+impl ManagedInstance {
+    /// Initiate graceful shutdown by sending HTTP request to /_platform/shutdown endpoint.
+    /// Falls back to immediate shutdown if HTTP fails.
+    pub async fn initiate_shutdown(self, grace_timeout: Duration) -> Option<ExecutionStats> {
+        let id = self.id.clone();
+        let addr = self.addr;
+
+        tracing::info!(instance = %id.0, addr = %addr, "initiating graceful shutdown");
+
+        // Try HTTP shutdown endpoint first (gives app chance to cleanup)
+        if initiate_http_shutdown(addr).await.is_ok() {
+            tracing::debug!(instance = %id.0, "HTTP shutdown signal sent");
+        }
+
+        // Send shutdown signal via channel (consumes shutdown_tx)
+        let _ = self.shutdown_tx.send(());
+
+        // Wait for task to complete with timeout
+        match timeout(grace_timeout, self.task).await {
+            Ok(Ok(stats)) => {
+                tracing::info!(
+                    instance = %id.0,
+                    fuel = stats.fuel_consumed,
+                    "instance exited cleanly"
+                );
+                Some(stats)
+            }
+            Ok(Err(e)) => {
+                tracing::warn!(instance = %id.0, error = %e, "instance task panicked");
+                None
+            }
+            Err(_) => {
+                tracing::warn!(
+                    instance = %id.0,
+                    "instance did not exit within {:?} — hard abort",
+                    grace_timeout
+                );
+                // Task is dropped here = hard abort
+                None
+            }
+        }
+    }
+}
+
+/// Send HTTP POST to /_platform/shutdown endpoint.
+/// Returns Ok if endpoint responds (even with error status).
+async fn initiate_http_shutdown(addr: SocketAddr) -> Result<(), String> {
+    let url = format!("http://{}/_platform/shutdown", addr);
+    let client = reqwest::Client::new();
+
+    match timeout(Duration::from_secs(2), client.post(&url).send()).await {
+        Ok(Ok(_)) => Ok(()),
+        Ok(Err(e)) => Err(format!("HTTP request failed: {}", e)),
+        Err(_) => Err("HTTP shutdown timeout".to_string()),
+    }
+}
+
 /// Wait until the TCP port is accepting connections.
 /// Polls every 5ms, gives up after `max_wait`.
 pub async fn wait_for_ready(addr: SocketAddr, max_wait: Duration) -> Result<(), PlatformError> {

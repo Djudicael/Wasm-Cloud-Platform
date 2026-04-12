@@ -343,6 +343,98 @@ impl Supervisor {
         Ok(())
     }
 
+    /// Gracefully shutdown an instance with drain timeout.
+    /// Steps:
+    /// 1. Remove from upstream registry (no new requests)
+    /// 2. Try HTTP /_platform/shutdown endpoint
+    /// 3. Wait drain_timeout for in-flight requests
+    /// 4. Wait for task to exit (with grace_timeout)
+    /// 5. Release resources
+    pub async fn kill_instance_gracefully(
+        &self,
+        app_id: &AppId,
+        id: &InstanceId,
+        drain_timeout: Duration,
+        grace_timeout: Duration,
+    ) -> Result<(), PlatformError> {
+        tracing::info!(
+            app = %app_id.0,
+            instance = %id.0,
+            drain = ?drain_timeout,
+            "starting graceful shutdown"
+        );
+
+        // 1. Remove from upstream registry first (stop new requests)
+        let instance = {
+            let mut pools = self.pools.write().await;
+            let pool = pools
+                .get_mut(&app_id.0)
+                .ok_or_else(|| PlatformError::AppNotFound(app_id.0.clone()))?;
+
+            let pos = pool
+                .instances
+                .iter()
+                .position(|i| i.id == *id)
+                .ok_or_else(|| PlatformError::Runtime(format!("instance {} not found", id.0)))?;
+
+            // Remove from upstream immediately
+            let inst = &pool.instances[pos];
+            if let InstanceState::Ready { addr } = &inst.state {
+                self.upstream_registry.remove(app_id, addr).await;
+                tracing::debug!(
+                    app = %app_id.0,
+                    instance = %id.0,
+                    addr = %addr,
+                    "removed from upstream registry"
+                );
+            }
+
+            pool.instances.remove(pos)
+        };
+
+        // 2. Wait for in-flight requests to drain
+        tokio::time::sleep(drain_timeout).await;
+
+        // 3. Save data we need after consuming instance
+        let addr = instance.addr;
+        let state = instance.state.clone();
+
+        // 4. Initiate graceful shutdown (HTTP + channel signal + wait)
+        let stats = instance.initiate_shutdown(grace_timeout).await;
+
+        // 5. Release resources
+        if let InstanceState::Ready { addr } = &state {
+            self.service_registry.deregister(app_id, addr).await;
+            self.port_alloc.release(addr.port());
+        }
+
+        // 6. Publish InstanceDead event
+        let _ = self
+            .event_tx
+            .send(Event::InstanceDead {
+                app_id: app_id.clone(),
+                addr,
+                node_id: self.node_id(),
+            })
+            .await;
+
+        if stats.is_some() {
+            tracing::info!(
+                app = %app_id.0,
+                instance = %id.0,
+                "graceful shutdown complete"
+            );
+        } else {
+            tracing::warn!(
+                app = %app_id.0,
+                instance = %id.0,
+                "graceful shutdown timeout — instance was aborted"
+            );
+        }
+
+        Ok(())
+    }
+
     async fn kill_instance_internal(
         &self,
         pool: &mut InstancePool,
@@ -416,6 +508,19 @@ impl Supervisor {
 
     pub fn store(&self) -> &Store {
         &self.store
+    }
+
+    pub fn upstream(&self) -> &Arc<UpstreamRegistry> {
+        &self.upstream_registry
+    }
+
+    pub async fn list_instances(&self, app_id: &AppId) -> Vec<InstanceId> {
+        let pools = self.pools.read().await;
+        if let Some(pool) = pools.get(&app_id.0) {
+            pool.instances.iter().map(|i| i.id.clone()).collect()
+        } else {
+            vec![]
+        }
     }
 
     pub async fn node_stats(&self) -> Result<scaling::NodeStats, PlatformError> {
@@ -494,5 +599,55 @@ impl Supervisor {
 
         // 3. If trap rate exceeds threshold, suspend the app
         // (see step 12: scaling)
+    }
+
+    /// List all app IDs currently managed by the supervisor.
+    pub async fn list_app_ids(&self) -> Vec<AppId> {
+        let pools = self.pools.read().await;
+        pools.keys().map(|k| AppId(k.clone())).collect()
+    }
+
+    /// Gracefully shutdown all instances across all apps.
+    /// Used during node shutdown (SIGTERM).
+    pub async fn shutdown_all(&self, timeout: Duration) {
+        tracing::info!("shutting down all instances");
+
+        let app_ids = self.list_app_ids().await;
+        for app_id in app_ids {
+            // Drain app (remove from upstream)
+            if let Err(e) = self.drain_app(&app_id, Duration::from_secs(5)).await {
+                tracing::warn!(app = %app_id.0, error = %e, "drain failed");
+            }
+
+            // Gracefully kill all instances
+            let instance_ids: Vec<InstanceId> = {
+                let pools = self.pools.read().await;
+                pools
+                    .get(&app_id.0)
+                    .map(|p| p.instances.iter().map(|i| i.id.clone()).collect())
+                    .unwrap_or_default()
+            };
+
+            for instance_id in instance_ids {
+                if let Err(e) = self
+                    .kill_instance_gracefully(
+                        &app_id,
+                        &instance_id,
+                        Duration::from_secs(2), // drain timeout
+                        Duration::from_secs(5), // grace timeout
+                    )
+                    .await
+                {
+                    tracing::warn!(
+                        app = %app_id.0,
+                        instance = %instance_id.0,
+                        error = %e,
+                        "graceful shutdown failed"
+                    );
+                }
+            }
+        }
+
+        tracing::info!("all instances shutdown complete");
     }
 }

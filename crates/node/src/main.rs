@@ -279,9 +279,16 @@ async fn main() -> anyhow::Result<()> {
         proxy_server.run();
     });
 
-    // Wait for shutdown signal
+    // Wait for shutdown signal (SIGTERM / Ctrl-C)
     tokio::signal::ctrl_c().await.unwrap();
-    info!("Shutting down...");
+    info!("SIGTERM/Ctrl-C received — gracefully shutting down all instances");
+
+    // Gracefully shutdown all instances with timeout
+    let shutdown_timeout = std::time::Duration::from_secs(30);
+    supervisor.shutdown_all(shutdown_timeout).await;
+
+    info!("All instances stopped — exiting");
+    std::process::exit(0);
 
     Ok(())
 }
