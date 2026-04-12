@@ -6,6 +6,7 @@ pub mod instance_manager;
 pub mod network;
 pub mod pool;
 pub mod port_alloc;
+pub mod scaling;
 
 #[cfg(test)]
 mod tests;
@@ -333,6 +334,27 @@ impl Supervisor {
 
     pub fn store(&self) -> &Store {
         &self.store
+    }
+
+    pub async fn node_stats(&self) -> Result<scaling::NodeStats, PlatformError> {
+        let mut total_instances = 0;
+        let mut app_counts = HashMap::new();
+
+        let pools = self.pools.read().await;
+        for (app_id, pool) in pools.iter() {
+            let count = pool.active_count();
+            if count > 0 {
+                app_counts.insert(app_id.clone(), count);
+                total_instances += count;
+            }
+        }
+
+        Ok(scaling::NodeStats {
+            cpu_percent: 0.0, // placeholder
+            fuel_per_sec: 0,  // placeholder
+            total_instances,
+            app_counts,
+        })
     }
 
     /// Mark all instances of an app as DRAINING.

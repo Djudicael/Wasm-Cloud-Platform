@@ -1,4 +1,5 @@
 pub mod admin;
+pub mod node_table;
 pub mod rate_limiter;
 pub mod router;
 pub mod service;

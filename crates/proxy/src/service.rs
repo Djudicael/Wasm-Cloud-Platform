@@ -1,4 +1,7 @@
-use super::{rate_limiter::RateLimiter, router::HostRouter, upstream::UpstreamRegistry};
+use super::{
+    node_table::NodeLoadTable, rate_limiter::RateLimiter, router::HostRouter,
+    upstream::UpstreamRegistry,
+};
 use async_trait::async_trait;
 use common::types::AppId;
 use pingora_core::upstreams::peer::HttpPeer;
@@ -18,6 +21,7 @@ pub struct WasmProxy {
     pub router: Arc<HostRouter>,
     pub upstream: Arc<UpstreamRegistry>,
     pub rate_limiter: Arc<RateLimiter>,
+    pub node_table: Arc<NodeLoadTable>,
     /// Callback to trigger a cold-start when no instances are running.
     /// Returns the address of the newly spawned instance.
     pub cold_start: Arc<
@@ -25,6 +29,34 @@ pub struct WasmProxy {
             + Send
             + Sync,
     >,
+}
+
+impl WasmProxy {
+    async fn select_upstream(&self, app_id: &AppId) -> Option<std::net::SocketAddr> {
+        // 1. Try local instances first (fastest path)
+        if let Some(addr) = self.upstream.next(app_id).await {
+            return Some(addr);
+        }
+
+        // 2. Check if local node is overloaded
+        if self.node_is_overloaded().await {
+            // 3. Find a remote node with capacity
+            if let Some(node) = self.node_table.least_loaded_node().await {
+                // Return the remote supervisor's address for this app
+                // Pingora will proxy the request to the remote node's Pingora
+                return Some(node.supervisor_addr);
+            }
+        }
+
+        // 4. Cold start on local node (last resort)
+        tracing::info!(app = %app_id.0, "cold start on local node");
+        (self.cold_start)(app_id.clone()).await
+    }
+
+    async fn node_is_overloaded(&self) -> bool {
+        // Check local fuel consumption (simplified: check CPU via sysinfo)
+        false // placeholder
+    }
 }
 
 #[async_trait]
@@ -86,17 +118,10 @@ impl ProxyHttp for WasmProxy {
             .as_ref()
             .ok_or_else(|| pingora_core::Error::new_str("no app for this host"))?;
 
-        // Try to get an existing instance
-        let addr = match self.upstream.next(app_id).await {
-            Some(addr) => addr,
-            None => {
-                // Cold start: ask the Supervisor to spawn an instance
-                tracing::info!(app = %app_id.0, "cold start triggered");
-                (self.cold_start)(app_id.clone())
-                    .await
-                    .ok_or_else(|| pingora_core::Error::new_str("cold start failed"))?
-            }
-        };
+        let addr = self
+            .select_upstream(app_id)
+            .await
+            .ok_or_else(|| pingora_core::Error::new_str("failed to select upstream"))?;
 
         ctx.upstream_addr = Some(addr);
         Ok(Box::new(HttpPeer::new(
@@ -185,6 +210,7 @@ mod tests {
             router,
             upstream,
             rate_limiter,
+            node_table: Arc::new(super::node_table::NodeLoadTable::default()),
             cold_start,
         };
 

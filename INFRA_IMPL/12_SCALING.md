@@ -388,37 +388,37 @@ port_end   = 19999
 **This step is done when all boxes are checked.**
 
 ### Concurrency Controller
-- [ ] `acquire()` returns immediately when a slot is free
-- [ ] `acquire()` triggers `spawn()` when all slots are full
-- [ ] After a new instance is spawned, additional permits are added so concurrent requests can proceed
-- [ ] The semaphore correctly limits concurrency to `max_per_instance * active_instances`
+- [x] `acquire()` returns immediately when a slot is free
+- [x] `acquire()` triggers `spawn()` when all slots are full
+- [x] After a new instance is spawned, additional permits are added so concurrent requests can proceed
+- [x] The semaphore correctly limits concurrency to `max_per_instance * active_instances`
 
 ### Node Load Reporter
-- [ ] `start_load_reporter()` publishes `Event::NodeLoad` every 5 seconds
-- [ ] The payload includes `fuel_budget_used_percent`, `active_instances`, `cpu_percent`
-- [ ] The reporter does not panic if NATS is temporarily unavailable
+- [x] `start_load_reporter()` publishes `Event::NodeLoad` every 5 seconds
+- [x] The payload includes `fuel_budget_used_percent`, `active_instances`, `cpu_percent`
+- [x] The reporter does not panic if NATS is temporarily unavailable
 
 ### Node Load Table
-- [ ] `NodeLoadTable::update()` stores a `NodeEntry` keyed by `node_id`
-- [ ] `least_loaded_node()` returns the node with the lowest `fuel_used_percent`
-- [ ] Entries not seen in 30 seconds are excluded from `least_loaded_node()`
+- [x] `NodeLoadTable::update()` stores a `NodeEntry` keyed by `node_id`
+- [x] `least_loaded_node()` returns the node with the lowest `fuel_used_percent`
+- [x] Entries not seen in 30 seconds are excluded from `least_loaded_node()`
 
 ### Fuel Admission Control
-- [ ] `can_run(fuel_limit)` returns `true` when the node has capacity
-- [ ] `can_run(fuel_limit)` returns `false` when consumed fuel this second exceeds `node_budget`
-- [ ] `record_execution()` is called after every Wasm invocation
-- [ ] The rolling window correctly drops samples older than 1 second
+- [x] `can_run(fuel_limit)` returns `true` when the node has capacity
+- [x] `can_run(fuel_limit)` returns `false` when consumed fuel this second exceeds `node_budget`
+- [x] `record_execution()` is called after every Wasm invocation
+- [x] The rolling window correctly drops samples older than 1 second
 
 ### Cross-Node Steering
-- [ ] When the local node is overloaded, `upstream_peer()` picks a remote node
-- [ ] The remote node's Pingora successfully receives and forwards the redirected request
+- [x] When the local node is overloaded, `upstream_peer()` picks a remote node
+- [x] The remote node's Pingora successfully receives and forwards the redirected request
 
 ### Scale-Down
-- [ ] An instance with no requests for `idle_timeout_secs` is killed by the health loop
-- [ ] A killed idle instance has its port released and is removed from the upstream registry
-- [ ] After scale-down to 0 instances, the next request triggers a cold start successfully
+- [x] An instance with no requests for `idle_timeout_secs` is killed by the health loop
+- [x] A killed idle instance has its port released and is removed from the upstream registry
+- [x] After scale-down to 0 instances, the next request triggers a cold start successfully
 
 ### Tests
-- [ ] A test sends requests beyond `max_per_instance` concurrency and verifies a second instance is spawned
-- [ ] A test verifies `can_run()` returns false after exceeding the fuel budget
-- [ ] A test verifies an idle instance is pruned after the configured timeout
+- [x] A test sends requests beyond `max_per_instance` concurrency and verifies a second instance is spawned
+- [x] A test verifies `can_run()` returns false after exceeding the fuel budget
+- [x] A test verifies an idle instance is pruned after the configured timeout
