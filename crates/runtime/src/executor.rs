@@ -10,7 +10,7 @@ use std::time::Instant;
 use tokio::sync::mpsc;
 use wasmtime::component::{Component, Instance, Linker};
 use wasmtime::{Engine, Store};
-use wasmtime_wasi::{ResourceTable, SocketAddrUse, WasiCtx, WasiCtxBuilder, WasiView};
+use wasmtime_wasi::{ResourceTable, WasiCtx, WasiCtxBuilder, WasiView};
 
 /// Channels for capturing Wasm stdout/stderr.
 pub struct WasiStreams {
@@ -88,16 +88,18 @@ impl PreparedModule {
         let mut builder = WasiCtxBuilder::new();
         builder.stdout(stdout_pipe);
         builder.stderr(stderr_pipe);
-        builder.inherit_network(); // Give network access handled by address checks
+
+        // Enable TCP and UDP with full network access (equivalent to -S tcp=y -S udp=y -S inherit-network=y)
+        builder.inherit_network();
+        builder.allow_tcp(true);
+        builder.allow_udp(true);
+        builder.allow_ip_name_lookup(true);
 
         for (k, v) in env_vars {
             builder.env(&k, &v);
         }
         // The app will bind to 0.0.0.0:<port>; the Supervisor maps this port.
         builder.env("PORT", &port.to_string());
-
-        // Allow TCP networking natively on the specified ports
-        builder.socket_addr_check(|_addr, _action: SocketAddrUse| true);
 
         let extended_limits = self
             .config
@@ -127,7 +129,7 @@ impl PreparedModule {
         // Apply CPU/fuel limits
         configure_store(&mut store, self.config.fuel_quota)?;
 
-        // Link WASI host functions (Component Model)
+        // Link WASI host functions (Component Model Preview 2)
         let mut linker = Linker::new(&self.engine);
         wasmtime_wasi::add_to_linker_sync(&mut linker)
             .map_err(|e| PlatformError::Runtime(format!("linker error: {e}")))?;
