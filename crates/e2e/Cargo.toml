@@ -16,6 +16,7 @@ serde_json    = { workspace = true }
 sha2          = "0.10"
 hex           = "0.4"
 testcontainers = "0.27"
+axum          = { workspace = true }
 
 # Local crates
 common        = { path = "../common" }

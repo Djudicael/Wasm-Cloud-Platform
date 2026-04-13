@@ -40,24 +40,23 @@ async fn test_deploy_and_serve_http() {
         .await
         .expect("Failed to start node");
 
-    // 3. Find and upload hello-axum.wasm
+    // 3. Start file server to host the WASM file
     let wasm_path = find_hello_axum_wasm().expect("hello_axum.wasm not found");
     let sha256 = compute_sha256(&wasm_path).expect("Failed to compute SHA-256");
     let size_bytes = std::fs::metadata(&wasm_path)
         .expect("Failed to get file size")
         .len();
 
-    eprintln!("Uploading artifact (SHA-256: {})", sha256);
-    upload_artifact(node.artifact_port, &wasm_path, &sha256)
+    let file_server = FileServer::start(9100, &wasm_path)
         .await
-        .expect("Failed to upload artifact");
+        .expect("Failed to start file server");
+
+    let wasm_filename = wasm_path.file_name().unwrap().to_str().unwrap();
+    let artifact_url = file_server.wasm_url(wasm_filename);
 
     // 4. Deploy the app
     let app_id = "hello-axum:v1";
-    let artifact_url = format!(
-        "http://127.0.0.1:{}/artifacts/{}",
-        node.artifact_port, sha256
-    );
+    eprintln!("Deploying with artifact URL: {}", artifact_url);
 
     let config = build_app_config(app_id, 100_000_000, 100, 2);
 

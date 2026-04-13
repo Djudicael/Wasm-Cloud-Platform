@@ -25,6 +25,9 @@ pub struct EventDispatcher {
 
 impl EventDispatcher {
     pub async fn handle(&self, event: Event) {
+        let event_name = format!("{:?}", std::mem::discriminant(&event));
+        tracing::info!(event = %event_name, "received event in handler");
+
         match event {
             Event::DeployApp {
                 app_id,
@@ -33,6 +36,7 @@ impl EventDispatcher {
                 expected_hash,
                 size_bytes,
             } => {
+                info!("🚀 Handling DeployApp for app_id: {}, url: {}", app_id.0, artifact_url);
                 self.handle_deploy(app_id, config, artifact_url, expected_hash, size_bytes)
                     .await
             }
@@ -162,6 +166,8 @@ impl EventDispatcher {
         expected_hash: Option<String>,
         size_bytes: u64,
     ) {
+        tracing::info!(app = %app_id.0, "handle_deploy invoked");
+        
         let sha256 = match &expected_hash {
             Some(h) => h.clone(),
             None => {

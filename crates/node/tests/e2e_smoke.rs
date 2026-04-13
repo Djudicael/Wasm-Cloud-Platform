@@ -6,7 +6,7 @@ use sha2::{Digest, Sha256};
 use std::env;
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 use testcontainers::{core::ContainerPort, runners::AsyncRunner, GenericImage, ImageExt};
 use tokio::time::sleep;
@@ -77,9 +77,12 @@ async fn test_full_platform_e2e() {
 
     let proxy_port = 8080;
     let admin_port = 9090;
+    let test_artifact_port = 9091; // Test's artifact server port
+    let node_artifact_port = 19091; // Node's artifact server (different from test's)
 
     println!("Starting wasm-node process in background...");
-    let mut node_process = Command::new(node_bin)
+    let node_process: Child = Command::new(node_bin)
+        .env("RUST_BACKTRACE", "1")
         .arg("--db-path")
         .arg(&db_path)
         .arg("--nats-url")
@@ -90,6 +93,10 @@ async fn test_full_platform_e2e() {
         .arg("0") // Disable HTTPS for tests
         .arg("--admin-port")
         .arg(admin_port.to_string())
+        .arg("--artifact-port")
+        .arg(node_artifact_port.to_string())
+        .arg("--database-url")
+        .arg("postgres://localhost:5432/postgres")
         .arg("--key-source")
         .arg("generate")
         .arg("--key-file")
@@ -101,6 +108,7 @@ async fn test_full_platform_e2e() {
 
     // Wait for the admin API to be up
     println!("Waiting for node to become ready...");
+    let mut node_process = node_process;
     let client = Client::new();
     let mut ready = false;
     for _ in 0..15 {
@@ -118,7 +126,7 @@ async fn test_full_platform_e2e() {
     }
 
     if !ready {
-        let _ = node_process.kill();
+        let _ = node_process.kill().ok();
         let output = node_process
             .wait_with_output()
             .expect("Failed to read node output");
@@ -148,7 +156,7 @@ async fn test_full_platform_e2e() {
     let event = Event::DeployApp {
         app_id: app_id.clone(),
         config: AppConfig::default_for(app_id.clone()),
-        artifact_url: format!("http://127.0.0.1:{}/hello_axum.wasm", artifact_port),
+        artifact_url: format!("http://127.0.0.1:{}/hello_axum.wasm", test_artifact_port),
         expected_hash: Some(expected_hash),
         size_bytes: wasm_bytes.len() as u64,
     };
@@ -157,6 +165,7 @@ async fn test_full_platform_e2e() {
     bus.publish(&event)
         .await
         .expect("Failed to publish deploy event");
+    println!("Deploy event published to subject: {}", event.subject());
 
     let route_event = Event::RouteAdd {
         route: common::types::Route {
@@ -172,6 +181,7 @@ async fn test_full_platform_e2e() {
     bus.publish(&route_event)
         .await
         .expect("Failed to publish route event");
+    println!("Route add event published to subject: {}", route_event.subject());
 
     // Give it a few seconds to compile Cranelift AOT and spin up
     println!("Waiting for app to be deployed and ready...");

@@ -37,6 +37,11 @@ pub struct NatsContainer {
     _container: testcontainers::ContainerAsync<GenericImage>,
 }
 
+/// A simple HTTP file server for serving WASM artifacts
+pub struct FileServer {
+    pub url: String,
+}
+
 impl NatsContainer {
     /// Start a NATS container with JetStream enabled
     pub async fn start(port: u16) -> Result<Self, Box<dyn std::error::Error>> {
@@ -63,6 +68,45 @@ impl NatsContainer {
     /// Connect to this NATS instance
     pub async fn connect(&self) -> Result<NatsBus, Box<dyn std::error::Error>> {
         Ok(NatsBus::connect(&self.url).await?)
+    }
+}
+
+impl FileServer {
+    /// Start embedded HTTP file server using tokio
+    pub async fn start(port: u16, wasm_path: &Path) -> Result<Self, Box<dyn std::error::Error>> {
+        // Read WASM file
+        let wasm_bytes = std::fs::read(wasm_path)?;
+        let wasm_filename = wasm_path.file_name().unwrap().to_str().unwrap().to_string();
+
+        // Start simple HTTP server in background
+        let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+
+        tokio::spawn(async move {
+            use axum::{routing::get, Router, response::IntoResponse, http::StatusCode};
+
+            let wasm_data = wasm_bytes.clone();
+            let filename_clone = wasm_filename.clone();
+
+            let app = Router::new().route(&format!("/{}", filename_clone), get(move || async move {
+                ([("content-type", "application/wasm")], wasm_data.clone()).into_response()
+            }));
+
+            let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        // Wait for server to start
+        sleep(Duration::from_millis(500)).await;
+
+        let url = format!("http://127.0.0.1:{}", port);
+        eprintln!("✓ File server ready at {}", url);
+
+        Ok(FileServer { url })
+    }
+
+    /// Get URL for the WASM file
+    pub fn wasm_url(&self, filename: &str) -> String {
+        format!("{}/{}", self.url, filename)
     }
 }
 
@@ -94,23 +138,34 @@ impl NodeProcess {
             node_id, proxy_port, artifact_port
         );
 
-        let process = Command::new(&node_binary)
+        let mut process = Command::new(&node_binary)
             .arg("--node-id")
             .arg(node_id)
             .arg("--nats-url")
             .arg(nats_url)
             .arg("--proxy-port")
             .arg(proxy_port.to_string())
-            .arg("--artifact-server-port")
-            .arg(artifact_port.to_string())
-            .arg("--db-path")
-            .arg(&db_path)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
+            .arg("--admin-port")
+            .arg("9190")
+            .env("RUST_LOG", "debug")
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
             .spawn()?;
 
-        // Wait for node to start up
-        sleep(Duration::from_secs(3)).await;
+        // Check if process started successfully
+        if let Some(status) = process.try_wait()? {
+            return Err(format!("Node process exited immediately with status: {}", status).into());
+        }
+
+        // Wait for node to start up and all servers (proxy, artifact) to be ready
+        // The node needs time to:
+        // 1. Initialize the database
+        // 2. Start the artifact server
+        // 3. Start the proxy server
+        // 4. Connect to NATS
+        sleep(Duration::from_secs(8)).await;
+
+        eprintln!("✓ Node startup wait complete");
 
         Ok(NodeProcess {
             node_id: node_id.to_string(),
@@ -142,15 +197,14 @@ impl NodeProcess {
             .arg(nats_url)
             .arg("--proxy-port")
             .arg(proxy_port.to_string())
-            .arg("--artifact-server-port")
-            .arg(artifact_port.to_string())
             .arg("--db-path")
             .arg(&db_path)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()?;
 
-        sleep(Duration::from_secs(3)).await;
+        sleep(Duration::from_secs(8)).await;
+        eprintln!("✓ Node restart complete");
 
         Ok(NodeProcess {
             node_id: node_id.to_string(),
@@ -204,7 +258,17 @@ fn find_node_binary() -> Result<PathBuf, Box<dyn std::error::Error>> {
     } else if debug_binary.exists() {
         Ok(debug_binary)
     } else {
-        Err("wasm-node binary not found. Build it with: cargo build --bin wasm-node".into())
+        eprintln!("⚠️ wasm-node not found, building...");
+        let status = std::process::Command::new("cargo")
+            .args(["build", "--release", "-p", "node"])
+            .current_dir(workspace_root)
+            .status()?;
+
+        if !status.success() {
+            return Err("Failed to build wasm-node".into());
+        }
+
+        Ok(release_binary)
     }
 }
 
@@ -213,20 +277,43 @@ pub fn find_hello_axum_wasm() -> Result<PathBuf, Box<dyn std::error::Error>> {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
     let workspace_root = Path::new(manifest_dir).parent().unwrap().parent().unwrap();
 
-    // Try both hello-axum.wasm and hello_axum.wasm
-    let wasm_path_dash = workspace_root.join("target/wasm32-wasip2/release/hello-axum.wasm");
-    let wasm_path_underscore = workspace_root.join("target/wasm32-wasip2/release/hello_axum.wasm");
+    let wasm_path = workspace_root.join("target/wasm32-wasip2/release/hello-axum.wasm");
 
-    if wasm_path_dash.exists() {
-        Ok(wasm_path_dash)
-    } else if wasm_path_underscore.exists() {
-        Ok(wasm_path_underscore)
+    // Check if needs rebuild
+    let needs_rebuild = if !wasm_path.exists() {
+        true
     } else {
-        Err(
-            "hello-axum.wasm not found. Build it with: \
-             RUSTFLAGS='--cfg tokio_unstable' cargo build --manifest-path apps/hello-axum/Cargo.toml --target wasm32-wasip2 --release"
-                .into(),
-        )
+        let wasm_modified = std::fs::metadata(&wasm_path)?.modified()?;
+        let main_modified = std::fs::metadata(workspace_root.join("apps/hello-axum/src/main.rs"))?.modified()?;
+        wasm_modified < main_modified
+    };
+
+    if needs_rebuild {
+        eprintln!("⚠️ Building hello-axum.wasm...");
+
+        let output = std::process::Command::new("cargo")
+            .args([
+                "build",
+                "--release",
+                "--target", "wasm32-wasip2",
+                "-p", "hello-axum"
+            ])
+            .current_dir(workspace_root)
+            .output()?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            eprintln!("Build error: {}", stderr);
+            return Err(format!("Failed to build hello-axum: {}", stderr).into());
+        }
+
+        eprintln!("Build stdout: {}", String::from_utf8_lossy(&output.stdout));
+    }
+
+    if wasm_path.exists() {
+        Ok(wasm_path)
+    } else {
+        Err("Build succeeded but wasm file not found".into())
     }
 }
 
@@ -298,12 +385,19 @@ pub async fn deploy_app(
     let event = Event::DeployApp {
         app_id: common::types::AppId(app_id.to_string()),
         config,
-        artifact_url,
-        expected_hash: Some(expected_hash),
+        artifact_url: artifact_url.clone(),
+        expected_hash: Some(expected_hash.clone()),
         size_bytes,
     };
 
+    eprintln!("📤 Publishing DeployApp event:");
+    eprintln!("   app_id: {}", app_id);
+    eprintln!("   artifact_url: {}", artifact_url);
+    eprintln!("   expected_hash: {}", expected_hash);
+    eprintln!("   subject: {}", event.subject());
+
     bus.publish(&event).await?;
+    eprintln!("✓ DeployApp event published");
 
     // Wait for deployment to process
     sleep(Duration::from_millis(500)).await;

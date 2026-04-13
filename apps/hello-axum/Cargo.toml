@@ -1,25 +1,16 @@
-
 [package]
 name = "hello-axum"
 version = "0.1.0"
 edition = "2021"
 
-[[bin]]
-name = "hello-axum"
-path = "src/main.rs"
+# No [lib] section — this is a binary (wasi:cli/run)
+# The wasm32-wasip2 target uses std::net directly, no axum/tokio needed.
 
-[dependencies]
-axum = { workspace = true }
-
-# For non-WASM targets, use full tokio
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
+axum = { workspace = true }
 tokio = { workspace = true }
 
-# For WASM targets, only use WASM-compatible features
-[target.'cfg(target_family = "wasm")'.dependencies]
-tokio = { version = "1.51", default-features = false, features = ["sync", "macros", "io-util", "rt", "time"] }
-
 [profile.release]
-opt-level = 3
+opt-level = "s"
 lto = true
 strip = "symbols"

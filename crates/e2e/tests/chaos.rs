@@ -30,12 +30,8 @@ async fn test_node_restart_restores_state() {
     let sha256 = compute_sha256(&wasm_path).expect("Failed to compute SHA-256");
     let size_bytes = std::fs::metadata(&wasm_path).unwrap().len();
 
-    upload_artifact(node.artifact_port, &wasm_path, &sha256)
-        .await
-        .expect("Failed to upload artifact");
-
     let app_id = "restart-test:v1";
-    let artifact_url = format!("http://127.0.0.1:{}/artifacts/{}", node.artifact_port, sha256);
+    let artifact_url = format!("file://{}", wasm_path.display());
 
     deploy_app(
         &bus,
@@ -127,12 +123,8 @@ async fn test_fuel_exhaustion_returns_4xx() {
     let sha256 = compute_sha256(&wasm_path).expect("Failed to compute SHA-256");
     let size_bytes = std::fs::metadata(&wasm_path).unwrap().len();
 
-    upload_artifact(node.artifact_port, &wasm_path, &sha256)
-        .await
-        .expect("Failed to upload artifact");
-
     let app_id = "fuel-test:v1";
-    let artifact_url = format!("http://127.0.0.1:{}/artifacts/{}", node.artifact_port, sha256);
+    let artifact_url = format!("file://{}", wasm_path.display());
 
     deploy_app(
         &bus,
@@ -199,12 +191,8 @@ async fn test_secret_rotation() {
     let sha256 = compute_sha256(&wasm_path).expect("Failed to compute SHA-256");
     let size_bytes = std::fs::metadata(&wasm_path).unwrap().len();
 
-    upload_artifact(node.artifact_port, &wasm_path, &sha256)
-        .await
-        .expect("Failed to upload artifact");
-
     let app_id = "secret-test:v1";
-    let artifact_url = format!("http://127.0.0.1:{}/artifacts/{}", node.artifact_port, sha256);
+    let artifact_url = format!("file://{}", wasm_path.display());
 
     // Initial secret value
     let secret_key = "API_KEY";

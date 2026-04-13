@@ -214,12 +214,22 @@ impl Supervisor {
 
             // The run() call blocks until the Wasm module exits or is killed
             let stats = instance.run();
-            tracing::info!(
-                app = %app_id_clone.0,
-                fuel_consumed = stats.fuel_consumed,
-                ram_bytes = stats.ram_bytes,
-                "instance exited"
-            );
+            if let Some(ref trap) = stats.trap {
+                tracing::error!(
+                    app = %app_id_clone.0,
+                    fuel_consumed = stats.fuel_consumed,
+                    ram_bytes = stats.ram_bytes,
+                    trap = %trap,
+                    "instance crashed with trap"
+                );
+            } else {
+                tracing::info!(
+                    app = %app_id_clone.0,
+                    fuel_consumed = stats.fuel_consumed,
+                    ram_bytes = stats.ram_bytes,
+                    "instance exited"
+                );
+            }
             stats
         });
 

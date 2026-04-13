@@ -203,11 +203,16 @@ async fn main() -> anyhow::Result<()> {
 
     {
         let d = dispatcher.clone();
-        bus.subscribe_durable("DEPLOY", &args.node_id, move |event| {
+        let node_id = args.node_id.clone();
+        tracing::info!(subscribing_to = "DEPLOY", consumer = %node_id, "subscribing to deploy stream");
+        if let Err(e) = bus.subscribe_durable("DEPLOY", &node_id, move |event| {
             let d = d.clone();
             async move { d.handle(event).await }
-        })
-        .await?;
+        }).await {
+            tracing::error!(error = %e, "failed to subscribe to DEPLOY stream");
+        } else {
+            tracing::info!("successfully subscribed to DEPLOY stream");
+        }
     }
 
     for subject in &[
@@ -216,6 +221,7 @@ async fn main() -> anyhow::Result<()> {
         "secrets.update.>",
         "config.update.>",
         "node.load.>",
+        "routes.>", // Subscribe to route events
         "cluster.>", // Subscribe to cluster bootstrap events
     ] {
         let d = dispatcher.clone();

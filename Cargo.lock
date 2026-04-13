@@ -1478,6 +1478,7 @@ version = "0.1.0"
 dependencies = [
  "assert_cmd",
  "async-nats",
+ "axum 0.7.9",
  "common",
  "hex",
  "messaging",

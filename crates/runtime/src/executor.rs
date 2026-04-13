@@ -76,7 +76,9 @@ impl PreparedModule {
         env_vars: Vec<(String, String)>,
         port: u16,
     ) -> Result<(RunningInstance, WasiStreams), PlatformError> {
+        tracing::info!(app = %self.config.id.0, "spawn_instance called");
         let id = InstanceId::new();
+        tracing::info!(instance_id = %id.0, "instance ID created");
 
         // Create custom pipes for capturing stdout/stderr
         let (stdout_pipe, stdout_rx) = crate::custom_pipe::ChannelPipe::new();
@@ -130,9 +132,13 @@ impl PreparedModule {
         wasmtime_wasi::add_to_linker_sync(&mut linker)
             .map_err(|e| PlatformError::Runtime(format!("linker error: {e}")))?;
 
-        let instance = linker
-            .instantiate(&mut store, &self.module)
-            .map_err(|e| PlatformError::Runtime(format!("instantiation error: {e}")))?;
+        eprintln!("[SPAWN] About to instantiate component");
+        let instance = linker.instantiate(&mut store, &self.module).map_err(|e| {
+            eprintln!("[SPAWN] INSTANTIATION FAILED: {}", e);
+            PlatformError::Runtime(format!("instantiation error: {e}"))
+        })?;
+
+        eprintln!("[SPAWN] Component instantiated successfully, returning RunningInstance");
 
         Ok((
             RunningInstance {
@@ -160,28 +166,46 @@ impl RunningInstance {
     /// Call `_start` (the WASI entry point). This blocks until the Wasm app exits.
     /// For a server like Axum, this runs indefinitely until the Supervisor kills it.
     pub fn run(&mut self) -> ExecutionStats {
+        tracing::info!(instance_id = %self.id.0, "RunningInstance::run() called");
         let fuel_limit = self.config.fuel_quota.0;
         let start = Instant::now();
         let mut trap_msg = None;
 
-        // In Component Model, common entry points are `wasi:cli/run@0.2.0#run` or custom `run`
-        let start_fn = self
-            .instance
-            .get_func(&mut self.store, "wasi:cli/run@0.2.0#run")
+        // In Component Model, common entry points are `wasi:cli/run@0.2.x#run` or custom `run`
+        // Try multiple WASI versions as the version may vary between components
+        let wasi_versions = [
+            "0.2.6", "0.2.5", "0.2.4", "0.2.3", "0.2.2", "0.2.1", "0.2.0",
+        ];
+        let start_fn = wasi_versions
+            .iter()
+            .find_map(|ver| {
+                self.instance
+                    .get_func(&mut self.store, &format!("wasi:cli/run@{ver}#run"))
+            })
             .or_else(|| self.instance.get_func(&mut self.store, "run"))
             .or_else(|| self.instance.get_func(&mut self.store, "_start"));
+
+        tracing::info!(
+            has_entry_point = start_fn.is_some(),
+            "entry point lookup result"
+        );
 
         match start_fn {
             Some(f) => {
                 let mut results =
                     vec![wasmtime::component::Val::Bool(false); f.results(&self.store).len()];
                 if let Err(e) = f.call(&mut self.store, &[], &mut results) {
-                    trap_msg = Some(e.to_string());
+                    let err_msg = e.to_string();
+                    eprintln!("🔴 WASM TRAP: instance={}, error={}", self.id.0, err_msg);
+                    tracing::error!(instance = %self.id.0, error = %err_msg, "WASM function call failed");
+                    trap_msg = Some(err_msg);
                 } else {
                     f.post_return(&mut self.store).ok();
                 }
             }
             None => {
+                eprintln!("🔴 WASM NO ENTRY POINT: instance={}", self.id.0);
+                tracing::error!(instance = %self.id.0, "No entry point found (wasi:cli/run@0.2.x#run, run, or _start)");
                 trap_msg = Some("export not found".to_string());
             }
         }

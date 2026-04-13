@@ -1,41 +1,98 @@
-use axum::{routing::get, routing::post, Router};
-use std::sync::Arc;
-use tokio::sync::Notify;
+// hello-axum: a minimal HTTP server that works both natively (axum+tokio)
+// and as a wasm32-wasip2 component (std::net, wasi:cli/run).
 
-#[tokio::main(flavor = "current_thread")]
-async fn main() {
-    // Create a shutdown notifier shared between the shutdown endpoint and the server
-    let shutdown = Arc::new(Notify::new());
-    let shutdown_for_endpoint = shutdown.clone();
-    let shutdown_for_signal = shutdown.clone();
+// ── WASM target: synchronous HTTP/1.1 server over std::net ──────────────
+#[cfg(target_family = "wasm")]
+fn main() {
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::TcpListener;
 
-    let app = Router::new()
-        .route("/", get(|| async { "Hello from Wasm!" }))
-        // Platform shutdown endpoint - called by the Supervisor for graceful shutdown
-        .route(
-            "/_platform/shutdown",
-            post(move || {
-                let s = shutdown_for_endpoint.clone();
-                async move {
-                    println!("Graceful shutdown requested via /_platform/shutdown");
-                    s.notify_one();
-                    "shutting down gracefully"
-                }
-            }),
+    let port = std::env::var("PORT").unwrap_or_else(|_| "8080".to_string());
+    let addr = format!("0.0.0.0:{}", port);
+    let listener = TcpListener::bind(&addr).expect("failed to bind");
+    eprintln!("Listening on {}", addr);
+
+    for stream in listener.incoming() {
+        let mut stream = match stream {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("accept error: {}", e);
+                continue;
+            }
+        };
+
+        // Read the request line (e.g. "GET /health HTTP/1.1")
+        let mut reader = BufReader::new(&stream);
+        let mut request_line = String::new();
+        if reader.read_line(&mut request_line).is_err() {
+            continue;
+        }
+
+        // Drain remaining headers (read until empty line)
+        loop {
+            let mut line = String::new();
+            match reader.read_line(&mut line) {
+                Ok(0) => break,
+                Ok(_) if line.trim().is_empty() => break,
+                Ok(_) => continue,
+                Err(_) => break,
+            }
+        }
+
+        // Parse method and path
+        let path = request_line
+            .split_whitespace()
+            .nth(1)
+            .unwrap_or("/");
+
+        let (status, content_type, body) = route(path);
+
+        let response = format!(
+            "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            status,
+            reason(status),
+            content_type,
+            body.len(),
+            body,
         );
 
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:8080").await.unwrap();
+        let _ = stream.write_all(response.as_bytes());
+    }
+}
 
-    println!("Hello-axum server listening on 0.0.0.0:8080");
+#[cfg(target_family = "wasm")]
+fn route(path: &str) -> (u16, &'static str, &'static str) {
+    match path {
+        "/" => (200, "text/plain", "Hello from wasip2!"),
+        "/health" => (200, "application/json", r#"{"status":"healthy"}"#),
+        _ => (404, "text/plain", "Not Found"),
+    }
+}
 
-    // Run Axum with graceful shutdown support
-    axum::serve(listener, app)
-        .with_graceful_shutdown(async move {
-            shutdown_for_signal.notified().await;
-            println!("Shutdown signal received - draining connections");
-        })
-        .await
-        .unwrap();
+#[cfg(target_family = "wasm")]
+fn reason(status: u16) -> &'static str {
+    match status {
+        200 => "OK",
+        404 => "Not Found",
+        _ => "Unknown",
+    }
+}
 
-    println!("Server shut down cleanly");
+// ── Native target: axum + tokio ─────────────────────────────────────────
+#[cfg(not(target_family = "wasm"))]
+#[tokio::main]
+async fn main() {
+    use axum::{routing::get, Router};
+    use std::net::SocketAddr;
+    use tokio::net::TcpListener;
+
+    let app = Router::new()
+        .route("/", get(|| async { "Hello from native!" }))
+        .route("/health", get(|| async { r#"{"status":"healthy"}"# }));
+
+    let addr = SocketAddr::from(([0, 0, 0, 0], 8080));
+    let listener = TcpListener::bind(addr).await.unwrap();
+    println!("Listening on {}", addr);
+
+    axum::serve(listener, app).await.unwrap();
 }
