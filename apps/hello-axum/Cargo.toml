@@ -11,11 +11,13 @@ path = "src/main.rs"
 [dependencies]
 axum = { workspace = true }
 
+# For non-WASM targets, use full tokio
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
 tokio = { workspace = true }
 
+# For WASM targets, only use WASM-compatible features
 [target.'cfg(target_family = "wasm")'.dependencies]
-tokio = { version = "1", features = ["sync", "macros", "io-util", "rt", "time"] }
+tokio = { version = "1.51", default-features = false, features = ["sync", "macros", "io-util", "rt", "time"] }
 
 [profile.release]
 opt-level = 3

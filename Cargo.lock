@@ -1487,6 +1487,7 @@ dependencies = [
  "sha2",
  "storage",
  "tempfile",
+ "testcontainers",
  "tokio",
 ]
 

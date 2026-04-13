@@ -1,71 +1,125 @@
 /// End-to-end test: Deploy hello-axum.wasm and send HTTP request
 ///
-/// This test requires:
-/// 1. A running NATS server on localhost:4222
-/// 2. hello-axum.wasm built: cargo build --target wasm32-wasip2 --release
-/// 3. The wasm-node binary built
+/// This test:
+/// 1. Starts a NATS container
+/// 2. Starts a wasm-node process
+/// 3. Uploads hello-axum.wasm to the artifact server
+/// 4. Publishes a DeployApp event
+/// 5. Adds a route
+/// 6. Sends an HTTP request and verifies the response
 ///
 /// To run:
 /// ```
-/// # Start NATS
-/// docker run -d --name nats-test -p 4222:4222 nats:latest
-///
-/// # Build hello-axum
+/// # Build prerequisites
+/// cargo build --bin wasm-node
 /// cargo build --manifest-path apps/hello-axum/Cargo.toml --target wasm32-wasip2 --release
 ///
-/// # Build the node
-/// cargo build --bin wasm-node
-///
-/// # Run E2E tests
-/// cargo test -p e2e
-///
-/// # Cleanup
-/// docker stop nats-test && docker rm nats-test
+/// # Run test
+/// cargo test -p e2e test_deploy_and_serve_http -- --ignored --nocapture
 /// ```
+mod harness;
 
-use std::time::Duration;
-use tokio::time::sleep;
+use harness::*;
 
 #[tokio::test]
-#[ignore] // Manual test - requires NATS and built binaries
+#[ignore] // Requires built binaries and NATS (via testcontainers)
 async fn test_deploy_and_serve_http() {
-    // Check prerequisites
-    let wasm_path = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../target/wasm32-wasip2/release/hello_axum.wasm"
+    // 1. Start NATS
+    let nats = NatsContainer::start(4222)
+        .await
+        .expect("Failed to start NATS");
+    let bus = nats.connect().await.expect("Failed to connect to NATS");
+
+    // Set up JetStream
+    bus.setup_jetstream()
+        .await
+        .expect("Failed to setup JetStream");
+
+    // 2. Start node
+    let node = NodeProcess::start("test-node-0", &nats.url, 8180, 9000)
+        .await
+        .expect("Failed to start node");
+
+    // 3. Find and upload hello-axum.wasm
+    let wasm_path = find_hello_axum_wasm().expect("hello_axum.wasm not found");
+    let sha256 = compute_sha256(&wasm_path).expect("Failed to compute SHA-256");
+    let size_bytes = std::fs::metadata(&wasm_path)
+        .expect("Failed to get file size")
+        .len();
+
+    eprintln!("Uploading artifact (SHA-256: {})", sha256);
+    upload_artifact(node.artifact_port, &wasm_path, &sha256)
+        .await
+        .expect("Failed to upload artifact");
+
+    // 4. Deploy the app
+    let app_id = "hello-axum:v1";
+    let artifact_url = format!(
+        "http://127.0.0.1:{}/artifacts/{}",
+        node.artifact_port, sha256
     );
 
-    if !std::path::Path::new(wasm_path).exists() {
-        panic!(
-            "hello_axum.wasm not found. Build it with:\n  \
-             cargo build --manifest-path apps/hello-axum/Cargo.toml --target wasm32-wasip2 --release"
-        );
-    }
+    let config = build_app_config(app_id, 100_000_000, 100, 2);
 
-    let node_binary = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../target/debug/wasm-node"
+    eprintln!("Deploying app: {}", app_id);
+    deploy_app(
+        &bus,
+        app_id,
+        artifact_url,
+        sha256.clone(),
+        size_bytes,
+        config,
+    )
+    .await
+    .expect("Failed to deploy app");
+
+    // 5. Add route
+    eprintln!("Adding route: test-app.local -> {}", app_id);
+    add_route(&bus, "test-app.local", app_id)
+        .await
+        .expect("Failed to add route");
+
+    // 6. Wait for app to be ready (cold start compilation)
+    eprintln!("Waiting for app to be ready (cold start)...");
+    wait_for_app_ready(node.proxy_port, "test-app.local", 30)
+        .await
+        .expect("App did not become ready");
+
+    // 7. Send HTTP request
+    eprintln!("Sending HTTP request to /");
+    let response = send_request(node.proxy_port, "test-app.local", "/")
+        .await
+        .expect("Failed to send request");
+
+    // 8. Verify response
+    assert_eq!(
+        response.status(),
+        200,
+        "Expected 200 OK, got {}",
+        response.status()
     );
 
-    if !std::path::Path::new(node_binary).exists() {
-        panic!(
-            "wasm-node binary not found. Build it with:\n  \
-             cargo build --bin wasm-node"
-        );
-    }
+    let body = response.text().await.expect("Failed to read response body");
+    assert!(
+        body.contains("Hello"),
+        "Expected response to contain 'Hello', got: {}",
+        body
+    );
 
-    // TODO: Start node as subprocess
-    // TODO: Load wasm binary and compute SHA-256
-    // TODO: Upload artifact via HTTP
-    // TODO: Publish DeployApp event via NATS
-    // TODO: Add route via NATS
-    // TODO: Wait for compilation
-    // TODO: Send HTTP request to proxy
-    // TODO: Verify response contains expected content
-    // TODO: Clean up
+    eprintln!("✓ Response: {}", body);
 
-    println!("E2E test infrastructure ready");
-    println!("Full implementation requires node subprocess management");
+    // 9. Test another endpoint
+    eprintln!("Sending HTTP request to /health");
+    let health_response = send_request(node.proxy_port, "test-app.local", "/health")
+        .await
+        .expect("Failed to send health request");
+
+    assert_eq!(health_response.status(), 200);
+
+    // Cleanup
+    node.stop().ok();
+
+    eprintln!("✅ test_deploy_and_serve_http PASSED");
 }
 
 #[test]
