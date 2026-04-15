@@ -41,7 +41,7 @@ impl ResourceLimiter for MemoryLimiter {
         current: usize,
         desired: usize,
         _maximum: Option<usize>,
-    ) -> Result<bool, anyhow::Error> {
+    ) -> Result<bool, wasmtime::Error> {
         if desired > self.max_memory {
             return Ok(false); // Refuse memory growth
         }
@@ -51,10 +51,10 @@ impl ResourceLimiter for MemoryLimiter {
 
     fn table_growing(
         &mut self,
-        _current: u32,
-        _desired: u32,
-        _maximum: Option<u32>,
-    ) -> Result<bool, anyhow::Error> {
+        _current: usize,
+        _desired: usize,
+        _maximum: Option<usize>,
+    ) -> Result<bool, wasmtime::Error> {
         Ok(true) // No table limit for now
     }
 }

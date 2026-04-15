@@ -33,8 +33,8 @@ tracing               = "0.1"
 tracing-subscriber    = { version = "0.3", features = ["env-filter", "json"] }
 
 # Wasm runtime
-wasmtime              = { version = "20.0" }
-wasmtime-wasi         = { version = "20.0" }
+wasmtime              = { version = "43.0.1" }
+wasmtime-wasi         = { version = "43.0.1" }
 
 # Proxy
 pingora               = "0.4"

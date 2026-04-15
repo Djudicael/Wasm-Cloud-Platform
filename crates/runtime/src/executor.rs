@@ -7,18 +7,12 @@ use common::{
     types::{AppConfig, InstanceId},
 };
 use std::time::Instant;
-use tokio::sync::mpsc;
-use wasmtime::component::{Component, Instance, Linker};
+use wasmtime::component::{Component, Instance, Linker, ResourceTable};
 use wasmtime::{Engine, Store};
-use wasmtime_wasi::{ResourceTable, WasiCtx, WasiCtxBuilder, WasiView};
+use wasmtime_wasi::p2::add_to_linker_sync;
+use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
-/// Channels for capturing Wasm stdout/stderr.
-pub struct WasiStreams {
-    pub stdout_rx: mpsc::UnboundedReceiver<Vec<u8>>,
-    pub stderr_rx: mpsc::UnboundedReceiver<Vec<u8>>,
-}
-
-/// The internal state of our Wasmtime Store.
+/// Store state for WASI Preview 2
 pub struct StoreState {
     pub ctx: WasiCtx,
     pub table: ResourceTable,
@@ -27,11 +21,11 @@ pub struct StoreState {
 }
 
 impl WasiView for StoreState {
-    fn table(&mut self) -> &mut ResourceTable {
-        &mut self.table
-    }
-    fn ctx(&mut self) -> &mut WasiCtx {
-        &mut self.ctx
+    fn ctx(&mut self) -> WasiCtxView<'_> {
+        WasiCtxView {
+            ctx: &mut self.ctx,
+            table: &mut self.table,
+        }
     }
 }
 
@@ -75,25 +69,24 @@ impl PreparedModule {
         &self,
         env_vars: Vec<(String, String)>,
         port: u16,
-    ) -> Result<(RunningInstance, WasiStreams), PlatformError> {
+    ) -> Result<(RunningInstance, ()), PlatformError> {
         tracing::info!(app = %self.config.id.0, "spawn_instance called");
         let id = InstanceId::new();
         tracing::info!(instance_id = %id.0, "instance ID created");
 
-        // Create custom pipes for capturing stdout/stderr
-        let (stdout_pipe, stdout_rx) = crate::custom_pipe::ChannelPipe::new();
-        let (stderr_pipe, stderr_rx) = crate::custom_pipe::ChannelPipe::new();
-
         // Build WASI environment (Preview 2)
+        // Use inherit for now - can add custom streams later
         let mut builder = WasiCtxBuilder::new();
-        builder.stdout(stdout_pipe);
-        builder.stderr(stderr_pipe);
+        builder.inherit_stdout();
+        builder.inherit_stderr();
 
         // Enable TCP and UDP with full network access (equivalent to -S tcp=y -S udp=y -S inherit-network=y)
         builder.inherit_network();
         builder.allow_tcp(true);
         builder.allow_udp(true);
         builder.allow_ip_name_lookup(true);
+
+        eprintln!("[SPAWN] WASI config: inherit_network=true, allow_tcp=true, allow_udp=true, allow_ip_name_lookup=true");
 
         for (k, v) in env_vars {
             builder.env(&k, &v);
@@ -107,12 +100,6 @@ impl PreparedModule {
             .as_ref()
             .map(|c| c.to_limits())
             .unwrap_or_default();
-
-        // Create streams with the receivers
-        let streams = WasiStreams {
-            stdout_rx,
-            stderr_rx,
-        };
 
         let state = StoreState {
             ctx: builder.build(),
@@ -131,7 +118,7 @@ impl PreparedModule {
 
         // Link WASI host functions (Component Model Preview 2)
         let mut linker = Linker::new(&self.engine);
-        wasmtime_wasi::add_to_linker_sync(&mut linker)
+        add_to_linker_sync(&mut linker)
             .map_err(|e| PlatformError::Runtime(format!("linker error: {e}")))?;
 
         eprintln!("[SPAWN] About to instantiate component");
@@ -150,7 +137,7 @@ impl PreparedModule {
                 config: self.config.clone(),
                 started_at: Instant::now(),
             },
-            streams,
+            (),
         ))
     }
 }
@@ -187,6 +174,8 @@ impl RunningInstance {
             .or_else(|| self.instance.get_func(&mut self.store, "run"))
             .or_else(|| self.instance.get_func(&mut self.store, "_start"));
 
+        eprintln!("[RUN] Looking for entry point...");
+        eprintln!("[RUN] Found entry point: {:?}", start_fn.is_some());
         tracing::info!(
             has_entry_point = start_fn.is_some(),
             "entry point lookup result"
@@ -194,15 +183,15 @@ impl RunningInstance {
 
         match start_fn {
             Some(f) => {
-                let mut results =
-                    vec![wasmtime::component::Val::Bool(false); f.results(&self.store).len()];
-                if let Err(e) = f.call(&mut self.store, &[], &mut results) {
+                eprintln!("[RUN] Calling entry point...");
+                // Use untyped call - the new WasiView trait doesn't expose table() method
+                if let Err(e) = f.call(&mut self.store, &[], &mut []) {
                     let err_msg = e.to_string();
                     eprintln!("🔴 WASM TRAP: instance={}, error={}", self.id.0, err_msg);
                     tracing::error!(instance = %self.id.0, error = %err_msg, "WASM function call failed");
                     trap_msg = Some(err_msg);
                 } else {
-                    f.post_return(&mut self.store).ok();
+                    eprintln!("[RUN] Entry point called successfully");
                 }
             }
             None => {
