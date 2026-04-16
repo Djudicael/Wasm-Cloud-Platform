@@ -149,7 +149,8 @@ impl Supervisor {
         let host_port = self.port_alloc.allocate()?;
         let addr = self.port_alloc.socket_addr(host_port);
 
-        // 4. Resolve env vars
+        // 4. Resolve env vars - note: we pass host_port, not wasm_bind_port
+        // The app MUST bind to the allocated port so the proxy can reach it
         let env_vars = (self.env_resolver)(&config, host_port);
 
         // 5. Spawn the Wasm instance
@@ -164,53 +165,14 @@ impl Supervisor {
         let instance_id_log = instance_id.clone();
 
         let task = tokio::task::spawn_blocking(move || {
-            let (mut instance, mut streams) = prepared_clone
-                .spawn_instance(env_vars, config_clone.wasm_bind_port)
+            // Use the allocated host_port, NOT wasm_bind_port.
+            // The app must bind to the allocated port so the proxy can connect.
+            let (mut instance, _streams) = prepared_clone
+                .spawn_instance(env_vars, host_port)
                 .expect("failed to spawn instance");
 
-            // Spawn tasks to drain stdout/stderr
-            if let Some(log_tx) = log_tx_clone {
-                let app_id_stdout = app_id_log.0.clone();
-                let instance_id_stdout = instance_id_log.0.to_string();
-                let log_tx_stdout = log_tx.clone();
-
-                std::thread::spawn(move || {
-                    while let Some(data) = streams.stdout_rx.blocking_recv() {
-                        for line in data.split(|&b| b == b'\n') {
-                            if !line.is_empty() {
-                                let record = metrics::WasmLogRecord::from_line(
-                                    &app_id_stdout,
-                                    &instance_id_stdout,
-                                    "stdout",
-                                    line,
-                                    None,
-                                );
-                                let _ = log_tx_stdout.blocking_send(record);
-                            }
-                        }
-                    }
-                });
-
-                let app_id_stderr = app_id_log.0.clone();
-                let instance_id_stderr = instance_id_log.0.to_string();
-
-                std::thread::spawn(move || {
-                    while let Some(data) = streams.stderr_rx.blocking_recv() {
-                        for line in data.split(|&b| b == b'\n') {
-                            if !line.is_empty() {
-                                let record = metrics::WasmLogRecord::from_line(
-                                    &app_id_stderr,
-                                    &instance_id_stderr,
-                                    "stderr",
-                                    line,
-                                    None,
-                                );
-                                let _ = log_tx.blocking_send(record);
-                            }
-                        }
-                    }
-                });
-            }
+            // Note: WASI stdout/stderr streams are handled via inherit_* in the runtime
+            // The eprintln! output goes to stderr of the wasm-node process
 
             // The run() call blocks until the Wasm module exits or is killed
             let stats = instance.run();

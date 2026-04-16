@@ -9,8 +9,16 @@ fn main() {
 
     let port = std::env::var("PORT").unwrap_or_else(|_| "8080".to_string());
     let addr = format!("0.0.0.0:{}", port);
-    let listener = TcpListener::bind(&addr).expect("failed to bind");
-    eprintln!("Listening on {}", addr);
+    eprintln!("[hello-axum] Attempting to bind to {}", addr);
+    let listener = match TcpListener::bind(&addr) {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("[hello-axum] Failed to bind to {}: {}", addr, e);
+            eprintln!("[hello-axum] Trying to bind to 0.0.0.0:8080 as fallback");
+            TcpListener::bind("0.0.0.0:8080").expect("failed to bind to fallback port")
+        }
+    };
+    eprintln!("[hello-axum] Listening on {}", addr);
 
     for stream in listener.incoming() {
         let mut stream = match stream {

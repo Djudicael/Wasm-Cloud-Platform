@@ -12,6 +12,94 @@ fn base_config() -> AppConfig {
 }
 
 #[test]
+fn test_list_hello_axum_exports() {
+    use wasmtime::component::ResourceTable;
+    use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
+
+    struct TestStoreState {
+        ctx: WasiCtx,
+        table: ResourceTable,
+    }
+
+    impl WasiView for TestStoreState {
+        fn ctx(&mut self) -> WasiCtxView<'_> {
+            WasiCtxView {
+                ctx: &mut self.ctx,
+                table: &mut self.table,
+            }
+        }
+    }
+
+    let wasm_bytes = std::fs::read(
+        "/mnt/d/dev/Wasm-Cloud-Platform/target/wasm32-wasip2/release/hello-axum.wasm",
+    )
+    .expect("Failed to read WASM file");
+
+    let runtime = WasmRuntime::new();
+    let component = wasmtime::component::Component::from_binary(&runtime.engine, &wasm_bytes)
+        .expect("Failed to parse component");
+
+    let mut linker = wasmtime::component::Linker::new(&runtime.engine);
+    wasmtime_wasi::p2::add_to_linker_sync(&mut linker).expect("Failed to add to linker");
+
+    let mut builder = WasiCtxBuilder::new();
+    builder.inherit_stdout();
+    builder.inherit_stderr();
+    builder.inherit_network();
+    builder.allow_tcp(true);
+    let state = TestStoreState {
+        ctx: builder.build(),
+        table: ResourceTable::new(),
+    };
+    let mut store = wasmtime::Store::new(&runtime.engine, state);
+
+    let instance = linker
+        .instantiate(&mut store, &component)
+        .expect("Failed to instantiate");
+
+    // Try to find the wasi:cli/run@0.2.6 interface
+    println!("\n=== Looking for wasi:cli/run@0.2.6 ===");
+    let interface_idx = instance.get_export_index(&mut store, None, "wasi:cli/run@0.2.6");
+    println!("Interface index: {:?}", interface_idx);
+
+    if let Some(idx) = interface_idx {
+        println!("\n=== Looking for run function inside interface ===");
+        let func_idx = instance.get_export_index(&mut store, Some(&idx), "run");
+        println!("Function index: {:?}", func_idx);
+
+        // Unwrap the Option and use the index directly
+        if let Some(func_export_idx) = func_idx {
+            // Try to get the function using the index directly
+            if let Some(func) = instance.get_func(&mut store, func_export_idx) {
+                println!("Found run function! Type: {:?}", func.ty(&store));
+
+                // Try typed call
+                match func.typed::<(), (Result<(), ()>,)>(&store) {
+                    Ok(typed) => {
+                        println!("Typed call created successfully!");
+                        match typed.call(&mut store, ()) {
+                            Ok((result,)) => {
+                                println!("Call succeeded, result: {:?}", result);
+                            }
+                            Err(e) => {
+                                println!("Call failed: {}", e);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        println!("Failed to create typed call: {}", e);
+                    }
+                }
+            } else {
+                println!("Could not get func from func_idx");
+            }
+        }
+    } else {
+        println!("Could not find wasi:cli/run@0.2.6 interface");
+    }
+}
+
+#[test]
 fn test_runtime_initialization() {
     let runtime = WasmRuntime::new();
     assert!(Arc::strong_count(&runtime.engine) >= 1);

@@ -95,7 +95,8 @@ impl ProxyHttp for WasmProxy {
         ctx.app_id = self.router.resolve(&host).await;
         if ctx.app_id.is_none() {
             tracing::warn!(host, "no route found for host");
-            // Will result in a 502 from Pingora
+            session.respond_error(502).await?;
+            return Ok(true);
         }
 
         // Check backpressure first (node at capacity)

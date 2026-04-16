@@ -160,21 +160,43 @@ impl RunningInstance {
         let start = Instant::now();
         let mut trap_msg = None;
 
-        // In Component Model, common entry points are `wasi:cli/run@0.2.x#run` or custom `run`
-        // Try multiple WASI versions as the version may vary between components
+        // WASI Preview 2 components export `wasi:cli/run@0.2.x` as an interface containing `run`.
+        // We need to navigate: interface -> function inside it.
         let wasi_versions = [
             "0.2.6", "0.2.5", "0.2.4", "0.2.3", "0.2.2", "0.2.1", "0.2.0",
         ];
-        let start_fn = wasi_versions
-            .iter()
-            .find_map(|ver| {
-                self.instance
-                    .get_func(&mut self.store, &format!("wasi:cli/run@{ver}#run"))
-            })
-            .or_else(|| self.instance.get_func(&mut self.store, "run"))
-            .or_else(|| self.instance.get_func(&mut self.store, "_start"));
 
-        eprintln!("[RUN] Looking for entry point...");
+        let start_fn = wasi_versions.iter().find_map(|ver| {
+            let interface_name = format!("wasi:cli/run@{ver}");
+
+            // Get the interface index
+            let interface_idx =
+                self.instance
+                    .get_export_index(&mut self.store, None, &interface_name);
+
+            eprintln!(
+                "[RUN] Checking {}: {:?}",
+                interface_name,
+                interface_idx.is_some()
+            );
+
+            let interface_idx = interface_idx?;
+
+            // Get the function index inside the interface
+            let func_idx =
+                self.instance
+                    .get_export_index(&mut self.store, Some(&interface_idx), "run");
+
+            eprintln!(
+                "[RUN]   run function inside {}: {:?}",
+                interface_name,
+                func_idx.is_some()
+            );
+
+            let func_idx = func_idx?;
+            self.instance.get_func(&mut self.store, func_idx)
+        });
+
         eprintln!("[RUN] Found entry point: {:?}", start_fn.is_some());
         tracing::info!(
             has_entry_point = start_fn.is_some(),
@@ -184,14 +206,39 @@ impl RunningInstance {
         match start_fn {
             Some(f) => {
                 eprintln!("[RUN] Calling entry point...");
-                // Use untyped call - the new WasiView trait doesn't expose table() method
-                if let Err(e) = f.call(&mut self.store, &[], &mut []) {
-                    let err_msg = e.to_string();
-                    eprintln!("🔴 WASM TRAP: instance={}, error={}", self.id.0, err_msg);
-                    tracing::error!(instance = %self.id.0, error = %err_msg, "WASM function call failed");
-                    trap_msg = Some(err_msg);
-                } else {
-                    eprintln!("[RUN] Entry point called successfully");
+                // The run function returns Result<(), ()> wrapped in a tuple
+                let typed = f.typed::<(), (Result<(), ()>,)>(&self.store);
+                match typed {
+                    Ok(t) => match t.call(&mut self.store, ()) {
+                        Ok((result,)) => match result {
+                            Ok(()) => {
+                                eprintln!("[RUN] Entry point completed successfully");
+                            }
+                            Err(()) => {
+                                let err = "WASM app exited with error".to_string();
+                                eprintln!("🔴 WASM ERROR: instance={}, exit code=1", self.id.0);
+                                trap_msg = Some(err);
+                            }
+                        },
+                        Err(e) => {
+                            let err_msg = e.to_string();
+                            eprintln!("🔴 WASM TRAP: instance={}, error={}", self.id.0, err_msg);
+                            tracing::error!(instance = %self.id.0, error = %err_msg, "WASM function call failed");
+                            trap_msg = Some(err_msg);
+                        }
+                    },
+                    Err(typed_err) => {
+                        // Fallback to untyped call
+                        eprintln!("[RUN] Typed call failed ({:?}), trying untyped", typed_err);
+                        if let Err(e) = f.call(&mut self.store, &[], &mut []) {
+                            let err_msg = e.to_string();
+                            eprintln!("🔴 WASM TRAP: instance={}, error={}", self.id.0, err_msg);
+                            tracing::error!(instance = %self.id.0, error = %err_msg, "WASM function call failed");
+                            trap_msg = Some(err_msg);
+                        } else {
+                            eprintln!("[RUN] Entry point called successfully");
+                        }
+                    }
                 }
             }
             None => {
