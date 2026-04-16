@@ -286,9 +286,9 @@ async fn main() -> anyhow::Result<()> {
     );
 
     let default_rate_config = proxy::rate_limiter::RateLimitConfig {
-        requests_per_second: 100,
-        burst_capacity: 100,
-        per_ip_limit: 10,
+        requests_per_second: 1000,
+        burst_capacity: 200,
+        per_ip_limit: 200,
     };
 
     // Initialize rate limit metrics (register with the same registry)
