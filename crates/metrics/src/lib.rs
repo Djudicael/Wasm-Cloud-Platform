@@ -2,6 +2,7 @@ pub mod collector;
 pub mod exporter;
 pub mod log_dispatcher;
 pub mod nats;
+pub mod recovery;
 pub mod tracing_setup;
 
 use serde::{Deserialize, Serialize};

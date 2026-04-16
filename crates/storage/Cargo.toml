@@ -16,6 +16,8 @@ axum = { workspace = true }
 sha2 = "0.10"
 tokio = { workspace = true, features = ["full"] }
 prometheus = { workspace = true }
+async-nats = { workspace = true }
+futures = "0.3"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

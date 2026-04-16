@@ -6,6 +6,7 @@ mod cmds {
     pub mod gc;
     pub mod list;
     pub mod logs;
+    pub mod node;
     pub mod platform;
     pub mod routes;
     pub mod secrets;
@@ -58,6 +59,32 @@ enum Commands {
     Platform(cmds::platform::PlatformArgs),
     /// Garbage collection management
     Gc(cmds::gc::GcArgs),
+    /// Node-level operations (health check, rebuild)
+    Node {
+        #[arg(long, help = "Target node ID (default: local node)")]
+        target: Option<String>,
+        #[command(subcommand)]
+        action: NodeAction,
+    },
+    /// Cluster-level health and operations
+    Cluster,
+}
+
+#[derive(Subcommand)]
+enum NodeAction {
+    /// Check node health status
+    Health,
+    /// Force a full node rebuild from cluster state
+    Rebuild,
+}
+
+impl NodeAction {
+    pub async fn run(&self, node_api: &str, http: &reqwest::Client) -> anyhow::Result<()> {
+        match self {
+            NodeAction::Health => cmds::node::health(node_api, http).await,
+            NodeAction::Rebuild => cmds::node::rebuild(node_api, http).await,
+        }
+    }
 }
 
 #[tokio::main]
@@ -81,6 +108,8 @@ async fn main() -> anyhow::Result<()> {
         Commands::Status => cmds::status::run(&cli.node_api, &http).await?,
         Commands::Platform(args) => cmds::platform::run(args, &bus, &cli.node_api, &http).await?,
         Commands::Gc(args) => cmds::gc::run(args, &bus, &cli.node_api, &http).await?,
+        Commands::Node { target: _, action } => action.run(&cli.node_api, &http).await?,
+        Commands::Cluster => cmds::node::cluster_health(&bus).await?,
     }
     Ok(())
 }

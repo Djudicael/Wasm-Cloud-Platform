@@ -35,3 +35,4 @@ proxy = { path = "../proxy" }
 messaging = { path = "../messaging" }
 metrics = { path = "../metrics" }
 secrets = { path = "../secrets" }
+async-nats = { workspace = true }

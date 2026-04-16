@@ -9,6 +9,7 @@ pub mod artifact_server;
 pub mod config;
 pub mod gc;
 pub mod gc_metrics;
+pub mod integrity;
 pub mod metrics;
 pub mod routes;
 pub mod secrets;

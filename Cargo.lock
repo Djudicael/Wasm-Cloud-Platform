@@ -2902,6 +2902,7 @@ name = "node"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-nats",
  "axum 0.7.9",
  "clap 4.6.0",
  "common",
@@ -4897,9 +4898,11 @@ checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
 name = "storage"
 version = "0.1.0"
 dependencies = [
+ "async-nats",
  "axum 0.7.9",
  "bincode 2.0.1",
  "common",
+ "futures",
  "libc",
  "prometheus",
  "redb",

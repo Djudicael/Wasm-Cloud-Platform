@@ -1,5 +1,6 @@
 pub mod events;
 pub mod publisher;
+pub mod reconnect;
 
 #[cfg(test)]
 mod tests;

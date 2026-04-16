@@ -1,11 +1,14 @@
 use clap::Parser;
+use messaging::reconnect::{NatsHealth, NatsHealthWatcher};
 use std::net::IpAddr;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::mpsc;
 use tracing::info;
 
 pub mod db_config;
 pub mod handlers;
+pub mod recovery;
 pub mod upgrade;
 
 #[derive(Parser, Debug)]
@@ -92,6 +95,25 @@ async fn main() -> anyhow::Result<()> {
     let store = storage::Store::open(std::path::Path::new(&args.db_path))?;
     info!(path = %args.db_path, "storage opened");
 
+    // Initialize recovery metrics early (needed for recovery mode detection)
+    let recovery_metrics = Arc::new(metrics::recovery::RecoveryMetrics::new());
+
+    // Detect recovery mode (L4: total loss detection)
+    let recovery_mode = recovery::detect_recovery_mode(&store, &args.node_id);
+    match recovery_mode {
+        recovery::RecoveryMode::Normal => {
+            info!("normal startup — existing state found");
+        }
+        recovery::RecoveryMode::FullRebuild => {
+            info!("recovery mode: full rebuild required — will request state from cluster");
+            recovery_metrics.set_recovery_mode(1);
+        }
+        recovery::RecoveryMode::CorruptionDetected => {
+            tracing::warn!("recovery mode: corruption detected — will attempt partial rebuild");
+            recovery_metrics.set_recovery_mode(2);
+        }
+    }
+
     let runtime = runtime::WasmRuntime::new();
     info!("Wasm runtime initialized (Cranelift AOT)");
 
@@ -113,6 +135,18 @@ async fn main() -> anyhow::Result<()> {
     info!(url = %args.nats_url, "NATS connected");
 
     bus.setup_jetstream().await?;
+
+    // Initialize NATS health tracking for L5 (partition) recovery
+    let nats_health = Arc::new(NatsHealth::new());
+
+    // Start NATS health watcher (updates last message timestamp periodically)
+    let _nats_watcher_handle = NatsHealthWatcher::new(
+        (*nats_health).clone(),
+        Duration::from_secs(5),
+    )
+    .start();
+
+    recovery::startup_integrity_check(&store, bus.client()).await;
 
     let (event_tx, _event_rx) = mpsc::channel::<messaging::events::Event>(1000);
 
@@ -326,6 +360,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Admin API with pgBouncer status endpoint and Prometheus metrics
     let pgbouncer_check_addr = args.pgbouncer_addr.clone();
+    let db_path_clone = args.db_path.clone();
     let admin_app = axum::Router::new()
         .route("/health", axum::routing::get(|| async { "OK" }))
         .route(
@@ -340,6 +375,34 @@ async fn main() -> anyhow::Result<()> {
                         "address": addr,
                         "available": available,
                     }))
+                }
+            }),
+        )
+        .route(
+            "/admin/rebuild",
+            axum::routing::post(move || {
+                let db_path = db_path_clone.clone();
+                async move {
+                    tracing::warn!("Admin rebuild requested — draining and restarting");
+                    match std::fs::remove_file(&db_path) {
+                        Ok(_) => (
+                            axum::http::StatusCode::OK,
+                            axum::Json(serde_json::json!({
+                                "status": "rebuild_initiated",
+                                "message": "Node will restart and rebuild from cluster state"
+                            })),
+                        ),
+                        Err(e) => {
+                            tracing::error!(error = %e, "failed to delete database for rebuild");
+                            (
+                                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                                axum::Json(serde_json::json!({
+                                    "status": "error",
+                                    "message": format!("Failed to delete database: {}", e)
+                                })),
+                            )
+                        }
+                    }
                 }
             }),
         )
