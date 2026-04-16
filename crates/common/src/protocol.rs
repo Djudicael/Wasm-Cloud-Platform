@@ -187,6 +187,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::const_is_empty)]
     fn test_binary_version_format() {
         // Verify BINARY_VERSION is set from Cargo.toml
         assert!(!BINARY_VERSION.is_empty());

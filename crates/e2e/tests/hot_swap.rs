@@ -2,7 +2,6 @@
 ///
 /// This test verifies that deploying a new version of an app while traffic is flowing
 /// results in ZERO failed requests.
-
 mod harness;
 
 use common::types::AppId;
@@ -26,20 +25,32 @@ async fn test_hot_swap_zero_downtime() {
         .await
         .expect("Failed to start NATS");
     let bus = nats.connect().await.expect("Failed to connect to NATS");
-    bus.setup_jetstream().await.expect("Failed to setup JetStream");
+    bus.setup_jetstream()
+        .await
+        .expect("Failed to setup JetStream");
 
     // 2. Start node
     let node = NodeProcess::start("test-node-hotswap", &nats.url, 8182, 9002)
         .await
         .expect("Failed to start node");
 
+    // Wait for artifact server to be ready
+    sleep(Duration::from_secs(2)).await;
+
     // 3. Deploy v1
     let wasm_path = find_hello_axum_wasm().expect("hello_axum.wasm not found");
     let sha256 = compute_sha256(&wasm_path).expect("Failed to compute SHA-256");
     let size_bytes = std::fs::metadata(&wasm_path).unwrap().len();
 
+    upload_artifact(node.artifact_port, &wasm_path, &sha256)
+        .await
+        .expect("Failed to upload artifact");
+
     let app_id_v1 = "hotswap-app:v1";
-    let artifact_url = format!("file://{}", wasm_path.display());
+    let artifact_url = format!(
+        "http://127.0.0.1:{}/artifacts/{}",
+        node.artifact_port, sha256
+    );
 
     deploy_app(
         &bus,

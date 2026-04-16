@@ -52,11 +52,10 @@ async fn test_fresh_node_publishes_node_joined() {
     bus.setup_jetstream().await.unwrap();
 
     // Subscribe to node_joined events
-    let mut join_events: Vec<Event> = Vec::new();
-    let join_bus = bus.clone();
+    let join_events: Vec<Event> = Vec::new();
 
     bus.subscribe("cluster.node_joined.>", move |event| {
-        let mut events = join_events.clone();
+        let _events = join_events.clone();
         async move {
             if let Event::NodeJoined {
                 node_id,

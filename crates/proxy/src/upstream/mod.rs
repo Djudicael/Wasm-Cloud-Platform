@@ -9,11 +9,13 @@ use std::{
 };
 use tokio::sync::RwLock;
 
+type UpstreamMap = HashMap<String, (AtomicUsize, Vec<SocketAddr>)>;
+
 /// Thread-safe registry of all live instance addresses, per app.
 #[derive(Clone, Default)]
 pub struct UpstreamRegistry {
     /// app_id → (round-robin counter, list of addresses)
-    pub inner: Arc<RwLock<HashMap<String, (AtomicUsize, Vec<SocketAddr>)>>>,
+    pub inner: Arc<RwLock<UpstreamMap>>,
 }
 
 impl UpstreamRegistry {

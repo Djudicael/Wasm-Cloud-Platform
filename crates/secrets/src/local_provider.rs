@@ -30,7 +30,7 @@ impl LocalSecretProvider {
         {
             let cache = self.dek_cache.read().await;
             if cache.contains_key(&app_id.0) {
-                let dek_bytes = cache[&app_id.0].as_bytes().clone();
+                let dek_bytes = *cache[&app_id.0].as_bytes();
                 return Ok(SymmetricKey::from_bytes(dek_bytes));
             }
         }

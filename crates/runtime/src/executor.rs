@@ -92,7 +92,8 @@ impl PreparedModule {
             builder.env(&k, &v);
         }
         // The app will bind to 0.0.0.0:<port>; the Supervisor maps this port.
-        builder.env("PORT", &port.to_string());
+        let port_str = port.to_string();
+        builder.env("PORT", &port_str);
 
         let extended_limits = self
             .config
@@ -143,6 +144,7 @@ impl PreparedModule {
 }
 
 /// An instantiated, running Wasm module.
+#[allow(dead_code)]
 pub struct RunningInstance {
     pub id: InstanceId,
     instance: Instance,

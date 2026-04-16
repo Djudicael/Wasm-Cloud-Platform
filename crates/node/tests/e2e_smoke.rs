@@ -181,7 +181,10 @@ async fn test_full_platform_e2e() {
     bus.publish(&route_event)
         .await
         .expect("Failed to publish route event");
-    println!("Route add event published to subject: {}", route_event.subject());
+    println!(
+        "Route add event published to subject: {}",
+        route_event.subject()
+    );
 
     // Give it a few seconds to compile Cranelift AOT and spin up
     println!("Waiting for app to be deployed and ready...");

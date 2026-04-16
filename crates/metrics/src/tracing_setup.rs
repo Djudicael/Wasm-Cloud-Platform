@@ -1,5 +1,4 @@
 // crates/metrics/src/tracing_setup.rs
-use opentelemetry::global;
 use opentelemetry_otlp::WithExportConfig;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 

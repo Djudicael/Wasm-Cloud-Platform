@@ -36,7 +36,10 @@ impl EventDispatcher {
                 expected_hash,
                 size_bytes,
             } => {
-                info!("🚀 Handling DeployApp for app_id: {}, url: {}", app_id.0, artifact_url);
+                info!(
+                    "🚀 Handling DeployApp for app_id: {}, url: {}",
+                    app_id.0, artifact_url
+                );
                 self.handle_deploy(app_id, config, artifact_url, expected_hash, size_bytes)
                     .await
             }
@@ -167,7 +170,7 @@ impl EventDispatcher {
         size_bytes: u64,
     ) {
         tracing::info!(app = %app_id.0, "handle_deploy invoked");
-        
+
         let sha256 = match &expected_hash {
             Some(h) => h.clone(),
             None => {

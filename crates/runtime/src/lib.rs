@@ -42,6 +42,6 @@ impl WasmRuntime {
         artifact_bytes: &[u8],
         config: AppConfig,
     ) -> Result<PreparedModule, PlatformError> {
-        PreparedModule::from_artifact((&*self.engine).clone(), artifact_bytes, config)
+        PreparedModule::from_artifact(self.engine.as_ref().clone(), artifact_bytes, config)
     }
 }

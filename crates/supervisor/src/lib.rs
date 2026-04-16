@@ -14,8 +14,8 @@ pub mod scaling;
 mod tests;
 
 use crate::{
-    env_resolver::EnvResolver, instance::ManagedInstance, network::LocalServiceRegistry,
-    pool::InstancePool, port_alloc::PortAllocator,
+    instance::ManagedInstance, network::LocalServiceRegistry, pool::InstancePool,
+    port_alloc::PortAllocator,
 };
 use common::{
     error::PlatformError,
@@ -34,6 +34,7 @@ use storage::Store;
 use tokio::sync::{mpsc, RwLock};
 use tracing::{error, info, warn};
 
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
 pub struct Supervisor {
     store: Store,
     runtime: WasmRuntime,
@@ -54,6 +55,7 @@ pub struct Supervisor {
 }
 
 impl Supervisor {
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
     pub fn new(
         store: Store,
         runtime: WasmRuntime,
@@ -154,15 +156,11 @@ impl Supervisor {
         let env_vars = (self.env_resolver)(&config, host_port);
 
         // 5. Spawn the Wasm instance
-        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let (shutdown_tx, _shutdown_rx) = tokio::sync::oneshot::channel::<()>();
         let app_id_clone = app_id.clone();
-        let config_clone = config.clone();
 
         let prepared_clone = prepared.clone();
         let instance_id = InstanceId(uuid::Uuid::new_v4());
-        let log_tx_clone = self.log_tx.clone();
-        let app_id_log = app_id.clone();
-        let instance_id_log = instance_id.clone();
 
         let task = tokio::task::spawn_blocking(move || {
             // Use the allocated host_port, NOT wasm_bind_port.
@@ -582,7 +580,7 @@ impl Supervisor {
 
     /// Gracefully shutdown all instances across all apps.
     /// Used during node shutdown (SIGTERM).
-    pub async fn shutdown_all(&self, timeout: Duration) {
+    pub async fn shutdown_all(&self, _timeout: Duration) {
         tracing::info!("shutting down all instances");
 
         let app_ids = self.list_app_ids().await;

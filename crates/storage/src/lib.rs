@@ -1,3 +1,5 @@
+#![allow(clippy::result_large_err)]
+
 use redb::Database;
 use std::path::Path;
 use std::sync::Arc;
@@ -62,7 +64,7 @@ impl Store {
             };
             let backup_path = path.with_extension(format!("redb.v{current_version}.bak"));
             if !backup_path.exists() {
-                std::fs::copy(path, &backup_path).map_err(|e| redb::Error::Io(e))?;
+                std::fs::copy(path, &backup_path).map_err(redb::Error::Io)?;
                 tracing::warn!(
                     backup = %backup_path.display(),
                     from_version = current_version,

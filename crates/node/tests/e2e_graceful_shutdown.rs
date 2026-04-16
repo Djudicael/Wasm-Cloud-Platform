@@ -6,9 +6,8 @@ use sha2::{Digest, Sha256};
 use std::env;
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
+use std::process::{Command, Stdio};
 use std::time::Duration;
-use testcontainers::{core::ContainerPort, runners::AsyncRunner, GenericImage, ImageExt};
 use tokio::time::sleep;
 
 /// End-to-end test demonstrating graceful shutdown with the /_platform/shutdown endpoint

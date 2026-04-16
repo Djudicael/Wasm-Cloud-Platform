@@ -31,6 +31,7 @@ pub fn setup_container_runtime() {
 }
 
 /// A running NATS container
+#[allow(dead_code)]
 pub struct NatsContainer {
     pub url: String,
     pub port: u16,
@@ -71,6 +72,7 @@ impl NatsContainer {
     }
 }
 
+#[allow(dead_code)]
 impl FileServer {
     /// Start embedded HTTP file server using tokio
     pub async fn start(port: u16, wasm_path: &Path) -> Result<Self, Box<dyn std::error::Error>> {
@@ -82,14 +84,17 @@ impl FileServer {
         let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
 
         tokio::spawn(async move {
-            use axum::{routing::get, Router, response::IntoResponse, http::StatusCode};
+            use axum::{response::IntoResponse, routing::get, Router};
 
             let wasm_data = wasm_bytes.clone();
             let filename_clone = wasm_filename.clone();
 
-            let app = Router::new().route(&format!("/{}", filename_clone), get(move || async move {
-                ([("content-type", "application/wasm")], wasm_data.clone()).into_response()
-            }));
+            let app = Router::new().route(
+                &format!("/{}", filename_clone),
+                get(move || async move {
+                    ([("content-type", "application/wasm")], wasm_data.clone()).into_response()
+                }),
+            );
 
             let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
             axum::serve(listener, app).await.unwrap();
@@ -111,6 +116,7 @@ impl FileServer {
 }
 
 /// A running wasm-node process
+#[allow(dead_code)]
 pub struct NodeProcess {
     pub node_id: String,
     pub proxy_port: u16,
@@ -147,6 +153,10 @@ impl NodeProcess {
             .arg(proxy_port.to_string())
             .arg("--admin-port")
             .arg("9190")
+            .arg("--artifact-port")
+            .arg(artifact_port.to_string())
+            .arg("--db-path")
+            .arg(&db_path)
             .env("RUST_LOG", "debug")
             .stdout(Stdio::inherit())
             .stderr(Stdio::inherit())
@@ -178,13 +188,14 @@ impl NodeProcess {
     }
 
     /// Start a node with an existing database (for restart tests)
+    #[allow(dead_code)]
     pub async fn start_with_db(
         node_id: &str,
         nats_url: &str,
         proxy_port: u16,
         artifact_port: u16,
         db_path: PathBuf,
-        temp_dir: TempDir,
+        _temp_dir: TempDir,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let node_binary = find_node_binary()?;
 
@@ -199,11 +210,12 @@ impl NodeProcess {
             .arg(proxy_port.to_string())
             .arg("--db-path")
             .arg(&db_path)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
+            .env("RUST_LOG", "debug")
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
             .spawn()?;
 
-        sleep(Duration::from_secs(8)).await;
+        sleep(Duration::from_secs(12)).await;
         eprintln!("✓ Node restart complete");
 
         Ok(NodeProcess {
@@ -211,12 +223,13 @@ impl NodeProcess {
             proxy_port,
             artifact_port,
             db_path,
-            _temp_dir: temp_dir,
+            _temp_dir,
             process,
         })
     }
 
     /// Extract temp dir and db path (for restart tests)
+    #[allow(dead_code)]
     pub fn extract_db(mut self) -> (PathBuf, TempDir) {
         // Kill process first to avoid Drop interference
         let _ = self.process.kill();
@@ -284,7 +297,8 @@ pub fn find_hello_axum_wasm() -> Result<PathBuf, Box<dyn std::error::Error>> {
         true
     } else {
         let wasm_modified = std::fs::metadata(&wasm_path)?.modified()?;
-        let main_modified = std::fs::metadata(workspace_root.join("apps/hello-axum/src/main.rs"))?.modified()?;
+        let main_modified =
+            std::fs::metadata(workspace_root.join("apps/hello-axum/src/main.rs"))?.modified()?;
         wasm_modified < main_modified
     };
 
@@ -295,8 +309,10 @@ pub fn find_hello_axum_wasm() -> Result<PathBuf, Box<dyn std::error::Error>> {
             .args([
                 "build",
                 "--release",
-                "--target", "wasm32-wasip2",
-                "-p", "hello-axum"
+                "--target",
+                "wasm32-wasip2",
+                "-p",
+                "hello-axum",
             ])
             .current_dir(workspace_root)
             .output()?;
@@ -326,6 +342,7 @@ pub fn compute_sha256(path: &Path) -> Result<String, Box<dyn std::error::Error>>
 }
 
 /// Upload a WASM artifact to a node's artifact server
+#[allow(dead_code)]
 pub async fn upload_artifact(
     artifact_port: u16,
     wasm_path: &Path,

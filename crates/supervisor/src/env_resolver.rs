@@ -2,6 +2,7 @@ use common::{error::PlatformError, types::AppConfig};
 use secrets::SecretProvider;
 use storage::Store;
 
+#[allow(dead_code)]
 pub struct EnvResolver<S: SecretProvider> {
     store: Store,
     secret_provider: S,

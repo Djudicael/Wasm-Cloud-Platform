@@ -1,7 +1,6 @@
 /// Route management tests
 ///
 /// Tests for adding/removing routes and verifying traffic routing
-
 mod harness;
 
 use harness::*;
@@ -24,13 +23,23 @@ async fn test_route_add_and_serve() {
         .await
         .expect("Failed to start node");
 
-    // 3. Deploy app
+    // Wait for artifact server to be ready
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+    // 3. Deploy app - upload to artifact server first
     let wasm_path = find_hello_axum_wasm().expect("hello_axum.wasm not found");
     let sha256 = compute_sha256(&wasm_path).expect("Failed to compute SHA-256");
     let size_bytes = std::fs::metadata(&wasm_path).unwrap().len();
 
+    upload_artifact(node.artifact_port, &wasm_path, &sha256)
+        .await
+        .expect("Failed to upload artifact");
+
     let app_id = "route-test:v1";
-    let artifact_url = format!("file://{}", wasm_path.display());
+    let artifact_url = format!(
+        "http://127.0.0.1:{}/artifacts/{}",
+        node.artifact_port, sha256
+    );
 
     deploy_app(
         &bus,

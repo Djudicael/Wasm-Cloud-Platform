@@ -115,8 +115,7 @@ impl ProxyHttp for WasmProxy {
             // Extract source IP from session
             let source_ip = session
                 .client_addr()
-                .map(|addr| addr.as_inet().map(|inet| inet.ip()))
-                .flatten()
+                .and_then(|addr| addr.as_inet().map(|inet| inet.ip()))
                 .unwrap_or_else(|| std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)));
 
             match self.rate_limiter.check_request(&app_id.0, source_ip).await {
@@ -147,7 +146,7 @@ impl ProxyHttp for WasmProxy {
     /// Step 2: Select the upstream (with cold-start if needed).
     async fn upstream_peer(
         &self,
-        session: &mut Session,
+        _session: &mut Session,
         ctx: &mut Self::CTX,
     ) -> PingoraResult<Box<HttpPeer>> {
         let app_id = ctx

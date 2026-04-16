@@ -1,5 +1,5 @@
 #[cfg(test)]
-mod tests {
+mod test_helpers {
     use crate::{events::Event, NatsBus};
     use common::types::{AppConfig, AppId};
     use std::time::Duration;

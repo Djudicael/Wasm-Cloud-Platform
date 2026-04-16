@@ -1,5 +1,5 @@
 #[cfg(test)]
-mod tests {
+mod test_helpers {
     use crate::{collector::MetricsCollector, exporter::Metrics, ExecutionSample};
     use std::sync::Arc;
     use storage::Store;
@@ -99,6 +99,5 @@ mod tests {
 
         // If we reach this point, the collector successfully dropped excess samples
         // without blocking the thread.
-        assert!(true);
     }
 }

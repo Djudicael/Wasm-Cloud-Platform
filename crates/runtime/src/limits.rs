@@ -38,7 +38,7 @@ impl MemoryLimiter {
 impl ResourceLimiter for MemoryLimiter {
     fn memory_growing(
         &mut self,
-        current: usize,
+        _current: usize,
         desired: usize,
         _maximum: Option<usize>,
     ) -> Result<bool, wasmtime::Error> {

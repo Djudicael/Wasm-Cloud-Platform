@@ -36,10 +36,7 @@ fn main() {
         }
 
         // Parse method and path
-        let path = request_line
-            .split_whitespace()
-            .nth(1)
-            .unwrap_or("/");
+        let path = request_line.split_whitespace().nth(1).unwrap_or("/");
 
         let (status, content_type, body) = route(path);
 

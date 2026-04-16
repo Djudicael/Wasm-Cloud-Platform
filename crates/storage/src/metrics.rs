@@ -66,7 +66,13 @@ impl Store {
         {
             let (k, v) = entry.map_err(|e| PlatformError::Storage(e.to_string()))?;
             if k.value().starts_with(&prefix) {
-                let ts: u64 = k.value().split(':').last().unwrap().parse().unwrap_or(0);
+                let ts: u64 = k
+                    .value()
+                    .split(':')
+                    .next_back()
+                    .unwrap()
+                    .parse()
+                    .unwrap_or(0);
                 if ts >= cutoff {
                     let bucket: MetricBucket = serde_json::from_str(v.value())
                         .map_err(|e| PlatformError::Storage(e.to_string()))?;
@@ -101,7 +107,7 @@ impl Store {
                 .filter(|(k, _)| {
                     k.value()
                         .split(':')
-                        .last()
+                        .next_back()
                         .and_then(|ts| ts.parse::<u64>().ok())
                         .map(|ts| ts < cutoff)
                         .unwrap_or(false)

@@ -11,11 +11,7 @@ pub async fn run(node_api: &str, http: &reqwest::Client) -> Result<()> {
                 println!("{}", "Deployed applications:".bold());
                 println!("{}", serde_json::to_string_pretty(&apps)?);
             } else {
-                println!(
-                    "{} Node API returned status {}",
-                    "✗".red(),
-                    resp.status()
-                );
+                println!("{} Node API returned status {}", "✗".red(), resp.status());
             }
         }
         Err(e) => {
@@ -34,11 +30,7 @@ pub async fn instances(node_api: &str, http: &reqwest::Client) -> Result<()> {
                 println!("{}", "Running instances:".bold());
                 println!("{}", serde_json::to_string_pretty(&data)?);
             } else {
-                println!(
-                    "{} Node API returned status {}",
-                    "✗".red(),
-                    resp.status()
-                );
+                println!("{} Node API returned status {}", "✗".red(), resp.status());
             }
         }
         Err(e) => {

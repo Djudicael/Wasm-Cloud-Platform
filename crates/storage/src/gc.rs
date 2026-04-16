@@ -9,6 +9,7 @@ use tracing::{debug, info, warn};
 
 /// Metadata about an artifact version, used for GC decisions.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct VersionEntry {
     /// Full key in redb, e.g. "api-users:v3"
     key: String,
@@ -714,7 +715,7 @@ mod tests {
     #[test]
     fn test_version_sorting() {
         let mut versions = vec!["v10", "v1", "v2", "v100"];
-        versions.sort_by(|a, b| version_sort_key(a).cmp(&version_sort_key(b)));
+        versions.sort_by_key(|a| version_sort_key(a));
         assert_eq!(versions, vec!["v1", "v2", "v10", "v100"]);
     }
 }

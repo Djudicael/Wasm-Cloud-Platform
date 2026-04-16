@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 use storage::{metrics::MetricBucket, Store};
 use tokio::sync::mpsc;
-use tracing::{error, info};
+use tracing::error;
 
 const CHANNEL_CAPACITY: usize = 10_000;
 
@@ -22,7 +22,7 @@ impl MetricsCollector {
 
     /// Record an execution sample. Non-blocking (drops if channel is full).
     pub fn record(&self, sample: ExecutionSample) {
-        if let Err(_) = self.tx.try_send(sample) {
+        if self.tx.try_send(sample).is_err() {
             tracing::warn!("metrics channel full, dropping sample");
         }
     }

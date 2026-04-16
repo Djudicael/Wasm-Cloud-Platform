@@ -9,7 +9,7 @@ pub mod service;
 pub mod tls;
 pub mod upstream;
 
-use pingora::{server::Server, services::listening::Service};
+use pingora::server::Server;
 use pingora_proxy::http_proxy_service;
 use service::WasmProxy;
 
