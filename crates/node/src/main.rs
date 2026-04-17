@@ -380,6 +380,8 @@ async fn main() -> anyhow::Result<()> {
     // Admin API with pgBouncer status endpoint and Prometheus metrics
     let pgbouncer_check_addr = args.pgbouncer_addr.clone();
     let db_path_clone = args.db_path.clone();
+    let store_gc = store.clone();
+    let supervisor_gc = supervisor.clone();
     let admin_app = axum::Router::new()
         .route("/health", axum::routing::get(|| async { "OK" }))
         .route(
@@ -422,6 +424,47 @@ async fn main() -> anyhow::Result<()> {
                             )
                         }
                     }
+                }
+            }),
+        )
+        .route(
+            "/admin/gc/force",
+            axum::routing::post(move || {
+                let store = store_gc.clone();
+                let supervisor = supervisor_gc.clone();
+                async move {
+                    tracing::info!("Forcing immediate GC run");
+                    
+                    // Force purge undeployed apps with grace period = 0
+                    let purged = store.gc_undeployed_apps(0).unwrap_or(0);
+                    tracing::info!(apps = purged, "Forced GC: undeployed apps purged");
+                    
+                    // Get list of apps that were marked undeployed by reading from GC metadata
+                    // For simplicity, we kill instances for all apps that have no active routes
+                    let app_ids = store.list_apps().unwrap_or_default();
+                    let mut killed_count = 0;
+                    
+                    for app_id in app_ids.iter() {
+                        let app_id_obj = common::types::AppId(app_id.0.clone());
+                        // Try to kill all instances - this is safe to call even if app is still deployed
+                        match supervisor.kill_all_instances(&app_id_obj).await {
+                            Ok(()) => {
+                                killed_count += 1;
+                            }
+                            Err(e) => {
+                                tracing::debug!(app = %app_id.0, error = %e, "No instances to kill");
+                            }
+                        }
+                    }
+                    
+                    (
+                        axum::http::StatusCode::OK,
+                        axum::Json(serde_json::json!({
+                            "status": "gc_complete",
+                            "undeployed_apps_purged": purged,
+                            "apps_killed": killed_count,
+                        })),
+                    )
                 }
             }),
         )

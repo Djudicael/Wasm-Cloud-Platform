@@ -121,18 +121,31 @@ pub struct NodeProcess {
     pub node_id: String,
     pub proxy_port: u16,
     pub artifact_port: u16,
+    pub admin_port: u16,
     pub db_path: PathBuf,
     _temp_dir: TempDir,
     process: Child,
 }
 
 impl NodeProcess {
-    /// Start a wasm-node process
+    #[allow(dead_code)]
+    /// Start a wasm-node process (use start_with_admin for custom admin port)
     pub async fn start(
         node_id: &str,
         nats_url: &str,
         proxy_port: u16,
         artifact_port: u16,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::start_with_admin(node_id, nats_url, proxy_port, artifact_port, 9190).await
+    }
+
+    /// Start a wasm-node process with custom admin port
+    pub async fn start_with_admin(
+        node_id: &str,
+        nats_url: &str,
+        proxy_port: u16,
+        artifact_port: u16,
+        admin_port: u16,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let temp_dir = tempfile::tempdir()?;
         let db_path = temp_dir.path().join("node.db");
@@ -140,8 +153,8 @@ impl NodeProcess {
         let node_binary = find_node_binary()?;
 
         eprintln!(
-            "Starting node {} (proxy:{}, artifact:{})",
-            node_id, proxy_port, artifact_port
+            "Starting node {} (proxy:{}, artifact:{}, admin:{})",
+            node_id, proxy_port, artifact_port, admin_port
         );
 
         let mut process = Command::new(&node_binary)
@@ -152,7 +165,7 @@ impl NodeProcess {
             .arg("--proxy-port")
             .arg(proxy_port.to_string())
             .arg("--admin-port")
-            .arg("9190")
+            .arg(admin_port.to_string())
             .arg("--artifact-port")
             .arg(artifact_port.to_string())
             .arg("--db-path")
@@ -181,6 +194,7 @@ impl NodeProcess {
             node_id: node_id.to_string(),
             proxy_port,
             artifact_port,
+            admin_port,
             db_path,
             _temp_dir: temp_dir,
             process,
@@ -197,6 +211,20 @@ impl NodeProcess {
         db_path: PathBuf,
         _temp_dir: TempDir,
     ) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::start_with_db_and_admin(node_id, nats_url, proxy_port, artifact_port, 9190, db_path, _temp_dir).await
+    }
+
+    /// Start a node with existing database and custom admin port
+    #[allow(dead_code)]
+    pub async fn start_with_db_and_admin(
+        node_id: &str,
+        nats_url: &str,
+        proxy_port: u16,
+        artifact_port: u16,
+        admin_port: u16,
+        db_path: PathBuf,
+        _temp_dir: TempDir,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let node_binary = find_node_binary()?;
 
         eprintln!("Restarting node {} with existing DB", node_id);
@@ -208,6 +236,10 @@ impl NodeProcess {
             .arg(nats_url)
             .arg("--proxy-port")
             .arg(proxy_port.to_string())
+            .arg("--admin-port")
+            .arg(admin_port.to_string())
+            .arg("--artifact-port")
+            .arg(artifact_port.to_string())
             .arg("--db-path")
             .arg(&db_path)
             .env("RUST_LOG", "debug")
@@ -222,6 +254,7 @@ impl NodeProcess {
             node_id: node_id.to_string(),
             proxy_port,
             artifact_port,
+            admin_port,
             db_path,
             _temp_dir,
             process,
@@ -451,6 +484,24 @@ pub async fn add_route(
 
     // Wait for route to be added
     sleep(Duration::from_millis(200)).await;
+
+    Ok(())
+}
+
+/// Remove an app via NATS (triggers instance shutdown and billing record creation)
+#[allow(dead_code)]
+pub async fn remove_app(
+    bus: &NatsBus,
+    app_id: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let event = Event::RemoveApp {
+        app_id: common::types::AppId(app_id.to_string()),
+    };
+
+    bus.publish(&event).await?;
+
+    // Wait for app to be removed
+    sleep(Duration::from_secs(1)).await;
 
     Ok(())
 }

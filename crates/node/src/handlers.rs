@@ -251,14 +251,16 @@ impl EventDispatcher {
     async fn handle_remove(&self, app_id: AppId) {
         info!(app = %app_id.0, "removing app");
 
+        // Kill all running instances first (this creates billing records)
+        if let Err(e) = self.supervisor.kill_all_instances(&app_id).await {
+            error!(app = %app_id.0, error = %e, "failed to kill instances");
+        }
+
         // Mark app as undeployed - starts grace period
         // Actual deletion happens after grace period expires in GC loop
         if let Err(e) = self.store.mark_undeployed(&app_id.0) {
             error!(app = %app_id.0, error = %e, "failed to mark app as undeployed");
         }
-
-        // Stop all instances first
-        // (supervisor.kill_all_for(&app_id) — not shown here)
 
         // Note: We don't immediately delete artifacts/configs anymore
         // The GC loop will purge them after the grace period

@@ -334,13 +334,8 @@ impl Supervisor {
         app_id: &AppId,
         id: &InstanceId,
     ) -> Result<(), PlatformError> {
-        let mut pools = self.pools.write().await;
-        let pool = pools
-            .get_mut(&app_id.0)
-            .ok_or_else(|| PlatformError::AppNotFound(app_id.0.clone()))?;
-
-        self.kill_instance_internal(pool, app_id, id).await;
-        Ok(())
+        self.kill_instance_gracefully(app_id, id, Duration::ZERO, Duration::from_secs(2))
+            .await
     }
 
     /// Gracefully shutdown an instance with drain timeout.
@@ -583,17 +578,20 @@ impl Supervisor {
         Ok(())
     }
 
-    /// Kill all instances of an app immediately.
+    /// Kill all instances of an app immediately and record billing.
     pub async fn kill_all_instances(&self, app_id: &AppId) -> Result<(), PlatformError> {
-        let mut pools = self.pools.write().await;
-        if let Some(pool) = pools.get_mut(&app_id.0) {
-            let instances = std::mem::take(&mut pool.instances);
-            for inst in instances {
-                if let InstanceState::Ready { addr: _ } | InstanceState::Starting = &inst.state {
-                    // Already removed from upstream above in drain_app
-                    self.port_alloc.release(inst.addr.port());
-                }
-                inst.shutdown_tx.send(()).ok();
+        let instance_ids: Vec<_> = {
+            let mut pools = self.pools.write().await;
+            if let Some(pool) = pools.get_mut(&app_id.0) {
+                pool.instances.iter().map(|i| i.id.clone()).collect()
+            } else {
+                Vec::new()
+            }
+        };
+
+        for id in instance_ids {
+            if let Err(e) = self.kill_instance(app_id, &id).await {
+                tracing::warn!(app = %app_id.0, instance = %id.0, error = %e, "failed to kill instance");
             }
         }
         Ok(())
