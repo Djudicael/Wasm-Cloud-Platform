@@ -119,7 +119,12 @@ impl EventDispatcher {
                     error!(app = %app_id.0, error = %e, "config update failed");
                 }
             }
-            Event::NodeLoad { node_id, cpu_percent: _, fuel_budget_used_percent, active_instances } => {
+            Event::NodeLoad {
+                node_id,
+                cpu_percent: _,
+                fuel_budget_used_percent,
+                active_instances,
+            } => {
                 // Update node table for cross-node routing decisions
                 use proxy::node_table::NodeEntry;
                 let entry = NodeEntry {
@@ -134,7 +139,10 @@ impl EventDispatcher {
                 // Update DNS webhook with node IPs for webhook notifications
                 if let Some(ref webhook) = self.dns_webhook {
                     let nodes = self.node_table.nodes.read().await;
-                    let ips: Vec<String> = nodes.values().map(|n| n.supervisor_addr.ip().to_string()).collect();
+                    let ips: Vec<String> = nodes
+                        .values()
+                        .map(|n| n.supervisor_addr.ip().to_string())
+                        .collect();
                     drop(nodes);
                     webhook.set_node_ips(ips).await;
                 }

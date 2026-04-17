@@ -38,6 +38,14 @@ pub struct NatsContainer {
     _container: testcontainers::ContainerAsync<GenericImage>,
 }
 
+/// A running PostgreSQL container
+#[allow(dead_code)]
+pub struct PostgresContainer {
+    pub url: String,
+    pub port: u16,
+    _container: testcontainers::ContainerAsync<GenericImage>,
+}
+
 /// A simple HTTP file server for serving WASM artifacts
 pub struct FileServer {
     pub url: String,
@@ -69,6 +77,36 @@ impl NatsContainer {
     /// Connect to this NATS instance
     pub async fn connect(&self) -> Result<NatsBus, Box<dyn std::error::Error>> {
         Ok(NatsBus::connect(&self.url).await?)
+    }
+}
+
+#[allow(dead_code)]
+impl PostgresContainer {
+    /// Start a PostgreSQL container
+    pub async fn start(port: u16, password: &str) -> Result<Self, Box<dyn std::error::Error>> {
+        setup_container_runtime();
+
+        let image = GenericImage::new("postgres", "17-alpine")
+            .with_mapped_port(port, ContainerPort::Tcp(5432))
+            .with_env_var("POSTGRES_PASSWORD", password)
+            .with_env_var("POSTGRES_USER", "postgres")
+            .with_env_var("POSTGRES_DB", "postgres");
+
+        let container = image.start().await?;
+
+        // Wait for PostgreSQL to be ready
+        sleep(Duration::from_secs(3)).await;
+
+        let url = format!(
+            "postgres://postgres:{}@127.0.0.1:{}/postgres",
+            password, port
+        );
+
+        Ok(PostgresContainer {
+            url,
+            port,
+            _container: container,
+        })
     }
 }
 
@@ -329,6 +367,7 @@ fn find_node_binary() -> Result<PathBuf, Box<dyn std::error::Error>> {
 }
 
 /// Helper to find the hello-axum.wasm test app
+#[allow(dead_code)]
 pub fn find_hello_axum_wasm() -> Result<PathBuf, Box<dyn std::error::Error>> {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
     let workspace_root = Path::new(manifest_dir).parent().unwrap().parent().unwrap();
@@ -413,6 +452,54 @@ pub fn find_echo_service_wasm() -> Result<PathBuf, Box<dyn std::error::Error>> {
             let stderr = String::from_utf8_lossy(&output.stderr);
             eprintln!("Build error: {}", stderr);
             return Err(format!("Failed to build echo-service: {}", stderr).into());
+        }
+
+        eprintln!("Build stdout: {}", String::from_utf8_lossy(&output.stdout));
+    }
+
+    if wasm_path.exists() {
+        Ok(wasm_path)
+    } else {
+        Err("Build succeeded but wasm file not found".into())
+    }
+}
+
+/// Helper to find the postgres-app.wasm test app
+#[allow(dead_code)]
+pub fn find_postgres_app_wasm() -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let workspace_root = Path::new(manifest_dir).parent().unwrap().parent().unwrap();
+
+    let wasm_path = workspace_root.join("target/wasm32-wasip2/release/postgres-app.wasm");
+
+    let needs_rebuild = if !wasm_path.exists() {
+        true
+    } else {
+        let wasm_modified = std::fs::metadata(&wasm_path)?.modified()?;
+        let main_modified =
+            std::fs::metadata(workspace_root.join("apps/postgres-app/src/main.rs"))?.modified()?;
+        wasm_modified < main_modified
+    };
+
+    if needs_rebuild {
+        eprintln!("⚠️ Building postgres-app.wasm...");
+
+        let output = std::process::Command::new("cargo")
+            .args([
+                "build",
+                "--release",
+                "--target",
+                "wasm32-wasip2",
+                "-p",
+                "postgres-app",
+            ])
+            .current_dir(workspace_root)
+            .output()?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            eprintln!("Build error: {}", stderr);
+            return Err(format!("Failed to build postgres-app: {}", stderr).into());
         }
 
         eprintln!("Build stdout: {}", String::from_utf8_lossy(&output.stdout));

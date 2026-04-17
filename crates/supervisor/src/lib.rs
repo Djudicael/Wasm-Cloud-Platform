@@ -177,11 +177,26 @@ impl Supervisor {
         // 4b. Inject service discovery env vars for other running apps
         // Use 127.0.0.1 for local service discovery (apps bind to 0.0.0.0 but external connections must use loopback)
         let all_services = self.service_registry.get_all_services().await;
-        for (service_name, addrs) in all_services {
+        tracing::info!(
+            "Service discovery: found {} services for app {}",
+            all_services.len(),
+            app_id.0
+        );
+        for (service_full_name, addrs) in &all_services {
+            // Skip self (don't inject env vars for own service)
+            if service_full_name == &app_id.0 {
+                continue;
+            }
+            // Extract app name without version (e.g., "echo-service:v1" -> "echo-service")
+            let app_name = service_full_name
+                .split(':')
+                .next()
+                .unwrap_or(service_full_name);
             if let Some(addr) = addrs.first() {
-                let key = format!("{}_SERVICE_URL", service_name.to_uppercase().replace('-', "_"));
+                let key = format!("{}_SERVICE_URL", app_name.to_uppercase().replace('-', "_"));
                 // Use 127.0.0.1 instead of 0.0.0.0 for service discovery
                 let url = format!("http://127.0.0.1:{}", addr.port());
+                tracing::info!("Injecting {}={} into app {}", key, url, app_id.0);
                 env_vars.retain(|(k, _)| k != &key);
                 env_vars.push((key, url));
             }

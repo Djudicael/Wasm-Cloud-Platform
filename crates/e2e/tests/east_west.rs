@@ -146,9 +146,15 @@ async fn test_east_west_traffic() {
     // 7. Test East-West traffic: hello-axum calls echo-service via /call-echo
     // This verifies service discovery works - platform injects ECHO_SERVICE_URL
     eprintln!("Testing East-West traffic: hello-axum -> /call-echo -> echo-service");
+
+    // Give extra time for service discovery to propagate
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
     let response = send_request(node.proxy_port, "hello.local", "/call-echo")
         .await
         .expect("Failed to send request");
+
+    eprintln!("Response status: {}", response.status());
 
     assert_eq!(
         response.status(),

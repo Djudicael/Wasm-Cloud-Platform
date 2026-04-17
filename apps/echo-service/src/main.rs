@@ -7,8 +7,7 @@ fn main() {
     use std::net::TcpListener;
 
     let port = std::env::var("PORT").unwrap_or_else(|_| "8081".to_string());
-    // Bind to 127.0.0.1 instead of 0.0.0.0 so other apps can reach this service
-    let addr = format!("127.0.0.1:{}", port);
+    let addr = format!("0.0.0.0:{}", port);
     let listener = TcpListener::bind(&addr).expect("failed to bind");
 
     for stream in listener.incoming() {

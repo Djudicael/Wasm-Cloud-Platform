@@ -14,7 +14,8 @@ members = [
     "crates/ctl",
     "crates/e2e",
     "apps/hello-axum",
-    "apps/echo-service"
+    "apps/echo-service",
+    "apps/postgres-app"
 ]
 
 [workspace.dependencies]
