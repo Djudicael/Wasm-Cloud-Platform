@@ -32,4 +32,10 @@ impl LocalServiceRegistry {
         let map = self.entries.read().await;
         map.get(&app_id.0)?.first().copied()
     }
+
+    /// Get all registered service addresses as a map.
+    pub async fn get_all_services(&self) -> HashMap<String, Vec<SocketAddr>> {
+        let map = self.entries.read().await;
+        map.clone()
+    }
 }

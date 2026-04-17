@@ -14,7 +14,9 @@ pub mod scaling;
 mod tests;
 
 use crate::{
-    instance::{BillingInfo, ManagedInstance}, network::LocalServiceRegistry, pool::InstancePool,
+    instance::{BillingInfo, ManagedInstance},
+    network::LocalServiceRegistry,
+    pool::InstancePool,
     port_alloc::PortAllocator,
 };
 use common::{
@@ -170,7 +172,20 @@ impl Supervisor {
 
         // 4. Resolve env vars - note: we pass host_port, not wasm_bind_port
         // The app MUST bind to the allocated port so the proxy can reach it
-        let env_vars = (self.env_resolver)(&config, host_port);
+        let mut env_vars = (self.env_resolver)(&config, host_port);
+
+        // 4b. Inject service discovery env vars for other running apps
+        // Use 127.0.0.1 for local service discovery (apps bind to 0.0.0.0 but external connections must use loopback)
+        let all_services = self.service_registry.get_all_services().await;
+        for (service_name, addrs) in all_services {
+            if let Some(addr) = addrs.first() {
+                let key = format!("{}_SERVICE_URL", service_name.to_uppercase().replace('-', "_"));
+                // Use 127.0.0.1 instead of 0.0.0.0 for service discovery
+                let url = format!("http://127.0.0.1:{}", addr.port());
+                env_vars.retain(|(k, _)| k != &key);
+                env_vars.push((key, url));
+            }
+        }
 
         // 5. Spawn the Wasm instance
         let (shutdown_tx, _shutdown_rx) = tokio::sync::oneshot::channel::<()>();
@@ -223,9 +238,10 @@ impl Supervisor {
         self.service_registry.register(app_id, addr).await;
 
         // Extract billing info before config is moved
-        let tenant_id = config.tenant_id.clone().unwrap_or_else(|| {
-            app_id.0.split(':').next().unwrap_or(&app_id.0).to_string()
-        });
+        let tenant_id = config
+            .tenant_id
+            .clone()
+            .unwrap_or_else(|| app_id.0.split(':').next().unwrap_or(&app_id.0).to_string());
         let fuel_quota = config.fuel_quota.0;
         let ram_bytes = config.memory_limit.to_bytes() as u64;
 
@@ -620,6 +636,11 @@ impl Supervisor {
     pub async fn list_app_ids(&self) -> Vec<AppId> {
         let pools = self.pools.read().await;
         pools.keys().map(|k| AppId(k.clone())).collect()
+    }
+
+    /// Get all registered service addresses for service discovery.
+    pub fn get_service_registry(&self) -> Arc<LocalServiceRegistry> {
+        self.service_registry.clone()
     }
 
     /// Gracefully shutdown all instances across all apps.

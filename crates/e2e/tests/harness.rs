@@ -211,7 +211,16 @@ impl NodeProcess {
         db_path: PathBuf,
         _temp_dir: TempDir,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        Self::start_with_db_and_admin(node_id, nats_url, proxy_port, artifact_port, 9190, db_path, _temp_dir).await
+        Self::start_with_db_and_admin(
+            node_id,
+            nats_url,
+            proxy_port,
+            artifact_port,
+            9190,
+            db_path,
+            _temp_dir,
+        )
+        .await
     }
 
     /// Start a node with existing database and custom admin port
@@ -367,6 +376,55 @@ pub fn find_hello_axum_wasm() -> Result<PathBuf, Box<dyn std::error::Error>> {
     }
 }
 
+/// Helper to find the echo-service.wasm test app
+#[allow(dead_code)]
+pub fn find_echo_service_wasm() -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let workspace_root = Path::new(manifest_dir).parent().unwrap().parent().unwrap();
+
+    let wasm_path = workspace_root.join("target/wasm32-wasip2/release/echo-service.wasm");
+
+    // Check if needs rebuild
+    let needs_rebuild = if !wasm_path.exists() {
+        true
+    } else {
+        let wasm_modified = std::fs::metadata(&wasm_path)?.modified()?;
+        let main_modified =
+            std::fs::metadata(workspace_root.join("apps/echo-service/src/main.rs"))?.modified()?;
+        wasm_modified < main_modified
+    };
+
+    if needs_rebuild {
+        eprintln!("⚠️ Building echo-service.wasm...");
+
+        let output = std::process::Command::new("cargo")
+            .args([
+                "build",
+                "--release",
+                "--target",
+                "wasm32-wasip2",
+                "-p",
+                "echo-service",
+            ])
+            .current_dir(workspace_root)
+            .output()?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            eprintln!("Build error: {}", stderr);
+            return Err(format!("Failed to build echo-service: {}", stderr).into());
+        }
+
+        eprintln!("Build stdout: {}", String::from_utf8_lossy(&output.stdout));
+    }
+
+    if wasm_path.exists() {
+        Ok(wasm_path)
+    } else {
+        Err("Build succeeded but wasm file not found".into())
+    }
+}
+
 /// Compute SHA-256 hash of a file
 pub fn compute_sha256(path: &Path) -> Result<String, Box<dyn std::error::Error>> {
     use sha2::{Digest, Sha256};
@@ -490,10 +548,7 @@ pub async fn add_route(
 
 /// Remove an app via NATS (triggers instance shutdown and billing record creation)
 #[allow(dead_code)]
-pub async fn remove_app(
-    bus: &NatsBus,
-    app_id: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn remove_app(bus: &NatsBus, app_id: &str) -> Result<(), Box<dyn std::error::Error>> {
     let event = Event::RemoveApp {
         app_id: common::types::AppId(app_id.to_string()),
     };

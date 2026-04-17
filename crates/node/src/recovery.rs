@@ -54,7 +54,9 @@ pub async fn startup_integrity_check(store: &Store, nats_client: &NatsClient) {
         storage::integrity::RecoveryAction::FullRebootstrap => {
             tracing::error!("critical tables corrupted — triggering full re-bootstrap");
             match std::fs::remove_file(store.db_path()) {
-                Ok(_) => tracing::info!("corrupted redb deleted — restart required for clean bootstrap"),
+                Ok(_) => {
+                    tracing::info!("corrupted redb deleted — restart required for clean bootstrap")
+                }
                 Err(e) => {
                     tracing::error!(error = %e, path = ?store.db_path(), "failed to delete corrupted redb — manual cleanup may be required");
                 }

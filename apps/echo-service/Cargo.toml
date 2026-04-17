@@ -1,0 +1,16 @@
+[package]
+name = "echo-service"
+version = "0.1.0"
+edition = "2021"
+
+# Binary target - runs as wasm32-wasip2 or native
+# The wasm32-wasip2 target uses std::net directly
+
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+axum = { workspace = true }
+tokio = { workspace = true }
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = "symbols"

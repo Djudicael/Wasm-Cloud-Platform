@@ -147,22 +147,18 @@ async fn main() -> anyhow::Result<()> {
         Commands::Gc(args) => cmds::gc::run(args, &bus, &cli.node_api, &http).await?,
         Commands::Node { target: _, action } => action.run(&cli.node_api, &http).await?,
         Commands::Cluster => cmds::node::cluster_health(&bus).await?,
-        Commands::Billing { store_path, action } => {
-            match action {
-                BillingAction::Report { tenant, start_ms, end_ms } => {
-                    cmds::billing::report(&store_path, &tenant, start_ms, end_ms).await?
-                }
-                BillingAction::Verify => {
-                    cmds::billing::verify(&store_path).await?
-                }
-                BillingAction::Records { app, tenant, last } => {
-                    cmds::billing::records(&store_path, app.as_deref(), tenant.as_deref(), last).await?
-                }
-                BillingAction::Export { output } => {
-                    cmds::billing::export(&store_path, &output).await?
-                }
+        Commands::Billing { store_path, action } => match action {
+            BillingAction::Report {
+                tenant,
+                start_ms,
+                end_ms,
+            } => cmds::billing::report(&store_path, &tenant, start_ms, end_ms).await?,
+            BillingAction::Verify => cmds::billing::verify(&store_path).await?,
+            BillingAction::Records { app, tenant, last } => {
+                cmds::billing::records(&store_path, app.as_deref(), tenant.as_deref(), last).await?
             }
-        }
+            BillingAction::Export { output } => cmds::billing::export(&store_path, &output).await?,
+        },
     }
     Ok(())
 }

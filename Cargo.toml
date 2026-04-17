@@ -13,7 +13,8 @@ members = [
     "crates/billing",
     "crates/ctl",
     "crates/e2e",
-    "apps/hello-axum"
+    "apps/hello-axum",
+    "apps/echo-service"
 ]
 
 [workspace.dependencies]
@@ -68,3 +69,6 @@ chrono = { version = "0.4", features = ["serde"] }
 # Testing
 reqwest = { version = "0.12", features = ["json"] }
 testcontainers = "0.27.2"
+
+# URL parsing
+url = "2"

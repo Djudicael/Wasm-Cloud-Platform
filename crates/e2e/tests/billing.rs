@@ -39,21 +39,17 @@ async fn test_billing_records_created_on_instance_exit() {
         .expect("Failed to upload artifact");
 
     let app_id = "billing-test:v1";
-    let artifact_url = format!("http://127.0.0.1:{}/artifacts/{}", node.artifact_port, sha256);
+    let artifact_url = format!(
+        "http://127.0.0.1:{}/artifacts/{}",
+        node.artifact_port, sha256
+    );
 
     let mut config = build_app_config(app_id, 100_000_000, 100, 1);
     config.tenant_id = Some("test-tenant".to_string());
 
-    deploy_app(
-        &bus,
-        app_id,
-        artifact_url,
-        sha256,
-        size_bytes,
-        config,
-    )
-    .await
-    .expect("Failed to deploy app");
+    deploy_app(&bus, app_id, artifact_url, sha256, size_bytes, config)
+        .await
+        .expect("Failed to deploy app");
 
     // Add route
     add_route(&bus, "billing.local", app_id)
@@ -87,22 +83,35 @@ async fn test_billing_records_created_on_instance_exit() {
     let (db_path, _temp_dir) = node.extract_db();
 
     // Read billing records from storage
-    let store = storage::Store::open(std::path::Path::new(&db_path))
-        .expect("Failed to open store");
-    let records = store.get_all_billing_records().expect("Failed to read billing records");
+    let store = storage::Store::open(std::path::Path::new(&db_path)).expect("Failed to open store");
+    let records = store
+        .get_all_billing_records()
+        .expect("Failed to read billing records");
 
     eprintln!("✓ Found {} billing records", records.len());
 
     // We expect at least 1 billing record (one per app removal)
-    assert!(!records.is_empty(), "Expected at least 1 billing record, found {}", records.len());
+    assert!(
+        !records.is_empty(),
+        "Expected at least 1 billing record, found {}",
+        records.len()
+    );
 
     // Verify hash chain integrity
     let verified = billing::verify_chain(&records);
-    assert!(verified.is_ok(), "Hash chain should be valid: {:?}", verified.err());
+    assert!(
+        verified.is_ok(),
+        "Hash chain should be valid: {:?}",
+        verified.err()
+    );
 
     // Verify chain covers all records
     let count = verified.unwrap();
-    assert_eq!(count as usize, records.len(), "All records should be in chain");
+    assert_eq!(
+        count as usize,
+        records.len(),
+        "All records should be in chain"
+    );
 
     eprintln!("✓ Hash chain integrity verified for {} records", count);
 }
@@ -135,7 +144,10 @@ async fn test_billing_tampering_detected() {
         .expect("Failed to upload artifact");
 
     let app_id = "tamper-test:v1";
-    let artifact_url = format!("http://127.0.0.1:{}/artifacts/{}", node.artifact_port, sha256);
+    let artifact_url = format!(
+        "http://127.0.0.1:{}/artifacts/{}",
+        node.artifact_port, sha256
+    );
 
     let config = build_app_config(app_id, 100_000_000, 100, 1);
 
@@ -170,9 +182,10 @@ async fn test_billing_tampering_detected() {
 
     // Extract and read billing records
     let (db_path, _temp_dir) = node.extract_db();
-    let store = storage::Store::open(std::path::Path::new(&db_path))
-        .expect("Failed to open store");
-    let mut records = store.get_all_billing_records().expect("Failed to read billing records");
+    let store = storage::Store::open(std::path::Path::new(&db_path)).expect("Failed to open store");
+    let mut records = store
+        .get_all_billing_records()
+        .expect("Failed to read billing records");
 
     assert!(!records.is_empty(), "Should have at least one record");
 
@@ -192,7 +205,10 @@ async fn test_billing_tampering_detected() {
         _ => panic!("Expected TamperedRecord error"),
     }
 
-    eprintln!("✓ Tampering detection verified (changed fuel from {} to 999999999)", original_fuel);
+    eprintln!(
+        "✓ Tampering detection verified (changed fuel from {} to 999999999)",
+        original_fuel
+    );
 }
 
 /// Test: Billing report generation
@@ -223,7 +239,10 @@ async fn test_billing_report_generation() {
         .expect("Failed to upload artifact");
 
     let app_id = "report-test:v1";
-    let artifact_url = format!("http://127.0.0.1:{}/artifacts/{}", node.artifact_port, sha256);
+    let artifact_url = format!(
+        "http://127.0.0.1:{}/artifacts/{}",
+        node.artifact_port, sha256
+    );
 
     let mut config = build_app_config(app_id, 100_000_000, 100, 1);
     config.tenant_id = Some("report-tenant".to_string());
@@ -264,17 +283,13 @@ async fn test_billing_report_generation() {
 
     // Extract and read billing records
     let (db_path, _temp_dir) = node.extract_db();
-    let store = storage::Store::open(std::path::Path::new(&db_path))
-        .expect("Failed to open store");
-    let records = store.get_all_billing_records().expect("Failed to read billing records");
+    let store = storage::Store::open(std::path::Path::new(&db_path)).expect("Failed to open store");
+    let records = store
+        .get_all_billing_records()
+        .expect("Failed to read billing records");
 
     // Generate report
-    let report = billing::report::generate_report(
-        &records,
-        "report-tenant",
-        0,
-        u64::MAX,
-    );
+    let report = billing::report::generate_report(&records, "report-tenant", 0, u64::MAX);
 
     eprintln!("✓ Generated billing report:");
     eprintln!("   Tenant: {}", report.tenant_id);
@@ -284,5 +299,8 @@ async fn test_billing_report_generation() {
 
     // Verify report structure
     assert_eq!(report.tenant_id, "report-tenant");
-    assert!(report.total_requests > 0, "Should have at least one request");
+    assert!(
+        report.total_requests > 0,
+        "Should have at least one request"
+    );
 }

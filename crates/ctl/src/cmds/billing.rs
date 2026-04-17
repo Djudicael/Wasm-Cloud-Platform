@@ -2,12 +2,7 @@ use anyhow::Result;
 use billing::{verify_chain, ChainError};
 use std::path::Path;
 
-pub async fn report(
-    store_path: &str,
-    tenant_id: &str,
-    start_ms: u64,
-    end_ms: u64,
-) -> Result<()> {
+pub async fn report(store_path: &str, tenant_id: &str, start_ms: u64, end_ms: u64) -> Result<()> {
     let store = storage::Store::open(Path::new(store_path))?;
     let records = store.read_billing_records_for_tenant(tenant_id, start_ms, end_ms)?;
 
@@ -16,7 +11,10 @@ pub async fn report(
     println!("Tenant Billing Report");
     println!("====================");
     println!("Tenant: {}", report.tenant_id);
-    println!("Period: {} - {}", report.period_start_ms, report.period_end_ms);
+    println!(
+        "Period: {} - {}",
+        report.period_start_ms, report.period_end_ms
+    );
     println!();
     println!("Total Requests: {}", report.total_requests);
     println!("Total Fuel Consumed: {}", report.total_fuel_consumed);
@@ -49,26 +47,32 @@ pub async fn verify(store_path: &str) -> Result<()> {
         Ok(count) => {
             println!("Verified {} billing records — chain is consistent ✓", count);
         }
-        Err(e) => {
-            match e {
-                ChainError::BrokenLink { seq, expected, actual } => {
-                    anyhow::bail!(
-                        "Chain broken at record {}: expected prev_hash={}, found {}",
-                        seq,
-                        expected,
-                        actual
-                    );
-                }
-                ChainError::TamperedRecord { seq, expected, actual } => {
-                    anyhow::bail!(
-                        "Tampering detected at record {}: hash mismatch (expected={}, found={})",
-                        seq,
-                        expected,
-                        actual
-                    );
-                }
+        Err(e) => match e {
+            ChainError::BrokenLink {
+                seq,
+                expected,
+                actual,
+            } => {
+                anyhow::bail!(
+                    "Chain broken at record {}: expected prev_hash={}, found {}",
+                    seq,
+                    expected,
+                    actual
+                );
             }
-        }
+            ChainError::TamperedRecord {
+                seq,
+                expected,
+                actual,
+            } => {
+                anyhow::bail!(
+                    "Tampering detected at record {}: hash mismatch (expected={}, found={})",
+                    seq,
+                    expected,
+                    actual
+                );
+            }
+        },
     }
 
     Ok(())
@@ -112,10 +116,7 @@ pub async fn records(
     Ok(())
 }
 
-pub async fn export(
-    store_path: &str,
-    output_path: &str,
-) -> Result<()> {
+pub async fn export(store_path: &str, output_path: &str) -> Result<()> {
     let store = storage::Store::open(Path::new(store_path))?;
     let records = store.read_unexported_billing_records(10_000)?;
 

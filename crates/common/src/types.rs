@@ -188,3 +188,22 @@ pub enum InstanceState {
     Stopping,
     Stopped,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct DnsConfig {
+    pub platform_domain: Option<String>,
+    pub dns_webhook_url: Option<String>,
+    pub dns_webhook_token: Option<String>,
+    pub admin_port: u16,
+}
+
+impl DnsConfig {
+    pub fn default_with_port(port: u16) -> Self {
+        DnsConfig {
+            platform_domain: None,
+            dns_webhook_url: None,
+            dns_webhook_token: None,
+            admin_port: port,
+        }
+    }
+}

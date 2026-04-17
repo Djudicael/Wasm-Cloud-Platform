@@ -15,7 +15,7 @@ pub struct NodeEntry {
 
 #[derive(Clone, Default)]
 pub struct NodeLoadTable {
-    nodes: Arc<RwLock<HashMap<String, NodeEntry>>>,
+    pub nodes: Arc<RwLock<HashMap<String, NodeEntry>>>,
 }
 
 impl NodeLoadTable {

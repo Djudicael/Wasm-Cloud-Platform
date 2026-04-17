@@ -77,11 +77,27 @@ struct Args {
     #[arg(long, default_value = "20")]
     db_proxy_max_connections: usize,
 
-    #[arg(long, help = "Directory for billing record exports (if set, enables periodic export)")]
+    #[arg(
+        long,
+        help = "Directory for billing record exports (if set, enables periodic export)"
+    )]
     billing_export_dir: Option<String>,
 
-    #[arg(long, default_value = "3600", help = "Billing export interval in seconds (requires --billing-export-dir)")]
+    #[arg(
+        long,
+        default_value = "3600",
+        help = "Billing export interval in seconds (requires --billing-export-dir)"
+    )]
     billing_export_interval_secs: u64,
+
+    #[arg(long, help = "Platform domain for subdomains (e.g. myplatform.com)")]
+    platform_domain: Option<String>,
+
+    #[arg(long, help = "Webhook URL for DNS automation")]
+    dns_webhook_url: Option<String>,
+
+    #[arg(long, help = "Auth token for DNS webhook")]
+    dns_webhook_token: Option<String>,
 }
 
 #[tokio::main]
@@ -146,11 +162,8 @@ async fn main() -> anyhow::Result<()> {
     let nats_health = Arc::new(NatsHealth::new());
 
     // Start NATS health watcher (updates last message timestamp periodically)
-    let _nats_watcher_handle = NatsHealthWatcher::new(
-        (*nats_health).clone(),
-        Duration::from_secs(5),
-    )
-    .start();
+    let _nats_watcher_handle =
+        NatsHealthWatcher::new((*nats_health).clone(), Duration::from_secs(5)).start();
 
     recovery::startup_integrity_check(&store, bus.client()).await;
 
@@ -191,10 +204,16 @@ async fn main() -> anyhow::Result<()> {
 
     // Optionally start billing export loop
     if let Some(ref export_dir) = args.billing_export_dir {
-        let exporter = Arc::new(billing::FileExporter::new(std::path::PathBuf::from(export_dir)));
+        let exporter = Arc::new(billing::FileExporter::new(std::path::PathBuf::from(
+            export_dir,
+        )));
         let interval = Duration::from_secs(args.billing_export_interval_secs);
         billing::start_export_loop(store.clone(), exporter, interval);
-        info!(dir = export_dir, interval = interval.as_secs(), "billing export loop started");
+        info!(
+            dir = export_dir,
+            interval = interval.as_secs(),
+            "billing export loop started"
+        );
     }
 
     let supervisor = supervisor::Supervisor::new(
@@ -252,6 +271,11 @@ async fn main() -> anyhow::Result<()> {
         secret_provider: secret_provider.clone(),
         bootstrap_keypair,
         bus: bus.clone(),
+        dns_webhook: proxy::dns_webhook::DnsWebhookManager::new(
+            args.dns_webhook_url.clone(),
+            args.dns_webhook_token.clone(),
+        ),
+        node_table: Arc::new(proxy::node_table::NodeLoadTable::default()),
     });
 
     {
@@ -341,6 +365,8 @@ async fn main() -> anyhow::Result<()> {
         "platform version metrics initialized"
     );
 
+    let backpressure = proxy::backpressure::BackpressureSignal::new();
+
     let default_rate_config = proxy::rate_limiter::RateLimitConfig {
         requests_per_second: 1000,
         burst_capacity: 200,
@@ -358,7 +384,7 @@ async fn main() -> anyhow::Result<()> {
         rate_limiter: Arc::new(proxy::rate_limiter::RateLimiter::new(default_rate_config)),
         node_table: Arc::new(proxy::node_table::NodeLoadTable::default()),
         cold_start,
-        backpressure: proxy::backpressure::BackpressureSignal::new(),
+        backpressure: backpressure.clone(),
         metrics: Some(rate_limit_metrics),
     };
 
@@ -382,8 +408,16 @@ async fn main() -> anyhow::Result<()> {
     let db_path_clone = args.db_path.clone();
     let store_gc = store.clone();
     let supervisor_gc = supervisor.clone();
+
+    // Enhanced health check for external LBs and DNS providers
+    let health_router = proxy::health::health_router(
+        args.node_id.clone(),
+        nats_health.clone(),
+        Arc::new(backpressure),
+    );
+
     let admin_app = axum::Router::new()
-        .route("/health", axum::routing::get(|| async { "OK" }))
+        .merge(health_router)
         .route(
             "/status/pgbouncer",
             axum::routing::get(move || {
@@ -434,16 +468,16 @@ async fn main() -> anyhow::Result<()> {
                 let supervisor = supervisor_gc.clone();
                 async move {
                     tracing::info!("Forcing immediate GC run");
-                    
+
                     // Force purge undeployed apps with grace period = 0
                     let purged = store.gc_undeployed_apps(0).unwrap_or(0);
                     tracing::info!(apps = purged, "Forced GC: undeployed apps purged");
-                    
+
                     // Get list of apps that were marked undeployed by reading from GC metadata
                     // For simplicity, we kill instances for all apps that have no active routes
                     let app_ids = store.list_apps().unwrap_or_default();
                     let mut killed_count = 0;
-                    
+
                     for app_id in app_ids.iter() {
                         let app_id_obj = common::types::AppId(app_id.0.clone());
                         // Try to kill all instances - this is safe to call even if app is still deployed
@@ -454,9 +488,9 @@ async fn main() -> anyhow::Result<()> {
                             Err(e) => {
                                 tracing::debug!(app = %app_id.0, error = %e, "No instances to kill");
                             }
-                        }
+}
                     }
-                    
+
                     (
                         axum::http::StatusCode::OK,
                         axum::Json(serde_json::json!({

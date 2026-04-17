@@ -10,6 +10,9 @@ edition = "2021"
 axum = { workspace = true }
 tokio = { workspace = true }
 
+[target.'cfg(target_family = "wasm")'.dependencies]
+url = "2"
+
 [profile.release]
 opt-level = "s"
 lto = true

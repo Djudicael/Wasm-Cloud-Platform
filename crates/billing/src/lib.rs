@@ -5,7 +5,7 @@ pub mod report;
 pub use collector::BillingCollector;
 pub use collector::BillingInput;
 pub use common::billing::BillingRecord;
-pub use export::{start_export_loop, FileExporter, S3Exporter, BillingExporter};
+pub use export::{start_export_loop, BillingExporter, FileExporter, S3Exporter};
 pub use report::generate_report;
 
 #[derive(Debug)]

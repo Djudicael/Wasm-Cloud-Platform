@@ -46,7 +46,14 @@ impl S3Exporter {
         secret_key: String,
         region: String,
     ) -> Self {
-        Self::new(bucket, prefix, endpoint, Some(access_key), Some(secret_key), region)
+        Self::new(
+            bucket,
+            prefix,
+            endpoint,
+            Some(access_key),
+            Some(secret_key),
+            region,
+        )
     }
 }
 
@@ -59,8 +66,8 @@ impl BillingExporter for S3Exporter {
 
         let mut body = Vec::new();
         for record in records {
-            let line = serde_json::to_string(record)
-                .map_err(|e| PlatformError::Storage(e.to_string()))?;
+            let line =
+                serde_json::to_string(record).map_err(|e| PlatformError::Storage(e.to_string()))?;
             body.extend(line.as_bytes());
             body.push(b'\n');
         }
@@ -68,7 +75,12 @@ impl BillingExporter for S3Exporter {
         let first_ts = records.first().map(|r| r.timestamp_ms).unwrap_or(0);
         let key = format!("{}/{}/{}.ndjson", self.prefix, records[0].node_id, first_ts);
 
-        let url = format!("{}/{}/{}", self.endpoint.trim_end_matches('/'), self.bucket, key);
+        let url = format!(
+            "{}/{}/{}",
+            self.endpoint.trim_end_matches('/'),
+            self.bucket,
+            key
+        );
 
         let client = reqwest::Client::new();
         let mut request = client.put(&url);
@@ -77,7 +89,7 @@ impl BillingExporter for S3Exporter {
             let timestamp = chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
             let date = &timestamp[..8];
             let scope = format!("{}/{}/s3/aws4_request", date, self.region);
-            
+
             request = request
                 .header("x-amz-date", &timestamp)
                 .header("x-amz-content-sha256", "UNSIGNED-PAYLOAD")
@@ -127,13 +139,18 @@ impl BillingExporter for FileExporter {
         }
 
         let first_ts = records.first().map(|r| r.timestamp_ms).unwrap_or(0);
-        let node_id = records.first().map(|r| r.node_id.clone()).unwrap_or_default();
-        let path = self.dir.join(format!("billing_{}_{}.ndjson", node_id, first_ts));
+        let node_id = records
+            .first()
+            .map(|r| r.node_id.clone())
+            .unwrap_or_default();
+        let path = self
+            .dir
+            .join(format!("billing_{}_{}.ndjson", node_id, first_ts));
 
         let mut body = String::new();
         for record in records {
-            let line = serde_json::to_string(record)
-                .map_err(|e| PlatformError::Storage(e.to_string()))?;
+            let line =
+                serde_json::to_string(record).map_err(|e| PlatformError::Storage(e.to_string()))?;
             body.push_str(&line);
             body.push('\n');
         }

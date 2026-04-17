@@ -80,7 +80,9 @@ async fn billing_writer_loop(mut rx: mpsc::Receiver<BillingInput>, store: Store,
 }
 
 pub fn verify_node_billing_chain(store: &Store, node_id: &str) -> Result<u64, String> {
-    let records = store.get_billing_records_for_node(node_id).map_err(|e| e.to_string())?;
+    let records = store
+        .get_billing_records_for_node(node_id)
+        .map_err(|e| e.to_string())?;
 
     if records.is_empty() {
         return Ok(0);
@@ -98,17 +100,20 @@ pub fn generate_tenant_billing_report(
     start_ms: u64,
     end_ms: u64,
 ) -> Result<crate::report::TenantBillingReport, String> {
-    let all_records = store
-        .get_all_billing_records()
-        .map_err(|e| e.to_string())?;
+    let all_records = store.get_all_billing_records().map_err(|e| e.to_string())?;
 
     let tenant_records: Vec<&BillingRecord> = all_records
         .iter()
-        .filter(|r| r.tenant_id == tenant_id && r.timestamp_ms >= start_ms && r.timestamp_ms < end_ms)
+        .filter(|r| {
+            r.tenant_id == tenant_id && r.timestamp_ms >= start_ms && r.timestamp_ms < end_ms
+        })
         .collect();
 
     Ok(generate_report(
-        &tenant_records.iter().map(|r| (*r).clone()).collect::<Vec<_>>(),
+        &tenant_records
+            .iter()
+            .map(|r| (*r).clone())
+            .collect::<Vec<_>>(),
         tenant_id,
         start_ms,
         end_ms,

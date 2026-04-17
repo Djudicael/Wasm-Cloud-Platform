@@ -19,3 +19,6 @@ axum.workspace = true
 serde_json.workspace = true
 storage = { path = "../storage" }
 prometheus = "0.13"
+reqwest = { workspace = true }
+serde = { workspace = true }
+messaging = { path = "../messaging" }

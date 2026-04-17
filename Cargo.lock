@@ -1540,6 +1540,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "echo-service"
+version = "0.1.0"
+dependencies = [
+ "axum 0.7.9",
+ "tokio",
+]
+
+[[package]]
 name = "ed25519"
 version = "2.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2028,6 +2036,7 @@ version = "0.1.0"
 dependencies = [
  "axum 0.7.9",
  "tokio",
+ "url",
 ]
 
 [[package]]
@@ -3845,12 +3854,15 @@ dependencies = [
  "axum 0.7.9",
  "common",
  "futures",
+ "messaging",
  "pingora",
  "pingora-core",
  "pingora-http",
  "pingora-load-balancing",
  "pingora-proxy",
  "prometheus",
+ "reqwest 0.12.28",
+ "serde",
  "serde_json",
  "storage",
  "tokio",

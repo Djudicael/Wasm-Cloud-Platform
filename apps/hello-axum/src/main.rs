@@ -54,11 +54,54 @@ fn main() {
 }
 
 #[cfg(target_family = "wasm")]
-fn route(path: &str) -> (u16, &'static str, &'static str) {
+fn route(path: &str) -> (u16, &'static str, String) {
     match path {
-        "/" => (200, "text/plain", "Hello from wasip2!"),
-        "/health" => (200, "application/json", r#"{"status":"healthy"}"#),
-        _ => (404, "text/plain", "Not Found"),
+        "/" => (200, "text/plain", "Hello from wasip2!".to_string()),
+        "/health" => (200, "application/json", r#"{"status":"healthy"}"#.to_string()),
+        "/call-echo" => {
+            // Make outbound HTTP call to echo-service
+            let echo_host = std::env::var("ECHO_SERVICE_URL").unwrap_or_else(|_| "http://127.0.0.1:8081".to_string());
+            let url = format!("{}/echo", echo_host);
+            
+            // Simple HTTP client using std::net
+            let result = make_http_request(&url);
+            
+            match result {
+                Ok(response) => (200, "text/plain", response),
+                Err(e) => (500, "text/plain", format!("Failed to call echo-service: {}", e)),
+            }
+        }
+        _ => (404, "text/plain", "Not Found".to_string()),
+    }
+}
+
+#[cfg(target_family = "wasm")]
+fn make_http_request(url: &str) -> Result<String, String> {
+    use std::io::{Read, Write};
+    
+    let parsed = url::Url::parse(url).map_err(|e| e.to_string())?;
+    let host = parsed.host_str().ok_or("no host")?;
+    let port = parsed.port().unwrap_or(80);
+    let path = parsed.path();
+    
+    let mut stream = std::net::TcpStream::connect(format!("{}:{}", host, port))
+        .map_err(|e| e.to_string())?;
+    
+    let request = format!(
+        "GET {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
+        path, host
+    );
+    
+    stream.write_all(request.as_bytes()).map_err(|e| e.to_string())?;
+    
+    let mut response = String::new();
+    stream.read_to_string(&mut response).map_err(|e| e.to_string())?;
+    
+    // Extract body from HTTP response (skip headers)
+    if let Some(body_start) = response.find("\r\n\r\n") {
+        Ok(response[body_start + 4..].to_string())
+    } else {
+        Ok(response)
     }
 }
 

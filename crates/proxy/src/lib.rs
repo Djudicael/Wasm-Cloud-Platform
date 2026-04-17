@@ -1,6 +1,8 @@
 pub mod admin;
 pub mod backpressure;
 pub mod config;
+pub mod dns_webhook;
+pub mod health;
 pub mod metrics;
 pub mod node_table;
 pub mod rate_limiter;

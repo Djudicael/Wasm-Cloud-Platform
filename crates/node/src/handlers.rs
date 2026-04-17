@@ -1,5 +1,7 @@
 use common::types::AppId;
 use messaging::events::Event;
+use proxy::dns_webhook::DnsWebhookManager;
+use proxy::node_table::NodeLoadTable;
 use proxy::router::HostRouter;
 use proxy::upstream::UpstreamRegistry;
 use runtime::WasmRuntime;
@@ -21,6 +23,8 @@ pub struct EventDispatcher {
     pub secret_provider: Arc<dyn SecretProvider>,
     pub bootstrap_keypair: Option<BootstrapKeyPair>,
     pub bus: messaging::NatsBus,
+    pub dns_webhook: Option<DnsWebhookManager>,
+    pub node_table: Arc<NodeLoadTable>,
 }
 
 impl EventDispatcher {
@@ -50,11 +54,30 @@ impl EventDispatcher {
                     .add_route(route.host.clone(), route.app_id.clone())
                     .await;
                 info!(host = %route.host, app = %route.app_id.0, "route added");
+                if let Some(ref webhook) = self.dns_webhook {
+                    webhook
+                        .notify_route_change("add", &route.host, &route.app_id.0)
+                        .await;
+                }
             }
             Event::RouteRemove { host } => {
+                // Load route to get app_id for webhook before deleting
+                let app_id = self
+                    .store
+                    .load_route(&host)
+                    .ok()
+                    .flatten()
+                    .map(|r| r.app_id);
                 self.store.delete_route(&host).ok();
                 self.host_router.remove_route(&host).await;
                 info!(host, "route removed");
+                if let Some(ref webhook) = self.dns_webhook {
+                    if let Some(app_id) = app_id {
+                        webhook
+                            .notify_route_change("remove", &host, &app_id.0)
+                            .await;
+                    }
+                }
             }
             Event::InstanceReady {
                 app_id,
@@ -96,8 +119,25 @@ impl EventDispatcher {
                     error!(app = %app_id.0, error = %e, "config update failed");
                 }
             }
-            Event::NodeLoad { .. } => {
-                // Collected by the metrics module for cross-node routing decisions
+            Event::NodeLoad { node_id, cpu_percent: _, fuel_budget_used_percent, active_instances } => {
+                // Update node table for cross-node routing decisions
+                use proxy::node_table::NodeEntry;
+                let entry = NodeEntry {
+                    node_id: node_id.clone(),
+                    supervisor_addr: "127.0.0.1:9000".parse().unwrap(), // TODO: actual addr
+                    fuel_used_percent: fuel_budget_used_percent,
+                    active_instances,
+                    last_seen: std::time::Instant::now(),
+                };
+                self.node_table.update(entry).await;
+
+                // Update DNS webhook with node IPs for webhook notifications
+                if let Some(ref webhook) = self.dns_webhook {
+                    let nodes = self.node_table.nodes.read().await;
+                    let ips: Vec<String> = nodes.values().map(|n| n.supervisor_addr.ip().to_string()).collect();
+                    drop(nodes);
+                    webhook.set_node_ips(ips).await;
+                }
             }
             Event::NodeJoined {
                 node_id,
