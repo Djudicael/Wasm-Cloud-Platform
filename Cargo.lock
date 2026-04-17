@@ -516,6 +516,23 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2af50177e190e07a26ab74f8b1efbfe2ef87da2116221318cb1c2e82baf7de06"
 
 [[package]]
+name = "billing"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "common",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "sha2",
+ "storage",
+ "tempfile",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "bincode"
 version = "1.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1006,6 +1023,7 @@ dependencies = [
  "chrono",
  "serde",
  "serde_json",
+ "sha2",
  "thiserror 1.0.69",
  "uuid",
 ]
@@ -1284,6 +1302,8 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-nats",
+ "billing",
+ "chrono",
  "clap 4.6.0",
  "colored",
  "common",
@@ -1295,6 +1315,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "storage",
  "tabled",
  "tokio",
 ]
@@ -1504,6 +1525,7 @@ dependencies = [
  "assert_cmd",
  "async-nats",
  "axum 0.7.9",
+ "billing",
  "common",
  "hex",
  "messaging",
@@ -2904,6 +2926,7 @@ dependencies = [
  "anyhow",
  "async-nats",
  "axum 0.7.9",
+ "billing",
  "clap 4.6.0",
  "common",
  "futures",
@@ -4985,6 +5008,7 @@ name = "supervisor"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "billing",
  "common",
  "messaging",
  "metrics",

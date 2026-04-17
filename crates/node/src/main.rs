@@ -76,6 +76,12 @@ struct Args {
 
     #[arg(long, default_value = "20")]
     db_proxy_max_connections: usize,
+
+    #[arg(long, help = "Directory for billing record exports (if set, enables periodic export)")]
+    billing_export_dir: Option<String>,
+
+    #[arg(long, default_value = "3600", help = "Billing export interval in seconds (requires --billing-export-dir)")]
+    billing_export_interval_secs: u64,
 }
 
 #[tokio::main]
@@ -179,6 +185,18 @@ async fn main() -> anyhow::Result<()> {
         vars
     });
 
+    // Initialize billing collector
+    let billing_collector = billing::BillingCollector::start(store.clone(), args.node_id.clone());
+    info!("billing collector started");
+
+    // Optionally start billing export loop
+    if let Some(ref export_dir) = args.billing_export_dir {
+        let exporter = Arc::new(billing::FileExporter::new(std::path::PathBuf::from(export_dir)));
+        let interval = Duration::from_secs(args.billing_export_interval_secs);
+        billing::start_export_loop(store.clone(), exporter, interval);
+        info!(dir = export_dir, interval = interval.as_secs(), "billing export loop started");
+    }
+
     let supervisor = supervisor::Supervisor::new(
         store.clone(),
         runtime.clone(),
@@ -188,6 +206,7 @@ async fn main() -> anyhow::Result<()> {
         service_registry.clone(),
         env_resolver,
         event_tx.clone(),
+        Some(billing_collector.tx()),
     );
 
     supervisor.restore_from_storage().await?;

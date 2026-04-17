@@ -9,6 +9,14 @@ use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 use tokio::time::{sleep, timeout, Duration};
 
+/// Billing info needed for recording fuel consumption on instance exit.
+#[derive(Clone)]
+pub struct BillingInfo {
+    pub tenant_id: String,
+    pub fuel_quota: u64,
+    pub ram_bytes: u64,
+}
+
 /// A live Wasm instance managed by the Supervisor.
 pub struct ManagedInstance {
     pub id: InstanceId,
@@ -24,6 +32,9 @@ pub struct ManagedInstance {
 
     /// Send a signal to this handle to begin graceful shutdown.
     pub shutdown_tx: oneshot::Sender<()>,
+
+    /// Billing info for this instance.
+    pub billing_info: BillingInfo,
 }
 
 impl ManagedInstance {

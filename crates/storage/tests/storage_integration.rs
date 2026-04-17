@@ -70,6 +70,7 @@ fn test_config_roundtrip_with_secrets() {
             burst_capacity: 25,
             per_ip_limit: 50,
         }),
+        tenant_id: None,
     };
 
     store.save_config(&config).unwrap();

@@ -244,6 +244,7 @@ impl NodeProcess {
     }
 
     /// Stop the node gracefully
+    #[allow(dead_code)]
     pub fn stop(mut self) -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("Stopping node {}", self.node_id);
         self.process.kill()?;
@@ -387,6 +388,7 @@ pub fn build_app_config(
         health_check_path: None,
         db_max_connections: None,
         rate_limit: None,
+        tenant_id: None,
     }
 }
 

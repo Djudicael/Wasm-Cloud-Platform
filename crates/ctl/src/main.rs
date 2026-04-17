@@ -2,6 +2,7 @@
 use clap::{Parser, Subcommand};
 
 mod cmds {
+    pub mod billing;
     pub mod deploy;
     pub mod gc;
     pub mod list;
@@ -68,6 +69,13 @@ enum Commands {
     },
     /// Cluster-level health and operations
     Cluster,
+    /// Billing and fuel accounting
+    Billing {
+        #[arg(long, default_value = "/tmp/wasm-node/state.redb")]
+        store_path: String,
+        #[command(subcommand)]
+        action: BillingAction,
+    },
 }
 
 #[derive(Subcommand)]
@@ -76,6 +84,35 @@ enum NodeAction {
     Health,
     /// Force a full node rebuild from cluster state
     Rebuild,
+}
+
+#[derive(Subcommand)]
+enum BillingAction {
+    /// Generate a billing report for a tenant
+    Report {
+        #[arg(long)]
+        tenant: String,
+        #[arg(long)]
+        start_ms: u64,
+        #[arg(long)]
+        end_ms: u64,
+    },
+    /// Verify billing chain integrity
+    Verify,
+    /// View billing records
+    Records {
+        #[arg(long)]
+        app: Option<String>,
+        #[arg(long)]
+        tenant: Option<String>,
+        #[arg(long)]
+        last: Option<usize>,
+    },
+    /// Export billing records to a file
+    Export {
+        #[arg(long)]
+        output: String,
+    },
 }
 
 impl NodeAction {
@@ -110,6 +147,22 @@ async fn main() -> anyhow::Result<()> {
         Commands::Gc(args) => cmds::gc::run(args, &bus, &cli.node_api, &http).await?,
         Commands::Node { target: _, action } => action.run(&cli.node_api, &http).await?,
         Commands::Cluster => cmds::node::cluster_health(&bus).await?,
+        Commands::Billing { store_path, action } => {
+            match action {
+                BillingAction::Report { tenant, start_ms, end_ms } => {
+                    cmds::billing::report(&store_path, &tenant, start_ms, end_ms).await?
+                }
+                BillingAction::Verify => {
+                    cmds::billing::verify(&store_path).await?
+                }
+                BillingAction::Records { app, tenant, last } => {
+                    cmds::billing::records(&store_path, app.as_deref(), tenant.as_deref(), last).await?
+                }
+                BillingAction::Export { output } => {
+                    cmds::billing::export(&store_path, &output).await?
+                }
+            }
+        }
     }
     Ok(())
 }

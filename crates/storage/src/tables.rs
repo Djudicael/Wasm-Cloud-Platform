@@ -39,3 +39,8 @@ pub const SCHEMA_META: TableDefinition<&str, &str> = TableDefinition::new("schem
 // Key   : app_id
 // Value : SHA-256 hex string of the raw .wasm bytes
 pub const ARTIFACT_HASHES: TableDefinition<&str, &str> = TableDefinition::new("artifact_hashes");
+
+// ── BILLING RECORDS ────────────────────────────────────────────────────────────
+// Key   : "node_id:sequence_number" (e.g. "node-0:12345")
+// Value : JSON-serialized BillingRecord
+pub const BILLING: TableDefinition<&str, &str> = TableDefinition::new("billing");

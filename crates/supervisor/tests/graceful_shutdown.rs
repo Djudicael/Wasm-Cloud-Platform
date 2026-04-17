@@ -30,6 +30,7 @@ async fn create_test_supervisor() -> Arc<supervisor::Supervisor> {
         service_registry,
         env_resolver,
         event_tx,
+        None,
     )
 }
 
@@ -48,6 +49,7 @@ fn create_test_config(app_id: AppId) -> AppConfig {
         health_check_path: None,
         db_max_connections: None,
         rate_limit: None,
+        tenant_id: None,
     }
 }
 

@@ -25,6 +25,7 @@ fn create_test_app_config(app_id: &str) -> AppConfig {
         health_check_path: None,
         db_max_connections: None,
         rate_limit: None,
+        tenant_id: None,
     }
 }
 

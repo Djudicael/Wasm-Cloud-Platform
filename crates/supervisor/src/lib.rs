@@ -14,7 +14,7 @@ pub mod scaling;
 mod tests;
 
 use crate::{
-    instance::ManagedInstance, network::LocalServiceRegistry, pool::InstancePool,
+    instance::{BillingInfo, ManagedInstance}, network::LocalServiceRegistry, pool::InstancePool,
     port_alloc::PortAllocator,
 };
 use common::{
@@ -52,6 +52,9 @@ pub struct Supervisor {
 
     /// Channel to send log records
     log_tx: Option<mpsc::Sender<metrics::WasmLogRecord>>,
+
+    /// Channel to send billing records
+    billing_tx: Option<mpsc::Sender<billing::BillingInput>>,
 }
 
 impl Supervisor {
@@ -65,6 +68,7 @@ impl Supervisor {
         service_registry: Arc<LocalServiceRegistry>,
         env_resolver: Arc<dyn Fn(&AppConfig, u16) -> Vec<(String, String)> + Send + Sync>,
         event_tx: mpsc::Sender<Event>,
+        billing_tx: Option<mpsc::Sender<billing::BillingInput>>,
     ) -> Arc<Self> {
         Arc::new(Self {
             store,
@@ -77,11 +81,24 @@ impl Supervisor {
             pools: Arc::new(RwLock::new(HashMap::new())),
             event_tx,
             log_tx: None,
+            billing_tx,
         })
     }
 
     pub fn set_log_dispatcher(&mut self, log_tx: mpsc::Sender<metrics::WasmLogRecord>) {
         self.log_tx = Some(log_tx);
+    }
+
+    fn send_billing_record(&self, input: billing::BillingInput) {
+        if let Some(ref tx) = self.billing_tx {
+            if let Err(e) = tx.try_send(input) {
+                warn!(error = %e, "billing channel full — dropping record");
+            }
+        }
+    }
+
+    fn node_id(&self) -> String {
+        std::env::var("NODE_ID").unwrap_or_else(|_| "node-0".to_string())
     }
 
     pub fn check_resource_limits(&self, config: &AppConfig) -> Result<(), PlatformError> {
@@ -205,6 +222,13 @@ impl Supervisor {
         // 8. Register with local service registry
         self.service_registry.register(app_id, addr).await;
 
+        // Extract billing info before config is moved
+        let tenant_id = config.tenant_id.clone().unwrap_or_else(|| {
+            app_id.0.split(':').next().unwrap_or(&app_id.0).to_string()
+        });
+        let fuel_quota = config.fuel_quota.0;
+        let ram_bytes = config.memory_limit.to_bytes() as u64;
+
         let managed = ManagedInstance {
             id: instance_id.clone(),
             app_id: app_id.clone(),
@@ -215,6 +239,11 @@ impl Supervisor {
             request_count: 0,
             task,
             shutdown_tx,
+            billing_info: BillingInfo {
+                tenant_id: tenant_id.clone(),
+                fuel_quota,
+                ram_bytes,
+            },
         };
 
         {
@@ -369,17 +398,38 @@ impl Supervisor {
         // 3. Save data we need after consuming instance
         let addr = instance.addr;
         let state = instance.state.clone();
+        let billing_info = instance.billing_info.clone();
+        let wall_clock_start = instance.spawned_at;
 
         // 4. Initiate graceful shutdown (HTTP + channel signal + wait)
         let stats = instance.initiate_shutdown(grace_timeout).await;
 
-        // 5. Release resources
+        // 5. Record billing for this execution cycle
+        let wall_clock_ms = wall_clock_start.elapsed().as_millis() as u64;
+        let (fuel_consumed, ram_bytes, is_trap) = match &stats {
+            Some(s) => (s.fuel_consumed, s.ram_bytes as u64, s.trap.is_some()),
+            None => (billing_info.fuel_quota, billing_info.ram_bytes, true),
+        };
+        self.send_billing_record(billing::BillingInput {
+            tenant_id: billing_info.tenant_id,
+            app_id: app_id.0.clone(),
+            instance_id: id.0.to_string(),
+            node_id: self.node_id(),
+            fuel_consumed,
+            fuel_quota: billing_info.fuel_quota,
+            ram_bytes,
+            wall_clock_ms,
+            status_code: if is_trap { 500 } else { 200 },
+            is_trap,
+        });
+
+        // 6. Release resources
         if let InstanceState::Ready { addr } = &state {
             self.service_registry.deregister(app_id, addr).await;
             self.port_alloc.release(addr.port());
         }
 
-        // 6. Publish InstanceDead event
+        // 7. Publish InstanceDead event
         let _ = self
             .event_tx
             .send(Event::InstanceDead {
@@ -471,10 +521,6 @@ impl Supervisor {
             .load_artifact(app_id)?
             .ok_or_else(|| PlatformError::AppNotFound(format!("no artifact: {}", app_id.0)))?;
         self.runtime.prepare(&artifact, config)
-    }
-
-    fn node_id(&self) -> String {
-        std::env::var("NODE_ID").unwrap_or_else(|_| "node-0".to_string())
     }
 
     pub fn store(&self) -> &Store {

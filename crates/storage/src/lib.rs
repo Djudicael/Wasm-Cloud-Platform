@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 pub mod artifact;
 pub mod artifact_server;
+pub mod billing;
 pub mod config;
 pub mod gc;
 pub mod gc_metrics;
@@ -88,6 +89,7 @@ impl Store {
             tx.open_table(tables::ROUTES)?;
             tx.open_table(tables::RAW_WASM)?;
             tx.open_table(tables::ARTIFACT_HASHES)?;
+            tx.open_table(tables::BILLING)?;
         }
         tx.commit()?;
 

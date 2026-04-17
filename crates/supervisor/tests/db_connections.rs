@@ -53,6 +53,7 @@ async fn test_database_url_injection() {
         health_check_path: None,
         db_max_connections: Some(10),
         rate_limit: None,
+        tenant_id: None,
     };
 
     // Simulate the env_resolver from node/main.rs

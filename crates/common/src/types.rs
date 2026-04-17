@@ -130,6 +130,11 @@ pub struct AppConfig {
     /// Rate limit configuration for this app.
     #[serde(default)]
     pub rate_limit: Option<AppRateLimitConfig>,
+
+    /// Tenant identifier for billing attribution.
+    /// If not specified, the app name (without version) is used as the tenant.
+    #[serde(default)]
+    pub tenant_id: Option<String>,
 }
 
 /// Rate limit configuration, stored as part of AppConfig.
@@ -171,6 +176,7 @@ impl AppConfig {
             health_check_path: None,
             db_max_connections: None,
             rate_limit: None,
+            tenant_id: None,
         }
     }
 }

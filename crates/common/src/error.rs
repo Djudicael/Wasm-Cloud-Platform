@@ -29,4 +29,6 @@ pub enum PlatformError {
     Io(String),
     #[error("Internal error: {0}")]
     Internal(String),
+    #[error("External service error: {0}")]
+    External(String),
 }

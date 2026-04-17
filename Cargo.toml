@@ -10,6 +10,7 @@ members = [
     "crates/secrets",
     "crates/metrics",
     "crates/common",
+    "crates/billing",
     "crates/ctl",
     "crates/e2e",
     "apps/hello-axum"
