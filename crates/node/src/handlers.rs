@@ -127,12 +127,17 @@ impl EventDispatcher {
             } => {
                 // Update node table for cross-node routing decisions
                 use proxy::node_table::NodeEntry;
+                use std::time::{SystemTime, UNIX_EPOCH};
+                let now = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs();
                 let entry = NodeEntry {
                     node_id: node_id.clone(),
                     supervisor_addr: "127.0.0.1:9000".parse().unwrap(), // TODO: actual addr
                     fuel_used_percent: fuel_budget_used_percent,
                     active_instances,
-                    last_seen: std::time::Instant::now(),
+                    last_seen: now,
                 };
                 self.node_table.update(entry).await;
 

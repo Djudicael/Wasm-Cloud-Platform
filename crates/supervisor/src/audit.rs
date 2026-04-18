@@ -4,7 +4,7 @@ use std::io::Write;
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct AuditEvent {
-    pub timestamp: String,
+    pub timestamp: u64,
     pub node_id: String,
     pub event_type: AuditEventType,
     pub actor: String,
@@ -49,7 +49,7 @@ mod tests {
         let _ = fs::remove_file(path);
 
         let event = AuditEvent {
-            timestamp: "2023-10-25T12:00:00Z".to_string(),
+            timestamp: 1698158400,
             node_id: "node-1".to_string(),
             event_type: AuditEventType::InstanceSpawned,
             actor: "system".to_string(),

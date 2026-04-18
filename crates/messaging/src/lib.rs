@@ -14,6 +14,8 @@ use events::Event;
 use tokio_stream::StreamExt;
 
 #[derive(Clone)]
+/// NATS message bus for publish/subscribe.
+/// Cloning is cheap because [`async_nats::Client`] uses internal `Arc`s.
 pub struct NatsBus {
     client: Client,
 }
@@ -183,5 +185,28 @@ impl NatsBus {
 
     pub fn client(&self) -> &Client {
         &self.client
+    }
+
+    /// Wait for the first event matching the subject pattern.
+    /// This is useful for cluster bootstrap where we need to wait for StateSnapshot.
+    pub async fn wait_for_event(&self, subject_pattern: &str) -> Result<Event, PlatformError> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+
+        let mut sub = self
+            .client
+            .subscribe(subject_pattern.to_string())
+            .await
+            .map_err(|e| PlatformError::Messaging(format!("subscribe to {subject_pattern}: {e}")))?;
+
+        tokio::spawn(async move {
+            if let Some(msg) = sub.next().await {
+                if let Ok(event) = serde_json::from_slice::<Event>(&msg.payload) {
+                    let _ = tx.send(event);
+                }
+            }
+        });
+
+        rx.await
+            .map_err(|_| PlatformError::Messaging("timeout waiting for event".to_string()))
     }
 }

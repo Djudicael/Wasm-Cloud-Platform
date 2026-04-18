@@ -376,8 +376,14 @@ async fn main() -> anyhow::Result<()> {
         bus.publish(&join_event).await?;
         info!("NodeJoined event published, waiting for snapshot");
 
-        // Give the cluster a few seconds to respond
-        tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+        // Wait for StateSnapshot with a timeout instead of fixed sleep
+        let snapshot_subject = format!("cluster.snapshot.{}", args.node_id);
+        let timeout = tokio::time::Duration::from_secs(30);
+        match tokio::time::timeout(timeout, bus.wait_for_event(&snapshot_subject)).await {
+            Ok(Ok(_)) => info!("State snapshot received"),
+            Ok(Err(e)) => warn!(error = %e, "failed to receive state snapshot"),
+            Err(_) => warn!("timed out waiting for state snapshot after 30s"),
+        }
     }
 
     supervisor::scaling::start_load_reporter(
