@@ -95,6 +95,34 @@ impl NatsBus {
         .await
         .map_err(|e| PlatformError::Messaging(e.to_string()))?;
 
+        // Create "CONTROL" stream for instance, secrets, config events
+        js.get_or_create_stream(StreamConfig {
+            name: "CONTROL".to_string(),
+            subjects: vec![
+                "instance.ready.>".to_string(),
+                "instance.dead.>".to_string(),
+                "secrets.update.>".to_string(),
+                "config.update.>".to_string(),
+            ],
+            max_messages: 10_000,
+            ..Default::default()
+        })
+        .await
+        .map_err(|e| PlatformError::Messaging(e.to_string()))?;
+
+        // Create "NODE" stream for node load and cluster events
+        js.get_or_create_stream(StreamConfig {
+            name: "NODE".to_string(),
+            subjects: vec![
+                "node.load.>".to_string(),
+                "cluster.>".to_string(),
+            ],
+            max_messages: 10_000,
+            ..Default::default()
+        })
+        .await
+        .map_err(|e| PlatformError::Messaging(e.to_string()))?;
+
         Ok(())
     }
 
@@ -143,7 +171,9 @@ impl NatsBus {
                             error = %e,
                             "failed to deserialize NATS JetStream message"
                         );
-                        let _ = msg.ack().await; // Ack malformed messages so they aren't redelivered
+                        // NAK malformed messages so they can be redelivered (up to retry limit)
+                        // This prevents permanent data loss if the message format changes
+                        let _ = msg.ack_with(async_nats::jetstream::AckKind::Nak(None)).await;
                     }
                 }
             }

@@ -58,7 +58,7 @@ async fn put_artifact(
     }
 
     // Verify hash before storing
-    let actual = format!("{:x}", Sha256::digest(&body));
+    let actual = hex::encode(Sha256::digest(&body));
     if actual != sha256 {
         tracing::warn!(expected = %sha256, actual, "SHA-256 mismatch on PUT");
         return StatusCode::BAD_REQUEST;
@@ -111,7 +111,7 @@ mod tests {
 
         let client = reqwest::Client::new();
         let wasm_bytes = b"fake wasm binary for testing";
-        let sha256 = format!("{:x}", Sha256::digest(wasm_bytes));
+        let sha256 = hex::encode(Sha256::digest(wasm_bytes));
 
         // 1. PUT artifact
         let put_url = format!("http://{}/artifacts/{}", addr, sha256);

@@ -4,7 +4,7 @@ use common::{
     error::PlatformError,
     types::{AppConfig, AppId},
 };
-use redb::ReadableTable;
+use redb::{ReadableDatabase, ReadableTable};
 
 impl Store {
     pub fn save_config(&self, config: &AppConfig) -> Result<(), PlatformError> {

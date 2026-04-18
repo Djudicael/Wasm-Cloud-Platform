@@ -253,7 +253,22 @@ impl EventDispatcher {
             info!(url = %artifact_url, "fetching artifact via HTTP");
             match fetch_artifact(&artifact_url, &sha256).await {
                 Ok(bytes) => {
-                    // 3. Store raw bytes for future use
+                    // 3. Verify SHA-256 hash before storing or compiling
+                    use std::sync::LazyLock;
+                    use hex;
+                    static SHA256_HASHER: LazyLock<sha2::Sha256> = LazyLock::new(sha2::Sha256::new);
+                    let computed_hash = hex::encode(SHA256_HASHER.clone().chain_update(&bytes).finalize());
+                    if computed_hash != sha256 {
+                        error!(
+                            expected_hash = %sha256,
+                            computed_hash = %computed_hash,
+                            "artifact hash mismatch - possible tampering"
+                        );
+                        return;
+                    }
+                    info!(sha256 = %computed_hash, "artifact hash verified");
+
+                    // 5. Store raw bytes for future use
                     if let Err(e) = self.store.save_raw_wasm(&sha256, &bytes) {
                         error!(sha256, error = %e, "failed to cache raw wasm");
                     }
@@ -268,13 +283,13 @@ impl EventDispatcher {
 
         info!(app = %app_id.0, bytes = wasm_bytes.len(), "artifact ready, compiling");
 
-        // 4. Compile (CPU-intensive — spawn_blocking)
+        // 5. Compile (CPU-intensive — spawn_blocking)
         let runtime = self.runtime.clone();
         let artifact = tokio::task::spawn_blocking(move || runtime.compile(&wasm_bytes)).await;
 
         match artifact {
             Ok(Ok(artifact_bytes)) => {
-                // 5. Store compiled artifact, config, and hash
+                // 6. Store compiled artifact, config, and hash
                 if let Err(e) = self.store.store_artifact(&app_id, &artifact_bytes) {
                     error!(app = %app_id.0, error = %e, "failed to store artifact");
                     return;
@@ -316,7 +331,7 @@ impl EventDispatcher {
     }
 
     fn our_node_id(&self) -> String {
-        std::env::var("NODE_ID").unwrap_or_else(|_| "node-0".to_string())
+        self.node_id.clone()
     }
 
     async fn handle_node_joined(

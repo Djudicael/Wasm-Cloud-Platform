@@ -3,7 +3,7 @@ use crate::tables::{
 };
 use crate::Store;
 use common::error::PlatformError;
-use redb::ReadableTable;
+use redb::{ReadableDatabase, ReadableTable};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -85,73 +85,81 @@ impl Store {
                 let table = tx
                     .open_table(ARTIFACTS)
                     .map_err(|e| PlatformError::Storage(e.to_string()))?;
-                Ok(table
+                let count = table
                     .iter()
                     .map_err(|e| PlatformError::Storage(e.to_string()))?
-                    .count() as u64)
+                    .count() as u64;
+                Ok(count)
             }
             "configs" => {
                 let table = tx
                     .open_table(CONFIGS)
                     .map_err(|e| PlatformError::Storage(e.to_string()))?;
-                Ok(table
+                let count = table
                     .iter()
                     .map_err(|e| PlatformError::Storage(e.to_string()))?
-                    .count() as u64)
+                    .count() as u64;
+                Ok(count)
             }
             "secrets" => {
                 let table = tx
                     .open_table(SECRETS)
                     .map_err(|e| PlatformError::Storage(e.to_string()))?;
-                Ok(table
+                let count = table
                     .iter()
                     .map_err(|e| PlatformError::Storage(e.to_string()))?
-                    .count() as u64)
+                    .count() as u64;
+                Ok(count)
             }
             "metrics" => {
                 let table = tx
                     .open_table(METRICS)
                     .map_err(|e| PlatformError::Storage(e.to_string()))?;
-                Ok(table
+                let count = table
                     .iter()
                     .map_err(|e| PlatformError::Storage(e.to_string()))?
-                    .count() as u64)
+                    .count() as u64;
+                Ok(count)
             }
             "routes" => {
                 let table = tx
                     .open_table(ROUTES)
                     .map_err(|e| PlatformError::Storage(e.to_string()))?;
-                Ok(table
+                let count = table
                     .iter()
                     .map_err(|e| PlatformError::Storage(e.to_string()))?
-                    .count() as u64)
+                    .count() as u64;
+                Ok(count)
             }
             "raw_wasm" => {
                 let table = tx
                     .open_table(RAW_WASM)
                     .map_err(|e| PlatformError::Storage(e.to_string()))?;
-                Ok(table
+                let count = table
                     .iter()
                     .map_err(|e| PlatformError::Storage(e.to_string()))?
-                    .count() as u64)
+                    .count() as u64;
+                Ok(count)
             }
             "schema_meta" => {
                 let table = tx
                     .open_table(SCHEMA_META)
                     .map_err(|e| PlatformError::Storage(e.to_string()))?;
-                Ok(table
+                let count = table
                     .iter()
                     .map_err(|e| PlatformError::Storage(e.to_string()))?
-                    .count() as u64)
+                    .count() as u64;
+                Ok(count)
             }
             "artifact_hashes" => {
                 let table = tx
                     .open_table(ARTIFACT_HASHES)
                     .map_err(|e| PlatformError::Storage(e.to_string()))?;
-                Ok(table
+                let count = table
                     .iter()
                     .map_err(|e| PlatformError::Storage(e.to_string()))?
-                    .count() as u64)
+                    .count() as u64;
+                Ok(count)
             }
             other => Err(PlatformError::Storage(format!("unknown table: {other}"))),
         }
@@ -277,9 +285,18 @@ impl Store {
             .begin_write()
             .map_err(|e| PlatformError::Storage(e.to_string()))?;
         {
-            let _table = tx
+            let mut table = tx
                 .open_table(ROUTES)
                 .map_err(|e| PlatformError::Storage(e.to_string()))?;
+            let keys: Vec<String> = table
+                .iter()
+                .map_err(|e| PlatformError::Storage(e.to_string()))?
+                .filter_map(|e| e.ok())
+                .map(|(k, _)| k.value().to_string())
+                .collect();
+            for key in keys {
+                table.remove(key.as_str()).map_err(|e| PlatformError::Storage(e.to_string()))?;
+            }
         }
         tx.commit()
             .map_err(|e| PlatformError::Storage(e.to_string()))?;
@@ -292,9 +309,18 @@ impl Store {
             .begin_write()
             .map_err(|e| PlatformError::Storage(e.to_string()))?;
         {
-            let _table = tx
+            let mut table = tx
                 .open_table(METRICS)
                 .map_err(|e| PlatformError::Storage(e.to_string()))?;
+            let keys: Vec<String> = table
+                .iter()
+                .map_err(|e| PlatformError::Storage(e.to_string()))?
+                .filter_map(|e| e.ok())
+                .map(|(k, _)| k.value().to_string())
+                .collect();
+            for key in keys {
+                table.remove(key.as_str()).map_err(|e| PlatformError::Storage(e.to_string()))?;
+            }
         }
         tx.commit()
             .map_err(|e| PlatformError::Storage(e.to_string()))?;
@@ -306,6 +332,6 @@ impl Store {
     }
 
     pub fn db_path(&self) -> std::path::PathBuf {
-        std::path::PathBuf::from("/tmp/unknown.redb")
+        self.db_path.clone()
     }
 }

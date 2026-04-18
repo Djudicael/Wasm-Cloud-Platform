@@ -1,5 +1,6 @@
 use crate::Store;
 use common::types::{AppConfig, AppId, FuelQuota, MemoryPages};
+use redb::ReadableDatabase;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tempfile::NamedTempFile;
 

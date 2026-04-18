@@ -1,7 +1,7 @@
 // crates/storage/src/gc.rs
 use crate::{tables::*, Store};
 use common::{error::PlatformError, gc::GcConfig};
-use redb::ReadableTable;
+use redb::{ReadableDatabase, ReadableTable};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};

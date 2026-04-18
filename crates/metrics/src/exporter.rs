@@ -127,7 +127,9 @@ impl Metrics {
 
         if sample.is_trap {
             let reason = sample.trap_reason.as_deref().unwrap_or("unknown");
-            self.trap_total.with_label_values(&[app, reason]).inc();
+            let app_owned = app.to_string();
+            let reason_owned = reason.to_string();
+            self.trap_total.with_label_values(&[&app_owned, &reason_owned]).inc();
         }
     }
 }

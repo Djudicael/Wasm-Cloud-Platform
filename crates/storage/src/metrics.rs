@@ -1,7 +1,7 @@
 // crates/storage/src/metrics.rs
 use crate::{tables::METRICS, Store};
 use common::error::PlatformError;
-use redb::ReadableTable;
+use redb::{ReadableDatabase, ReadableTable};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

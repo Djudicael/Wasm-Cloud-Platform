@@ -4,7 +4,7 @@ use crate::{
     Store,
 };
 use common::{error::PlatformError, types::AppId};
-use redb::ReadableTable;
+use redb::{ReadableDatabase, ReadableTable};
 
 impl Store {
     /// Persist a compiled Wasm artifact.

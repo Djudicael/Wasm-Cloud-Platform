@@ -13,7 +13,8 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 common = { path = "../common" }
 axum = { workspace = true }
-sha2 = "0.10"
+sha2 = { workspace = true }
+hex = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 prometheus = { workspace = true }
 async-nats = { workspace = true }

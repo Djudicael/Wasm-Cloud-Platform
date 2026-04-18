@@ -27,8 +27,13 @@ pub enum AuditEventType {
 
 pub fn write_audit_event(path: &str, event: &AuditEvent) {
     if let Ok(line) = serde_json::to_string(event) {
-        if let Ok(mut file) = OpenOptions::new().append(true).create(true).open(path) {
-            let _ = file.write_all(format!("{}\n", line).as_bytes());
+        if let Err(e) = OpenOptions::new()
+            .append(true)
+            .create(true)
+            .open(path)
+            .and_then(|mut f| f.write_all(format!("{}\n", line).as_bytes()))
+        {
+            tracing::warn!(error = %e, path = path, "failed to write audit event");
         }
     }
 }

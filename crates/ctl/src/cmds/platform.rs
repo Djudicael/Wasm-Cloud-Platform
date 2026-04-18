@@ -1,5 +1,6 @@
 // crates/ctl/src/cmds/platform.rs
 use clap::Subcommand;
+use hex;
 use messaging::events::Event;
 use messaging::NatsBus;
 
@@ -128,7 +129,7 @@ async fn upload_binary(
     // Compute SHA-256
     let mut hasher = Sha256::new();
     hasher.update(&binary_bytes);
-    let sha256 = format!("{:x}", hasher.finalize());
+    let sha256 = hex::encode(hasher.finalize());
 
     println!("🔐 SHA-256: {}", sha256);
     println!("📤 Uploading to {}...", artifact_url);

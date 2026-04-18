@@ -1,3 +1,4 @@
+use hex;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -35,6 +36,6 @@ impl BillingRecord {
         hasher.update(self.wall_clock_ms.to_le_bytes());
         hasher.update(self.status_code.to_le_bytes());
         hasher.update([self.is_trap as u8]);
-        format!("{:x}", hasher.finalize())
+        hex::encode(hasher.finalize())
     }
 }

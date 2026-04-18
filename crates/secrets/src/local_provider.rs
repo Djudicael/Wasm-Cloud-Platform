@@ -4,6 +4,7 @@ use crate::{
 };
 use async_trait::async_trait;
 use common::{error::PlatformError, types::AppId};
+use redb::ReadableDatabase;
 use std::sync::Arc;
 use storage::{tables::SECRETS, Store};
 use tokio::sync::RwLock;

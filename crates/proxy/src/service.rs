@@ -118,7 +118,7 @@ impl ProxyHttp for WasmProxy {
                 .and_then(|addr| addr.as_inet().map(|inet| inet.ip()))
                 .unwrap_or_else(|| std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)));
 
-            match self.rate_limiter.check_request(&app_id.0, source_ip).await {
+            match self.rate_limiter.check_request(&app_id.0, source_ip) {
                 Ok(()) => {
                     // Rate limit passed, continue
                 }
@@ -171,7 +171,7 @@ impl ProxyHttp for WasmProxy {
     async fn upstream_request_filter(
         &self,
         _session: &mut Session,
-        upstream_request: &mut pingora_http::RequestHeader,
+        upstream_request: &mut pingora::http::RequestHeader,
         ctx: &mut Self::CTX,
     ) -> PingoraResult<()> {
         if let Some(id) = &ctx.app_id {

@@ -59,6 +59,9 @@ struct Args {
     #[arg(long)]
     key_file: Option<String>,
 
+    #[arg(long, env = "ADMIN_TOKEN")]
+    admin_token: Option<String>,
+
     #[arg(long, default_value = "postgres://127.0.0.1:5432")]
     database_url: String,
 
@@ -242,7 +245,20 @@ async fn main() -> anyhow::Result<()> {
         // For now, just generate a new key (will be persisted in storage)
         secrets::crypto::SymmetricKey::generate()
     } else {
-        secrets::crypto::SymmetricKey::generate()
+        // Try to load KEK from storage, generate new if not found
+        if let Ok(Some(_encrypted_kek)) = store.load_kek() {
+            tracing::info!("loaded KEK from storage");
+            // TODO: decrypt the KEK using a passphrase or load from secure store
+            // For now, this is a placeholder - in production you'd decrypt with a passphrase
+            secrets::crypto::SymmetricKey::generate()
+        } else {
+            let new_kek = secrets::crypto::SymmetricKey::generate();
+            // Persist the KEK (in production, encrypt with a passphrase before storing)
+            if let Err(e) = store.save_kek(new_kek.as_bytes()) {
+                tracing::warn!(error = %e, "failed to persist KEK");
+            }
+            new_kek
+        }
     };
     let secret_provider = Arc::new(secrets::LocalSecretProvider::new(store.clone(), kek));
 
@@ -295,17 +311,44 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    for subject in &[
+    // Subscribe to critical control plane events with durable consumers
+    for _subject in &[
         "instance.ready.>",
         "instance.dead.>",
-        "secrets.update.>",
-        "config.update.>",
-        "node.load.>",
-        "routes.>",  // Subscribe to route events
-        "cluster.>", // Subscribe to cluster bootstrap events
     ] {
         let d = dispatcher.clone();
-        bus.subscribe(subject, move |event| {
+        let stream = "CONTROL".to_string();
+        let consumer = format!("node-{}", args.node_id);
+        bus.subscribe_durable(&stream, &consumer, move |event| {
+            let d = d.clone();
+            async move { d.handle(event).await }
+        })
+        .await?;
+    }
+
+    for _subject in &[
+        "secrets.update.>",
+        "config.update.>",
+    ] {
+        let d = dispatcher.clone();
+        let stream = "CONTROL".to_string();
+        let consumer = format!("node-{}", args.node_id);
+        bus.subscribe_durable(&stream, &consumer, move |event| {
+            let d = d.clone();
+            async move { d.handle(event).await }
+        })
+        .await?;
+    }
+
+    for _subject in &[
+        "node.load.>",
+        "routes.",
+        "cluster.>",
+    ] {
+        let d = dispatcher.clone();
+        let stream = "NODE".to_string();
+        let consumer = format!("node-{}", args.node_id);
+        bus.subscribe_durable(&stream, &consumer, move |event| {
             let d = d.clone();
             async move { d.handle(event).await }
         })

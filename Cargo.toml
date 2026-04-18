@@ -20,45 +20,45 @@ members = [
 
 [workspace.dependencies]
 # Async
-tokio        = { version = "1", features = ["full"] }
+tokio        = { version = "1.52", features = ["full"] }
 
 # Serialization
-serde        = { version = "1", features = ["derive"] }
-serde_json   = "1"
-bincode      = "2"
+serde        = { version = "1.0", features = ["derive"] }
+serde_json   = "1.0"
+bincode      = "2.0"
 
 # Error handling
-thiserror    = "1"
-anyhow       = "1"
+thiserror    = "2.0"
+anyhow       = "1.0"
 
 # Logging / Tracing
 tracing               = "0.1"
 tracing-subscriber    = { version = "0.3", features = ["env-filter", "json"] }
 
 # Wasm runtime
-wasmtime              = { version = "43.0.1" }
-wasmtime-wasi         = { version = "43.0.1" }
+wasmtime              = "43.0.1"
+wasmtime-wasi         = "43.0.1"
 
 # Proxy
-pingora               = "0.4"
-pingora-proxy         = "0.4"
-pingora-load-balancing = "0.4"
-pingora-core          = "0.4"
+pingora               = "0.8"
+pingora-proxy         = "0.8"
+pingora-load-balancing = "0.8"
+pingora-core          = "0.8"
 
 # Storage
-redb = "2"
+redb = "4.0"
 
 # Messaging
-async-nats = "0.36"
+async-nats = "0.47"
 
 # Encryption
 aes-gcm          = "0.10"
 
 # Metrics
-prometheus      = { version = "0.13", features = ["process"] }
+prometheus      = { version = "0.14", features = ["process"] }
 
 # HTTP (admin API)
-axum = "0.7"
+axum = "0.8"
 
 # CLI
 clap = { version = "4", features = ["derive", "env"] }
@@ -68,8 +68,15 @@ uuid   = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 
 # Testing
-reqwest = { version = "0.12", features = ["json"] }
-testcontainers = "0.27.2"
+reqwest = { version = "0.13", features = ["json"] }
+testcontainers = "0.27"
+
+# Crypto
+sha2 = "0.11"
+hex = "0.4"
 
 # URL parsing
 url = "2"
+
+# Concurrent
+dashmap = "6.1"

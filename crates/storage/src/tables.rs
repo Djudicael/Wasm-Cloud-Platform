@@ -44,3 +44,8 @@ pub const ARTIFACT_HASHES: TableDefinition<&str, &str> = TableDefinition::new("a
 // Key   : "node_id:sequence_number" (e.g. "node-0:12345")
 // Value : JSON-serialized BillingRecord
 pub const BILLING: TableDefinition<&str, &str> = TableDefinition::new("billing");
+
+// ── KEY ENCRYPTION KEY (KEK) ───────────────────────────────────────────────────
+// Key   : "kek" (singleton)
+// Value : Encrypted KEK bytes (nonce + ciphertext)
+pub const KEK: TableDefinition<&str, &[u8]> = TableDefinition::new("kek");

@@ -33,6 +33,10 @@ impl MemoryLimiter {
             memory_used: 0,
         }
     }
+
+    pub fn current_memory(&self) -> usize {
+        self.memory_used
+    }
 }
 
 impl ResourceLimiter for MemoryLimiter {

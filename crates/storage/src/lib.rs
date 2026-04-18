@@ -1,6 +1,6 @@
 #![allow(clippy::result_large_err)]
 
-use redb::Database;
+use redb::{Database, ReadableDatabase};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -32,6 +32,7 @@ const CURRENT_SCHEMA_VERSION: u32 = 3;
 #[derive(Clone)]
 pub struct Store {
     pub db: Arc<Database>,
+    db_path: std::path::PathBuf,
 }
 
 impl Store {
@@ -45,6 +46,7 @@ impl Store {
             let temp_db = Database::create(path)?;
             let temp_store = Store {
                 db: Arc::new(temp_db),
+                db_path: path.to_path_buf(),
             };
             let current = temp_store.read_schema_version().unwrap_or(0);
             drop(temp_store);
@@ -59,6 +61,7 @@ impl Store {
                 let temp_db = Database::create(path)?;
                 let temp_store = Store {
                     db: Arc::new(temp_db),
+                    db_path: path.to_path_buf(),
                 };
                 let v = temp_store.read_schema_version().unwrap_or(0);
                 drop(temp_store);
@@ -90,10 +93,11 @@ impl Store {
             tx.open_table(tables::RAW_WASM)?;
             tx.open_table(tables::ARTIFACT_HASHES)?;
             tx.open_table(tables::BILLING)?;
+            tx.open_table(tables::KEK)?;
         }
         tx.commit()?;
 
-        let store = Store { db: Arc::new(db) };
+        let store = Store { db: Arc::new(db), db_path: path.to_path_buf() };
 
         // Run migrations
         store.run_migrations()?;

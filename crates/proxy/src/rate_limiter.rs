@@ -1,9 +1,8 @@
 // crates/proxy/src/rate_limiter.rs
-use std::collections::HashMap;
+use dashmap::DashMap;
 use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::RwLock;
 
 /// Per-app rate limit configuration.
 #[derive(Debug, Clone)]
@@ -69,14 +68,14 @@ impl TokenBucket {
 /// Node-local rate limiter. No external dependencies.
 pub struct RateLimiter {
     /// Per-app token buckets (app_id → bucket).
-    app_buckets: RwLock<HashMap<String, TokenBucket>>,
+    app_buckets: DashMap<String, TokenBucket>,
 
     /// Per-IP token buckets (ip → bucket).
     /// Pruned periodically to prevent unbounded growth.
-    ip_buckets: RwLock<HashMap<IpAddr, TokenBucket>>,
+    ip_buckets: DashMap<IpAddr, TokenBucket>,
 
     /// Per-app rate limit configs.
-    configs: RwLock<HashMap<String, RateLimitConfig>>,
+    configs: DashMap<String, RateLimitConfig>,
 
     /// Default config for apps without explicit limits.
     default_config: RateLimitConfig,
@@ -85,51 +84,43 @@ pub struct RateLimiter {
 impl RateLimiter {
     pub fn new(default_config: RateLimitConfig) -> Self {
         RateLimiter {
-            app_buckets: RwLock::new(HashMap::new()),
-            ip_buckets: RwLock::new(HashMap::new()),
-            configs: RwLock::new(HashMap::new()),
+            app_buckets: DashMap::new(),
+            ip_buckets: DashMap::new(),
+            configs: DashMap::new(),
             default_config,
         }
     }
 
     /// Set a custom rate limit for a specific app.
-    pub async fn set_app_config(&self, app_id: &str, config: RateLimitConfig) {
-        self.configs
-            .write()
-            .await
-            .insert(app_id.to_string(), config);
+    pub fn set_app_config(&self, app_id: &str, config: RateLimitConfig) {
+        self.configs.insert(app_id.to_string(), config);
     }
 
     /// Get the current config for an app (for introspection/CLI).
-    pub async fn get_app_config(&self, app_id: &str) -> RateLimitConfig {
-        let configs = self.configs.read().await;
-        configs
+    pub fn get_app_config(&self, app_id: &str) -> RateLimitConfig {
+        self.configs
             .get(app_id)
-            .cloned()
+            .map(|c| c.clone())
             .unwrap_or(self.default_config.clone())
     }
 
     /// Check whether a request should be allowed.
     /// Returns Ok(()) if allowed, Err(RateLimitDenied) with reason if rejected.
-    pub async fn check_request(
-        &self,
-        app_id: &str,
-        source_ip: IpAddr,
-    ) -> Result<(), RateLimitDenied> {
-        let config = {
-            let configs = self.configs.read().await;
-            configs
-                .get(app_id)
-                .cloned()
-                .unwrap_or(self.default_config.clone())
-        };
+    pub fn check_request(&self, app_id: &str, source_ip: IpAddr) -> Result<(), RateLimitDenied> {
+        let config = self
+            .configs
+            .get(app_id)
+            .map(|c| c.clone())
+            .unwrap_or(self.default_config.clone());
 
         // 1. Check per-app limit
         {
-            let mut buckets = self.app_buckets.write().await;
-            let bucket = buckets.entry(app_id.to_string()).or_insert_with(|| {
-                TokenBucket::new(config.requests_per_second, config.burst_capacity)
-            });
+            let mut bucket = self
+                .app_buckets
+                .entry(app_id.to_string())
+                .or_insert_with(|| {
+                    TokenBucket::new(config.requests_per_second, config.burst_capacity)
+                });
             if !bucket.try_acquire() {
                 return Err(RateLimitDenied::AppLimitExceeded {
                     app_id: app_id.to_string(),
@@ -140,8 +131,8 @@ impl RateLimiter {
 
         // 2. Check per-IP limit
         {
-            let mut buckets = self.ip_buckets.write().await;
-            let bucket = buckets
+            let mut bucket = self
+                .ip_buckets
                 .entry(source_ip)
                 .or_insert_with(|| TokenBucket::new(config.per_ip_limit, config.per_ip_limit));
             if !bucket.try_acquire() {
@@ -162,23 +153,20 @@ impl RateLimiter {
             let mut interval = tokio::time::interval(Duration::from_secs(60));
             loop {
                 interval.tick().await;
-                limiter
-                    .prune_stale_ip_buckets(Duration::from_secs(300))
-                    .await;
+                limiter.prune_stale_ip_buckets(Duration::from_secs(300));
             }
         });
     }
 
-    async fn prune_stale_ip_buckets(&self, max_age: Duration) {
+    fn prune_stale_ip_buckets(&self, max_age: Duration) {
         let now = Instant::now();
-        let mut buckets = self.ip_buckets.write().await;
-        let before = buckets.len();
-        buckets.retain(|_, bucket| now.duration_since(bucket.last_refill) < max_age);
-        let pruned = before - buckets.len();
+        let before = self.ip_buckets.len();
+        self.ip_buckets.retain(|_, bucket| now.duration_since(bucket.last_refill) < max_age);
+        let pruned = before - self.ip_buckets.len();
         if pruned > 0 {
             tracing::debug!(
                 pruned,
-                remaining = buckets.len(),
+                remaining = self.ip_buckets.len(),
                 "pruned stale IP rate limit buckets"
             );
         }
@@ -219,17 +207,17 @@ mod tests {
             per_ip_limit: 100,
         };
         let limiter = RateLimiter::new(config.clone());
-        limiter.set_app_config("test-app", config).await;
+        limiter.set_app_config("test-app", config);
 
         let ip = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1));
 
         // First 5 requests (burst) should succeed
         for _ in 0..5 {
-            assert!(limiter.check_request("test-app", ip).await.is_ok());
+            assert!(limiter.check_request("test-app", ip).is_ok());
         }
 
         // 6th should fail (burst exhausted, refill rate not enough)
-        assert!(limiter.check_request("test-app", ip).await.is_err());
+        assert!(limiter.check_request("test-app", ip).is_err());
     }
 
     #[tokio::test]
@@ -240,17 +228,17 @@ mod tests {
             per_ip_limit: 5,
         };
         let limiter = RateLimiter::new(config.clone());
-        limiter.set_app_config("test-app", config).await;
+        limiter.set_app_config("test-app", config);
 
         let ip = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100));
 
         // First 5 should succeed (per-IP burst)
         for _ in 0..5 {
-            assert!(limiter.check_request("test-app", ip).await.is_ok());
+            assert!(limiter.check_request("test-app", ip).is_ok());
         }
 
         // 6th should fail due to IP limit
-        let result = limiter.check_request("test-app", ip).await;
+        let result = limiter.check_request("test-app", ip);
         assert!(result.is_err());
         assert!(matches!(
             result,
@@ -271,13 +259,13 @@ mod tests {
         let ip2 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
 
         // Exhaust ip1
-        limiter.check_request("test-app", ip1).await.unwrap();
-        limiter.check_request("test-app", ip1).await.unwrap();
-        assert!(limiter.check_request("test-app", ip1).await.is_err());
+        limiter.check_request("test-app", ip1).unwrap();
+        limiter.check_request("test-app", ip1).unwrap();
+        assert!(limiter.check_request("test-app", ip1).is_err());
 
         // ip2 should still work
-        assert!(limiter.check_request("test-app", ip2).await.is_ok());
-        assert!(limiter.check_request("test-app", ip2).await.is_ok());
+        assert!(limiter.check_request("test-app", ip2).is_ok());
+        assert!(limiter.check_request("test-app", ip2).is_ok());
     }
 
     #[tokio::test]
@@ -291,13 +279,13 @@ mod tests {
         let ip = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1));
 
         // Consume the burst
-        assert!(limiter.check_request("test-app", ip).await.is_ok());
-        assert!(limiter.check_request("test-app", ip).await.is_err());
+        assert!(limiter.check_request("test-app", ip).is_ok());
+        assert!(limiter.check_request("test-app", ip).is_err());
 
         // Wait for refill (10 req/s = 1 token every 100ms)
         tokio::time::sleep(Duration::from_millis(150)).await;
 
         // Should allow one more
-        assert!(limiter.check_request("test-app", ip).await.is_ok());
+        assert!(limiter.check_request("test-app", ip).is_ok());
     }
 }

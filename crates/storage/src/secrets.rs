@@ -1,6 +1,7 @@
 // crates/storage/src/secrets.rs
 use crate::{tables::SECRETS, Store};
 use common::{error::PlatformError, types::AppId};
+use redb::ReadableDatabase;
 
 impl Store {
     pub fn save_secrets(&self, id: &AppId, encrypted_blob: &[u8]) -> Result<(), PlatformError> {

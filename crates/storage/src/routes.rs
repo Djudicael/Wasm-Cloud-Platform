@@ -1,6 +1,6 @@
 use crate::{tables::ROUTES, Store};
 use common::{error::PlatformError, types::Route};
-use redb::ReadableTable;
+use redb::{ReadableDatabase, ReadableTable};
 
 impl Store {
     pub fn save_route(&self, route: &Route) -> Result<(), PlatformError> {

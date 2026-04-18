@@ -86,7 +86,12 @@ impl PreparedModule {
         builder.allow_udp(true);
         builder.allow_ip_name_lookup(true);
 
-        eprintln!("[SPAWN] WASI config: inherit_network=true, allow_tcp=true, allow_udp=true, allow_ip_name_lookup=true");
+        tracing::debug!(
+            allow_tcp = true,
+            allow_udp = true,
+            allow_ip_name_lookup = true,
+            "WASI config built"
+        );
 
         for (k, v) in env_vars {
             builder.env(&k, &v);
@@ -122,13 +127,13 @@ impl PreparedModule {
         add_to_linker_sync(&mut linker)
             .map_err(|e| PlatformError::Runtime(format!("linker error: {e}")))?;
 
-        eprintln!("[SPAWN] About to instantiate component");
+        tracing::debug!("instantiating component");
         let instance = linker.instantiate(&mut store, &self.module).map_err(|e| {
-            eprintln!("[SPAWN] INSTANTIATION FAILED: {}", e);
+            tracing::warn!(error = %e, "instantiation failed");
             PlatformError::Runtime(format!("instantiation error: {e}"))
         })?;
 
-        eprintln!("[SPAWN] Component instantiated successfully, returning RunningInstance");
+        tracing::debug!("component instantiated");
 
         Ok((
             RunningInstance {
@@ -176,11 +181,7 @@ impl RunningInstance {
                 self.instance
                     .get_export_index(&mut self.store, None, &interface_name);
 
-            eprintln!(
-                "[RUN] Checking {}: {:?}",
-                interface_name,
-                interface_idx.is_some()
-            );
+            tracing::trace!(interface = %interface_name, "checking for entry point");
 
             let interface_idx = interface_idx?;
 
@@ -189,17 +190,20 @@ impl RunningInstance {
                 self.instance
                     .get_export_index(&mut self.store, Some(&interface_idx), "run");
 
-            eprintln!(
-                "[RUN]   run function inside {}: {:?}",
-                interface_name,
-                func_idx.is_some()
-            );
+            tracing::trace!(interface = %interface_name, has_run = func_idx.is_some(), "checking for run function");
 
             let func_idx = func_idx?;
             self.instance.get_func(&mut self.store, func_idx)
         });
 
-        eprintln!("[RUN] Found entry point: {:?}", start_fn.is_some());
+        if start_fn.is_some() {
+            tracing::info!("WASI entry point found and callable");
+        }
+
+        tracing::debug!(
+            has_entry_point = start_fn.is_some(),
+            "entry point lookup complete"
+        );
         tracing::info!(
             has_entry_point = start_fn.is_some(),
             "entry point lookup result"
@@ -207,44 +211,44 @@ impl RunningInstance {
 
         match start_fn {
             Some(f) => {
-                eprintln!("[RUN] Calling entry point...");
+                tracing::debug!("calling entry point");
                 // The run function returns Result<(), ()> wrapped in a tuple
                 let typed = f.typed::<(), (Result<(), ()>,)>(&self.store);
                 match typed {
                     Ok(t) => match t.call(&mut self.store, ()) {
                         Ok((result,)) => match result {
                             Ok(()) => {
-                                eprintln!("[RUN] Entry point completed successfully");
+                                tracing::debug!("entry point completed successfully");
                             }
                             Err(()) => {
                                 let err = "WASM app exited with error".to_string();
-                                eprintln!("🔴 WASM ERROR: instance={}, exit code=1", self.id.0);
+                                tracing::error!(instance_id = %self.id.0, "WASM app exited with error");
                                 trap_msg = Some(err);
                             }
                         },
                         Err(e) => {
                             let err_msg = e.to_string();
-                            eprintln!("🔴 WASM TRAP: instance={}, error={}", self.id.0, err_msg);
+                            tracing::error!(instance_id = %self.id.0, error = %err_msg, "WASM trap");
                             tracing::error!(instance = %self.id.0, error = %err_msg, "WASM function call failed");
                             trap_msg = Some(err_msg);
                         }
                     },
                     Err(typed_err) => {
                         // Fallback to untyped call
-                        eprintln!("[RUN] Typed call failed ({:?}), trying untyped", typed_err);
+                        tracing::debug!(error = ?typed_err, "typed call failed, trying untyped");
                         if let Err(e) = f.call(&mut self.store, &[], &mut []) {
                             let err_msg = e.to_string();
-                            eprintln!("🔴 WASM TRAP: instance={}, error={}", self.id.0, err_msg);
+                            tracing::error!(instance_id = %self.id.0, error = %err_msg, "WASM trap");
                             tracing::error!(instance = %self.id.0, error = %err_msg, "WASM function call failed");
                             trap_msg = Some(err_msg);
                         } else {
-                            eprintln!("[RUN] Entry point called successfully");
+                            tracing::debug!("entry point called successfully");
                         }
                     }
                 }
             }
             None => {
-                eprintln!("🔴 WASM NO ENTRY POINT: instance={}", self.id.0);
+                tracing::error!(instance_id = %self.id.0, "No WASI entry point found");
                 tracing::error!(instance = %self.id.0, "No entry point found (wasi:cli/run@0.2.x#run, run, or _start)");
                 trap_msg = Some("export not found".to_string());
             }
@@ -269,8 +273,6 @@ impl RunningInstance {
     }
 
     fn read_memory_usage(&mut self) -> usize {
-        // In the component model, linear memories are deeply nested and not directly
-        // exported as `Val::Memory`. For now, we return a non-zero placeholder.
-        1024
+        self.store.data().limiter.current_memory()
     }
 }

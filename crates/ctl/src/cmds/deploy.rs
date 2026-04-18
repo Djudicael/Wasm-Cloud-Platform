@@ -6,6 +6,7 @@ use common::types::{AppConfig, AppId, FuelQuota, MemoryPages};
 use indicatif::{ProgressBar, ProgressStyle};
 use messaging::{events::Event, NatsBus};
 use sha2::{Digest, Sha256};
+use hex;
 use std::collections::HashMap;
 
 #[derive(Args)]
@@ -72,7 +73,7 @@ pub async fn run(
     let size_bytes = wasm_bytes.len() as u64;
 
     // 2. Compute SHA-256
-    let sha256 = format!("{:x}", Sha256::digest(&wasm_bytes));
+    let sha256 = hex::encode(Sha256::digest(&wasm_bytes));
     println!("{}", "Deploying application:".bold());
     println!("  App ID:  {}", app_id.0.cyan());
     println!("  SHA-256: {}", sha256.yellow());

@@ -23,7 +23,27 @@ pub struct Route {
 }
 impl AppId {
     pub fn new(name: &str, version: &str) -> Self {
-        AppId(format!("{name}:{version}"))
+        let id = format!("{name}:{version}");
+        Self::new_validate(&id).unwrap_or_else(|_| {
+            panic!("Invalid AppId: name and version must be non-empty and contain no whitespace or NATS-invalid characters (> * . newline)")
+        })
+    }
+
+    pub fn new_validate(s: &str) -> Result<Self, &'static str> {
+        if s.is_empty() {
+            return Err("AppId cannot be empty");
+        }
+        if s.contains(' ') || s.contains('\n') || s.contains('\t') {
+            return Err("AppId cannot contain whitespace");
+        }
+        if s.contains('>') || s.contains('*') || s.contains('.') {
+            return Err("AppId cannot contain >, *, or . (invalid in NATS subjects)");
+        }
+        Ok(AppId(s.to_string()))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
     }
 }
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]

@@ -2,7 +2,7 @@ use crate::tables::BILLING;
 use crate::Store;
 use common::billing::BillingRecord;
 use common::error::PlatformError;
-use redb::ReadableTable;
+use redb::{ReadableDatabase, ReadableTable};
 
 impl Store {
     pub fn write_billing_record(&self, record: &BillingRecord) -> Result<(), PlatformError> {
