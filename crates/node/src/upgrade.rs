@@ -17,10 +17,10 @@ pub async fn download_and_verify(
     // 1. Download the binary
     let response = reqwest::get(artifact_url)
         .await
-        .map_err(|e| PlatformError::Network(format!("download failed: {}", e)))?;
+        .map_err(|e| PlatformError::network(format!("download failed: {}", e)))?;
 
     if !response.status().is_success() {
-        return Err(PlatformError::Network(format!(
+        return Err(PlatformError::network(format!(
             "download failed with status: {}",
             response.status()
         )));
@@ -29,14 +29,14 @@ pub async fn download_and_verify(
     let bytes = response
         .bytes()
         .await
-        .map_err(|e| PlatformError::Network(format!("read body failed: {}", e)))?;
+        .map_err(|e| PlatformError::network(format!("read body failed: {}", e)))?;
 
     tracing::info!(bytes = bytes.len(), "binary downloaded");
 
     // 2. Verify SHA-256
     let mut hasher = Sha256::new();
     hasher.update(&bytes);
-    let actual_hash = format!("{:x}", hasher.finalize());
+    let actual_hash = hex::encode(hasher.finalize());
 
     if actual_hash != expected_sha256 {
         return Err(PlatformError::Security(format!(
@@ -50,13 +50,13 @@ pub async fn download_and_verify(
     // 3. Ensure install directory exists
     tokio::fs::create_dir_all(install_dir)
         .await
-        .map_err(|e| PlatformError::Storage(format!("create install dir failed: {}", e)))?;
+        .map_err(|e| PlatformError::storage_with_msg("create install dir failed", e))?;
 
     // 4. Write to install directory
     let dest = install_dir.join(binary_name);
     tokio::fs::write(&dest, &bytes)
         .await
-        .map_err(|e| PlatformError::Storage(format!("write binary failed: {}", e)))?;
+        .map_err(|e| PlatformError::storage_with_msg("write binary failed", e))?;
 
     // 5. Set executable permission (Unix)
     #[cfg(unix)]
@@ -64,7 +64,7 @@ pub async fn download_and_verify(
         use std::os::unix::fs::PermissionsExt;
         let perms = std::fs::Permissions::from_mode(0o755);
         std::fs::set_permissions(&dest, perms)
-            .map_err(|e| PlatformError::Storage(format!("chmod failed: {}", e)))?;
+            .map_err(|e| PlatformError::storage_with_msg("chmod failed", e))?;
     }
 
     tracing::info!(path = %dest.display(), "binary installed");

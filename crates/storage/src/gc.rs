@@ -36,18 +36,15 @@ impl Store {
         let tx = self
             .db
             .begin_read()
-            .map_err(|e| PlatformError::Storage(e.to_string()))?;
+            .map_err(PlatformError::storage_source)?;
         let table = tx
             .open_table(ARTIFACTS)
-            .map_err(|e| PlatformError::Storage(e.to_string()))?;
+            .map_err(PlatformError::storage_source)?;
 
         let mut inventory: HashMap<String, Vec<VersionEntry>> = HashMap::new();
 
-        for entry in table
-            .iter()
-            .map_err(|e| PlatformError::Storage(e.to_string()))?
-        {
-            let (k, _) = entry.map_err(|e| PlatformError::Storage(e.to_string()))?;
+        for entry in table.iter().map_err(PlatformError::storage_source)? {
+            let (k, _) = entry.map_err(PlatformError::storage_source)?;
             let key = k.value().to_string();
 
             // Parse "api-users:v3" into ("api-users", "v3")
@@ -161,51 +158,42 @@ impl Store {
         let tx = self
             .db
             .begin_write()
-            .map_err(|e| PlatformError::Storage(e.to_string()))?;
+            .map_err(PlatformError::storage_source)?;
         {
             let mut table = tx
                 .open_table(ARTIFACTS)
-                .map_err(|e| PlatformError::Storage(e.to_string()))?;
-            table
-                .remove(key)
-                .map_err(|e| PlatformError::Storage(e.to_string()))?;
+                .map_err(PlatformError::storage_source)?;
+            table.remove(key).map_err(PlatformError::storage_source)?;
         }
-        tx.commit()
-            .map_err(|e| PlatformError::Storage(e.to_string()))
+        tx.commit().map_err(PlatformError::storage_source)
     }
 
     fn delete_raw_wasm_by_key(&self, key: &str) -> Result<(), PlatformError> {
         let tx = self
             .db
             .begin_write()
-            .map_err(|e| PlatformError::Storage(e.to_string()))?;
+            .map_err(PlatformError::storage_source)?;
         {
             let mut table = tx
                 .open_table(RAW_WASM)
-                .map_err(|e| PlatformError::Storage(e.to_string()))?;
-            table
-                .remove(key)
-                .map_err(|e| PlatformError::Storage(e.to_string()))?;
+                .map_err(PlatformError::storage_source)?;
+            table.remove(key).map_err(PlatformError::storage_source)?;
         }
-        tx.commit()
-            .map_err(|e| PlatformError::Storage(e.to_string()))
+        tx.commit().map_err(PlatformError::storage_source)
     }
 
     fn delete_config_by_key(&self, key: &str) -> Result<(), PlatformError> {
         let tx = self
             .db
             .begin_write()
-            .map_err(|e| PlatformError::Storage(e.to_string()))?;
+            .map_err(PlatformError::storage_source)?;
         {
             let mut table = tx
                 .open_table(CONFIGS)
-                .map_err(|e| PlatformError::Storage(e.to_string()))?;
-            table
-                .remove(key)
-                .map_err(|e| PlatformError::Storage(e.to_string()))?;
+                .map_err(PlatformError::storage_source)?;
+            table.remove(key).map_err(PlatformError::storage_source)?;
         }
-        tx.commit()
-            .map_err(|e| PlatformError::Storage(e.to_string()))
+        tx.commit().map_err(PlatformError::storage_source)
     }
 
     /// Delete metric buckets older than `retain_days` days.
@@ -221,17 +209,17 @@ impl Store {
         let tx = self
             .db
             .begin_write()
-            .map_err(|e| PlatformError::Storage(e.to_string()))?;
+            .map_err(PlatformError::storage_source)?;
         let mut deleted = 0u64;
         {
             let mut table = tx
                 .open_table(METRICS)
-                .map_err(|e| PlatformError::Storage(e.to_string()))?;
+                .map_err(PlatformError::storage_source)?;
 
             // Collect keys to delete (cannot mutate while iterating)
             let stale_keys: Vec<String> = table
                 .iter()
-                .map_err(|e| PlatformError::Storage(e.to_string()))?
+                .map_err(PlatformError::storage_source)?
                 .filter_map(|e| e.ok())
                 .filter_map(|(k, _)| {
                     let key = k.value().to_string();
@@ -251,12 +239,11 @@ impl Store {
             for key in &stale_keys {
                 table
                     .remove(key.as_str())
-                    .map_err(|e| PlatformError::Storage(e.to_string()))?;
+                    .map_err(PlatformError::storage_source)?;
                 deleted += 1;
             }
         }
-        tx.commit()
-            .map_err(|e| PlatformError::Storage(e.to_string()))?;
+        tx.commit().map_err(PlatformError::storage_source)?;
 
         if deleted > 0 {
             info!(deleted, retain_days, "GC: pruned old metric buckets");
@@ -276,17 +263,16 @@ impl Store {
         let tx = self
             .db
             .begin_write()
-            .map_err(|e| PlatformError::Storage(e.to_string()))?;
+            .map_err(PlatformError::storage_source)?;
         {
             let mut table = tx
                 .open_table(SCHEMA_META)
-                .map_err(|e| PlatformError::Storage(e.to_string()))?;
+                .map_err(PlatformError::storage_source)?;
             table
                 .insert(meta_key.as_str(), now.to_string().as_str())
-                .map_err(|e| PlatformError::Storage(e.to_string()))?;
+                .map_err(PlatformError::storage_source)?;
         }
-        tx.commit()
-            .map_err(|e| PlatformError::Storage(e.to_string()))?;
+        tx.commit().map_err(PlatformError::storage_source)?;
 
         info!(app = %app_name, "app marked as undeployed, grace period started");
         Ok(())
@@ -303,14 +289,14 @@ impl Store {
         let tx = self
             .db
             .begin_read()
-            .map_err(|e| PlatformError::Storage(e.to_string()))?;
+            .map_err(PlatformError::storage_source)?;
         let table = tx
             .open_table(SCHEMA_META)
-            .map_err(|e| PlatformError::Storage(e.to_string()))?;
+            .map_err(PlatformError::storage_source)?;
 
         let expired_apps: Vec<String> = table
             .iter()
-            .map_err(|e| PlatformError::Storage(e.to_string()))?
+            .map_err(PlatformError::storage_source)?
             .filter_map(|e| e.ok())
             .filter_map(|(k, v)| {
                 let key = k.value().to_string();
@@ -349,14 +335,14 @@ impl Store {
         let tx = self
             .db
             .begin_write()
-            .map_err(|e| PlatformError::Storage(e.to_string()))?;
+            .map_err(PlatformError::storage_source)?;
         {
             let mut table = tx
                 .open_table(ARTIFACTS)
-                .map_err(|e| PlatformError::Storage(e.to_string()))?;
+                .map_err(PlatformError::storage_source)?;
             let keys: Vec<String> = table
                 .iter()
-                .map_err(|e| PlatformError::Storage(e.to_string()))?
+                .map_err(PlatformError::storage_source)?
                 .filter_map(|e| e.ok())
                 .filter_map(|(k, _)| {
                     let key = k.value().to_string();
@@ -371,21 +357,20 @@ impl Store {
                 table.remove(key.as_str()).ok();
             }
         }
-        tx.commit()
-            .map_err(|e| PlatformError::Storage(e.to_string()))?;
+        tx.commit().map_err(PlatformError::storage_source)?;
 
         // Delete from raw_wasm table (byte values)
         let tx = self
             .db
             .begin_write()
-            .map_err(|e| PlatformError::Storage(e.to_string()))?;
+            .map_err(PlatformError::storage_source)?;
         {
             let mut table = tx
                 .open_table(RAW_WASM)
-                .map_err(|e| PlatformError::Storage(e.to_string()))?;
+                .map_err(PlatformError::storage_source)?;
             let keys: Vec<String> = table
                 .iter()
-                .map_err(|e| PlatformError::Storage(e.to_string()))?
+                .map_err(PlatformError::storage_source)?
                 .filter_map(|e| e.ok())
                 .filter_map(|(k, _)| {
                     let key = k.value().to_string();
@@ -400,21 +385,20 @@ impl Store {
                 table.remove(key.as_str()).ok();
             }
         }
-        tx.commit()
-            .map_err(|e| PlatformError::Storage(e.to_string()))?;
+        tx.commit().map_err(PlatformError::storage_source)?;
 
         // Delete from configs table (string values)
         let tx = self
             .db
             .begin_write()
-            .map_err(|e| PlatformError::Storage(e.to_string()))?;
+            .map_err(PlatformError::storage_source)?;
         {
             let mut table = tx
                 .open_table(CONFIGS)
-                .map_err(|e| PlatformError::Storage(e.to_string()))?;
+                .map_err(PlatformError::storage_source)?;
             let keys: Vec<String> = table
                 .iter()
-                .map_err(|e| PlatformError::Storage(e.to_string()))?
+                .map_err(PlatformError::storage_source)?
                 .filter_map(|e| e.ok())
                 .filter_map(|(k, _)| {
                     let key = k.value().to_string();
@@ -429,21 +413,20 @@ impl Store {
                 table.remove(key.as_str()).ok();
             }
         }
-        tx.commit()
-            .map_err(|e| PlatformError::Storage(e.to_string()))?;
+        tx.commit().map_err(PlatformError::storage_source)?;
 
         // Delete from metrics table (string values)
         let tx = self
             .db
             .begin_write()
-            .map_err(|e| PlatformError::Storage(e.to_string()))?;
+            .map_err(PlatformError::storage_source)?;
         {
             let mut table = tx
                 .open_table(METRICS)
-                .map_err(|e| PlatformError::Storage(e.to_string()))?;
+                .map_err(PlatformError::storage_source)?;
             let keys: Vec<String> = table
                 .iter()
-                .map_err(|e| PlatformError::Storage(e.to_string()))?
+                .map_err(PlatformError::storage_source)?
                 .filter_map(|e| e.ok())
                 .filter_map(|(k, _)| {
                     let key = k.value().to_string();
@@ -458,8 +441,7 @@ impl Store {
                 table.remove(key.as_str()).ok();
             }
         }
-        tx.commit()
-            .map_err(|e| PlatformError::Storage(e.to_string()))?;
+        tx.commit().map_err(PlatformError::storage_source)?;
 
         // Delete routes for this app
         let routes_to_delete = self.list_routes_for_app(app_name)?;
@@ -472,15 +454,14 @@ impl Store {
         let tx = self
             .db
             .begin_write()
-            .map_err(|e| PlatformError::Storage(e.to_string()))?;
+            .map_err(PlatformError::storage_source)?;
         {
             let mut table = tx
                 .open_table(SCHEMA_META)
-                .map_err(|e| PlatformError::Storage(e.to_string()))?;
+                .map_err(PlatformError::storage_source)?;
             table.remove(meta_key.as_str()).ok();
         }
-        tx.commit()
-            .map_err(|e| PlatformError::Storage(e.to_string()))?;
+        tx.commit().map_err(PlatformError::storage_source)?;
 
         // NOTE: Secrets are NOT deleted here. They must be explicitly removed
         // via `wasm-ctl secret delete --app <name>` to prevent accidental loss.
@@ -633,14 +614,13 @@ fn get_available_disk_space(path: &std::path::Path) -> Result<u64, PlatformError
     use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt;
 
-    let path_cstr =
-        CString::new(path.as_os_str().as_bytes()).map_err(|e| PlatformError::Io(e.to_string()))?;
+    let path_cstr = CString::new(path.as_os_str().as_bytes()).map_err(PlatformError::io_source)?;
 
     let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
     let result = unsafe { libc::statvfs(path_cstr.as_ptr(), &mut stat) };
 
     if result != 0 {
-        return Err(PlatformError::Io(format!(
+        return Err(PlatformError::io(format!(
             "statvfs failed: {}",
             std::io::Error::last_os_error()
         )));
@@ -676,7 +656,7 @@ fn get_available_disk_space(path: &std::path::Path) -> Result<u64, PlatformError
     };
 
     if result == 0 {
-        return Err(PlatformError::Io(format!(
+        return Err(PlatformError::io(format!(
             "GetDiskFreeSpaceEx failed: {}",
             std::io::Error::last_os_error()
         )));

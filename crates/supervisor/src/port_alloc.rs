@@ -26,7 +26,7 @@ impl PortAllocator {
             .iter()
             .next()
             .copied()
-            .ok_or_else(|| PlatformError::Runtime("port pool exhausted".into()))?;
+            .ok_or_else(|| PlatformError::runtime("port pool exhausted"))?;
         free.remove(&port);
         tracing::debug!(port, "allocated port");
         Ok(port)

@@ -74,17 +74,17 @@ impl LocalSecretProvider {
             .store
             .db
             .begin_read()
-            .map_err(|e| PlatformError::Storage(e.to_string()))?;
+            .map_err(PlatformError::storage_source)?;
         let table = tx
             .open_table(SECRETS)
-            .map_err(|e| PlatformError::Storage(e.to_string()))?;
+            .map_err(PlatformError::storage_source)?;
         match table
             .get(app_id.0.as_str())
-            .map_err(|e| PlatformError::Storage(e.to_string()))?
+            .map_err(PlatformError::storage_source)?
         {
             Some(v) => {
-                let bundle: AppSecretBundle = bincode::deserialize(v.value())
-                    .map_err(|e| PlatformError::Storage(e.to_string()))?;
+                let bundle: AppSecretBundle =
+                    bincode::deserialize(v.value()).map_err(PlatformError::storage_source)?;
                 Ok(Some(bundle))
             }
             None => Ok(None),
@@ -92,23 +92,21 @@ impl LocalSecretProvider {
     }
 
     fn save_bundle(&self, bundle: &AppSecretBundle) -> Result<(), PlatformError> {
-        let bytes =
-            bincode::serialize(bundle).map_err(|e| PlatformError::Storage(e.to_string()))?;
+        let bytes = bincode::serialize(bundle).map_err(PlatformError::storage_source)?;
         let tx = self
             .store
             .db
             .begin_write()
-            .map_err(|e| PlatformError::Storage(e.to_string()))?;
+            .map_err(PlatformError::storage_source)?;
         {
             let mut table = tx
                 .open_table(SECRETS)
-                .map_err(|e| PlatformError::Storage(e.to_string()))?;
+                .map_err(PlatformError::storage_source)?;
             table
                 .insert(bundle.app_id.as_str(), bytes.as_slice())
-                .map_err(|e| PlatformError::Storage(e.to_string()))?;
+                .map_err(PlatformError::storage_source)?;
         }
-        tx.commit()
-            .map_err(|e| PlatformError::Storage(e.to_string()))
+        tx.commit().map_err(PlatformError::storage_source)
     }
 }
 
@@ -124,7 +122,7 @@ impl SecretProvider for LocalSecretProvider {
             .get(key)
             .ok_or_else(|| PlatformError::AppNotFound(format!("secret '{key}' not found")))?;
         let plaintext = decrypt(&dek, &EncryptedBlob(encrypted_value.clone()))?;
-        String::from_utf8(plaintext).map_err(|e| PlatformError::Encryption(e.to_string()))
+        String::from_utf8(plaintext).map_err(|e| PlatformError::encryption(e.to_string()))
     }
 
     async fn set(&self, app_id: &AppId, key: &str, value: &str) -> Result<(), PlatformError> {
@@ -132,7 +130,7 @@ impl SecretProvider for LocalSecretProvider {
         let encrypted_value = encrypt(&dek, value.as_bytes())?;
         let mut bundle = self
             .load_bundle(app_id)?
-            .ok_or_else(|| PlatformError::Storage("Bundle vanished".into()))?;
+            .ok_or_else(|| PlatformError::storage("Bundle vanished"))?;
 
         bundle.secrets.insert(key.to_string(), encrypted_value.0);
         bundle.version += 1;

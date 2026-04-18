@@ -80,8 +80,8 @@ async fn put_artifact(
 pub fn artifact_router(store: Store) -> Router {
     let state = ArtifactServerState { store };
     Router::new()
-        .route("/artifacts/:sha256", get(get_artifact))
-        .route("/artifacts/:sha256", put(put_artifact))
+        .route("/artifacts/{sha256}", get(get_artifact))
+        .route("/artifacts/{sha256}", put(put_artifact))
         .with_state(state)
 }
 

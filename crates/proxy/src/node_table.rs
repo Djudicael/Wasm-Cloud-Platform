@@ -1,10 +1,10 @@
 // crates/proxy/src/node_table.rs
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::RwLock;
-use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NodeEntry {
@@ -17,7 +17,7 @@ pub struct NodeEntry {
 
 impl NodeEntry {
     pub fn is_stale(&self) -> bool {
-        if let Some(now) = SystemTime::now().duration_since(UNIX_EPOCH) {
+        if let Ok(now) = SystemTime::now().duration_since(UNIX_EPOCH) {
             now.as_secs() - self.last_seen > 30
         } else {
             false
@@ -56,7 +56,6 @@ impl NodeLoadTable {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Duration;
 
     #[tokio::test]
     async fn test_node_load_table() {

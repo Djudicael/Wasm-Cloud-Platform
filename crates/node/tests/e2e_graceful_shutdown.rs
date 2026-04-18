@@ -55,7 +55,7 @@ async fn test_graceful_shutdown_via_platform_endpoint() {
     // 3. Calculate SHA256 hash
     let mut hasher = Sha256::new();
     hasher.update(&wasm_bytes);
-    let expected_hash = format!("{:x}", hasher.finalize());
+    let expected_hash = hex::encode(hasher.finalize());
 
     // 4. Start artifact server to host the wasm file
     let artifact_app = axum::Router::new().route(

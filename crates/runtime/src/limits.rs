@@ -9,7 +9,7 @@ pub fn configure_store<T>(store: &mut Store<T>, fuel: FuelQuota) -> Result<(), P
     // Every Wasm instruction decrements this counter.
     store
         .set_fuel(fuel.0)
-        .map_err(|e| PlatformError::Runtime(format!("fuel error: {e}")))?;
+        .map_err(|e| PlatformError::runtime(format!("fuel error: {e}")))?;
 
     tracing::debug!(fuel = fuel.0, "store fuel limits configured");
     Ok(())
@@ -84,7 +84,7 @@ impl IoResourceTracker {
 
     pub fn track_fd_open(&mut self) -> Result<(), PlatformError> {
         if self.open_fds >= self.limits.max_open_fds {
-            return Err(PlatformError::Runtime(format!(
+            return Err(PlatformError::runtime(format!(
                 "fd limit reached: {} (max {})",
                 self.open_fds, self.limits.max_open_fds
             )));
@@ -100,7 +100,7 @@ impl IoResourceTracker {
     pub fn track_fs_write(&mut self, bytes: u64) -> Result<(), PlatformError> {
         self.fs_bytes_written += bytes;
         if self.fs_bytes_written > self.limits.max_fs_write_bytes {
-            return Err(PlatformError::Runtime(format!(
+            return Err(PlatformError::runtime(format!(
                 "fs write limit exceeded: {} bytes (max {})",
                 self.fs_bytes_written, self.limits.max_fs_write_bytes
             )));
@@ -111,7 +111,7 @@ impl IoResourceTracker {
     pub fn track_net_egress(&mut self, bytes: u64) -> Result<(), PlatformError> {
         self.net_egress_bytes += bytes;
         if self.net_egress_bytes > self.limits.max_net_egress_bytes {
-            return Err(PlatformError::Runtime(format!(
+            return Err(PlatformError::runtime(format!(
                 "network egress limit exceeded: {} bytes (max {})",
                 self.net_egress_bytes, self.limits.max_net_egress_bytes
             )));
@@ -122,7 +122,7 @@ impl IoResourceTracker {
     pub fn track_outbound_connect(&mut self) -> Result<(), PlatformError> {
         self.outbound_connections += 1;
         if self.outbound_connections > self.limits.max_outbound_connections {
-            return Err(PlatformError::Runtime(format!(
+            return Err(PlatformError::runtime(format!(
                 "outbound connection limit exceeded: {} (max {})",
                 self.outbound_connections, self.limits.max_outbound_connections
             )));

@@ -297,7 +297,7 @@ async fn test_two_node_bootstrap_simulation() {
 
     // Save artifact hash
     let wasm_bytes = b"fake wasm binary";
-    let sha256 = format!("{:x}", Sha256::digest(wasm_bytes));
+    let sha256 = hex::encode(Sha256::digest(wasm_bytes));
     store0.save_raw_wasm(&sha256, wasm_bytes).unwrap();
     store0.save_artifact_hash(&app_config.id, &sha256).unwrap();
 

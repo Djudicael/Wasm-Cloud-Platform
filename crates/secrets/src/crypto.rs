@@ -39,11 +39,11 @@ pub struct EncryptedBlob(pub Vec<u8>);
 /// Nonce is prepended to the ciphertext.
 pub fn encrypt(key: &SymmetricKey, plaintext: &[u8]) -> Result<EncryptedBlob, PlatformError> {
     let cipher = Aes256Gcm::new_from_slice(key.as_bytes())
-        .map_err(|e| PlatformError::Encryption(e.to_string()))?;
+        .map_err(|e| PlatformError::encryption(e.to_string()))?;
     let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
     let ciphertext = cipher
         .encrypt(&nonce, plaintext)
-        .map_err(|e| PlatformError::Encryption(e.to_string()))?;
+        .map_err(|e| PlatformError::encryption(e.to_string()))?;
 
     let mut blob = nonce.to_vec();
     blob.extend_from_slice(&ciphertext);
@@ -53,15 +53,15 @@ pub fn encrypt(key: &SymmetricKey, plaintext: &[u8]) -> Result<EncryptedBlob, Pl
 /// Decrypt an EncryptedBlob (nonce || ciphertext).
 pub fn decrypt(key: &SymmetricKey, blob: &EncryptedBlob) -> Result<Vec<u8>, PlatformError> {
     if blob.0.len() < 12 {
-        return Err(PlatformError::Encryption("blob too short".into()));
+        return Err(PlatformError::encryption("blob too short"));
     }
     let (nonce_bytes, ciphertext) = blob.0.split_at(12);
     let nonce = Nonce::from_slice(nonce_bytes);
     let cipher = Aes256Gcm::new_from_slice(key.as_bytes())
-        .map_err(|e| PlatformError::Encryption(e.to_string()))?;
+        .map_err(|e| PlatformError::encryption(e.to_string()))?;
     cipher
         .decrypt(nonce, ciphertext)
-        .map_err(|e| PlatformError::Encryption(e.to_string()))
+        .map_err(|e| PlatformError::encryption(e.to_string()))
 }
 
 /// Per-app encrypted secret bundle stored in redb.

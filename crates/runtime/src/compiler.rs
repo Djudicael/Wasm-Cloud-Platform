@@ -25,12 +25,12 @@ pub fn build_engine() -> Engine {
 /// Returns: serialized artifact bytes (store in redb).
 pub fn compile(engine: &Engine, wasm_bytes: &[u8]) -> Result<Vec<u8>, PlatformError> {
     let component = Component::new(engine, wasm_bytes)
-        .map_err(|e| PlatformError::Runtime(format!("compile error: {e}")))?;
+        .map_err(|e| PlatformError::runtime(format!("compile error: {e}")))?;
 
     // Serialize the compiled component to bytes (portable Artifact format).
     let artifact = component
         .serialize()
-        .map_err(|e| PlatformError::Runtime(format!("serialize error: {e}")))?;
+        .map_err(|e| PlatformError::runtime(format!("serialize error: {e}")))?;
 
     Ok(artifact.to_vec())
 }
@@ -45,5 +45,5 @@ pub unsafe fn deserialize(
     artifact_bytes: &[u8],
 ) -> Result<Component, PlatformError> {
     Component::deserialize(engine, artifact_bytes)
-        .map_err(|e| PlatformError::Runtime(format!("deserialize error: {e}")))
+        .map_err(|e| PlatformError::runtime(format!("deserialize error: {e}")))
 }

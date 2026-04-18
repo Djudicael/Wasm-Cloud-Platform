@@ -11,6 +11,7 @@ pub mod service;
 pub mod tls;
 pub mod upstream;
 
+use config::ProxyTimeouts;
 use pingora::server::Server;
 use pingora_proxy::http_proxy_service;
 use service::WasmProxy;
@@ -20,12 +21,29 @@ pub struct ProxyServer {
 }
 
 impl ProxyServer {
+    /// Build the proxy server.
+    ///
+    /// `timeouts` defines the intended slowloris / keepalive / header-read
+    /// timeouts.  Pingora does not expose all of these through its public
+    /// `ServerConf` API, so we log the intended values here and apply what
+    /// we can at the request-filter level (see `service.rs`).  Pingora's
+    /// own internal defaults are used for the transport layer.
     pub fn build(
         proxy: WasmProxy,
         http_port: u16,
         https_port: Option<u16>,
         tls: Option<(String, String)>,
+        timeouts: ProxyTimeouts,
     ) -> Self {
+        tracing::info!(
+            header_read_timeout_secs = timeouts.request_header_read_timeout.as_secs(),
+            body_read_timeout_secs = timeouts.request_body_read_timeout.as_secs(),
+            keepalive_idle_timeout_secs = timeouts.keepalive_idle_timeout.as_secs(),
+            max_header_size = timeouts.max_header_size,
+            max_connections_per_ip = timeouts.max_connections_per_ip,
+            "proxy timeouts configured (Pingora uses its internal defaults for transport-level timeouts)"
+        );
+
         let mut server = Server::new(None).expect("Pingora server init failed");
         server.bootstrap();
 

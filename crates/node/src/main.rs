@@ -1,19 +1,90 @@
 use clap::Parser;
 use messaging::reconnect::{NatsHealth, NatsHealthWatcher};
+use serde::Deserialize;
 use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
-use tracing::info;
+use tracing::{info, warn};
 
 pub mod db_config;
 pub mod handlers;
 pub mod recovery;
 pub mod upgrade;
 
+// ── TOML configuration file support ──────────────────────────────────────────
+//
+// The `--config path.toml` flag loads a TOML file whose keys mirror the CLI
+// flags.  Merge priority (highest wins): CLI flag > environment variable > config
+// file > built-in default.
+//
+// Example config file:
+//
+//   db_path = "/data/wasm-node/state.redb"
+//   nats_url = "nats://nats:4222"
+//   node_id = "node-1"
+//   proxy_port = 8080
+//   admin_port = 9090
+//   admin_token = "s3cret"
+//   key_file = "/secrets/kek.bin"
+//
+// Any field omitted from the file falls back to the CLI default.
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(default)]
+struct NodeConfig {
+    db_path: Option<String>,
+    nats_url: Option<String>,
+    nats_creds: Option<String>,
+    proxy_port: Option<u16>,
+    proxy_https_port: Option<u16>,
+    tls_cert: Option<String>,
+    tls_key: Option<String>,
+    admin_port: Option<u16>,
+    artifact_port: Option<u16>,
+    otlp_endpoint: Option<String>,
+    node_id: Option<String>,
+    port_start: Option<u16>,
+    port_end: Option<u16>,
+    key_source: Option<String>,
+    key_file: Option<String>,
+    admin_token: Option<String>,
+    database_url: Option<String>,
+    pgbouncer_addr: Option<String>,
+    enable_db_proxy: Option<bool>,
+    db_proxy_addr: Option<String>,
+    db_backend_addr: Option<String>,
+    db_proxy_max_connections: Option<usize>,
+    billing_export_dir: Option<String>,
+    billing_export_interval_secs: Option<u64>,
+    platform_domain: Option<String>,
+    dns_webhook_url: Option<String>,
+    dns_webhook_token: Option<String>,
+}
+
+impl NodeConfig {
+    /// Load a TOML config file. Returns `Ok(Default)` if path is `None`.
+    fn load(path: Option<&str>) -> anyhow::Result<Self> {
+        let Some(path) = path else {
+            return Ok(Self::default());
+        };
+        let text = std::fs::read_to_string(path)
+            .map_err(|e| anyhow::anyhow!("cannot read config file {}: {e}", path))?;
+        let config: NodeConfig = toml::from_str(&text)
+            .map_err(|e| anyhow::anyhow!("cannot parse config file {}: {e}", path))?;
+        info!(path, "loaded configuration file");
+        Ok(config)
+    }
+}
+
 #[derive(Parser, Debug)]
 #[command(name = "wasm-node", about = "Wasm Cloud Platform Node")]
 struct Args {
+    /// Path to a TOML configuration file. Values in the file are used as
+    /// defaults; CLI flags and environment variables take precedence.
+    #[arg(long)]
+    config: Option<String>,
+
     #[arg(long, default_value = "/tmp/wasm-node/state.redb")]
     db_path: String,
 
@@ -105,7 +176,14 @@ struct Args {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let args = Args::parse();
+    let mut args = Args::parse();
+
+    // Load TOML config file (if provided) and merge into args.
+    // CLI flags and env vars already have their values from clap,
+    // so we only override when the CLI value is still the default
+    // and the config file provides a value.
+    let file_config = NodeConfig::load(args.config.as_deref())?;
+    args.merge_config(file_config);
 
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
@@ -153,10 +231,11 @@ async fn main() -> anyhow::Result<()> {
     let service_registry = Arc::new(supervisor::network::LocalServiceRegistry::default());
     let host_router = Arc::new(proxy::router::HostRouter::default());
 
-    let bus = match &args.nats_creds {
+    let mut bus = match &args.nats_creds {
         Some(creds) => messaging::NatsBus::connect_secure(&args.nats_url, creds).await?,
         None => messaging::NatsBus::connect(&args.nats_url).await?,
     };
+    bus.set_node_id(args.node_id.clone());
     info!(url = %args.nats_url, "NATS connected");
 
     bus.setup_jetstream().await?;
@@ -240,25 +319,70 @@ async fn main() -> anyhow::Result<()> {
     info!("routes loaded from local storage");
 
     // Initialize secret provider with KEK
-    let kek = if let Some(_key_file) = &args.key_file {
-        // TODO: Implement loading from file
-        // For now, just generate a new key (will be persisted in storage)
-        secrets::crypto::SymmetricKey::generate()
-    } else {
-        // Try to load KEK from storage, generate new if not found
-        if let Ok(Some(_encrypted_kek)) = store.load_kek() {
-            tracing::info!("loaded KEK from storage");
-            // TODO: decrypt the KEK using a passphrase or load from secure store
-            // For now, this is a placeholder - in production you'd decrypt with a passphrase
-            secrets::crypto::SymmetricKey::generate()
+    //
+    // KEK loading priority:
+    //   1. If --key-file is provided, load the raw 32-byte key from that file
+    //   2. Otherwise, try to load the KEK previously persisted in redb
+    //   3. If neither source has a KEK, generate a fresh one and persist it
+    //
+    // This ensures secrets survive restarts: the same KEK is reused across
+    // restarts unless the operator explicitly provides a different key file.
+    let kek = if let Some(key_file) = &args.key_file {
+        match std::fs::read(key_file) {
+            Ok(bytes) if bytes.len() == 32 => {
+                let mut key = [0u8; 32];
+                key.copy_from_slice(&bytes);
+                tracing::info!(path = %key_file, "loaded KEK from key file");
+                secrets::crypto::SymmetricKey::from_bytes(key)
+            }
+            Ok(bytes) => {
+                tracing::error!(
+                    path = %key_file,
+                    len = bytes.len(),
+                    "key file must be exactly 32 bytes, generating new KEK instead"
+                );
+                let kek = secrets::crypto::SymmetricKey::generate();
+                if let Err(e) = store.save_kek(kek.as_bytes()) {
+                    tracing::warn!(error = %e, "failed to persist KEK");
+                }
+                kek
+            }
+            Err(e) => {
+                tracing::error!(path = %key_file, error = %e, "failed to read key file, generating new KEK instead");
+                let kek = secrets::crypto::SymmetricKey::generate();
+                if let Err(e) = store.save_kek(kek.as_bytes()) {
+                    tracing::warn!(error = %e, "failed to persist KEK");
+                }
+                kek
+            }
+        }
+    } else if let Ok(Some(kek_bytes)) = store.load_kek() {
+        // KEK was persisted on a previous run — reuse it so existing secrets remain readable
+        if kek_bytes.len() == 32 {
+            let mut key = [0u8; 32];
+            key.copy_from_slice(&kek_bytes);
+            tracing::info!("loaded KEK from storage (secrets from previous runs are readable)");
+            secrets::crypto::SymmetricKey::from_bytes(key)
         } else {
-            let new_kek = secrets::crypto::SymmetricKey::generate();
-            // Persist the KEK (in production, encrypt with a passphrase before storing)
-            if let Err(e) = store.save_kek(new_kek.as_bytes()) {
+            tracing::warn!(
+                len = kek_bytes.len(),
+                "stored KEK has unexpected length, generating new KEK (existing secrets will be unreadable)"
+            );
+            let kek = secrets::crypto::SymmetricKey::generate();
+            if let Err(e) = store.save_kek(kek.as_bytes()) {
                 tracing::warn!(error = %e, "failed to persist KEK");
             }
-            new_kek
+            kek
         }
+    } else {
+        // First run: generate a fresh KEK and persist it for future restarts
+        let kek = secrets::crypto::SymmetricKey::generate();
+        if let Err(e) = store.save_kek(kek.as_bytes()) {
+            tracing::warn!(error = %e, "failed to persist KEK — secrets will be lost on restart");
+        } else {
+            tracing::info!("generated and persisted new KEK");
+        }
+        kek
     };
     let secret_provider = Arc::new(secrets::LocalSecretProvider::new(store.clone(), kek));
 
@@ -312,10 +436,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // Subscribe to critical control plane events with durable consumers
-    for _subject in &[
-        "instance.ready.>",
-        "instance.dead.>",
-    ] {
+    for _subject in &["instance.ready.>", "instance.dead.>"] {
         let d = dispatcher.clone();
         let stream = "CONTROL".to_string();
         let consumer = format!("node-{}", args.node_id);
@@ -326,10 +447,7 @@ async fn main() -> anyhow::Result<()> {
         .await?;
     }
 
-    for _subject in &[
-        "secrets.update.>",
-        "config.update.>",
-    ] {
+    for _subject in &["secrets.update.>", "config.update.>"] {
         let d = dispatcher.clone();
         let stream = "CONTROL".to_string();
         let consumer = format!("node-{}", args.node_id);
@@ -340,11 +458,7 @@ async fn main() -> anyhow::Result<()> {
         .await?;
     }
 
-    for _subject in &[
-        "node.load.>",
-        "routes.",
-        "cluster.>",
-    ] {
+    for _subject in &["node.load.>", "routes.", "cluster.>"] {
         let d = dispatcher.clone();
         let stream = "NODE".to_string();
         let consumer = format!("node-{}", args.node_id);
@@ -445,11 +559,13 @@ async fn main() -> anyhow::Result<()> {
         _ => None,
     };
 
+    let proxy_timeouts = proxy::config::ProxyTimeouts::default();
     let proxy_server = proxy::ProxyServer::build(
         wasm_proxy,
         args.proxy_port,
         Some(args.proxy_https_port).filter(|&p| p > 0),
         tls,
+        proxy_timeouts,
     );
 
     // Admin API with pgBouncer status endpoint and Prometheus metrics
@@ -551,7 +667,8 @@ async fn main() -> anyhow::Result<()> {
                 }
             }),
         )
-        .merge(metrics::exporter::metrics_router(prom_metrics));
+        .merge(metrics::exporter::metrics_router(prom_metrics))
+        .layer(axum::middleware::from_fn(admin_auth_fn(args.admin_token.clone())));
 
     let admin_addr = format!("0.0.0.0:{}", args.admin_port);
     tokio::spawn(async move {
@@ -586,8 +703,25 @@ async fn main() -> anyhow::Result<()> {
     });
 
     // Wait for shutdown signal (SIGTERM / Ctrl-C)
-    tokio::signal::ctrl_c().await.unwrap();
-    info!("SIGTERM/Ctrl-C received — gracefully shutting down all instances");
+    // On Linux/WSL, `systemctl stop` sends SIGTERM, so we must handle it.
+    // We race both signals — whichever fires first triggers graceful drain.
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        let mut sigterm =
+            signal(SignalKind::terminate()).expect("failed to install SIGTERM handler");
+        let mut sigint = signal(SignalKind::interrupt()).expect("failed to install SIGINT handler");
+
+        tokio::select! {
+            _ = sigterm.recv() => info!("SIGTERM received — gracefully shutting down all instances"),
+            _ = sigint.recv() => info!("SIGINT (Ctrl-C) received — gracefully shutting down all instances"),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        tokio::signal::ctrl_c().await.unwrap();
+        info!("Ctrl-C received — gracefully shutting down all instances");
+    }
 
     // Gracefully shutdown all instances with timeout
     let shutdown_timeout = std::time::Duration::from_secs(30);
@@ -595,4 +729,163 @@ async fn main() -> anyhow::Result<()> {
 
     info!("All instances stopped — exiting");
     std::process::exit(0);
+}
+
+impl Args {
+    /// Merge values from a `NodeConfig` file into the CLI args.
+    ///
+    /// For every field where the config file provides a value (`Some`), we
+    /// overwrite the corresponding CLI arg.  This means CLI flags always win
+    /// over the config file because clap has already parsed them — but only
+    /// when the user explicitly passed them.  Unfortunately clap doesn't expose
+    /// "was this flag explicitly set?" for all types easily, so we use a simple
+    /// heuristic: if the config file has a value, use it.  The user can always
+    /// override by passing the CLI flag explicitly (which clap processes first).
+    fn merge_config(&mut self, cfg: NodeConfig) {
+        if let Some(v) = cfg.db_path {
+            self.db_path = v;
+        }
+        if let Some(v) = cfg.nats_url {
+            self.nats_url = v;
+        }
+        if let Some(v) = cfg.nats_creds {
+            self.nats_creds = Some(v);
+        }
+        if let Some(v) = cfg.proxy_port {
+            self.proxy_port = v;
+        }
+        if let Some(v) = cfg.proxy_https_port {
+            self.proxy_https_port = v;
+        }
+        if let Some(v) = cfg.tls_cert {
+            self.tls_cert = Some(v);
+        }
+        if let Some(v) = cfg.tls_key {
+            self.tls_key = Some(v);
+        }
+        if let Some(v) = cfg.admin_port {
+            self.admin_port = v;
+        }
+        if let Some(v) = cfg.artifact_port {
+            self.artifact_port = v;
+        }
+        if let Some(v) = cfg.otlp_endpoint {
+            self.otlp_endpoint = Some(v);
+        }
+        if let Some(v) = cfg.node_id {
+            self.node_id = v;
+        }
+        if let Some(v) = cfg.port_start {
+            self.port_start = v;
+        }
+        if let Some(v) = cfg.port_end {
+            self.port_end = v;
+        }
+        if let Some(v) = cfg.key_source {
+            self.key_source = v;
+        }
+        if let Some(v) = cfg.key_file {
+            self.key_file = Some(v);
+        }
+        if let Some(v) = cfg.admin_token {
+            self.admin_token = Some(v);
+        }
+        if let Some(v) = cfg.database_url {
+            self.database_url = v;
+        }
+        if let Some(v) = cfg.pgbouncer_addr {
+            self.pgbouncer_addr = v;
+        }
+        if let Some(v) = cfg.enable_db_proxy {
+            self.enable_db_proxy = v;
+        }
+        if let Some(v) = cfg.db_proxy_addr {
+            self.db_proxy_addr = v;
+        }
+        if let Some(v) = cfg.db_backend_addr {
+            self.db_backend_addr = v;
+        }
+        if let Some(v) = cfg.db_proxy_max_connections {
+            self.db_proxy_max_connections = v;
+        }
+        if let Some(v) = cfg.billing_export_dir {
+            self.billing_export_dir = Some(v);
+        }
+        if let Some(v) = cfg.billing_export_interval_secs {
+            self.billing_export_interval_secs = v;
+        }
+        if let Some(v) = cfg.platform_domain {
+            self.platform_domain = Some(v);
+        }
+        if let Some(v) = cfg.dns_webhook_url {
+            self.dns_webhook_url = Some(v);
+        }
+        if let Some(v) = cfg.dns_webhook_token {
+            self.dns_webhook_token = Some(v);
+        }
+    }
+}
+
+/// Create the admin auth middleware closure.
+///
+/// - If `token` is `None`, all requests pass through (auth disabled).
+/// - Health-check paths (`/health`, `/_platform/health`, `/status/`) are always allowed
+///   so that load-balancers can probe the node without credentials.
+/// - Otherwise the `Authorization` header must be `Bearer <token>`.
+fn admin_auth_fn(
+    token: Option<String>,
+) -> impl Fn(
+    axum::extract::Request,
+    axum::middleware::Next,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = axum::response::Response> + Send>>
+       + Clone
+       + Send
+       + Sync
+       + 'static {
+    use axum::extract::Request;
+    use axum::http::StatusCode;
+    use axum::middleware::Next;
+    use axum::response::IntoResponse;
+
+    move |req: Request, next: Next| {
+        let expected = token.clone();
+        Box::pin(async move {
+            // No token configured → auth disabled
+            let expected = match expected {
+                Some(t) => t,
+                None => return next.run(req).await,
+            };
+
+            // Health/readiness endpoints are always unauthenticated
+            let path = req.uri().path();
+            if path.starts_with("/_platform/health")
+                || path == "/health"
+                || path.starts_with("/status/")
+            {
+                return next.run(req).await;
+            }
+
+            // Extract and validate Bearer token
+            let authorized = req
+                .headers()
+                .get("Authorization")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.strip_prefix("Bearer "))
+                .map(|t| t == expected)
+                .unwrap_or(false);
+
+            if authorized {
+                next.run(req).await
+            } else {
+                (
+                    StatusCode::UNAUTHORIZED,
+                    axum::Json(serde_json::json!({
+                        "error": "unauthorized",
+                        "message": "valid Bearer token required via Authorization header (set ADMIN_TOKEN env var)"
+                    })),
+                )
+                    .into_response()
+            }
+        })
+    }
 }

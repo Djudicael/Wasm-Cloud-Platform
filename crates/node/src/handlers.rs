@@ -51,7 +51,12 @@ impl EventDispatcher {
             Event::RouteAdd { route } => {
                 self.store.save_route(&route).ok();
                 self.host_router
-                    .add_route(route.host.clone(), route.app_id.clone())
+                    .add_route(
+                        route.host.clone(),
+                        route.path_prefix.clone(),
+                        route.app_id.clone(),
+                        route.strip_prefix,
+                    )
                     .await;
                 info!(host = %route.host, app = %route.app_id.0, "route added");
                 if let Some(ref webhook) = self.dns_webhook {
@@ -61,15 +66,15 @@ impl EventDispatcher {
                 }
             }
             Event::RouteRemove { host } => {
-                // Load route to get app_id for webhook before deleting
-                let app_id = self
-                    .store
-                    .load_route(&host)
-                    .ok()
-                    .flatten()
-                    .map(|r| r.app_id);
+                // Load route to get app_id and path_prefix for webhook before deleting
+                let existing = self.store.load_route(&host).ok().flatten();
+                let app_id = existing.as_ref().map(|r| r.app_id.clone());
+                let path_prefix = existing
+                    .as_ref()
+                    .map(|r| r.path_prefix.clone())
+                    .unwrap_or_default();
                 self.store.delete_route(&host).ok();
-                self.host_router.remove_route(&host).await;
+                self.host_router.remove_route(&host, &path_prefix).await;
                 info!(host, "route removed");
                 if let Some(ref webhook) = self.dns_webhook {
                     if let Some(app_id) = app_id {
@@ -259,10 +264,7 @@ impl EventDispatcher {
             match fetch_artifact(&artifact_url, &sha256).await {
                 Ok(bytes) => {
                     // 3. Verify SHA-256 hash before storing or compiling
-                    use std::sync::LazyLock;
-                    use hex;
-                    static SHA256_HASHER: LazyLock<sha2::Sha256> = LazyLock::new(sha2::Sha256::new);
-                    let computed_hash = hex::encode(SHA256_HASHER.clone().chain_update(&bytes).finalize());
+                    let computed_hash = hex::encode(sha2::Sha256::digest(&bytes));
                     if computed_hash != sha256 {
                         error!(
                             expected_hash = %sha256,
@@ -480,7 +482,12 @@ impl EventDispatcher {
                 error!(host = %route.host, error = %e, "failed to save route");
             }
             self.host_router
-                .add_route(route.host.clone(), route.app_id.clone())
+                .add_route(
+                    route.host.clone(),
+                    route.path_prefix.clone(),
+                    route.app_id.clone(),
+                    route.strip_prefix,
+                )
                 .await;
         }
 
@@ -718,9 +725,7 @@ async fn fetch_artifact(url: &str, expected_sha256: &str) -> Result<Vec<u8>, Str
         .to_vec();
 
     // Verify integrity
-    let mut hasher = Sha256::new();
-    hasher.update(&bytes);
-    let actual = format!("{:x}", hasher.finalize());
+    let actual = hex::encode(Sha256::digest(&bytes));
     if actual != expected_sha256 {
         return Err(format!(
             "SHA-256 mismatch: expected {expected_sha256}, got {actual}"

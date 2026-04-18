@@ -4,57 +4,49 @@ use redb::{ReadableDatabase, ReadableTable};
 
 impl Store {
     pub fn save_route(&self, route: &Route) -> Result<(), PlatformError> {
-        let json =
-            serde_json::to_string(route).map_err(|e| PlatformError::Storage(e.to_string()))?;
+        let json = serde_json::to_string(route).map_err(PlatformError::storage_source)?;
         let tx = self
             .db
             .begin_write()
-            .map_err(|e| PlatformError::Storage(e.to_string()))?;
+            .map_err(PlatformError::storage_source)?;
         {
             let mut table = tx
                 .open_table(ROUTES)
-                .map_err(|e| PlatformError::Storage(e.to_string()))?;
+                .map_err(PlatformError::storage_source)?;
             table
                 .insert(route.host.as_str(), json.as_str())
-                .map_err(|e| PlatformError::Storage(e.to_string()))?;
+                .map_err(PlatformError::storage_source)?;
         }
-        tx.commit()
-            .map_err(|e| PlatformError::Storage(e.to_string()))
+        tx.commit().map_err(PlatformError::storage_source)
     }
 
     pub fn delete_route(&self, host: &str) -> Result<(), PlatformError> {
         let tx = self
             .db
             .begin_write()
-            .map_err(|e| PlatformError::Storage(e.to_string()))?;
+            .map_err(PlatformError::storage_source)?;
         {
             let mut table = tx
                 .open_table(ROUTES)
-                .map_err(|e| PlatformError::Storage(e.to_string()))?;
-            table
-                .remove(host)
-                .map_err(|e| PlatformError::Storage(e.to_string()))?;
+                .map_err(PlatformError::storage_source)?;
+            table.remove(host).map_err(PlatformError::storage_source)?;
         }
-        tx.commit()
-            .map_err(|e| PlatformError::Storage(e.to_string()))
+        tx.commit().map_err(PlatformError::storage_source)
     }
 
     pub fn list_routes(&self) -> Result<Vec<Route>, PlatformError> {
         let tx = self
             .db
             .begin_read()
-            .map_err(|e| PlatformError::Storage(e.to_string()))?;
+            .map_err(PlatformError::storage_source)?;
         let table = tx
             .open_table(ROUTES)
-            .map_err(|e| PlatformError::Storage(e.to_string()))?;
+            .map_err(PlatformError::storage_source)?;
         let mut routes = Vec::new();
-        for entry in table
-            .iter()
-            .map_err(|e| PlatformError::Storage(e.to_string()))?
-        {
-            let (_, v) = entry.map_err(|e| PlatformError::Storage(e.to_string()))?;
-            let route: Route = serde_json::from_str(v.value())
-                .map_err(|e| PlatformError::Storage(e.to_string()))?;
+        for entry in table.iter().map_err(PlatformError::storage_source)? {
+            let (_, v) = entry.map_err(PlatformError::storage_source)?;
+            let route: Route =
+                serde_json::from_str(v.value()).map_err(PlatformError::storage_source)?;
             routes.push(route);
         }
         Ok(routes)
@@ -64,17 +56,13 @@ impl Store {
         let tx = self
             .db
             .begin_read()
-            .map_err(|e| PlatformError::Storage(e.to_string()))?;
+            .map_err(PlatformError::storage_source)?;
         let table = tx
             .open_table(ROUTES)
-            .map_err(|e| PlatformError::Storage(e.to_string()))?;
-        match table
-            .get(host)
-            .map_err(|e| PlatformError::Storage(e.to_string()))?
-        {
+            .map_err(PlatformError::storage_source)?;
+        match table.get(host).map_err(PlatformError::storage_source)? {
             Some(v) => Ok(Some(
-                serde_json::from_str(v.value())
-                    .map_err(|e| PlatformError::Storage(e.to_string()))?,
+                serde_json::from_str(v.value()).map_err(PlatformError::storage_source)?,
             )),
             None => Ok(None),
         }

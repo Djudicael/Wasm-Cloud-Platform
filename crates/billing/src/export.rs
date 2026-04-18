@@ -66,8 +66,7 @@ impl BillingExporter for S3Exporter {
 
         let mut body = Vec::new();
         for record in records {
-            let line =
-                serde_json::to_string(record).map_err(|e| PlatformError::Storage(e.to_string()))?;
+            let line = serde_json::to_string(record).map_err(PlatformError::storage_source)?;
             body.extend(line.as_bytes());
             body.push(b'\n');
         }
@@ -105,7 +104,7 @@ impl BillingExporter for S3Exporter {
             .body(body)
             .send()
             .await
-            .map_err(|e| PlatformError::External(format!("S3 export failed: {}", e)))?;
+            .map_err(|e| PlatformError::external(format!("S3 export failed: {}", e)))?;
 
         if response.status().is_success() || response.status().as_u16() == 307 {
             tracing::info!(key = %key, records = records.len(), "billing batch exported to S3");
@@ -113,7 +112,7 @@ impl BillingExporter for S3Exporter {
         } else {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
-            Err(PlatformError::External(format!(
+            Err(PlatformError::external(format!(
                 "S3 export failed: {} - {}",
                 status, body
             )))
@@ -149,19 +148,18 @@ impl BillingExporter for FileExporter {
 
         let mut body = String::new();
         for record in records {
-            let line =
-                serde_json::to_string(record).map_err(|e| PlatformError::Storage(e.to_string()))?;
+            let line = serde_json::to_string(record).map_err(PlatformError::storage_source)?;
             body.push_str(&line);
             body.push('\n');
         }
 
         tokio::fs::create_dir_all(&self.dir)
             .await
-            .map_err(|e| PlatformError::Storage(e.to_string()))?;
+            .map_err(PlatformError::storage_source)?;
 
         tokio::fs::write(&path, body.as_bytes())
             .await
-            .map_err(|e| PlatformError::Storage(e.to_string()))?;
+            .map_err(PlatformError::storage_source)?;
 
         tracing::info!(
             path = %path.display(),

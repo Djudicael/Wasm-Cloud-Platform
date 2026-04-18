@@ -78,90 +78,41 @@ impl Store {
         let tx = self
             .db
             .begin_read()
-            .map_err(|e| PlatformError::Storage(e.to_string()))?;
+            .map_err(PlatformError::storage_source)?;
+
+        /// Only verify the first entry is readable, not all entries.
+        /// For large tables like ARTIFACTS, iterating all entries would read
+        /// gigabytes of compiled binaries on every startup.
+        macro_rules! verify_and_count {
+            ($table_def:expr) => {{
+                let table = tx
+                    .open_table($table_def)
+                    .map_err(PlatformError::storage_source)?;
+                // Only check the first entry to verify table readability.
+                // We do NOT iterate all entries because for large tables like
+                // ARTIFACTS, reading every value would load gigabytes of
+                // compiled binaries on every startup.
+                let mut iter = table.iter().map_err(PlatformError::storage_source)?;
+                if let Some(result) = iter.next() {
+                    result.map_err(PlatformError::storage_source)?;
+                }
+                // redb's ReadOnlyTable does not expose len(), so we return 0.
+                // The count is only used for informational logging; callers
+                // that need an exact count should query the table directly.
+                Ok(0u64)
+            }};
+        }
 
         match table_name {
-            "artifacts" => {
-                let table = tx
-                    .open_table(ARTIFACTS)
-                    .map_err(|e| PlatformError::Storage(e.to_string()))?;
-                let count = table
-                    .iter()
-                    .map_err(|e| PlatformError::Storage(e.to_string()))?
-                    .count() as u64;
-                Ok(count)
-            }
-            "configs" => {
-                let table = tx
-                    .open_table(CONFIGS)
-                    .map_err(|e| PlatformError::Storage(e.to_string()))?;
-                let count = table
-                    .iter()
-                    .map_err(|e| PlatformError::Storage(e.to_string()))?
-                    .count() as u64;
-                Ok(count)
-            }
-            "secrets" => {
-                let table = tx
-                    .open_table(SECRETS)
-                    .map_err(|e| PlatformError::Storage(e.to_string()))?;
-                let count = table
-                    .iter()
-                    .map_err(|e| PlatformError::Storage(e.to_string()))?
-                    .count() as u64;
-                Ok(count)
-            }
-            "metrics" => {
-                let table = tx
-                    .open_table(METRICS)
-                    .map_err(|e| PlatformError::Storage(e.to_string()))?;
-                let count = table
-                    .iter()
-                    .map_err(|e| PlatformError::Storage(e.to_string()))?
-                    .count() as u64;
-                Ok(count)
-            }
-            "routes" => {
-                let table = tx
-                    .open_table(ROUTES)
-                    .map_err(|e| PlatformError::Storage(e.to_string()))?;
-                let count = table
-                    .iter()
-                    .map_err(|e| PlatformError::Storage(e.to_string()))?
-                    .count() as u64;
-                Ok(count)
-            }
-            "raw_wasm" => {
-                let table = tx
-                    .open_table(RAW_WASM)
-                    .map_err(|e| PlatformError::Storage(e.to_string()))?;
-                let count = table
-                    .iter()
-                    .map_err(|e| PlatformError::Storage(e.to_string()))?
-                    .count() as u64;
-                Ok(count)
-            }
-            "schema_meta" => {
-                let table = tx
-                    .open_table(SCHEMA_META)
-                    .map_err(|e| PlatformError::Storage(e.to_string()))?;
-                let count = table
-                    .iter()
-                    .map_err(|e| PlatformError::Storage(e.to_string()))?
-                    .count() as u64;
-                Ok(count)
-            }
-            "artifact_hashes" => {
-                let table = tx
-                    .open_table(ARTIFACT_HASHES)
-                    .map_err(|e| PlatformError::Storage(e.to_string()))?;
-                let count = table
-                    .iter()
-                    .map_err(|e| PlatformError::Storage(e.to_string()))?
-                    .count() as u64;
-                Ok(count)
-            }
-            other => Err(PlatformError::Storage(format!("unknown table: {other}"))),
+            "artifacts" => verify_and_count!(ARTIFACTS),
+            "configs" => verify_and_count!(CONFIGS),
+            "secrets" => verify_and_count!(SECRETS),
+            "metrics" => verify_and_count!(METRICS),
+            "routes" => verify_and_count!(ROUTES),
+            "raw_wasm" => verify_and_count!(RAW_WASM),
+            "schema_meta" => verify_and_count!(SCHEMA_META),
+            "artifact_hashes" => verify_and_count!(ARTIFACT_HASHES),
+            other => Err(PlatformError::storage(format!("unknown table: {other}"))),
         }
     }
 
@@ -216,7 +167,7 @@ impl Store {
                     ..Default::default()
                 };
                 stream.create_consumer(config).await.map_err(|e| {
-                    PlatformError::Messaging(format!("failed to create consumer: {e}"))
+                    PlatformError::messaging(format!("failed to create consumer: {e}"))
                 })?
             }
         };
@@ -224,7 +175,7 @@ impl Store {
         let mut messages = consumer
             .messages()
             .await
-            .map_err(|e| PlatformError::Messaging(format!("failed to get messages: {e}")))?;
+            .map_err(|e| PlatformError::messaging(format!("failed to get messages: {e}")))?;
 
         let mut processed = 0u64;
         while let Some(msg) = messages.next().await {
@@ -283,23 +234,24 @@ impl Store {
         let tx = self
             .db
             .begin_write()
-            .map_err(|e| PlatformError::Storage(e.to_string()))?;
+            .map_err(PlatformError::storage_source)?;
         {
             let mut table = tx
                 .open_table(ROUTES)
-                .map_err(|e| PlatformError::Storage(e.to_string()))?;
+                .map_err(PlatformError::storage_source)?;
             let keys: Vec<String> = table
                 .iter()
-                .map_err(|e| PlatformError::Storage(e.to_string()))?
+                .map_err(PlatformError::storage_source)?
                 .filter_map(|e| e.ok())
                 .map(|(k, _)| k.value().to_string())
                 .collect();
             for key in keys {
-                table.remove(key.as_str()).map_err(|e| PlatformError::Storage(e.to_string()))?;
+                table
+                    .remove(key.as_str())
+                    .map_err(PlatformError::storage_source)?;
             }
         }
-        tx.commit()
-            .map_err(|e| PlatformError::Storage(e.to_string()))?;
+        tx.commit().map_err(PlatformError::storage_source)?;
         Ok(())
     }
 
@@ -307,23 +259,24 @@ impl Store {
         let tx = self
             .db
             .begin_write()
-            .map_err(|e| PlatformError::Storage(e.to_string()))?;
+            .map_err(PlatformError::storage_source)?;
         {
             let mut table = tx
                 .open_table(METRICS)
-                .map_err(|e| PlatformError::Storage(e.to_string()))?;
+                .map_err(PlatformError::storage_source)?;
             let keys: Vec<String> = table
                 .iter()
-                .map_err(|e| PlatformError::Storage(e.to_string()))?
+                .map_err(PlatformError::storage_source)?
                 .filter_map(|e| e.ok())
                 .map(|(k, _)| k.value().to_string())
                 .collect();
             for key in keys {
-                table.remove(key.as_str()).map_err(|e| PlatformError::Storage(e.to_string()))?;
+                table
+                    .remove(key.as_str())
+                    .map_err(PlatformError::storage_source)?;
             }
         }
-        tx.commit()
-            .map_err(|e| PlatformError::Storage(e.to_string()))?;
+        tx.commit().map_err(PlatformError::storage_source)?;
         Ok(())
     }
 

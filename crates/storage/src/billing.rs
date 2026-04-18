@@ -7,40 +7,35 @@ use redb::{ReadableDatabase, ReadableTable};
 impl Store {
     pub fn write_billing_record(&self, record: &BillingRecord) -> Result<(), PlatformError> {
         let key = format!("{}:{}", record.node_id, record.seq);
-        let json =
-            serde_json::to_string(record).map_err(|e| PlatformError::Storage(e.to_string()))?;
+        let json = serde_json::to_string(record).map_err(PlatformError::storage_source)?;
 
         let tx = self
             .db
             .begin_write()
-            .map_err(|e| PlatformError::Storage(e.to_string()))?;
+            .map_err(PlatformError::storage_source)?;
         {
             let mut table = tx
                 .open_table(BILLING)
-                .map_err(|e| PlatformError::Storage(e.to_string()))?;
+                .map_err(PlatformError::storage_source)?;
             table
                 .insert(key.as_str(), json.as_str())
-                .map_err(|e| PlatformError::Storage(e.to_string()))?;
+                .map_err(PlatformError::storage_source)?;
         }
-        tx.commit()
-            .map_err(|e| PlatformError::Storage(e.to_string()))
+        tx.commit().map_err(PlatformError::storage_source)
     }
 
     pub fn get_billing_sequence(&self) -> Result<u64, PlatformError> {
         let tx = self
             .db
             .begin_read()
-            .map_err(|e| PlatformError::Storage(e.to_string()))?;
+            .map_err(PlatformError::storage_source)?;
         let table = tx
             .open_table(BILLING)
-            .map_err(|e| PlatformError::Storage(e.to_string()))?;
+            .map_err(PlatformError::storage_source)?;
 
         let mut max_seq = 0u64;
-        for entry in table
-            .iter()
-            .map_err(|e| PlatformError::Storage(e.to_string()))?
-        {
-            let (k, _) = entry.map_err(|e| PlatformError::Storage(e.to_string()))?;
+        for entry in table.iter().map_err(PlatformError::storage_source)? {
+            let (k, _) = entry.map_err(PlatformError::storage_source)?;
             let key_str = k.value();
             if let Some(seq_str) = key_str.strip_prefix("node-") {
                 if let Some(seq) = seq_str
@@ -59,21 +54,18 @@ impl Store {
         let tx = self
             .db
             .begin_read()
-            .map_err(|e| PlatformError::Storage(e.to_string()))?;
+            .map_err(PlatformError::storage_source)?;
         let table = tx
             .open_table(BILLING)
-            .map_err(|e| PlatformError::Storage(e.to_string()))?;
+            .map_err(PlatformError::storage_source)?;
 
         let mut last_record: Option<BillingRecord> = None;
         let mut max_seq = 0u64;
 
-        for entry in table
-            .iter()
-            .map_err(|e| PlatformError::Storage(e.to_string()))?
-        {
-            let (_, v) = entry.map_err(|e| PlatformError::Storage(e.to_string()))?;
-            let record: BillingRecord = serde_json::from_str(v.value())
-                .map_err(|e| PlatformError::Storage(e.to_string()))?;
+        for entry in table.iter().map_err(PlatformError::storage_source)? {
+            let (_, v) = entry.map_err(PlatformError::storage_source)?;
+            let record: BillingRecord =
+                serde_json::from_str(v.value()).map_err(PlatformError::storage_source)?;
 
             if record.seq > max_seq {
                 max_seq = record.seq;
@@ -91,23 +83,20 @@ impl Store {
         let tx = self
             .db
             .begin_read()
-            .map_err(|e| PlatformError::Storage(e.to_string()))?;
+            .map_err(PlatformError::storage_source)?;
         let table = tx
             .open_table(BILLING)
-            .map_err(|e| PlatformError::Storage(e.to_string()))?;
+            .map_err(PlatformError::storage_source)?;
 
         let mut records = Vec::new();
         let prefix = format!("{}:", node_id);
 
-        for entry in table
-            .iter()
-            .map_err(|e| PlatformError::Storage(e.to_string()))?
-        {
-            let (k, v) = entry.map_err(|e| PlatformError::Storage(e.to_string()))?;
+        for entry in table.iter().map_err(PlatformError::storage_source)? {
+            let (k, v) = entry.map_err(PlatformError::storage_source)?;
             let key_str = k.value();
             if key_str.starts_with(&prefix) {
-                let record: BillingRecord = serde_json::from_str(v.value())
-                    .map_err(|e| PlatformError::Storage(e.to_string()))?;
+                let record: BillingRecord =
+                    serde_json::from_str(v.value()).map_err(PlatformError::storage_source)?;
                 records.push(record);
             }
         }
@@ -119,20 +108,17 @@ impl Store {
         let tx = self
             .db
             .begin_read()
-            .map_err(|e| PlatformError::Storage(e.to_string()))?;
+            .map_err(PlatformError::storage_source)?;
         let table = tx
             .open_table(BILLING)
-            .map_err(|e| PlatformError::Storage(e.to_string()))?;
+            .map_err(PlatformError::storage_source)?;
 
         let mut records = Vec::new();
 
-        for entry in table
-            .iter()
-            .map_err(|e| PlatformError::Storage(e.to_string()))?
-        {
-            let (_, v) = entry.map_err(|e| PlatformError::Storage(e.to_string()))?;
-            let record: BillingRecord = serde_json::from_str(v.value())
-                .map_err(|e| PlatformError::Storage(e.to_string()))?;
+        for entry in table.iter().map_err(PlatformError::storage_source)? {
+            let (_, v) = entry.map_err(PlatformError::storage_source)?;
+            let record: BillingRecord =
+                serde_json::from_str(v.value()).map_err(PlatformError::storage_source)?;
             records.push(record);
         }
 
@@ -159,10 +145,10 @@ impl Store {
         let tx = self
             .db
             .begin_read()
-            .map_err(|e| PlatformError::Storage(e.to_string()))?;
+            .map_err(PlatformError::storage_source)?;
         let table = tx
             .open_table(crate::tables::SCHEMA_META)
-            .map_err(|e| PlatformError::Storage(e.to_string()))?;
+            .map_err(PlatformError::storage_source)?;
 
         match table.get("billing_export_watermark") {
             Ok(Some(v)) => {
@@ -178,17 +164,16 @@ impl Store {
         let tx = self
             .db
             .begin_write()
-            .map_err(|e| PlatformError::Storage(e.to_string()))?;
+            .map_err(PlatformError::storage_source)?;
         {
             let mut table = tx
                 .open_table(crate::tables::SCHEMA_META)
-                .map_err(|e| PlatformError::Storage(e.to_string()))?;
+                .map_err(PlatformError::storage_source)?;
             table
                 .insert("billing_export_watermark", seq.to_string().as_str())
-                .map_err(|e| PlatformError::Storage(e.to_string()))?;
+                .map_err(PlatformError::storage_source)?;
         }
-        tx.commit()
-            .map_err(|e| PlatformError::Storage(e.to_string()))
+        tx.commit().map_err(PlatformError::storage_source)
     }
 
     pub fn read_billing_records_for_tenant(

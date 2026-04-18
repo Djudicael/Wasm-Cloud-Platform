@@ -18,8 +18,13 @@ pingora-http = "0.4.0"
 axum.workspace = true
 serde_json.workspace = true
 storage = { path = "../storage" }
-prometheus = "0.13"
+prometheus = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true }
 messaging = { path = "../messaging" }
 dashmap = { workspace = true }
+rand = "0.8"
+hex = { workspace = true }
+
+[dev-dependencies]
+tower = "0.5"

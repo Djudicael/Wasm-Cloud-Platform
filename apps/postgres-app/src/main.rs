@@ -5,12 +5,9 @@
 #[cfg(not(target_family = "wasm"))]
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    use axum::{
-        routing::get,
-        Router,
-    };
-    use tokio::net::TcpListener;
+    use axum::{routing::get, Router};
     use std::net::SocketAddr;
+    use tokio::net::TcpListener;
 
     async fn query_db() -> Result<String, ()> {
         // Call the native Postgres function
@@ -31,7 +28,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let port = parsed.port().unwrap_or(5432);
         let user = parsed.username();
         let password = parsed.password().unwrap_or("");
-        let db = parsed.path_segments()
+        let db = parsed
+            .path_segments()
             .map(|mut s| s.next().unwrap_or("postgres"))
             .unwrap_or("postgres");
 
@@ -43,11 +41,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut packet = vec![0u8; 4];
         packet.extend_from_slice(b"\x00\x03\x00\x00");
 
-        let params = vec![
-            ("user", user),
-            ("database", db),
-            ("password", password),
-        ];
+        let params = vec![("user", user), ("database", db), ("password", password)];
 
         let mut param_data = Vec::new();
         for (key, value) in params {
@@ -67,7 +61,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // Read auth
         let mut auth = [0u8; 8];
-        stream.read_exact(&mut auth).await.map_err(|e| e.to_string())?;
+        stream
+            .read_exact(&mut auth)
+            .await
+            .map_err(|e| e.to_string())?;
 
         // Send query
         let query = "SELECT 1";

@@ -3,10 +3,10 @@ use anyhow::Result;
 use clap::Args;
 use colored::Colorize;
 use common::types::{AppConfig, AppId, FuelQuota, MemoryPages};
+use hex;
 use indicatif::{ProgressBar, ProgressStyle};
 use messaging::{events::Event, NatsBus};
 use sha2::{Digest, Sha256};
-use hex;
 use std::collections::HashMap;
 
 #[derive(Args)]

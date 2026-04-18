@@ -106,22 +106,22 @@ impl Supervisor {
     pub fn check_resource_limits(&self, config: &AppConfig) -> Result<(), PlatformError> {
         // Maximum fuel quota: 10 billion units (prevents absurdly long compute)
         if config.fuel_quota.0 > 10_000_000_000 {
-            return Err(PlatformError::Runtime(
-                "fuel_quota exceeds maximum allowed (10B units)".into(),
+            return Err(PlatformError::runtime(
+                "fuel_quota exceeds maximum allowed (10B units)",
             ));
         }
 
         // Maximum memory: 512 MB (8192 pages)
         if config.memory_limit.0 > 8192 {
-            return Err(PlatformError::Runtime(
-                "memory_limit exceeds maximum allowed (512 MB)".into(),
+            return Err(PlatformError::runtime(
+                "memory_limit exceeds maximum allowed (512 MB)",
             ));
         }
 
         // Maximum concurrent instances per app per node: 100
         if config.max_instances > 100 {
-            return Err(PlatformError::Runtime(
-                "max_instances exceeds node limit (100)".into(),
+            return Err(PlatformError::runtime(
+                "max_instances exceeds node limit (100)",
             ));
         }
 
@@ -401,7 +401,7 @@ impl Supervisor {
                 .instances
                 .iter()
                 .position(|i| i.id == *id)
-                .ok_or_else(|| PlatformError::Runtime(format!("instance {} not found", id.0)))?;
+                .ok_or_else(|| PlatformError::runtime(format!("instance {} not found", id.0)))?;
 
             // Remove from upstream immediately
             let inst = &pool.instances[pos];

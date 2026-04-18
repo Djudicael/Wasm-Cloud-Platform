@@ -125,12 +125,12 @@ impl PreparedModule {
         // Link WASI host functions (Component Model Preview 2)
         let mut linker = Linker::new(&self.engine);
         add_to_linker_sync(&mut linker)
-            .map_err(|e| PlatformError::Runtime(format!("linker error: {e}")))?;
+            .map_err(|e| PlatformError::runtime(format!("linker error: {e}")))?;
 
         tracing::debug!("instantiating component");
         let instance = linker.instantiate(&mut store, &self.module).map_err(|e| {
             tracing::warn!(error = %e, "instantiation failed");
-            PlatformError::Runtime(format!("instantiation error: {e}"))
+            PlatformError::runtime(format!("instantiation error: {e}"))
         })?;
 
         tracing::debug!("component instantiated");

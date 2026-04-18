@@ -100,7 +100,7 @@ pub async fn wait_for_ready(addr: SocketAddr, max_wait: Duration) -> Result<(), 
     let deadline = tokio::time::Instant::now() + max_wait;
     loop {
         if tokio::time::Instant::now() > deadline {
-            return Err(PlatformError::Runtime(format!(
+            return Err(PlatformError::runtime(format!(
                 "instance at {addr} did not become ready in time"
             )));
         }

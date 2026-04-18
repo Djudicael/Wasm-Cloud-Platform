@@ -27,7 +27,8 @@ mod tests;
 /// - 1: Initial schema with artifacts, configs, secrets, metrics, routes, raw_wasm, schema_meta tables
 /// - 2: Added db_max_connections field to AppConfig, added artifact_hashes table
 /// - 3: Added rate_limit field to AppConfig
-const CURRENT_SCHEMA_VERSION: u32 = 3;
+/// - 4: Added BILLING and KEK tables
+const CURRENT_SCHEMA_VERSION: u32 = 4;
 
 #[derive(Clone)]
 pub struct Store {
@@ -97,7 +98,10 @@ impl Store {
         }
         tx.commit()?;
 
-        let store = Store { db: Arc::new(db), db_path: path.to_path_buf() };
+        let store = Store {
+            db: Arc::new(db),
+            db_path: path.to_path_buf(),
+        };
 
         // Run migrations
         store.run_migrations()?;
@@ -183,6 +187,12 @@ impl Store {
                 // This migration includes the version bump in the same transaction
                 self.migrate_v2_to_v3()?;
             }
+            4 => {
+                // v3 → v4: Ensure BILLING and KEK tables exist
+                // These tables are created in open() for fresh databases,
+                // but older databases at v3 may not have them.
+                self.migrate_v3_to_v4()?;
+            }
             n => panic!("Unknown migration target: {n}"),
         }
         Ok(())
@@ -238,6 +248,30 @@ impl Store {
     /// Migration v2 → v3: Add rate_limit field to all AppConfig records.
     /// This migration is idempotent: records that already have the field are not modified.
     /// The version bump is included in the same transaction for atomicity.
+    /// Migration v3 → v4: Ensure BILLING and KEK tables exist.
+    /// Older databases at schema v3 may not have these tables.
+    /// The tables are created in open() for fresh databases, but this
+    /// migration ensures they exist for upgraded databases.
+    fn migrate_v3_to_v4(&self) -> Result<(), redb::Error> {
+        use crate::tables::{BILLING, KEK};
+
+        let tx = self.db.begin_write()?;
+        {
+            // Ensure BILLING table exists (redb creates on open_table if missing)
+            let _ = tx.open_table(BILLING)?;
+            // Ensure KEK table exists
+            let _ = tx.open_table(KEK)?;
+
+            // Bump schema version in the same transaction
+            let mut meta_table = tx.open_table(tables::SCHEMA_META)?;
+            meta_table.insert("version", "4")?;
+        }
+        tx.commit()?;
+
+        tracing::info!("v3→v4: ensured BILLING and KEK tables exist");
+        Ok(())
+    }
+
     fn migrate_v2_to_v3(&self) -> Result<(), redb::Error> {
         use crate::tables::CONFIGS;
         use redb::ReadableTable;

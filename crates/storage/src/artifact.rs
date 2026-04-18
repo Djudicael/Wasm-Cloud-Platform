@@ -13,17 +13,16 @@ impl Store {
         let tx = self
             .db
             .begin_write()
-            .map_err(|e| PlatformError::Storage(e.to_string()))?;
+            .map_err(PlatformError::storage_source)?;
         {
             let mut table = tx
                 .open_table(ARTIFACTS)
-                .map_err(|e| PlatformError::Storage(e.to_string()))?;
+                .map_err(PlatformError::storage_source)?;
             table
                 .insert(id.0.as_str(), bytes)
-                .map_err(|e| PlatformError::Storage(e.to_string()))?;
+                .map_err(PlatformError::storage_source)?;
         }
-        tx.commit()
-            .map_err(|e| PlatformError::Storage(e.to_string()))?;
+        tx.commit().map_err(PlatformError::storage_source)?;
         tracing::info!(app = %id.0, bytes = bytes.len(), "artifact stored");
         Ok(())
     }
@@ -33,13 +32,13 @@ impl Store {
         let tx = self
             .db
             .begin_read()
-            .map_err(|e| PlatformError::Storage(e.to_string()))?;
+            .map_err(PlatformError::storage_source)?;
         let table = tx
             .open_table(ARTIFACTS)
-            .map_err(|e| PlatformError::Storage(e.to_string()))?;
+            .map_err(PlatformError::storage_source)?;
         let result = table
             .get(id.0.as_str())
-            .map_err(|e| PlatformError::Storage(e.to_string()))?
+            .map_err(PlatformError::storage_source)?
             .map(|v| v.value().to_vec());
         Ok(result)
     }
@@ -54,17 +53,16 @@ impl Store {
         let tx = self
             .db
             .begin_write()
-            .map_err(|e| PlatformError::Storage(e.to_string()))?;
+            .map_err(PlatformError::storage_source)?;
         {
             let mut table = tx
                 .open_table(ARTIFACTS)
-                .map_err(|e| PlatformError::Storage(e.to_string()))?;
+                .map_err(PlatformError::storage_source)?;
             table
                 .remove(id.0.as_str())
-                .map_err(|e| PlatformError::Storage(e.to_string()))?;
+                .map_err(PlatformError::storage_source)?;
         }
-        tx.commit()
-            .map_err(|e| PlatformError::Storage(e.to_string()))
+        tx.commit().map_err(PlatformError::storage_source)
     }
 
     /// Enforce max N versions. Deletes oldest when exceeded.
@@ -78,14 +76,14 @@ impl Store {
         let tx = self
             .db
             .begin_read()
-            .map_err(|e| PlatformError::Storage(e.to_string()))?;
+            .map_err(PlatformError::storage_source)?;
         let table = tx
             .open_table(crate::tables::ARTIFACTS)
-            .map_err(|e| PlatformError::Storage(e.to_string()))?;
+            .map_err(PlatformError::storage_source)?;
 
         let mut versions: Vec<String> = table
             .iter()
-            .map_err(|e| PlatformError::Storage(e.to_string()))?
+            .map_err(PlatformError::storage_source)?
             .filter_map(|e| e.ok())
             .filter(|(k, _)| k.value().starts_with(&prefix))
             .map(|(k, _)| k.value().to_string())
@@ -116,17 +114,16 @@ impl Store {
         let tx = self
             .db
             .begin_write()
-            .map_err(|e| PlatformError::Storage(e.to_string()))?;
+            .map_err(PlatformError::storage_source)?;
         {
             let mut table = tx
                 .open_table(RAW_WASM)
-                .map_err(|e| PlatformError::Storage(e.to_string()))?;
+                .map_err(PlatformError::storage_source)?;
             table
                 .insert(sha256, bytes)
-                .map_err(|e| PlatformError::Storage(e.to_string()))?;
+                .map_err(PlatformError::storage_source)?;
         }
-        tx.commit()
-            .map_err(|e| PlatformError::Storage(e.to_string()))
+        tx.commit().map_err(PlatformError::storage_source)
     }
 
     /// Load raw .wasm bytes by SHA-256.
@@ -134,13 +131,13 @@ impl Store {
         let tx = self
             .db
             .begin_read()
-            .map_err(|e| PlatformError::Storage(e.to_string()))?;
+            .map_err(PlatformError::storage_source)?;
         let table = tx
             .open_table(RAW_WASM)
-            .map_err(|e| PlatformError::Storage(e.to_string()))?;
+            .map_err(PlatformError::storage_source)?;
         Ok(table
             .get(sha256)
-            .map_err(|e| PlatformError::Storage(e.to_string()))?
+            .map_err(PlatformError::storage_source)?
             .map(|v| v.value().to_vec()))
     }
 
@@ -154,17 +151,16 @@ impl Store {
         let tx = self
             .db
             .begin_write()
-            .map_err(|e| PlatformError::Storage(e.to_string()))?;
+            .map_err(PlatformError::storage_source)?;
         {
             let mut table = tx
                 .open_table(RAW_WASM)
-                .map_err(|e| PlatformError::Storage(e.to_string()))?;
+                .map_err(PlatformError::storage_source)?;
             table
                 .remove(sha256)
-                .map_err(|e| PlatformError::Storage(e.to_string()))?;
+                .map_err(PlatformError::storage_source)?;
         }
-        tx.commit()
-            .map_err(|e| PlatformError::Storage(e.to_string()))
+        tx.commit().map_err(PlatformError::storage_source)
     }
 
     /// Prune all raw wasm bytes (garbage collection).
@@ -175,13 +171,13 @@ impl Store {
         let tx = self
             .db
             .begin_read()
-            .map_err(|e| PlatformError::Storage(e.to_string()))?;
+            .map_err(PlatformError::storage_source)?;
         let raw_table = tx
             .open_table(RAW_WASM)
-            .map_err(|e| PlatformError::Storage(e.to_string()))?;
+            .map_err(PlatformError::storage_source)?;
         let sha256s: Vec<String> = raw_table
             .iter()
-            .map_err(|e| PlatformError::Storage(e.to_string()))?
+            .map_err(PlatformError::storage_source)?
             .filter_map(|e| e.ok())
             .map(|(k, _)| k.value().to_string())
             .collect();
@@ -203,17 +199,16 @@ impl Store {
         let tx = self
             .db
             .begin_write()
-            .map_err(|e| PlatformError::Storage(e.to_string()))?;
+            .map_err(PlatformError::storage_source)?;
         {
             let mut table = tx
                 .open_table(ARTIFACT_HASHES)
-                .map_err(|e| PlatformError::Storage(e.to_string()))?;
+                .map_err(PlatformError::storage_source)?;
             table
                 .insert(app_id.0.as_str(), sha256)
-                .map_err(|e| PlatformError::Storage(e.to_string()))?;
+                .map_err(PlatformError::storage_source)?;
         }
-        tx.commit()
-            .map_err(|e| PlatformError::Storage(e.to_string()))
+        tx.commit().map_err(PlatformError::storage_source)
     }
 
     /// Load the SHA-256 hash associated with an app_id.
@@ -221,13 +216,13 @@ impl Store {
         let tx = self
             .db
             .begin_read()
-            .map_err(|e| PlatformError::Storage(e.to_string()))?;
+            .map_err(PlatformError::storage_source)?;
         let table = tx
             .open_table(ARTIFACT_HASHES)
-            .map_err(|e| PlatformError::Storage(e.to_string()))?;
+            .map_err(PlatformError::storage_source)?;
         Ok(table
             .get(app_id.0.as_str())
-            .map_err(|e| PlatformError::Storage(e.to_string()))?
+            .map_err(PlatformError::storage_source)?
             .map(|v| v.value().to_string()))
     }
 
@@ -236,17 +231,16 @@ impl Store {
         let tx = self
             .db
             .begin_write()
-            .map_err(|e| PlatformError::Storage(e.to_string()))?;
+            .map_err(PlatformError::storage_source)?;
         {
             let mut table = tx
                 .open_table(ARTIFACT_HASHES)
-                .map_err(|e| PlatformError::Storage(e.to_string()))?;
+                .map_err(PlatformError::storage_source)?;
             table
                 .remove(app_id.0.as_str())
-                .map_err(|e| PlatformError::Storage(e.to_string()))?;
+                .map_err(PlatformError::storage_source)?;
         }
-        tx.commit()
-            .map_err(|e| PlatformError::Storage(e.to_string()))
+        tx.commit().map_err(PlatformError::storage_source)
     }
 }
 

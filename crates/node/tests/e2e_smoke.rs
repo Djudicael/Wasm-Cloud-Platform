@@ -151,7 +151,7 @@ async fn test_full_platform_e2e() {
     // Hash for security step
     let mut hasher = Sha256::new();
     hasher.update(&wasm_bytes);
-    let expected_hash = format!("{:x}", hasher.finalize());
+    let expected_hash = hex::encode(hasher.finalize());
 
     let event = Event::DeployApp {
         app_id: app_id.clone(),

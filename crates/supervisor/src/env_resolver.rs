@@ -96,7 +96,7 @@ mod tests {
             if key == "MY_SECRET" {
                 Ok("secret_value".to_string())
             } else {
-                Err(PlatformError::Encryption("Not found".into()))
+                Err(PlatformError::encryption("Not found"))
             }
         }
     }

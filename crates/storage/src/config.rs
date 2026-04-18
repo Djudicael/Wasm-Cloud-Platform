@@ -8,39 +8,37 @@ use redb::{ReadableDatabase, ReadableTable};
 
 impl Store {
     pub fn save_config(&self, config: &AppConfig) -> Result<(), PlatformError> {
-        let json =
-            serde_json::to_string(config).map_err(|e| PlatformError::Storage(e.to_string()))?;
+        let json = serde_json::to_string(config).map_err(PlatformError::storage_source)?;
         let tx = self
             .db
             .begin_write()
-            .map_err(|e| PlatformError::Storage(e.to_string()))?;
+            .map_err(PlatformError::storage_source)?;
         {
             let mut table = tx
                 .open_table(CONFIGS)
-                .map_err(|e| PlatformError::Storage(e.to_string()))?;
+                .map_err(PlatformError::storage_source)?;
             table
                 .insert(config.id.0.as_str(), json.as_str())
-                .map_err(|e| PlatformError::Storage(e.to_string()))?;
+                .map_err(PlatformError::storage_source)?;
         }
-        tx.commit()
-            .map_err(|e| PlatformError::Storage(e.to_string()))
+        tx.commit().map_err(PlatformError::storage_source)
     }
 
     pub fn load_config(&self, id: &AppId) -> Result<Option<AppConfig>, PlatformError> {
         let tx = self
             .db
             .begin_read()
-            .map_err(|e| PlatformError::Storage(e.to_string()))?;
+            .map_err(PlatformError::storage_source)?;
         let table = tx
             .open_table(CONFIGS)
-            .map_err(|e| PlatformError::Storage(e.to_string()))?;
+            .map_err(PlatformError::storage_source)?;
         match table
             .get(id.0.as_str())
-            .map_err(|e| PlatformError::Storage(e.to_string()))?
+            .map_err(PlatformError::storage_source)?
         {
             Some(v) => {
-                let config = serde_json::from_str(v.value())
-                    .map_err(|e| PlatformError::Storage(e.to_string()))?;
+                let config =
+                    serde_json::from_str(v.value()).map_err(PlatformError::storage_source)?;
                 Ok(Some(config))
             }
             None => Ok(None),
@@ -62,16 +60,13 @@ impl Store {
         let tx = self
             .db
             .begin_read()
-            .map_err(|e| PlatformError::Storage(e.to_string()))?;
+            .map_err(PlatformError::storage_source)?;
         let table = tx
             .open_table(CONFIGS)
-            .map_err(|e| PlatformError::Storage(e.to_string()))?;
+            .map_err(PlatformError::storage_source)?;
         let mut ids = Vec::new();
-        for entry in table
-            .iter()
-            .map_err(|e| PlatformError::Storage(e.to_string()))?
-        {
-            let (k, _) = entry.map_err(|e| PlatformError::Storage(e.to_string()))?;
+        for entry in table.iter().map_err(PlatformError::storage_source)? {
+            let (k, _) = entry.map_err(PlatformError::storage_source)?;
             ids.push(AppId(k.value().to_string()));
         }
         Ok(ids)

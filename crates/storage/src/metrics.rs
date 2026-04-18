@@ -20,22 +20,20 @@ pub struct MetricBucket {
 impl Store {
     pub fn write_metric_bucket(&self, bucket: &MetricBucket) -> Result<(), PlatformError> {
         let key = format!("{}:{}", bucket.app_id, bucket.minute_ts);
-        let json =
-            serde_json::to_string(bucket).map_err(|e| PlatformError::Storage(e.to_string()))?;
+        let json = serde_json::to_string(bucket).map_err(PlatformError::storage_source)?;
         let tx = self
             .db
             .begin_write()
-            .map_err(|e| PlatformError::Storage(e.to_string()))?;
+            .map_err(PlatformError::storage_source)?;
         {
             let mut table = tx
                 .open_table(METRICS)
-                .map_err(|e| PlatformError::Storage(e.to_string()))?;
+                .map_err(PlatformError::storage_source)?;
             table
                 .insert(key.as_str(), json.as_str())
-                .map_err(|e| PlatformError::Storage(e.to_string()))?;
+                .map_err(PlatformError::storage_source)?;
         }
-        tx.commit()
-            .map_err(|e| PlatformError::Storage(e.to_string()))
+        tx.commit().map_err(PlatformError::storage_source)
     }
 
     /// Load last N minutes of metrics for an app.
@@ -54,17 +52,14 @@ impl Store {
         let tx = self
             .db
             .begin_read()
-            .map_err(|e| PlatformError::Storage(e.to_string()))?;
+            .map_err(PlatformError::storage_source)?;
         let table = tx
             .open_table(METRICS)
-            .map_err(|e| PlatformError::Storage(e.to_string()))?;
+            .map_err(PlatformError::storage_source)?;
 
         let mut buckets = Vec::new();
-        for entry in table
-            .iter()
-            .map_err(|e| PlatformError::Storage(e.to_string()))?
-        {
-            let (k, v) = entry.map_err(|e| PlatformError::Storage(e.to_string()))?;
+        for entry in table.iter().map_err(PlatformError::storage_source)? {
+            let (k, v) = entry.map_err(PlatformError::storage_source)?;
             if k.value().starts_with(&prefix) {
                 let ts: u64 = k
                     .value()
@@ -74,8 +69,8 @@ impl Store {
                     .parse()
                     .unwrap_or(0);
                 if ts >= cutoff {
-                    let bucket: MetricBucket = serde_json::from_str(v.value())
-                        .map_err(|e| PlatformError::Storage(e.to_string()))?;
+                    let bucket: MetricBucket =
+                        serde_json::from_str(v.value()).map_err(PlatformError::storage_source)?;
                     buckets.push(bucket);
                 }
             }
@@ -94,15 +89,15 @@ impl Store {
         let tx = self
             .db
             .begin_write()
-            .map_err(|e| PlatformError::Storage(e.to_string()))?;
+            .map_err(PlatformError::storage_source)?;
         let mut removed = 0u64;
         {
             let mut table = tx
                 .open_table(METRICS)
-                .map_err(|e| PlatformError::Storage(e.to_string()))?;
+                .map_err(PlatformError::storage_source)?;
             let stale_keys: Vec<String> = table
                 .iter()
-                .map_err(|e| PlatformError::Storage(e.to_string()))?
+                .map_err(PlatformError::storage_source)?
                 .filter_map(|e| e.ok())
                 .filter(|(k, _)| {
                     k.value()
@@ -118,12 +113,11 @@ impl Store {
             for key in stale_keys {
                 table
                     .remove(key.as_str())
-                    .map_err(|e| PlatformError::Storage(e.to_string()))?;
+                    .map_err(PlatformError::storage_source)?;
                 removed += 1;
             }
         }
-        tx.commit()
-            .map_err(|e| PlatformError::Storage(e.to_string()))?;
+        tx.commit().map_err(PlatformError::storage_source)?;
         Ok(removed)
     }
 }

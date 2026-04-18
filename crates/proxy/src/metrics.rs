@@ -49,7 +49,7 @@ mod tests {
         let metric_families = registry.gather();
         let rate_limit_family = metric_families
             .iter()
-            .find(|mf| mf.get_name() == "proxy_rate_limit_rejected_total")
+            .find(|mf| mf.name() == "proxy_rate_limit_rejected_total")
             .expect("Metric not found");
 
         assert_eq!(rate_limit_family.get_metric().len(), 3);

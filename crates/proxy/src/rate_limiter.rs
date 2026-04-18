@@ -161,7 +161,8 @@ impl RateLimiter {
     fn prune_stale_ip_buckets(&self, max_age: Duration) {
         let now = Instant::now();
         let before = self.ip_buckets.len();
-        self.ip_buckets.retain(|_, bucket| now.duration_since(bucket.last_refill) < max_age);
+        self.ip_buckets
+            .retain(|_, bucket| now.duration_since(bucket.last_refill) < max_age);
         let pruned = before - self.ip_buckets.len();
         if pruned > 0 {
             tracing::debug!(
