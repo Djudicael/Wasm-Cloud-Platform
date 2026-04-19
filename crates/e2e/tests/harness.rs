@@ -567,6 +567,7 @@ pub fn build_app_config(
         db_max_connections: None,
         rate_limit: None,
         tenant_id: None,
+        policy: None,
     }
 }
 

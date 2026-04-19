@@ -2,5 +2,6 @@ pub mod billing;
 pub mod config;
 pub mod error;
 pub mod gc;
+pub mod policy;
 pub mod protocol;
 pub mod types;

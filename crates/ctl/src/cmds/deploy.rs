@@ -123,6 +123,7 @@ pub async fn run(
         db_max_connections: None,
         rate_limit: None, // Use default rate limiting
         tenant_id: None,
+        policy: None,
     };
 
     // 5. Publish deploy event

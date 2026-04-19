@@ -1,7 +1,6 @@
 // crates/runtime/src/executor.rs
-use crate::limits::{
-    configure_store, read_fuel_remaining, IoResourceTracker, IoStats, MemoryLimiter,
-};
+use crate::limits::{configure_store, read_fuel_remaining, IoStats, MemoryLimiter};
+use crate::policy_tracker::PolicyEnforcer;
 use common::{
     error::PlatformError,
     types::{AppConfig, InstanceId},
@@ -17,7 +16,7 @@ pub struct StoreState {
     pub ctx: WasiCtx,
     pub table: ResourceTable,
     pub limiter: MemoryLimiter,
-    pub io_tracker: IoResourceTracker,
+    pub policy_enforcer: PolicyEnforcer,
 }
 
 impl WasiView for StoreState {
@@ -74,23 +73,34 @@ impl PreparedModule {
         let id = InstanceId::new();
         tracing::info!(instance_id = %id.0, "instance ID created");
 
+        // Resolve the policy for this instance
+        let policy = self
+            .config
+            .policy
+            .as_ref()
+            .map(|p| p.resolve(port))
+            .unwrap_or_else(|| {
+                // If no policy config, create a default one with the assigned port
+                common::policy::PolicyConfig::default().resolve(port)
+            });
+
         // Build WASI environment (Preview 2)
         // Use inherit for now - can add custom streams later
         let mut builder = WasiCtxBuilder::new();
         builder.inherit_stdout();
         builder.inherit_stderr();
 
-        // Enable TCP and UDP with full network access (equivalent to -S tcp=y -S udp=y -S inherit-network=y)
+        // Network configuration based on policy
         builder.inherit_network();
-        builder.allow_tcp(true);
-        builder.allow_udp(true);
-        builder.allow_ip_name_lookup(true);
+        builder.allow_tcp(policy.network.allow_outbound_tcp || policy.network.allow_inbound);
+        builder.allow_udp(policy.network.allow_outbound_udp);
+        builder.allow_ip_name_lookup(policy.network.allow_dns);
 
         tracing::debug!(
-            allow_tcp = true,
-            allow_udp = true,
-            allow_ip_name_lookup = true,
-            "WASI config built"
+            allow_tcp = %(policy.network.allow_outbound_tcp || policy.network.allow_inbound),
+            allow_udp = %policy.network.allow_outbound_udp,
+            allow_ip_name_lookup = %policy.network.allow_dns,
+            "WASI config built from policy"
         );
 
         for (k, v) in env_vars {
@@ -100,18 +110,11 @@ impl PreparedModule {
         let port_str = port.to_string();
         builder.env("PORT", &port_str);
 
-        let extended_limits = self
-            .config
-            .extended_limits
-            .as_ref()
-            .map(|c| c.to_limits())
-            .unwrap_or_default();
-
         let state = StoreState {
             ctx: builder.build(),
             table: ResourceTable::new(),
             limiter: MemoryLimiter::new(self.config.memory_limit),
-            io_tracker: IoResourceTracker::new(extended_limits),
+            policy_enforcer: PolicyEnforcer::new(policy),
         };
 
         let mut store = Store::new(&self.engine, state);
@@ -259,7 +262,13 @@ impl RunningInstance {
         let ram_bytes = self.read_memory_usage();
         let wall_clock_ms = start.elapsed().as_millis() as u64;
 
-        let io_stats = self.store.data().io_tracker.stats();
+        // TODO: Update to collect policy counters instead of io_stats
+        let io_stats = IoStats {
+            open_fds_peak: 0,
+            fs_bytes_written: 0,
+            net_egress_bytes: 0,
+            outbound_connections: 0,
+        };
 
         ExecutionStats {
             instance_id: self.id.clone(),

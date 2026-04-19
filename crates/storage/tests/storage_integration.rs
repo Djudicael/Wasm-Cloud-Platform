@@ -71,6 +71,7 @@ fn test_config_roundtrip_with_secrets() {
             per_ip_limit: 50,
         }),
         tenant_id: None,
+        policy: None,
     };
 
     store.save_config(&config).unwrap();

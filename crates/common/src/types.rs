@@ -155,6 +155,9 @@ pub struct AppConfig {
     /// If not specified, the app name (without version) is used as the tenant.
     #[serde(default)]
     pub tenant_id: Option<String>,
+
+    #[serde(default)]
+    pub policy: Option<crate::policy::PolicyConfig>,
 }
 
 /// Rate limit configuration, stored as part of AppConfig.
@@ -197,6 +200,7 @@ impl AppConfig {
             db_max_connections: None,
             rate_limit: None,
             tenant_id: None,
+            policy: None,
         }
     }
 }
