@@ -1750,6 +1750,7 @@ dependencies = [
  "prometheus 0.14.0",
  "serde",
  "serde_json",
+ "thiserror 2.0.18",
  "tokio",
  "tracing",
 ]

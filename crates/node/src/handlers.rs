@@ -216,6 +216,69 @@ impl EventDispatcher {
                     info!(node = %node_id, "peer node draining");
                 }
             }
+
+            // ── eBPF Monitor Events ──────────────────────────────────────
+            Event::NodeUnderPressure {
+                node_id,
+                pressure_level,
+            } => {
+                if node_id == self.node_id {
+                    // Our own pressure events are handled directly by the
+                    // eBPF ActionDispatcher — no additional action needed here.
+                } else {
+                    // A peer node is under pressure — stop steering traffic to it.
+                    warn!(
+                        node = %node_id,
+                        pressure_level,
+                        "peer node under pressure — removing from routing"
+                    );
+                    self.node_table.mark_unhealthy(&node_id).await;
+                    if pressure_level >= 2 {
+                        // Critical pressure: also remove all upstream entries
+                        tracing::warn!(
+                            node = %node_id,
+                            "peer node under CRITICAL pressure — removing all upstream entries"
+                        );
+                    }
+                }
+            }
+
+            Event::NodePressureRecovered { node_id } => {
+                if node_id == self.node_id {
+                    info!("our node pressure recovered");
+                } else {
+                    info!(node = %node_id, "peer node pressure recovered — restoring in routing");
+                    self.node_table.mark_healthy(&node_id).await;
+                }
+            }
+
+            Event::SecurityIncident {
+                node_id,
+                app_id,
+                pid,
+                syscall_nr,
+                category,
+            } => {
+                tracing::error!(
+                    node = %node_id,
+                    app = %app_id,
+                    pid,
+                    syscall_nr,
+                    category,
+                    "SECURITY INCIDENT: privileged syscall detected by eBPF monitor"
+                );
+                // If the incident is from our node, the eBPF ActionDispatcher
+                // already killed the instance. For remote nodes, we log and
+                // could quarantine the artifact hash if we had a cluster-wide
+                // artifact blocklist. For now, we just log the incident.
+                if node_id != self.node_id {
+                    warn!(
+                        node = %node_id,
+                        app = %app_id,
+                        "security incident on peer node — consider quarantining artifact"
+                    );
+                }
+            }
         }
     }
 

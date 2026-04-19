@@ -470,7 +470,10 @@ impl HotConfig {
 /// Handle for accessing and updating hot-reloadable configuration.
 pub struct HotConfigHandle {
     inner: Arc<StdRwLock<HotConfig>>,
+    /// Cold (file/env/cli) config — used as the baseline for reset.
+    cold_config: HotConfig,
     store: Store,
+    #[allow(dead_code)]
     node_id: String,
 }
 
@@ -481,7 +484,8 @@ impl HotConfigHandle {
         store: Store,
         node_id: String,
     ) -> Result<Self, PlatformError> {
-        let mut hot_config = HotConfig::from_cold_config(cold_config);
+        let cold = HotConfig::from_cold_config(cold_config);
+        let mut hot_config = cold.clone();
 
         // Load persisted overrides
         if let Ok(Some(json)) = store.load_meta(HOT_CONFIG_KEY) {
@@ -496,6 +500,7 @@ impl HotConfigHandle {
 
         Ok(HotConfigHandle {
             inner: Arc::new(StdRwLock::new(hot_config)),
+            cold_config: cold,
             store,
             node_id,
         })
@@ -539,23 +544,25 @@ impl HotConfigHandle {
     }
 
     /// Reset hot configuration to cold defaults (clear persisted overrides).
+    ///
+    /// This restores all hot-reloadable fields to their cold-config values
+    /// (from the TOML file, environment variables, and CLI flags). Persisted
+    /// overrides in redb are deleted so a subsequent restart also starts clean.
     pub async fn reset(&self) -> Result<(), PlatformError> {
         let inner = self.inner.clone();
+        let cold = self.cold_config.clone();
         let store = self.store.clone();
         tokio::task::spawn_blocking(move || {
-            let _hot = inner.write().unwrap();
+            let mut hot = inner.write().unwrap();
             store
                 .delete_meta(HOT_CONFIG_KEY)
                 .map_err(|e| PlatformError::Storage {
                     message: e.to_string(),
                     source: None,
                 })?;
-            // We would need the cold config to reset, but we don't have it here.
-            // Instead, we rely on the caller to provide a cold config reset.
-            // For now, we'll just clear the overrides and leave the current in-memory config.
-            // In practice, we would reload from cold config, but that requires passing it.
-            // We'll leave this as a TODO for now.
-            tracing::warn!("hot config reset not fully implemented (cleared overrides)");
+            // Reset in-memory config to the cold baseline
+            *hot = cold;
+            tracing::info!("hot config reset to cold defaults");
             Ok::<(), PlatformError>(())
         })
         .await
@@ -690,6 +697,13 @@ fn merge_hot_config_update(base: &HotConfig, update: HotConfigUpdate) -> HotConf
 }
 
 /// Merge two HotConfigs (for loading persisted overrides).
+/// Merge two `HotConfig`s: `overlay` values take precedence over `base`.
+///
+/// For `Option` fields inside section structs we cannot tell whether a value
+/// was explicitly set or is just the default, so we replace entire sections
+/// from the overlay. This is correct because the persisted `HotConfig` is
+/// always a complete snapshot (written by `apply_update`), not a partial
+/// overlay.
 fn merge_hot_config(_base: HotConfig, overlay: HotConfig) -> HotConfig {
     overlay
 }

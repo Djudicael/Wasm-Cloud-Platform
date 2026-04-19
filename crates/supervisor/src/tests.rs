@@ -118,3 +118,190 @@ async fn test_wait_for_ready_timeout() {
     let err_msg = result.unwrap_err().to_string();
     assert!(err_msg.contains("did not become ready"));
 }
+
+// ── SupervisorCommand Channel Tests ──────────────────────────────────────────
+
+use crate::SupervisorCommand;
+
+#[tokio::test]
+async fn test_supervisor_command_channel_send_recv() {
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<SupervisorCommand>(256);
+
+    // Send a KillLargestInstance command
+    tx.try_send(SupervisorCommand::KillLargestInstance {
+        reason: "test OOM".to_string(),
+    })
+    .unwrap();
+
+    // Receive and verify
+    let cmd = rx.recv().await.unwrap();
+    match cmd {
+        SupervisorCommand::KillLargestInstance { reason } => {
+            assert_eq!(reason, "test OOM");
+        }
+        _ => panic!("expected KillLargestInstance, got {:?}", cmd),
+    }
+}
+
+#[tokio::test]
+async fn test_supervisor_command_channel_prune_idle() {
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<SupervisorCommand>(256);
+
+    tx.try_send(SupervisorCommand::PruneIdleInstances {
+        idle_threshold_secs: 120,
+    })
+    .unwrap();
+
+    let cmd = rx.recv().await.unwrap();
+    match cmd {
+        SupervisorCommand::PruneIdleInstances {
+            idle_threshold_secs,
+        } => {
+            assert_eq!(idle_threshold_secs, 120);
+        }
+        _ => panic!("expected PruneIdleInstances, got {:?}", cmd),
+    }
+}
+
+#[tokio::test]
+async fn test_supervisor_command_channel_remove_from_upstream() {
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<SupervisorCommand>(256);
+
+    let app_id = AppId("test-app".to_string());
+    tx.try_send(SupervisorCommand::RemoveAppFromUpstream {
+        app_id: app_id.clone(),
+    })
+    .unwrap();
+
+    let cmd = rx.recv().await.unwrap();
+    match cmd {
+        SupervisorCommand::RemoveAppFromUpstream { app_id } => {
+            assert_eq!(app_id.0, "test-app");
+        }
+        _ => panic!("expected RemoveAppFromUpstream, got {:?}", cmd),
+    }
+}
+
+#[tokio::test]
+async fn test_supervisor_command_channel_kill_instance() {
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<SupervisorCommand>(256);
+
+    let app_id = AppId("my-app".to_string());
+    let instance_id = common::types::InstanceId::new();
+    let instance_id_str = instance_id.0.to_string();
+    tx.try_send(SupervisorCommand::KillInstance {
+        app_id: app_id.clone(),
+        instance_id: instance_id.clone(),
+        reason: "security violation".to_string(),
+    })
+    .unwrap();
+
+    let cmd = rx.recv().await.unwrap();
+    match cmd {
+        SupervisorCommand::KillInstance {
+            app_id,
+            instance_id,
+            reason,
+        } => {
+            assert_eq!(app_id.0, "my-app");
+            assert_eq!(instance_id.0.to_string(), instance_id_str);
+            assert_eq!(reason, "security violation");
+        }
+        _ => panic!("expected KillInstance, got {:?}", cmd),
+    }
+}
+
+#[tokio::test]
+async fn test_supervisor_command_channel_multiple_commands() {
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<SupervisorCommand>(256);
+
+    // Send multiple commands in sequence
+    tx.try_send(SupervisorCommand::KillLargestInstance {
+        reason: "OOM".to_string(),
+    })
+    .unwrap();
+    tx.try_send(SupervisorCommand::PruneIdleInstances {
+        idle_threshold_secs: 30,
+    })
+    .unwrap();
+    tx.try_send(SupervisorCommand::KillLargestInstance {
+        reason: "FD exhaustion".to_string(),
+    })
+    .unwrap();
+
+    // Verify all three arrive in order
+    let cmd1 = rx.recv().await.unwrap();
+    let cmd2 = rx.recv().await.unwrap();
+    let cmd3 = rx.recv().await.unwrap();
+
+    match cmd1 {
+        SupervisorCommand::KillLargestInstance { reason } => {
+            assert_eq!(reason, "OOM");
+        }
+        _ => panic!("expected KillLargestInstance as first command"),
+    }
+    match cmd2 {
+        SupervisorCommand::PruneIdleInstances {
+            idle_threshold_secs,
+        } => {
+            assert_eq!(idle_threshold_secs, 30);
+        }
+        _ => panic!("expected PruneIdleInstances as second command"),
+    }
+    match cmd3 {
+        SupervisorCommand::KillLargestInstance { reason } => {
+            assert_eq!(reason, "FD exhaustion");
+        }
+        _ => panic!("expected KillLargestInstance as third command"),
+    }
+}
+
+#[tokio::test]
+async fn test_supervisor_command_channel_backpressure() {
+    // Channel with capacity 2 — third send should fail
+    let (tx, _rx) = tokio::sync::mpsc::channel::<SupervisorCommand>(2);
+
+    tx.try_send(SupervisorCommand::KillLargestInstance {
+        reason: "1".to_string(),
+    })
+    .unwrap();
+    tx.try_send(SupervisorCommand::KillLargestInstance {
+        reason: "2".to_string(),
+    })
+    .unwrap();
+
+    // Third send should fail (channel full)
+    let result = tx.try_send(SupervisorCommand::KillLargestInstance {
+        reason: "3".to_string(),
+    });
+    assert!(result.is_err());
+}
+
+#[tokio::test]
+async fn test_supervisor_command_channel_closed() {
+    let (tx, rx) = tokio::sync::mpsc::channel::<SupervisorCommand>(256);
+    drop(rx);
+
+    // Sending to a closed channel should fail
+    let result = tx.try_send(SupervisorCommand::KillLargestInstance {
+        reason: "test".to_string(),
+    });
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_supervisor_command_debug_format() {
+    let cmd = SupervisorCommand::KillLargestInstance {
+        reason: "OOM".to_string(),
+    };
+    let debug_str = format!("{:?}", cmd);
+    assert!(debug_str.contains("KillLargestInstance"));
+    assert!(debug_str.contains("OOM"));
+
+    let cmd = SupervisorCommand::PruneIdleInstances {
+        idle_threshold_secs: 60,
+    };
+    let debug_str = format!("{:?}", cmd);
+    assert!(debug_str.contains("PruneIdleInstances"));
+    assert!(debug_str.contains("60"));
+}

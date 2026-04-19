@@ -4,10 +4,123 @@ use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
-#[cfg(feature = "ebpf")]
-use ebpf_monitor::{init, MonitorConfig};
+use ebpf_monitor::{ActionDispatcher, EbpfMetrics, EventCallbacks, MonitorConfig};
+use supervisor::SupervisorCommand;
+
+/// Platform callbacks for the eBPF monitor's recovery actions.
+///
+/// This struct implements the `EventCallbacks` trait defined in the
+/// `ebpf_monitor` crate, bridging kernel-level events to the platform's
+/// actual components (backpressure signal, NATS health, event bus).
+///
+/// The eBPF monitor calls these methods when it detects anomalies that
+/// require automated recovery actions. The decoupled design (trait object)
+/// avoids circular dependencies between the `ebpf_monitor` and
+/// `proxy`/`messaging` crates.
+struct NodeEbpfCallbacks {
+    backpressure: proxy::backpressure::BackpressureSignal,
+    nats_health: Arc<NatsHealth>,
+    bus: messaging::NatsBus,
+    #[allow(dead_code)]
+    node_id: String,
+    /// Channel to send immediate action commands to the supervisor
+    /// (kill largest instance, prune idle, remove from upstream).
+    supervisor_tx: mpsc::Sender<SupervisorCommand>,
+}
+
+impl EventCallbacks for NodeEbpfCallbacks {
+    fn activate_backpressure(&self, reason: &str) {
+        warn!(reason, "eBPF: activating backpressure");
+        self.backpressure.set_rejecting();
+    }
+
+    fn deactivate_backpressure(&self) {
+        info!("eBPF: deactivating backpressure");
+        self.backpressure.set_accepting();
+    }
+
+    fn mark_nats_disconnected(&self) {
+        warn!("eBPF: pre-emptive NATS disconnect (TCP retransmits detected)");
+        self.nats_health.mark_disconnected();
+    }
+
+    fn publish_node_under_pressure(&self, node_id: &str, pressure_level: u32) {
+        let event = messaging::events::Event::NodeUnderPressure {
+            node_id: node_id.to_string(),
+            pressure_level,
+        };
+        if let Err(e) = tokio::runtime::Handle::current().block_on(self.bus.publish(&event)) {
+            warn!(error = %e, "Failed to publish NodeUnderPressure event");
+        }
+    }
+
+    fn publish_node_pressure_recovered(&self, node_id: &str) {
+        let event = messaging::events::Event::NodePressureRecovered {
+            node_id: node_id.to_string(),
+        };
+        if let Err(e) = tokio::runtime::Handle::current().block_on(self.bus.publish(&event)) {
+            warn!(error = %e, "Failed to publish NodePressureRecovered event");
+        }
+    }
+
+    fn publish_security_incident(&self, node_id: &str, pid: u32, syscall_nr: u64, category: &str) {
+        let event = messaging::events::Event::SecurityIncident {
+            node_id: node_id.to_string(),
+            app_id: String::new(), // Unknown at eBPF level
+            pid,
+            syscall_nr,
+            category: category.to_string(),
+        };
+        if let Err(e) = tokio::runtime::Handle::current().block_on(self.bus.publish(&event)) {
+            warn!(error = %e, "Failed to publish SecurityIncident event");
+        }
+    }
+
+    fn kill_instance(&self, pid: u32, reason: &str) {
+        // Wasm instances run as in-process Tokio tasks, not separate OS
+        // processes. The PID from eBPF refers to the node process itself
+        // or a child process. We request the supervisor kill the largest
+        // instance (most memory) as the best recovery action.
+        warn!(
+            pid,
+            reason, "eBPF: kill instance requested — sending KillLargestInstance to supervisor"
+        );
+        if let Err(e) = self
+            .supervisor_tx
+            .try_send(SupervisorCommand::KillLargestInstance {
+                reason: reason.to_string(),
+            })
+        {
+            warn!(error = %e, "Failed to send KillLargestInstance command to supervisor");
+        }
+    }
+
+    fn prune_idle_instances(&self) {
+        // Kill all instances idle for more than 60 seconds to free FDs.
+        warn!("eBPF: prune idle instances requested — sending PruneIdleInstances to supervisor");
+        if let Err(e) = self
+            .supervisor_tx
+            .try_send(SupervisorCommand::PruneIdleInstances {
+                idle_threshold_secs: 60,
+            })
+        {
+            warn!(error = %e, "Failed to send PruneIdleInstances command to supervisor");
+        }
+    }
+
+    fn remove_from_upstream(&self, pid: u32) {
+        // The eBPF monitor detected a process exit. Since Wasm instances
+        // are in-process, the health loop will handle cleanup. Log for
+        // visibility — the PID may refer to a child process spawned by
+        // a Wasm instance that has already exited.
+        debug!(
+            pid,
+            "eBPF: remove from upstream requested — process exit detected, health loop will handle"
+        );
+    }
+}
 
 pub mod db_config;
 pub mod handlers;
@@ -15,7 +128,7 @@ pub mod recovery;
 pub mod upgrade;
 
 // Configuration is now handled by the `config` crate.
-use config::{load_config, CliOverrides, HotConfigHandle};
+use config::{load_config, CliOverrides};
 
 #[derive(Parser, Debug)]
 #[command(name = "wasm-node", about = "Wasm Cloud Platform Node")]
@@ -277,32 +390,9 @@ async fn main() -> anyhow::Result<()> {
         );
     }
 
-    // Initialize eBPF monitor (kernel-level observability)
-    #[cfg(feature = "ebpf")]
-    {
-        let ebpf_config = ebpf_monitor::MonitorConfig {
-            enabled: config.ebpf.enabled,
-            fd_soft_limit: config.ebpf.fd_soft_limit,
-            fd_hard_limit: config.ebpf.fd_hard_limit,
-            mem_low_threshold_pages: config.ebpf.mem_low_threshold_pages,
-            mem_critical_threshold_pages: config.ebpf.mem_critical_threshold_pages,
-            disk_slow_threshold_ns: config.ebpf.disk_slow_threshold_ns,
-            tcp_conn_limit_per_pid: config.ebpf.tcp_conn_limit_per_pid,
-            syscall_rate_limit: config.ebpf.syscall_rate_limit,
-            sampling_period_secs: config.ebpf.sampling_period_secs,
-            enable_process_tracker: true,
-            enable_tcp_monitor: true,
-            enable_fd_watcher: true,
-            enable_mem_pressure: true,
-            enable_disk_monitor: true,
-            enable_syscall_counter: true,
-        };
-        if let Some(()) = ebpf_monitor::init(ebpf_config).await {
-            info!("eBPF monitor initialized and active");
-        } else {
-            info!("eBPF monitor not active, using fallback");
-        }
-    }
+    // eBPF monitor initialization is moved to after the backpressure signal
+    // and supervisor are created, so the ActionDispatcher can reference them.
+    // See below (after line ~535).
 
     let supervisor = supervisor::Supervisor::new(
         store.clone(),
@@ -320,6 +410,7 @@ async fn main() -> anyhow::Result<()> {
     info!("supervisor state restored from storage");
 
     supervisor.clone().start_health_loop();
+    supervisor.clone().start_command_loop();
 
     host_router.load_routes_from_store(&store).await;
     info!("routes loaded from local storage");
@@ -536,6 +627,37 @@ async fn main() -> anyhow::Result<()> {
 
     let backpressure = proxy::backpressure::BackpressureSignal::new();
 
+    // ── Initialize eBPF monitor (kernel-level observability) ────────────
+    // The eBPF monitor provides kernel-level monitoring for memory pressure,
+    // FD exhaustion, TCP retransmits, disk I/O latency, and syscall anomalies.
+    // It uses eBPF programs on Linux >= 5.8 with BTF, or falls back to
+    // userspace polling on other platforms.
+    let ebpf_config = MonitorConfig::from_ebpf_section(&config.ebpf);
+    let ebpf_metrics = Arc::new(EbpfMetrics::new(&prom_metrics.registry));
+    let ebpf_callbacks: Arc<dyn EventCallbacks> = Arc::new(NodeEbpfCallbacks {
+        backpressure: backpressure.clone(),
+        nats_health: nats_health.clone(),
+        bus: bus.clone(),
+        node_id: config.node.node_id.clone(),
+        supervisor_tx: supervisor.command_tx(),
+    });
+    let ebpf_dispatcher = Arc::new(ActionDispatcher::new(
+        ebpf_metrics.clone(),
+        ebpf_callbacks,
+        config.node.node_id.clone(),
+    ));
+    let node_pid = std::process::id();
+    // Clone metrics and dispatcher for admin API before moving into init()
+    let ebpf_metrics_admin = ebpf_metrics.clone();
+    let ebpf_dispatcher_admin = ebpf_dispatcher.clone();
+    let _ebpf_handle =
+        ebpf_monitor::init(ebpf_config, ebpf_metrics, ebpf_dispatcher, node_pid).await;
+    if _ebpf_handle.is_ebpf_active() {
+        info!("eBPF monitor initialized with kernel-level monitoring");
+    } else {
+        info!("eBPF monitor running in userspace fallback mode (5s polling interval)");
+    }
+
     let default_rate_config = proxy::rate_limiter::RateLimitConfig {
         requests_per_second: 1000,
         burst_capacity: 200,
@@ -579,6 +701,7 @@ async fn main() -> anyhow::Result<()> {
     let db_path_clone = config.storage.db_path.clone();
     let store_gc = store.clone();
     let supervisor_gc = supervisor.clone();
+    let ebpf_cmd_tx = supervisor.command_tx();
 
     // Enhanced health check for external LBs and DNS providers
     let health_router = proxy::health::health_router(
@@ -674,6 +797,89 @@ async fn main() -> anyhow::Result<()> {
             }),
         )
         .merge(metrics::exporter::metrics_router(prom_metrics))
+        // ── eBPF Monitor Admin Endpoints ──────────────────────────────
+        .route(
+            "/admin/ebpf/status",
+            axum::routing::get(move || {
+                let metrics = ebpf_metrics_admin.clone();
+                let dispatcher = ebpf_dispatcher_admin.clone();
+                async move {
+                    let status = ebpf_monitor::MonitorStatus {
+                        ebpf_active: metrics.ebpf_active.get() == 1,
+                        backpressure_active: dispatcher.is_backpressure_active(),
+                        degraded_mode: dispatcher.is_degraded(),
+                        pressure_level: dispatcher.last_pressure_level(),
+                        oom_kills: metrics.oom_kills.get(),
+                        process_exits: metrics.process_exits.get(),
+                        tcp_retransmits: metrics.tcp_retransmits.get(),
+                        security_violations: metrics.security_violations.get(),
+                        events_processed: metrics.events_processed.get(),
+                        events_parse_errors: metrics.events_parse_errors.get(),
+                        fd_usage_ratio: metrics.get_fd_usage_ratio(),
+                        memory_pressure_level: metrics.memory_pressure_level.get(),
+                        tcp_connection_count: metrics.tcp_connection_count.get(),
+                        fd_count: metrics.fd_count.get(),
+                    };
+                    axum::Json(status)
+                }
+            }),
+        )
+        .route(
+            "/admin/ebpf/config",
+            axum::routing::post(move |body: axum::Json<serde_json::Value>| {
+                let cmd_tx = ebpf_cmd_tx.clone();
+                async move {
+                    let body = body.0;
+                    let mut actions = Vec::new();
+
+                    // Action: prune idle instances to free FDs
+                    if body.get("prune_idle").and_then(|v| v.as_bool()).unwrap_or(false) {
+                        let threshold = body.get("idle_threshold_secs")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(60);
+                        if let Err(e) = cmd_tx.try_send(SupervisorCommand::PruneIdleInstances {
+                            idle_threshold_secs: threshold,
+                        }) {
+                            tracing::warn!(error = %e, "Failed to send PruneIdleInstances command");
+                        } else {
+                            actions.push("prune_idle");
+                        }
+                    }
+
+                    // Action: kill the largest instance (most memory)
+                    if body.get("kill_largest").and_then(|v| v.as_bool()).unwrap_or(false) {
+                        let reason = body.get("kill_largest_reason")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("admin API request")
+                            .to_string();
+                        if let Err(e) = cmd_tx.try_send(SupervisorCommand::KillLargestInstance {
+                            reason,
+                        }) {
+                            tracing::warn!(error = %e, "Failed to send KillLargestInstance command");
+                        } else {
+                            actions.push("kill_largest");
+                        }
+                    }
+
+                    // Threshold updates (logged for future propagation to eBPF programs)
+                    if let Some(thresholds) = body.get("thresholds") {
+                        tracing::info!(
+                            thresholds = ?thresholds,
+                            "eBPF threshold update requested (propagation to eBPF programs pending)"
+                        );
+                        actions.push("threshold_update_logged");
+                    }
+
+                    (
+                        axum::http::StatusCode::OK,
+                        axum::Json(serde_json::json!({
+                            "status": "ok",
+                            "actions": actions,
+                        })),
+                    )
+                }
+            }),
+        )
         .layer(axum::middleware::from_fn(admin_auth_fn(config.admin.auth_token.clone())));
 
     let admin_addr = format!("0.0.0.0:{}", config.admin.port);

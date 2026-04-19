@@ -36,6 +36,39 @@ use storage::Store;
 use tokio::sync::{mpsc, RwLock};
 use tracing::{error, info, warn};
 
+// ── Supervisor Command Interface ──────────────────────────────────────────────
+
+/// Commands that external subsystems (eBPF monitor, admin API) can send
+/// to the supervisor for immediate action.
+///
+/// These commands are processed asynchronously by the supervisor's command
+/// loop, which runs in a background Tokio task started via
+/// [`Supervisor::start_command_loop`].
+#[derive(Debug)]
+pub enum SupervisorCommand {
+    /// Kill the instance consuming the most memory.
+    /// Used when eBPF detects critical memory pressure or OOM.
+    KillLargestInstance { reason: String },
+
+    /// Kill all idle instances (those with no recent requests).
+    /// Used when eBPF detects FD exhaustion approaching hard limit.
+    PruneIdleInstances {
+        /// Only prune instances idle for more than this many seconds.
+        idle_threshold_secs: u64,
+    },
+
+    /// Remove an app's instances from the upstream routing table.
+    /// Used when eBPF detects a process exit (the instance is dead).
+    RemoveAppFromUpstream { app_id: AppId },
+
+    /// Kill a specific instance by its app_id and instance_id.
+    KillInstance {
+        app_id: AppId,
+        instance_id: InstanceId,
+        reason: String,
+    },
+}
+
 #[allow(clippy::type_complexity, clippy::too_many_arguments)]
 pub struct Supervisor {
     store: Store,
@@ -57,6 +90,14 @@ pub struct Supervisor {
 
     /// Channel to send billing records
     billing_tx: Option<mpsc::Sender<billing::BillingInput>>,
+
+    /// Channel to receive commands from eBPF monitor and other subsystems.
+    /// Wrapped in `Mutex` so the command loop can take it out via `Option::take`
+    /// even though `Supervisor` is behind `Arc`.
+    command_rx: std::sync::Mutex<Option<mpsc::Receiver<SupervisorCommand>>>,
+
+    /// Sender clone for providing to eBPF monitor callbacks and admin API.
+    command_tx: mpsc::Sender<SupervisorCommand>,
 }
 
 impl Supervisor {
@@ -72,6 +113,7 @@ impl Supervisor {
         event_tx: mpsc::Sender<Event>,
         billing_tx: Option<mpsc::Sender<billing::BillingInput>>,
     ) -> Arc<Self> {
+        let (command_tx, command_rx) = mpsc::channel::<SupervisorCommand>(256);
         Arc::new(Self {
             store,
             runtime,
@@ -84,11 +126,22 @@ impl Supervisor {
             event_tx,
             log_tx: None,
             billing_tx,
+            command_rx: std::sync::Mutex::new(Some(command_rx)),
+            command_tx,
         })
     }
 
     pub fn set_log_dispatcher(&mut self, log_tx: mpsc::Sender<metrics::WasmLogRecord>) {
         self.log_tx = Some(log_tx);
+    }
+
+    /// Get a sender for the supervisor command channel.
+    ///
+    /// This can be used by the eBPF monitor callbacks, admin API handlers,
+    /// or any other subsystem that needs to request immediate supervisor
+    /// actions (kill largest instance, prune idle, etc.).
+    pub fn command_tx(&self) -> mpsc::Sender<SupervisorCommand> {
+        self.command_tx.clone()
     }
 
     fn send_billing_record(&self, input: billing::BillingInput) {
@@ -656,6 +709,163 @@ impl Supervisor {
     /// Get all registered service addresses for service discovery.
     pub fn get_service_registry(&self) -> Arc<LocalServiceRegistry> {
         self.service_registry.clone()
+    }
+
+    // ── Command Loop (for eBPF monitor / admin API integration) ───────────
+
+    /// Start the background command processing loop.
+    ///
+    /// Listens for [`SupervisorCommand`] messages on the command channel
+    /// and dispatches them to the appropriate supervisor methods. This
+    /// enables the eBPF monitor and admin API to request immediate actions
+    /// (kill instances, prune idle, etc.) without needing direct `Arc<Supervisor>`
+    /// access or async runtime handles.
+    ///
+    /// Should be called once during startup, after `start_health_loop`.
+    pub fn start_command_loop(self: Arc<Self>) {
+        let rx = self.command_rx.lock().unwrap().take();
+        if rx.is_none() {
+            warn!("supervisor command loop already started — ignoring duplicate call");
+            return;
+        }
+        let mut rx = rx.unwrap();
+
+        let supervisor = self.clone();
+        tokio::spawn(async move {
+            info!("supervisor command loop started");
+            while let Some(cmd) = rx.recv().await {
+                match cmd {
+                    SupervisorCommand::KillLargestInstance { reason } => {
+                        supervisor.kill_largest_instance(&reason).await;
+                    }
+                    SupervisorCommand::PruneIdleInstances {
+                        idle_threshold_secs,
+                    } => {
+                        supervisor.prune_idle_instances(idle_threshold_secs).await;
+                    }
+                    SupervisorCommand::RemoveAppFromUpstream { app_id } => {
+                        let pools = supervisor.pools.read().await;
+                        if let Some(pool) = pools.get(&app_id.0) {
+                            for addr in pool.ready_addrs() {
+                                supervisor.upstream_registry.remove(&app_id, &addr).await;
+                            }
+                        }
+                        info!(app = %app_id.0, "removed app from upstream via command");
+                    }
+                    SupervisorCommand::KillInstance {
+                        app_id,
+                        instance_id,
+                        reason,
+                    } => {
+                        info!(
+                            app = %app_id.0,
+                            instance = %instance_id.0,
+                            reason,
+                            "killing instance via supervisor command"
+                        );
+                        if let Err(e) = supervisor.kill_instance(&app_id, &instance_id).await {
+                            warn!(
+                                app = %app_id.0,
+                                instance = %instance_id.0,
+                                error = %e,
+                                "failed to kill instance via command"
+                            );
+                        }
+                    }
+                }
+            }
+            warn!("supervisor command loop exited — no more senders");
+        });
+    }
+
+    /// Kill the instance consuming the most memory.
+    ///
+    /// Scans all instance pools and finds the ready instance with the
+    /// highest `ram_bytes` in its billing info. Used by the eBPF monitor
+    /// when critical memory pressure or OOM is detected.
+    pub async fn kill_largest_instance(&self, reason: &str) {
+        let mut largest: Option<(AppId, InstanceId, u64)> = None;
+
+        let pools = self.pools.read().await;
+        for (app_id_str, pool) in pools.iter() {
+            for inst in &pool.instances {
+                if matches!(inst.state, InstanceState::Ready { .. }) {
+                    let ram = inst.billing_info.ram_bytes;
+                    if largest.is_none() || ram > largest.as_ref().unwrap().2 {
+                        largest = Some((AppId(app_id_str.clone()), inst.id.clone(), ram));
+                    }
+                }
+            }
+        }
+        drop(pools);
+
+        match largest {
+            Some((app_id, instance_id, ram)) => {
+                warn!(
+                    app = %app_id.0,
+                    instance = %instance_id.0,
+                    ram_bytes = ram,
+                    reason,
+                    "killing largest instance (memory pressure recovery)"
+                );
+                if let Err(e) = self.kill_instance(&app_id, &instance_id).await {
+                    warn!(error = %e, "failed to kill largest instance");
+                }
+            }
+            None => {
+                info!(reason, "no instances to kill for memory pressure recovery");
+            }
+        }
+    }
+
+    /// Kill all idle instances across all apps.
+    ///
+    /// An instance is considered idle if it hasn't received a request in
+    /// more than `idle_threshold_secs` seconds. Used by the eBPF monitor
+    /// when FD exhaustion is approaching the hard limit.
+    pub async fn prune_idle_instances(&self, idle_threshold_secs: u64) {
+        let mut total_pruned = 0usize;
+
+        let app_ids = {
+            let pools = self.pools.read().await;
+            pools.keys().cloned().collect::<Vec<_>>()
+        };
+
+        for app_id_str in app_ids {
+            let app_id = AppId(app_id_str.clone());
+            let idle_ids = {
+                let pools = self.pools.read().await;
+                pools
+                    .get(&app_id_str)
+                    .map(|p| p.idle_instance_ids(idle_threshold_secs))
+                    .unwrap_or_default()
+            };
+
+            for instance_id in idle_ids {
+                info!(
+                    app = %app_id.0,
+                    instance = %instance_id.0,
+                    idle_threshold_secs,
+                    "pruning idle instance (FD pressure recovery)"
+                );
+                if let Err(e) = self.kill_instance(&app_id, &instance_id).await {
+                    warn!(
+                        app = %app_id.0,
+                        instance = %instance_id.0,
+                        error = %e,
+                        "failed to prune idle instance"
+                    );
+                } else {
+                    total_pruned += 1;
+                }
+            }
+        }
+
+        if total_pruned > 0 {
+            info!(total_pruned, idle_threshold_secs, "pruned idle instances");
+        } else {
+            info!(idle_threshold_secs, "no idle instances to prune");
+        }
     }
 
     /// Gracefully shutdown all instances across all apps.

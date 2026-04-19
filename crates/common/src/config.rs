@@ -2,7 +2,6 @@
 //! All fields have defaults — a completely empty TOML file is valid.
 
 use serde::{Deserialize, Serialize};
-use std::net::IpAddr;
 use std::path::PathBuf;
 
 /// Top-level configuration for a wasm-node.

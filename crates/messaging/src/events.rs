@@ -120,6 +120,34 @@ pub enum Event {
         /// Expected time until shutdown (seconds).
         drain_timeout_secs: u64,
     },
+
+    // ── eBPF Monitor Events ──────────────────────────────────────────
+    /// A node is under memory or I/O pressure detected by eBPF.
+    /// Other nodes should stop steering traffic to it.
+    NodeUnderPressure {
+        node_id: String,
+        /// 1 = medium, 2 = critical
+        pressure_level: u32,
+    },
+
+    /// A node recovered from pressure.
+    NodePressureRecovered {
+        node_id: String,
+    },
+
+    /// Security incident: a Wasm instance made a privileged syscall
+    /// detected by the eBPF syscall anomaly detector.
+    SecurityIncident {
+        node_id: String,
+        /// App ID of the offending instance (if known).
+        app_id: String,
+        /// PID of the offending process.
+        pid: u32,
+        /// Syscall number that triggered the incident.
+        syscall_nr: u64,
+        /// Category of the suspicious syscall (e.g., "PrivilegeEscalation").
+        category: String,
+    },
 }
 
 impl Event {
@@ -167,6 +195,17 @@ impl Event {
             }
             Event::NodeDraining { node_id, .. } => {
                 format!("platform.draining.{}", node_id)
+            }
+
+            // ── eBPF Monitor Events ──────────────────────────────────
+            Event::NodeUnderPressure { node_id, .. } => {
+                format!("ebpf.pressure.{}", node_id)
+            }
+            Event::NodePressureRecovered { node_id, .. } => {
+                format!("ebpf.pressure.recovered.{}", node_id)
+            }
+            Event::SecurityIncident { node_id, .. } => {
+                format!("ebpf.security.incident.{}", node_id)
             }
         }
     }
