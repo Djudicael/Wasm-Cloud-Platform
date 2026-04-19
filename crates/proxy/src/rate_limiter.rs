@@ -78,7 +78,9 @@ pub struct RateLimiter {
     configs: DashMap<String, RateLimitConfig>,
 
     /// Default config for apps without explicit limits.
-    default_config: RateLimitConfig,
+    /// Behind an `RwLock` so it can be updated at runtime via hot-reload
+    /// without disrupting ongoing requests.
+    default_config: std::sync::RwLock<RateLimitConfig>,
 }
 
 impl RateLimiter {
@@ -87,8 +89,31 @@ impl RateLimiter {
             app_buckets: DashMap::new(),
             ip_buckets: DashMap::new(),
             configs: DashMap::new(),
-            default_config,
+            default_config: std::sync::RwLock::new(default_config),
         }
+    }
+
+    /// Update the default rate-limit configuration at runtime (hot-reload).
+    ///
+    /// This is called by the config sync loop when the operator changes
+    /// rate-limit parameters via the admin API. The update takes effect
+    /// immediately for subsequent requests; existing token buckets keep
+    /// their current state.
+    pub fn update_default_config(&self, new_config: RateLimitConfig) {
+        let mut guard = self.default_config.write().unwrap();
+        tracing::info!(
+            old_rps = guard.requests_per_second,
+            new_rps = new_config.requests_per_second,
+            new_burst = new_config.burst_capacity,
+            new_per_ip = new_config.per_ip_limit,
+            "rate limiter default config updated via hot-reload"
+        );
+        *guard = new_config;
+    }
+
+    /// Read the current default config (used by sync loops and introspection).
+    pub fn read_default_config(&self) -> RateLimitConfig {
+        self.default_config.read().unwrap().clone()
     }
 
     /// Set a custom rate limit for a specific app.
@@ -101,7 +126,7 @@ impl RateLimiter {
         self.configs
             .get(app_id)
             .map(|c| c.clone())
-            .unwrap_or(self.default_config.clone())
+            .unwrap_or_else(|| self.default_config.read().unwrap().clone())
     }
 
     /// Check whether a request should be allowed.
@@ -111,7 +136,7 @@ impl RateLimiter {
             .configs
             .get(app_id)
             .map(|c| c.clone())
-            .unwrap_or(self.default_config.clone());
+            .unwrap_or_else(|| self.default_config.read().unwrap().clone());
 
         // 1. Check per-app limit
         {

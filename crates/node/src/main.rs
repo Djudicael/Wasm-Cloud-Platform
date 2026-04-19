@@ -124,6 +124,7 @@ impl EventCallbacks for NodeEbpfCallbacks {
 
 pub mod db_config;
 pub mod handlers;
+pub mod log_reload;
 pub mod recovery;
 pub mod upgrade;
 
@@ -225,11 +226,42 @@ struct Args {
 
     #[arg(long, help = "Auth token for DNS webhook")]
     dns_webhook_token: Option<String>,
+
+    /// Generate a default config file and print to stdout, then exit.
+    #[arg(long)]
+    generate_config: bool,
+
+    /// Validate a config file without starting the node, then exit.
+    #[arg(long)]
+    validate_config: Option<String>,
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
+
+    // --generate-config: print a default TOML config to stdout and exit
+    if args.generate_config {
+        let default_config = common::config::NodeConfig::default();
+        let toml_str =
+            toml::to_string_pretty(&default_config).expect("failed to serialize default config");
+        println!("{}", toml_str);
+        return Ok(());
+    }
+
+    // --validate-config: load and validate a config file, then exit
+    if let Some(ref path) = args.validate_config {
+        match config::load_config(Some(std::path::Path::new(path)), &CliOverrides::default()) {
+            Ok(_) => {
+                println!("✅ Configuration file '{}' is valid.", path);
+                return Ok(());
+            }
+            Err(e) => {
+                eprintln!("❌ Configuration validation failed: {}", e);
+                std::process::exit(1);
+            }
+        }
+    }
 
     // Convert CLI args to overrides for the config system
     let cli_overrides = CliOverrides {
@@ -267,20 +299,14 @@ async fn main() -> anyhow::Result<()> {
     let config_path = args.config.as_deref().map(std::path::Path::new);
     let config = load_config(config_path, &cli_overrides)?;
 
-    // Set up logging with configured level
-    let filter = tracing_subscriber::EnvFilter::builder()
-        .with_default_directive(
-            config
-                .logging
-                .level
-                .parse()
-                .unwrap_or(tracing::Level::INFO.into()),
-        )
-        .from_env_lossy();
-
-    tracing_subscriber::fmt().with_env_filter(filter).init();
+    // Set up logging with reload handle (allows runtime log-level changes)
+    let log_reload_handle = log_reload::LogReloadHandle::init(&config.logging.level);
 
     info!(node_id = %config.node.node_id, "wasm-node starting");
+    info!(
+        config_merge = "defaults + TOML + env + CLI",
+        "configuration loaded"
+    );
 
     if let Some(parent) = config.storage.db_path.parent() {
         std::fs::create_dir_all(parent).unwrap_or_default();
@@ -288,6 +314,38 @@ async fn main() -> anyhow::Result<()> {
 
     let store = storage::Store::open(&config.storage.db_path)?;
     info!(path = %config.storage.db_path.display(), "storage opened");
+
+    // Initialize hot-reloadable configuration handle.
+    // Loads any persisted overrides from redb so they survive restarts.
+    let hot_config_handle =
+        config::HotConfigHandle::new(&config, store.clone(), config.node.node_id.clone())?;
+    info!("hot config handle initialized (persisted overrides applied if any)");
+
+    // ── Watch channels for hot-reloadable component config ────────────
+    // These allow the config sync loop to push updated values to
+    // long-running background tasks without restarting them.
+
+    // GC config watch (interval, disk threshold, keep versions, etc.)
+    let initial_gc_config = common::gc::GcConfig {
+        artifact_keep_versions: config.gc.artifact_keep_versions,
+        metrics_retain_days: config.gc.metrics_retain_days,
+        undeploy_grace_secs: config.gc.undeploy_grace_secs,
+        gc_interval_secs: config.gc.gc_interval_secs,
+        disk_warning_threshold: config.gc.disk_warning_threshold,
+    };
+    let (gc_config_tx, gc_config_rx) = tokio::sync::watch::channel(initial_gc_config);
+
+    // Health-check interval watch
+    let (health_interval_tx, health_interval_rx) =
+        tokio::sync::watch::channel(config.health.check_interval_secs);
+
+    // Start the GC loop with the watch receiver (hot-reloadable interval)
+    storage::gc::start_gc_loop(
+        store.clone(),
+        gc_config_rx,
+        None, // GC metrics not yet wired
+    );
+    info!("GC loop started (interval hot-reloadable via config sync)");
 
     // Initialize recovery metrics early (needed for recovery mode detection)
     let recovery_metrics = Arc::new(metrics::recovery::RecoveryMetrics::new());
@@ -394,7 +452,7 @@ async fn main() -> anyhow::Result<()> {
     // and supervisor are created, so the ActionDispatcher can reference them.
     // See below (after line ~535).
 
-    let supervisor = supervisor::Supervisor::new(
+    let mut supervisor = supervisor::Supervisor::new(
         store.clone(),
         runtime.clone(),
         port_alloc.clone(),
@@ -408,6 +466,17 @@ async fn main() -> anyhow::Result<()> {
 
     supervisor.restore_from_storage().await?;
     info!("supervisor state restored from storage");
+
+    // Set the health interval watch before starting the loop.
+    // set_health_interval_rx requires &mut Self, but Supervisor is behind Arc.
+    // Arc::get_mut only succeeds if there's a single owner. Since supervisor
+    // was just created by Supervisor::new (which returns Arc<Self>), we are
+    // the sole owner at this point.
+    if let Some(sup) = Arc::get_mut(&mut supervisor) {
+        sup.set_health_interval_rx(health_interval_rx);
+    } else {
+        tracing::warn!("could not set health interval watch — supervisor already shared");
+    }
 
     supervisor.clone().start_health_loop();
     supervisor.clone().start_command_loop();
@@ -641,15 +710,17 @@ async fn main() -> anyhow::Result<()> {
         node_id: config.node.node_id.clone(),
         supervisor_tx: supervisor.command_tx(),
     });
-    let ebpf_dispatcher = Arc::new(ActionDispatcher::new(
+    let ebpf_dispatcher = Arc::new(ActionDispatcher::with_config(
         ebpf_metrics.clone(),
         ebpf_callbacks,
         config.node.node_id.clone(),
+        ebpf_config.clone(),
     ));
     let node_pid = std::process::id();
     // Clone metrics and dispatcher for admin API before moving into init()
     let ebpf_metrics_admin = ebpf_metrics.clone();
     let ebpf_dispatcher_admin = ebpf_dispatcher.clone();
+    let ebpf_dispatcher_sync = ebpf_dispatcher.clone();
     let _ebpf_handle =
         ebpf_monitor::init(ebpf_config, ebpf_metrics, ebpf_dispatcher, node_pid).await;
     if _ebpf_handle.is_ebpf_active() {
@@ -658,21 +729,27 @@ async fn main() -> anyhow::Result<()> {
         info!("eBPF monitor running in userspace fallback mode (5s polling interval)");
     }
 
+    // Read initial rate-limit defaults from hot config (may have persisted overrides)
+    let initial_hot = hot_config_handle.read().await;
     let default_rate_config = proxy::rate_limiter::RateLimitConfig {
-        requests_per_second: 1000,
-        burst_capacity: 200,
-        per_ip_limit: 200,
+        requests_per_second: initial_hot.rate_limit.default_requests_per_second,
+        burst_capacity: initial_hot.rate_limit.default_burst_capacity,
+        per_ip_limit: initial_hot.rate_limit.default_per_ip_limit,
     };
+    drop(initial_hot);
 
     // Initialize rate limit metrics (register with the same registry)
     let rate_limit_metrics = Arc::new(proxy::metrics::RateLimitMetrics::new(
         &prom_metrics.registry,
     ));
 
+    let rate_limiter = Arc::new(proxy::rate_limiter::RateLimiter::new(default_rate_config));
+    let rate_limiter_sync = rate_limiter.clone();
+
     let wasm_proxy = proxy::service::WasmProxy {
         router: host_router.clone(),
         upstream: upstream_registry.clone(),
-        rate_limiter: Arc::new(proxy::rate_limiter::RateLimiter::new(default_rate_config)),
+        rate_limiter,
         node_table: Arc::new(proxy::node_table::NodeLoadTable::default()),
         cold_start,
         backpressure: backpressure.clone(),
@@ -880,7 +957,259 @@ async fn main() -> anyhow::Result<()> {
                 }
             }),
         )
+        // ── Configuration Management Endpoints ──────────────────────────
+        .route(
+            "/admin/config",
+            axum::routing::get({
+                let cold = config.clone();
+                let hot = hot_config_handle.clone();
+                move || {
+                    let cold = cold.clone();
+                    let hot = hot.clone();
+                    async move {
+                        let hot_cfg = hot.read().await;
+                        axum::Json(serde_json::json!({
+                            "cold": {
+                                "node_id": cold.node.node_id,
+                                "nats_url": cold.nats.url,
+                                "proxy_http_port": cold.proxy.http_port,
+                                "proxy_https_port": cold.proxy.https_port,
+                                "admin_port": cold.admin.port,
+                                "artifact_port": cold.admin.artifact_port,
+                                "db_path": cold.storage.db_path.to_string_lossy(),
+                                "port_range": format!("{}-{}", cold.runtime.port_start, cold.runtime.port_end),
+                                "database_url": cold.database.default_url,
+                                "key_source": cold.runtime.key_source,
+                            },
+                            "hot": {
+                                "rate_limit": hot_cfg.rate_limit,
+                                "ebpf": hot_cfg.ebpf,
+                                "gc": hot_cfg.gc,
+                                "health": hot_cfg.health,
+                                "logging": hot_cfg.logging,
+                            },
+                            "hot_reloadable_fields": [
+                                "rate_limit.default_requests_per_second",
+                                "rate_limit.default_burst_capacity",
+                                "rate_limit.default_per_ip_limit",
+                                "ebpf.fd_soft_limit",
+                                "ebpf.fd_hard_limit",
+                                "ebpf.mem_low_threshold_pages",
+                                "ebpf.mem_critical_threshold_pages",
+                                "ebpf.disk_slow_threshold_ns",
+                                "ebpf.tcp_conn_limit_per_pid",
+                                "ebpf.syscall_rate_limit",
+                                "gc.gc_interval_secs",
+                                "gc.disk_warning_threshold",
+                                "health.check_interval_secs",
+                                "health.default_idle_timeout_secs",
+                                "logging.level",
+                            ],
+                        }))
+                    }
+                }
+            }),
+        )
+        .route(
+            "/admin/config",
+            axum::routing::patch({
+                let hot = hot_config_handle.clone();
+                let log_h = log_reload_handle.clone();
+                let nbus = bus.clone();
+                let nid = config.node.node_id.clone();
+                move |body: axum::Json<serde_json::Value>| {
+                    let hot = hot.clone();
+                    let log_h = log_h.clone();
+                    let nbus = nbus.clone();
+                    let nid = nid.clone();
+                    async move {
+                        let raw = body.0;
+                        // Build a HotConfigUpdate from the JSON body
+                        let update = config::HotConfigUpdate {
+                            rate_limit_default_rps: raw.get("rate_limit_default_rps")
+                                .and_then(|v| v.as_u64()).map(|v| v as u32),
+                            rate_limit_default_burst: raw.get("rate_limit_default_burst")
+                                .and_then(|v| v.as_u64()).map(|v| v as u32),
+                            rate_limit_default_per_ip: raw.get("rate_limit_default_per_ip")
+                                .and_then(|v| v.as_u64()).map(|v| v as u32),
+                            ebpf_fd_soft_limit: raw.get("ebpf_fd_soft_limit")
+                                .and_then(|v| v.as_u64()).map(|v| v as u32),
+                            ebpf_fd_hard_limit: raw.get("ebpf_fd_hard_limit")
+                                .and_then(|v| v.as_u64()).map(|v| v as u32),
+                            ebpf_mem_low_threshold_pages: raw.get("ebpf_mem_low_threshold_pages")
+                                .and_then(|v| v.as_u64()),
+                            ebpf_mem_critical_threshold_pages: raw.get("ebpf_mem_critical_threshold_pages")
+                                .and_then(|v| v.as_u64()),
+                            ebpf_disk_slow_threshold_ns: raw.get("ebpf_disk_slow_threshold_ns")
+                                .and_then(|v| v.as_u64()),
+                            ebpf_tcp_conn_limit_per_pid: raw.get("ebpf_tcp_conn_limit_per_pid")
+                                .and_then(|v| v.as_u64()).map(|v| v as u32),
+                            ebpf_syscall_rate_limit: raw.get("ebpf_syscall_rate_limit")
+                                .and_then(|v| v.as_u64()),
+                            gc_interval_secs: raw.get("gc_interval_secs")
+                                .and_then(|v| v.as_u64()),
+                            gc_disk_warning_threshold: raw.get("gc_disk_warning_threshold")
+                                .and_then(|v| v.as_f64()),
+                            health_check_interval_secs: raw.get("health_check_interval_secs")
+                                .and_then(|v| v.as_u64()),
+                            health_default_idle_timeout_secs: raw.get("health_default_idle_timeout_secs")
+                                .and_then(|v| v.as_u64()),
+                            logging_level: raw.get("logging_level")
+                                .and_then(|v| v.as_str()).map(|s| s.to_string()),
+                        };
+
+                        if update.count_changes() == 0 {
+                            return (
+                                axum::http::StatusCode::BAD_REQUEST,
+                                axum::Json(serde_json::json!({
+                                    "error": "no_changes",
+                                    "message": "No hot-reloadable fields were provided in the request body"
+                                })),
+                            );
+                        }
+
+                        match hot.apply_update(update.clone()).await {
+                            Ok(()) => {
+                                // If log level changed, apply it to the tracing subscriber
+                                if let Some(ref level) = update.logging_level {
+                                    if let Err(e) = log_h.set_level(level) {
+                                        tracing::warn!(error = %e, "failed to apply log level change via reload handle");
+                                    } else {
+                                        tracing::info!(new_level = %level, "log level changed at runtime");
+                                    }
+                                }
+
+                                // Publish ConfigHotReload event to NATS (informational)
+                                let changes_json = serde_json::to_value(&update)
+                                    .unwrap_or(serde_json::json!({}));
+                                let event = messaging::events::Event::ConfigHotReload {
+                                    node_id: nid.clone(),
+                                    changes: changes_json,
+                                };
+                                if let Err(e) = nbus.publish(&event).await {
+                                    tracing::warn!(error = %e, "failed to publish ConfigHotReload event");
+                                }
+
+                                tracing::info!(
+                                    changes = update.count_changes(),
+                                    "hot config updated via admin API"
+                                );
+
+                                (
+                                    axum::http::StatusCode::OK,
+                                    axum::Json(serde_json::json!({
+                                        "status": "updated",
+                                        "changes_applied": update.count_changes(),
+                                    })),
+                                )
+                            }
+                            Err(e) => {
+                                tracing::warn!(error = %e, "hot config update rejected");
+                                (
+                                    axum::http::StatusCode::BAD_REQUEST,
+                                    axum::Json(serde_json::json!({
+                                        "error": "validation_failed",
+                                        "message": e.to_string(),
+                                    })),
+                                )
+                            }
+                        }
+                    }
+                }
+            }),
+        )
+        .route(
+            "/admin/config",
+            axum::routing::delete({
+                let hot = hot_config_handle.clone();
+                move || {
+                    let hot = hot.clone();
+                    async move {
+                        match hot.reset().await {
+                            Ok(()) => {
+                                tracing::info!("hot config reset to cold defaults via admin API");
+                                (
+                                    axum::http::StatusCode::OK,
+                                    axum::Json(serde_json::json!({
+                                        "status": "reset",
+                                        "message": "Hot config reset to startup defaults. Restart to re-read TOML file.",
+                                    })),
+                                )
+                            }
+                            Err(e) => (
+                                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                                axum::Json(serde_json::json!({
+                                    "error": "reset_failed",
+                                    "message": e.to_string(),
+                                })),
+                            ),
+                        }
+                    }
+                }
+            }),
+        )
         .layer(axum::middleware::from_fn(admin_auth_fn(config.admin.auth_token.clone())));
+
+    // ── Config Sync Loop ──────────────────────────────────────────────
+    // Periodically reads HotConfigHandle and pushes updates to components
+    // that need hot-reloadable parameters (rate limiter, eBPF, GC, health).
+    {
+        let sync_hot = hot_config_handle.clone();
+        let sync_rate_limiter = rate_limiter_sync.clone();
+        let sync_ebpf_dispatcher = ebpf_dispatcher_sync.clone();
+        let sync_gc_tx = gc_config_tx;
+        let sync_health_tx = health_interval_tx;
+        let sync_log_handle = log_reload_handle.clone();
+
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(Duration::from_secs(10));
+            loop {
+                ticker.tick().await;
+                let hot = sync_hot.read().await;
+
+                // 1. Rate limiter
+                sync_rate_limiter.update_default_config(proxy::rate_limiter::RateLimitConfig {
+                    requests_per_second: hot.rate_limit.default_requests_per_second,
+                    burst_capacity: hot.rate_limit.default_burst_capacity,
+                    per_ip_limit: hot.rate_limit.default_per_ip_limit,
+                });
+
+                // 2. eBPF monitor thresholds
+                let new_ebpf_config =
+                    ebpf_monitor::MonitorConfig::from_ebpf_section(&common::config::EbpfSection {
+                        enabled: hot.ebpf.enabled,
+                        fd_soft_limit: hot.ebpf.fd_soft_limit,
+                        fd_hard_limit: hot.ebpf.fd_hard_limit,
+                        mem_low_threshold_pages: hot.ebpf.mem_low_threshold_pages,
+                        mem_critical_threshold_pages: hot.ebpf.mem_critical_threshold_pages,
+                        disk_slow_threshold_ns: hot.ebpf.disk_slow_threshold_ns,
+                        tcp_conn_limit_per_pid: hot.ebpf.tcp_conn_limit_per_pid,
+                        syscall_rate_limit: hot.ebpf.syscall_rate_limit,
+                        sampling_period_secs: hot.ebpf.sampling_period_secs,
+                    });
+                sync_ebpf_dispatcher.update_thresholds(new_ebpf_config);
+
+                // 3. GC config (interval + disk threshold)
+                let new_gc_config = common::gc::GcConfig {
+                    artifact_keep_versions: hot.gc.artifact_keep_versions,
+                    metrics_retain_days: hot.gc.metrics_retain_days,
+                    undeploy_grace_secs: hot.gc.undeploy_grace_secs,
+                    gc_interval_secs: hot.gc.gc_interval_secs,
+                    disk_warning_threshold: hot.gc.disk_warning_threshold,
+                };
+                let _ = sync_gc_tx.send(new_gc_config);
+
+                // 4. Health check interval
+                let _ = sync_health_tx.send(hot.health.check_interval_secs);
+
+                // 5. Log level (apply via reload handle if changed)
+                if let Err(e) = sync_log_handle.set_level(&hot.logging.level) {
+                    tracing::debug!(error = %e, "config sync: log level unchanged or invalid");
+                }
+            }
+        });
+        info!("config sync loop started (10s interval, pushes hot-reload updates to components)");
+    }
 
     let admin_addr = format!("0.0.0.0:{}", config.admin.port);
     tokio::spawn(async move {

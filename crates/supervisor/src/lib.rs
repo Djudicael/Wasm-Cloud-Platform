@@ -98,6 +98,12 @@ pub struct Supervisor {
 
     /// Sender clone for providing to eBPF monitor callbacks and admin API.
     command_tx: mpsc::Sender<SupervisorCommand>,
+
+    /// Watch receiver for the health-check interval (hot-reloadable).
+    /// When the operator changes `health.check_interval_secs` via the admin
+    /// API, the sender side is updated and this receiver picks up the new
+    /// value on the next loop iteration.
+    health_interval_rx: Option<tokio::sync::watch::Receiver<u64>>,
 }
 
 impl Supervisor {
@@ -128,7 +134,17 @@ impl Supervisor {
             billing_tx,
             command_rx: std::sync::Mutex::new(Some(command_rx)),
             command_tx,
+            health_interval_rx: None,
         })
+    }
+
+    /// Set the watch receiver for the health-check interval.
+    ///
+    /// Call this after construction, before `start_health_loop()`.
+    /// The sender side is typically held by the config sync task in
+    /// `main.rs` which reads from `HotConfigHandle`.
+    pub fn set_health_interval_rx(&mut self, rx: tokio::sync::watch::Receiver<u64>) {
+        self.health_interval_rx = Some(rx);
     }
 
     pub fn set_log_dispatcher(&mut self, log_tx: mpsc::Sender<metrics::WasmLogRecord>) {
@@ -357,12 +373,44 @@ impl Supervisor {
     }
 
     /// Start the background health monitoring loop.
+    /// Start the periodic health-check loop.
+    ///
+    /// If `health_interval_rx` was set via [`set_health_interval_rx`], the
+    /// loop reads the interval from the watch channel on every tick and
+    /// resets the timer when it changes — no restart required.
+    ///
+    /// If no watch receiver was provided, a default 5-second interval is
+    /// used (backward-compatible behaviour).
     pub fn start_health_loop(self: Arc<Self>) {
         let supervisor = self.clone();
         tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(5));
+            // Determine the initial interval
+            let initial_secs = supervisor
+                .health_interval_rx
+                .as_ref()
+                .map(|rx| *rx.borrow())
+                .unwrap_or(5);
+            let mut last_secs = initial_secs;
+            let mut interval = tokio::time::interval(Duration::from_secs(initial_secs));
+
             loop {
                 interval.tick().await;
+
+                // Check for interval updates from the watch channel
+                if let Some(ref rx) = supervisor.health_interval_rx {
+                    let new_secs = *rx.borrow();
+                    if new_secs != last_secs && new_secs > 0 {
+                        tracing::info!(
+                            old_secs = last_secs,
+                            new_secs,
+                            "health loop interval updated via hot-reload"
+                        );
+                        interval = tokio::time::interval(Duration::from_secs(new_secs));
+                        interval.tick().await; // consume the first immediate tick
+                        last_secs = new_secs;
+                    }
+                }
+
                 if let Err(e) = supervisor.health_tick().await {
                     error!(error = %e, "health tick failed");
                 }

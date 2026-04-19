@@ -132,7 +132,7 @@ fn default_http_port() -> u16 {
 }
 
 fn default_https_port() -> u16 {
-    8443
+    0
 }
 
 impl Default for ProxySection {

@@ -101,6 +101,19 @@ enum NodeAction {
         #[arg(long, default_value = "cli request")]
         kill_largest_reason: String,
     },
+    /// View or update hot-reloadable configuration
+    Config {
+        /// Set a hot-reloadable parameter (key=value). Repeatable.
+        /// e.g. --set rate_limit_default_rps=5000 --set logging_level=debug
+        #[arg(long)]
+        set: Vec<String>,
+        /// Reset hot config to startup defaults
+        #[arg(long)]
+        reset: bool,
+        /// Output in JSON format
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -228,6 +241,159 @@ impl NodeAction {
                     let status = resp.status();
                     let text = resp.text().await.unwrap_or_default();
                     anyhow::bail!("Failed to send eBPF config: {} {}", status, text);
+                }
+                Ok(())
+            }
+            NodeAction::Config { set, reset, json } => {
+                let config_url = format!("{}/admin/config", node_api);
+
+                // Reset takes priority
+                if *reset {
+                    let resp = http.delete(&config_url).send().await?;
+                    if resp.status().is_success() {
+                        let result: serde_json::Value = resp.json().await?;
+                        println!("✅ Hot config reset to startup defaults.");
+                        if !json {
+                            println!();
+                            println!("  Status:   {}", result["status"]);
+                            println!("  Message:  {}", result["message"]);
+                        } else {
+                            println!("{}", serde_json::to_string_pretty(&result).unwrap());
+                        }
+                    } else {
+                        let status = resp.status();
+                        let text = resp.text().await.unwrap_or_default();
+                        anyhow::bail!("Failed to reset config: {} {}", status, text);
+                    }
+                    return Ok(());
+                }
+
+                // Apply set overrides
+                if !set.is_empty() {
+                    let mut body = serde_json::json!({});
+                    for pair in set {
+                        let (key, value) = pair.split_once('=').ok_or_else(|| {
+                            anyhow::anyhow!("Invalid --set format: '{}'. Expected key=value", pair)
+                        })?;
+                        // Try to parse as number first, then fall back to string
+                        if let Ok(u) = value.parse::<u64>() {
+                            body[key] = serde_json::json!(u);
+                        } else if let Ok(f) = value.parse::<f64>() {
+                            body[key] = serde_json::json!(f);
+                        } else {
+                            body[key] = serde_json::json!(value);
+                        }
+                    }
+                    let resp = http.patch(&config_url).json(&body).send().await?;
+                    if resp.status().is_success() {
+                        let result: serde_json::Value = resp.json().await?;
+                        println!(
+                            "✅ Hot config updated ({} field(s) changed).",
+                            result["changes_applied"]
+                        );
+                    } else {
+                        let status = resp.status();
+                        let text = resp.text().await.unwrap_or_default();
+                        anyhow::bail!("Failed to update config: {} {}", status, text);
+                    }
+                    // After setting, fall through to show the current config
+                }
+
+                // Show current config
+                let resp = http.get(&config_url).send().await?;
+                if !resp.status().is_success() {
+                    let status = resp.status();
+                    let text = resp.text().await.unwrap_or_default();
+                    anyhow::bail!("Failed to get config: {} {}", status, text);
+                }
+                let result: serde_json::Value = resp.json().await?;
+
+                if *json {
+                    println!("{}", serde_json::to_string_pretty(&result).unwrap());
+                } else {
+                    println!("📋 Effective Configuration");
+                    println!("=========================");
+                    println!();
+                    println!("Cold (startup) config:");
+                    let cold = &result["cold"];
+                    println!("  node_id:           {}", cold["node_id"]);
+                    println!("  nats_url:          {}", cold["nats_url"]);
+                    println!("  proxy_http_port:   {}", cold["proxy_http_port"]);
+                    println!("  proxy_https_port:  {}", cold["proxy_https_port"]);
+                    println!("  admin_port:        {}", cold["admin_port"]);
+                    println!("  artifact_port:     {}", cold["artifact_port"]);
+                    println!("  db_path:           {}", cold["db_path"]);
+                    println!("  port_range:        {}", cold["port_range"]);
+                    println!("  database_url:      {}", cold["database_url"]);
+                    println!("  key_source:        {}", cold["key_source"]);
+                    println!();
+                    println!("Hot (runtime) config:");
+                    let hot = &result["hot"];
+                    let rl = &hot["rate_limit"];
+                    println!(
+                        "  rate_limit.default_requests_per_second:  {}",
+                        rl["default_requests_per_second"]
+                    );
+                    println!(
+                        "  rate_limit.default_burst_capacity:       {}",
+                        rl["default_burst_capacity"]
+                    );
+                    println!(
+                        "  rate_limit.default_per_ip_limit:         {}",
+                        rl["default_per_ip_limit"]
+                    );
+                    let ebpf = &hot["ebpf"];
+                    println!(
+                        "  ebpf.fd_soft_limit:                      {}",
+                        ebpf["fd_soft_limit"]
+                    );
+                    println!(
+                        "  ebpf.fd_hard_limit:                       {}",
+                        ebpf["fd_hard_limit"]
+                    );
+                    println!(
+                        "  ebpf.mem_low_threshold_pages:             {}",
+                        ebpf["mem_low_threshold_pages"]
+                    );
+                    println!(
+                        "  ebpf.mem_critical_threshold_pages:       {}",
+                        ebpf["mem_critical_threshold_pages"]
+                    );
+                    println!(
+                        "  ebpf.disk_slow_threshold_ns:              {}",
+                        ebpf["disk_slow_threshold_ns"]
+                    );
+                    println!(
+                        "  ebpf.tcp_conn_limit_per_pid:              {}",
+                        ebpf["tcp_conn_limit_per_pid"]
+                    );
+                    println!(
+                        "  ebpf.syscall_rate_limit:                  {}",
+                        ebpf["syscall_rate_limit"]
+                    );
+                    let gc = &hot["gc"];
+                    println!(
+                        "  gc.gc_interval_secs:                      {}",
+                        gc["gc_interval_secs"]
+                    );
+                    println!(
+                        "  gc.disk_warning_threshold:                {}",
+                        gc["disk_warning_threshold"]
+                    );
+                    let hlth = &hot["health"];
+                    println!(
+                        "  health.check_interval_secs:               {}",
+                        hlth["check_interval_secs"]
+                    );
+                    println!(
+                        "  health.default_idle_timeout_secs:        {}",
+                        hlth["default_idle_timeout_secs"]
+                    );
+                    let log = &hot["logging"];
+                    println!(
+                        "  logging.level:                            {}",
+                        log["level"]
+                    );
                 }
                 Ok(())
             }

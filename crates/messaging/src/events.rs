@@ -148,6 +148,17 @@ pub enum Event {
         /// Category of the suspicious syscall (e.g., "PrivilegeEscalation").
         category: String,
     },
+
+    // ── Configuration Hot-Reload ──────────────────────────────────────────────
+    /// A node changed its hot-reloadable configuration.
+    /// This event is informational only — peer nodes do NOT auto-apply it.
+    /// Operators who want cluster-wide consistency must apply the same change
+    /// to each node individually.
+    ConfigHotReload {
+        node_id: String,
+        /// The hot-config fields that changed (serialized HotConfigUpdate).
+        changes: serde_json::Value,
+    },
 }
 
 impl Event {
@@ -206,6 +217,11 @@ impl Event {
             }
             Event::SecurityIncident { node_id, .. } => {
                 format!("ebpf.security.incident.{}", node_id)
+            }
+
+            // ── Configuration Hot-Reload ──────────────────────────────────────
+            Event::ConfigHotReload { node_id, .. } => {
+                format!("config.hot_reload.{}", node_id)
             }
         }
     }

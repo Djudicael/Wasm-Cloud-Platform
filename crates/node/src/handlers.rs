@@ -279,6 +279,19 @@ impl EventDispatcher {
                     );
                 }
             }
+
+            // ── Configuration Hot-Reload ──────────────────────────────────
+            Event::ConfigHotReload { node_id, changes } => {
+                tracing::info!(
+                    node = %node_id,
+                    changes = ?changes,
+                    "peer node changed hot-reloadable config (informational only, not auto-applied)"
+                );
+                // Design decision: Config changes are NOT auto-propagated.
+                // Each node's operator controls its own configuration.
+                // The event is informational — it alerts operators that the
+                // cluster's configuration may have diverged.
+            }
         }
     }
 

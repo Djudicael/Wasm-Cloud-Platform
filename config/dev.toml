@@ -1,0 +1,14 @@
+# dev.toml — Minimal configuration for local development
+#
+# Usage: wasm-node --config config/dev.toml
+#
+# All other fields use built-in defaults (see crates/common/src/config.rs).
+
+[node]
+node_id = "dev-node"
+
+[nats]
+url = "nats://127.0.0.1:4222"
+
+[logging]
+level = "debug"

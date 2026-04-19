@@ -412,6 +412,137 @@ fn test_backup_not_overwritten() {
     std::fs::remove_file(backup_path).ok();
 }
 
+// ── HOT CONFIG PERSISTENCE TESTS ──────────────────────────────────────────────
+
+#[test]
+fn test_hot_config_save_load_roundtrip() {
+    let (store, _f) = make_store();
+
+    // Save a hot config override
+    let hot_json = serde_json::json!({
+        "rate_limit": {
+            "default_requests_per_second": 5000,
+            "default_burst_capacity": 1000,
+            "default_per_ip_limit": 500
+        },
+        "ebpf": {
+            "enabled": true,
+            "fd_soft_limit": 4096,
+            "fd_hard_limit": 8192,
+            "mem_low_threshold_pages": 65536,
+            "mem_critical_threshold_pages": 16384,
+            "disk_slow_threshold_ns": 50000000,
+            "tcp_conn_limit_per_pid": 10000,
+            "syscall_rate_limit": 100000,
+            "sampling_period_secs": 10
+        },
+        "gc": {
+            "artifact_keep_versions": 5,
+            "metrics_retain_days": 14,
+            "undeploy_grace_secs": 7200,
+            "gc_interval_secs": 300,
+            "disk_warning_threshold": 0.85
+        },
+        "health": {
+            "check_interval_secs": 10,
+            "default_idle_timeout_secs": 600,
+            "default_max_instances": 20,
+            "default_fuel_quota": 1000000000,
+            "default_memory_pages": 4096
+        },
+        "logging": {
+            "level": "debug",
+            "otlp_endpoint": null
+        }
+    });
+    let hot_str = serde_json::to_string(&hot_json).unwrap();
+
+    store.save_meta("hot_config_overrides", &hot_str).unwrap();
+
+    // Load it back
+    let loaded = store.load_meta("hot_config_overrides").unwrap();
+    assert!(loaded.is_some());
+    let loaded_json: serde_json::Value = serde_json::from_str(&loaded.unwrap()).unwrap();
+
+    // Verify key fields survived the round-trip
+    assert_eq!(
+        loaded_json["rate_limit"]["default_requests_per_second"],
+        5000
+    );
+    assert_eq!(loaded_json["ebpf"]["fd_soft_limit"], 4096);
+    assert_eq!(loaded_json["gc"]["gc_interval_secs"], 300);
+    assert_eq!(loaded_json["health"]["check_interval_secs"], 10);
+    assert_eq!(loaded_json["logging"]["level"], "debug");
+}
+
+#[test]
+fn test_hot_config_clear() {
+    let (store, _f) = make_store();
+
+    // Save a hot config override
+    store
+        .save_meta(
+            "hot_config_overrides",
+            "{\"logging\":{\"level\":\"trace\"}}",
+        )
+        .unwrap();
+
+    // Verify it exists
+    let loaded = store.load_meta("hot_config_overrides").unwrap();
+    assert!(loaded.is_some());
+
+    // Clear it
+    store.delete_meta("hot_config_overrides").unwrap();
+
+    // Verify it's gone
+    let loaded2 = store.load_meta("hot_config_overrides").unwrap();
+    assert!(loaded2.is_none());
+}
+
+#[test]
+fn test_hot_config_survives_restart() {
+    let f = tempfile::NamedTempFile::new().unwrap();
+    let path = f.path().to_path_buf();
+
+    // Write hot config in first session
+    {
+        let store = Store::open(&path).unwrap();
+        store
+            .save_meta(
+                "hot_config_overrides",
+                "{\"logging\":{\"level\":\"warn\"},\"gc\":{\"gc_interval_secs\":120}}",
+            )
+            .unwrap();
+    }
+
+    // Reopen (simulates restart) and verify persistence
+    {
+        let store2 = Store::open(&path).unwrap();
+        let loaded = store2.load_meta("hot_config_overrides").unwrap();
+        assert!(loaded.is_some());
+        let json: serde_json::Value = serde_json::from_str(&loaded.unwrap()).unwrap();
+        assert_eq!(json["logging"]["level"], "warn");
+        assert_eq!(json["gc"]["gc_interval_secs"], 120);
+    }
+}
+
+#[test]
+fn test_hot_config_corrupted_falls_back() {
+    let (store, _f) = make_store();
+
+    // Write invalid JSON
+    store
+        .save_meta("hot_config_overrides", "not valid json{{{")
+        .unwrap();
+
+    // Loading should return the raw string — the caller (HotConfigHandle)
+    // is responsible for handling deserialization errors gracefully.
+    let loaded = store.load_meta("hot_config_overrides").unwrap();
+    assert!(loaded.is_some());
+    // The value is the raw corrupted string; deserialization will fail
+    assert!(serde_json::from_str::<serde_json::Value>(&loaded.unwrap()).is_err());
+}
+
 #[test]
 #[should_panic(expected = "Database schema version 99 is NEWER than the binary supports")]
 fn test_downgrade_not_supported() {

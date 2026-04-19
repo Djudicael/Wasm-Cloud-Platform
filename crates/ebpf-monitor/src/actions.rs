@@ -11,6 +11,7 @@
 //! to avoid circular dependencies. Instead, it accepts a `dyn EventCallbacks`
 //! trait object that the node's `main.rs` implements with concrete types.
 
+use crate::MonitorConfig;
 use std::sync::Arc;
 
 use tracing::{error, info, warn};
@@ -253,6 +254,10 @@ pub struct ActionDispatcher {
     degraded_mode: std::sync::atomic::AtomicBool,
     /// Last memory pressure level (to detect recovery).
     last_pressure_level: std::sync::atomic::AtomicU32,
+    /// Current monitor configuration (hot-reloadable thresholds).
+    /// Updated via [`update_thresholds`] when the operator changes eBPF
+    /// parameters through the admin API.
+    config: std::sync::RwLock<MonitorConfig>,
 }
 
 impl ActionDispatcher {
@@ -269,12 +274,66 @@ impl ActionDispatcher {
             backpressure_active: std::sync::atomic::AtomicBool::new(false),
             degraded_mode: std::sync::atomic::AtomicBool::new(false),
             last_pressure_level: std::sync::atomic::AtomicU32::new(0),
+            config: std::sync::RwLock::new(MonitorConfig::default()),
         }
     }
 
     /// Create a dispatcher with no-op callbacks (for testing).
     pub fn new_noop(metrics: Arc<EbpfMetrics>, node_id: String) -> Self {
         Self::new(metrics, Arc::new(NoopCallbacks), node_id)
+    }
+
+    /// Create a dispatcher with an explicit initial monitor configuration.
+    ///
+    /// Use this when the eBPF monitor is initialised with a non-default
+    /// `MonitorConfig` so that the dispatcher's threshold values match
+    /// the actual eBPF program configuration from the start.
+    pub fn with_config(
+        metrics: Arc<EbpfMetrics>,
+        callbacks: Arc<dyn EventCallbacks>,
+        node_id: String,
+        config: MonitorConfig,
+    ) -> Self {
+        ActionDispatcher {
+            metrics,
+            callbacks,
+            node_id,
+            backpressure_active: std::sync::atomic::AtomicBool::new(false),
+            degraded_mode: std::sync::atomic::AtomicBool::new(false),
+            last_pressure_level: std::sync::atomic::AtomicU32::new(0),
+            config: std::sync::RwLock::new(config),
+        }
+    }
+
+    /// Update the eBPF monitor thresholds at runtime (hot-reload).
+    ///
+    /// Called by the config sync loop when the operator changes eBPF
+    /// parameters (`fd_soft_limit`, `fd_hard_limit`, `mem_low_threshold_pages`,
+    /// etc.) through the admin API. The update takes effect immediately for
+    /// subsequent event dispatching decisions.
+    ///
+    /// Returns the previous config for audit logging.
+    pub fn update_thresholds(&self, new_config: MonitorConfig) -> MonitorConfig {
+        let mut guard = self.config.write().unwrap();
+        let previous = guard.clone();
+        tracing::info!(
+            old_fd_soft = previous.fd_soft_limit,
+            new_fd_soft = new_config.fd_soft_limit,
+            new_fd_hard = new_config.fd_hard_limit,
+            new_mem_low = new_config.mem_low_threshold_pages,
+            new_mem_critical = new_config.mem_critical_threshold_pages,
+            new_disk_slow_ns = new_config.disk_slow_threshold_ns,
+            new_tcp_limit = new_config.tcp_conn_limit_per_pid,
+            new_syscall_rate = new_config.syscall_rate_limit,
+            "eBPF monitor thresholds updated via hot-reload"
+        );
+        *guard = new_config;
+        previous
+    }
+
+    /// Read the current monitor configuration (for introspection / admin API).
+    pub fn current_config(&self) -> MonitorConfig {
+        self.config.read().unwrap().clone()
     }
 
     /// Dispatch a monitor event: update metrics and trigger recovery actions.

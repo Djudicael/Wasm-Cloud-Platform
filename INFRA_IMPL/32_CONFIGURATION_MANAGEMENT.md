@@ -1851,68 +1851,219 @@ wasm-node --generate-config \
 **This step is done when all boxes are checked.**
 
 ### Configuration File
-- [ ] `NodeConfig` struct defined with all sections and `serde` defaults
-- [ ] TOML file format documented with all fields and comments
-- [ ] `load_config()` implements merge priority: defaults < TOML < env < CLI
-- [ ] Environment variable convention documented (`WASM_NODE_<SECTION>_<KEY>`)
-- [ ] `CliOverrides` struct captures only explicitly-set CLI flags
-- [ ] `validate_config()` rejects all invalid configurations
-- [ ] `--generate-config` flag outputs a complete TOML file
-- [ ] `--validate-config` flag validates a file without starting
+- [x] `NodeConfig` struct defined with all sections and `serde` defaults
+- [x] TOML file format documented with all fields and comments
+- [x] `load_config()` implements merge priority: defaults < TOML < env < CLI
+- [x] Environment variable convention documented (`WASM_NODE_<SECTION>_<KEY>`)
+- [x] `CliOverrides` struct captures only explicitly-set CLI flags
+- [x] `validate_config()` rejects all invalid configurations
+- [x] `--generate-config` flag outputs a complete TOML file
+- [x] `--validate-config` flag validates a file without starting
 
 ### Hot-Reload
-- [ ] `HotConfig` struct contains only hot-reloadable fields
-- [ ] `HotConfigHandle` provides `Arc<RwLock<>>` access to components
-- [ ] `HotConfigUpdate` supports partial updates (only Some fields applied)
-- [ ] Hot config validation runs before applying updates
-- [ ] Failed validation preserves previous config (atomic swap)
-- [ ] `LogReloadHandle` updates tracing subscriber log level
-- [ ] Rate limiter syncs default config from `HotConfigHandle`
-- [ ] eBPF monitor syncs config map from `HotConfigHandle`
-- [ ] GC loop interval adjustable at runtime
-- [ ] Health loop interval adjustable at runtime
+- [x] `HotConfig` struct contains only hot-reloadable fields
+- [x] `HotConfigHandle` provides `Arc<RwLock<>>` access to components
+- [x] `HotConfigUpdate` supports partial updates (only Some fields applied)
+- [x] Hot config validation runs before applying updates
+- [x] Failed validation preserves previous config (atomic swap)
+- [x] `LogReloadHandle` updates tracing subscriber log level
+- [x] Rate limiter syncs default config from `HotConfigHandle`
+- [x] eBPF monitor syncs config map from `HotConfigHandle`
+- [x] GC loop interval adjustable at runtime
+- [x] Health loop interval adjustable at runtime
 
 ### Persistence
-- [ ] Hot config overrides saved to redb `SCHEMA_META` table
-- [ ] Overrides loaded on startup and applied on top of cold config
-- [ ] `--reset` clears persisted overrides
-- [ ] Corrupted override JSON falls back to cold config with warning
+- [x] Hot config overrides saved to redb `SCHEMA_META` table
+- [x] Overrides loaded on startup and applied on top of cold config
+- [x] `--reset` clears persisted overrides
+- [x] Corrupted override JSON falls back to cold config with warning
 
 ### Admin API
-- [ ] `GET /admin/config` returns cold + hot config
-- [ ] `PATCH /admin/config` applies partial updates
-- [ ] `DELETE /admin/config` resets to startup defaults
-- [ ] All config changes logged with previous and new values
-- [ ] Auth token checked on all admin endpoints (Step 34)
+- [x] `GET /admin/config` returns cold + hot config
+- [x] `PATCH /admin/config` applies partial updates
+- [x] `DELETE /admin/config` resets to startup defaults
+- [x] All config changes logged with previous and new values
+- [x] Auth token checked on all admin endpoints (Step 34)
 
 ### NATS Propagation
-- [ ] `Event::ConfigHotReload` published on config change
-- [ ] Peer nodes log informational event (no auto-apply)
-- [ ] Event includes `node_id` and `HotConfigUpdate`
+- [x] `Event::ConfigHotReload` published on config change
+- [x] Peer nodes log informational event (no auto-apply)
+- [x] Event includes `node_id` and `HotConfigUpdate`
 
 ### CLI
-- [ ] `wasm-ctl node config --target <node>` shows effective config
-- [ ] `wasm-ctl node config --set <key>=<value>` changes hot config
-- [ ] `wasm-ctl node config --reset` resets to defaults
-- [ ] `wasm-ctl node config --json` outputs in JSON format
+- [x] `wasm-ctl node config --target <node>` shows effective config
+- [x] `wasm-ctl node config --set <key>=<value>` changes hot config
+- [x] `wasm-ctl node config --reset` resets to defaults
+- [x] `wasm-ctl node config --json` outputs in JSON format
 
 ### Node Integration
-- [ ] `main.rs` uses `load_config()` instead of individual `Arg` reads
-- [ ] All components receive `HotConfigHandle` instead of static values
-- [ ] Backward compatibility: all existing CLI flags still work
-- [ ] `--config` flag is optional (no file = current behavior)
+- [x] `main.rs` uses `load_config()` instead of individual `Arg` reads
+- [x] All components receive `HotConfigHandle` instead of static values
+- [x] Backward compatibility: all existing CLI flags still work
+- [x] `--config` flag is optional (no file = current behavior)
 
 ### Testing
-- [ ] Unit tests for config loading, merge priority, and validation
-- [ ] Unit tests for hot config update, reset, and persistence
-- [ ] Integration tests for redb persistence round-trip
-- [ ] E2E test: rate limit change via admin API takes effect
-- [ ] E2E test: log level change via admin API takes effect
-- [ ] E2E test: config persistence across node restart
+- [x] Unit tests for config loading, merge priority, and validation
+- [x] Unit tests for hot config update, reset, and persistence
+- [x] Integration tests for redb persistence round-trip
+- [x] E2E test: rate limit change via admin API takes effect
+- [x] E2E test: log level change via admin API takes effect
+- [x] E2E test: config persistence across node restart
 
 ### Documentation
-- [ ] `AGENTS.md` updated with `--config` flag and config file path
-- [ ] Example `config.toml` files for dev, staging, production
-- [ ] Environment variable reference table
-- [ ] Hot-reloadable vs. restart-required parameter table
-- [ ] systemd unit file example with `--config` flag
+- [x] `AGENTS.md` updated with `--config` flag and config file path
+- [x] Example `config.toml` files for dev, staging, production
+- [x] Environment variable reference table
+- [x] Hot-reloadable vs. restart-required parameter table
+- [x] systemd unit file example with `--config` flag
+
+---
+
+## 14. Environment Variable Reference
+
+All environment variables use the `WASM_NODE_<SECTION>_<KEY>` convention
+(uppercase, underscores for dots/hyphens). They override TOML file values
+but are themselves overridden by CLI flags.
+
+| Variable | Section.Key | Type | Example |
+|----------|-------------|------|---------|
+| `WASM_NODE_NODE_ID` | `node.node_id` | string | `node-1` |
+| `WASM_NODE_STORAGE_DB_PATH` | `storage.db_path` | path | `/var/lib/wasm-node/state.redb` |
+| `WASM_NODE_NATS_URL` | `nats.url` | string | `nats://nats.prod:4222` |
+| `WASM_NODE_NATS_CREDS_FILE` | `nats.creds_file` | path | `/etc/wasm-node/nats.creds` |
+| `WASM_NODE_PROXY_HTTP_PORT` | `proxy.http_port` | u16 | `8080` |
+| `WASM_NODE_PROXY_HTTPS_PORT` | `proxy.https_port` | u16 | `443` |
+| `WASM_NODE_PROXY_TLS_CERT` | `proxy.tls_cert` | path | `/etc/tls/server.crt` |
+| `WASM_NODE_PROXY_TLS_KEY` | `proxy.tls_key` | path | `/etc/tls/server.key` |
+| `WASM_NODE_ADMIN_PORT` | `admin.port` | u16 | `9090` |
+| `WASM_NODE_ADMIN_AUTH_TOKEN` | `admin.auth_token` | string | `secret-token` |
+| `WASM_NODE_LOGGING_LEVEL` | `logging.level` | string | `debug` |
+| `WASM_NODE_LOGGING_OTLP_ENDPOINT` | `logging.otlp_endpoint` | string | `http://collector:4317` |
+| `WASM_NODE_RATE_LIMIT_DEFAULT_REQUESTS_PER_SECOND` | `rate_limit.default_requests_per_second` | u32 | `5000` |
+| `WASM_NODE_RATE_LIMIT_DEFAULT_BURST_CAPACITY` | `rate_limit.default_burst_capacity` | u32 | `1000` |
+| `WASM_NODE_RATE_LIMIT_DEFAULT_PER_IP_LIMIT` | `rate_limit.default_per_ip_limit` | u32 | `500` |
+| `WASM_NODE_EBPF_ENABLED` | `ebpf.enabled` | bool | `true` |
+
+> **Note:** Only the most commonly used environment variables are listed
+> above. Any field in the TOML schema can be overridden with the
+> `WASM_NODE_<SECTION>_<KEY>` pattern. Numeric values must parse as the
+> correct Rust type (u16, u32, u64, f64, bool).
+
+---
+
+## 15. Hot-Reloadable vs. Restart-Required Parameters
+
+| Parameter | Hot-Reloadable? | Reason |
+|-----------|-----------------|--------|
+| `rate_limit.default_requests_per_second` | ✅ YES | In-memory token buckets |
+| `rate_limit.default_burst_capacity` | ✅ YES | In-memory token buckets |
+| `rate_limit.default_per_ip_limit` | ✅ YES | In-memory token buckets |
+| `ebpf.fd_soft_limit` | ✅ YES | eBPF config map update |
+| `ebpf.fd_hard_limit` | ✅ YES | eBPF config map update |
+| `ebpf.mem_low_threshold_pages` | ✅ YES | eBPF config map update |
+| `ebpf.mem_critical_threshold_pages` | ✅ YES | eBPF config map update |
+| `ebpf.disk_slow_threshold_ns` | ✅ YES | eBPF config map update |
+| `ebpf.tcp_conn_limit_per_pid` | ✅ YES | eBPF config map update |
+| `ebpf.syscall_rate_limit` | ✅ YES | eBPF config map update |
+| `gc.gc_interval_secs` | ✅ YES | Restart the timer |
+| `gc.disk_warning_threshold` | ✅ YES | In-memory threshold |
+| `health.check_interval_secs` | ✅ YES | Restart the timer |
+| `health.default_idle_timeout_secs` | ✅ YES | In-memory timeout |
+| `logging.level` | ✅ YES | tracing-subscriber reload |
+| `nats.url` | ❌ NO | Requires new connection |
+| `nats.creds_file` | ❌ NO | Requires new connection |
+| `proxy.http_port` | ❌ NO | Pingora already bound |
+| `proxy.https_port` | ❌ NO | Pingora already bound |
+| `proxy.tls_cert` / `proxy.tls_key` | ❌ NO | Requires Pingora restart |
+| `admin.port` | ❌ NO | Already bound |
+| `admin.artifact_port` | ❌ NO | Already bound |
+| `runtime.port_start` / `port_end` | ❌ NO | Ports already allocated |
+| `storage.db_path` | ❌ NO | redb already open |
+| `node.node_id` | ❌ NO | Identity is established |
+| `runtime.key_source` / `key_file` | ❌ NO | KEK already loaded |
+| `database.default_url` | ❌ NO | Injected at instance start |
+| `billing.export_dir` | ❌ NO | Export loop already started |
+| `dns.platform_domain` | ❌ NO | Routes already registered |
+
+---
+
+## 16. systemd Unit File Example
+
+```ini
+# /etc/systemd/system/wasm-node.service
+[Unit]
+Description=Wasm Cloud Platform Node
+After=network-online.target nats.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=wasm-node
+Group=wasm-node
+
+# ── Configuration ───────────────────────────────────────────────
+# Primary config file (required)
+ExecStart=/usr/local/bin/wasm-node --config /etc/wasm-node/config.toml
+
+# ── Environment overrides ──────────────────────────────────────
+# Per-node overrides that differ between machines.
+# These override values in config.toml.
+Environment=WASM_NODE_NODE_ID=node-0
+Environment=WASM_NODE_NATS_URL=nats://nats.prod:4222
+
+# ── Security ────────────────────────────────────────────────────
+# Protect the filesystem and restrict capabilities
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/wasm-node /var/log/wasm-node
+NoNewPrivileges=true
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+
+# ── Resource limits ─────────────────────────────────────────────
+LimitNOFILE=65536
+LimitNPROC=4096
+
+# ── Restart policy ──────────────────────────────────────────────
+Restart=on-failure
+RestartSec=5
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+# ── Logging ─────────────────────────────────────────────────────
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=wasm-node
+
+[Install]
+WantedBy=multi-user.target
+```
+
+### Deploying the systemd unit
+
+```bash
+# 1. Create the wasm-node user
+sudo useradd -r -s /sbin/nologin wasm-node
+
+# 2. Create directories
+sudo mkdir -p /var/lib/wasm-node /var/log/wasm-node /etc/wasm-node
+sudo chown wasm-node:wasm-node /var/lib/wasm-node /var/log/wasm-node
+
+# 3. Copy the config file
+sudo cp config/production.toml /etc/wasm-node/config.toml
+sudo chown wasm-node:wasm-node /etc/wasm-node/config.toml
+sudo chmod 600 /etc/wasm-node/config.toml  # Contains auth_token
+
+# 4. Install the binary
+sudo cp target/release/wasm-node /usr/local/bin/
+
+# 5. Install and enable the service
+sudo cp wasm-node.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable wasm-node
+sudo systemctl start wasm-node
+
+# 6. Verify
+sudo systemctl status wasm-node
+curl http://localhost:9090/health
+```

@@ -495,18 +495,50 @@ fn version_sort_key(version: &str) -> u64 {
 }
 
 /// Start the background GC loop.
+/// Start the GC loop with hot-reloadable configuration.
+///
+/// The `config_rx` watch receiver allows the caller (typically main.rs) to
+/// push updated `GcConfig` values when the operator changes hot-reloadable
+/// fields (`gc_interval_secs`, `disk_warning_threshold`) via the admin API.
+/// The loop picks up changes on the next tick — no restart required.
+///
+/// Non-reloadable fields (`artifact_keep_versions`, `metrics_retain_days`,
+/// `undeploy_grace_secs`) are also read from the watch, so a restart will
+/// pick up changes to those fields from the TOML file / env / CLI.
 pub fn start_gc_loop(
     store: Store,
-    config: GcConfig,
+    config_rx: tokio::sync::watch::Receiver<GcConfig>,
     metrics: Option<Arc<crate::gc_metrics::GcMetrics>>,
 ) {
     let store = Arc::new(store);
-    let interval = Duration::from_secs(config.gc_interval_secs);
 
     tokio::spawn(async move {
-        let mut tick = tokio::time::interval(interval);
+        // Read the initial interval from the watch channel
+        let initial_interval = config_rx.borrow().gc_interval_secs;
+        let mut tick = tokio::time::interval(Duration::from_secs(initial_interval));
+        // Track the last-seen interval so we can detect changes
+        let mut last_interval_secs = initial_interval;
+
         loop {
             tick.tick().await;
+
+            // Read the latest config from the watch channel.
+            // We borrow() rather than changed() so we don't block the loop
+            // if no update has arrived — we just use the current value.
+            let config = config_rx.borrow().clone();
+
+            // If the interval changed, reset the ticker
+            if config.gc_interval_secs != last_interval_secs {
+                let new_interval = Duration::from_secs(config.gc_interval_secs);
+                tick = tokio::time::interval(new_interval);
+                // Consume the first immediate tick that interval() produces
+                tick.tick().await;
+                last_interval_secs = config.gc_interval_secs;
+                info!(
+                    new_interval_secs = config.gc_interval_secs,
+                    "GC loop interval updated via hot-reload"
+                );
+            }
 
             debug!("GC tick starting");
 

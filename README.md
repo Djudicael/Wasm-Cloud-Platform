@@ -72,6 +72,64 @@ The implementation plan is split into ordered chapters in `INFRA_IMPL`:
 
 This repo is not a finished product repository of executable application code. It is a design and implementation plan for a Wasm-native cloud runtime.
 
+## Configuration Management
+
+The node supports layered configuration from multiple sources with a clear merge priority:
+
+```
+defaults < TOML file < environment variables < CLI flags
+```
+
+### Quick start
+
+```bash
+# Run with a config file
+wasm-node --config /etc/wasm-node/config.toml
+
+# Generate a default config file
+wasm-node --generate-config > /etc/wasm-node/config.toml
+
+# Validate a config file without starting
+wasm-node --validate-config /etc/wasm-node/config.toml
+
+# View / change hot-reloadable config at runtime
+wasm-ctl node config
+wasm-ctl node config --set rate_limit_default_rps=5000 --set logging_level=debug
+wasm-ctl node config --reset
+wasm-ctl node config --json
+```
+
+### Config file locations
+
+Example configuration files are provided in the `config/` directory:
+
+- `config/dev.toml` — Minimal config for local development
+- `config/staging.toml` — Staging environment with moderate thresholds
+- `config/production.toml` — Production-ready config with security hardening
+
+### Environment variables
+
+All config values can be overridden with the `WASM_NODE_<SECTION>_<KEY>` convention (uppercase, underscores). For example:
+
+- `WASM_NODE_NODE_ID=node-1`
+- `WASM_NODE_NATS_URL=nats://nats.prod:4222`
+- `WASM_NODE_LOGGING_LEVEL=debug`
+- `WASM_NODE_RATE_LIMIT_DEFAULT_REQUESTS_PER_SECOND=5000`
+
+### Hot-reloadable parameters
+
+Selected parameters can be changed at runtime without restarting the node:
+
+- Rate limits (per-app RPS, burst, per-IP)
+- eBPF thresholds (FD limits, memory pressure, disk I/O, TCP limits, syscall rate)
+- GC interval and disk warning threshold
+- Health check interval and idle timeout
+- Log level
+
+Non-reloadable parameters (require restart): NATS URL, proxy ports, TLS certs, port range, database path, node ID, key source.
+
+See `INFRA_IMPL/32_CONFIGURATION_MANAGEMENT.md` for the full specification.
+
 ## Notes
 
 - The focus is on **stateless, HTTP-serving applications**.

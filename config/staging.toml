@@ -1,0 +1,129 @@
+# staging.toml — Staging environment configuration
+#
+# Usage: wasm-node --config config/staging.toml
+#
+# This configuration is intended for pre-production staging environments.
+# It enables most features with moderate thresholds suitable for testing
+# under realistic (but not full-production) load.
+
+[node]
+# Unique node identifier within the staging cluster.
+node_id = "staging-node-0"
+
+[storage]
+# Path to the redb database file.
+db_path = "/var/lib/wasm-node/state.redb"
+
+[nats]
+# NATS server URL (staging cluster).
+url = "nats://staging-nats:4222"
+# Optional credentials file for authenticated NATS connections.
+# creds_file = "/etc/wasm-node/nats.creds"
+
+[proxy]
+# HTTP proxy port.
+http_port = 8080
+# HTTPS proxy port (0 = disabled). Set to 0 if TLS is terminated upstream.
+https_port = 0
+# TLS certificate and key (uncomment for direct TLS termination).
+# tls_cert = "/etc/wasm-node/tls/server.crt"
+# tls_key = "/etc/wasm-node/tls/server.key"
+
+[admin]
+# Admin API port (metrics, health, config changes).
+port = 9090
+# Artifact server port (Wasm binary distribution).
+artifact_port = 9091
+# Bearer token for admin API authentication (required in staging).
+auth_token = "staging-admin-token-change-me"
+
+[runtime]
+# Port range for Wasm instance binding.
+port_start = 10000
+port_end = 19999
+# Key source: "generate" (ephemeral), "file" (from key_file), "env:VAR_NAME"
+key_source = "generate"
+# key_file = "/etc/wasm-node/master.key"
+
+[database]
+# Default database URL injected into Wasm apps.
+default_url = "postgres://staging-db:5432/wasm_platform"
+# pgBouncer health check address.
+pgbouncer_addr = "staging-pgbouncer:5432"
+# Enable built-in TCP proxy (not PostgreSQL-aware).
+enable_db_proxy = false
+db_proxy_addr = "127.0.0.1:5433"
+db_proxy_backend = "staging-db.internal:5432"
+db_proxy_max_connections = 20
+
+[logging]
+# Log level: trace, debug, info, warn, error
+level = "info"
+# Optional OpenTelemetry OTLP endpoint.
+# otlp_endpoint = "http://staging-collector:4317"
+
+[billing]
+# Directory for billing record exports (enables periodic export).
+# export_dir = "/var/lib/wasm-node/billing"
+# Export interval in seconds.
+export_interval_secs = 3600
+
+[gc]
+# How many compiled artifact versions to retain per app.
+artifact_keep_versions = 3
+# How many days of metric buckets to retain.
+metrics_retain_days = 7
+# Grace period after undeploy before purging state (seconds).
+undeploy_grace_secs = 3600
+# GC loop interval (seconds).
+gc_interval_secs = 600
+# Disk usage warning threshold (0.0–1.0).
+disk_warning_threshold = 0.80
+
+[rate_limit]
+# Default per-app requests per second.
+default_requests_per_second = 1000
+# Default per-app burst capacity.
+default_burst_capacity = 200
+# Default per-IP requests per second.
+default_per_ip_limit = 200
+
+[ebpf]
+# Enable eBPF monitoring (requires Linux kernel >= 5.8).
+enabled = true
+# FD soft limit per Wasm instance (warning at 80%).
+fd_soft_limit = 8192
+# FD hard limit per Wasm instance (kill at 95%).
+fd_hard_limit = 9728
+# Memory pressure low threshold (pages).
+mem_low_threshold_pages = 65536
+# Memory pressure critical threshold (pages).
+mem_critical_threshold_pages = 16384
+# Disk I/O latency threshold for "slow" alert (nanoseconds).
+disk_slow_threshold_ns = 50000000
+# Maximum TCP connections per PID before alert.
+tcp_conn_limit_per_pid = 10000
+# Syscall rate limit per second for suspicious categories.
+syscall_rate_limit = 100000
+# Sampling period for periodic counters (seconds).
+sampling_period_secs = 10
+
+[dns]
+# Platform domain for subdomain routing.
+# platform_domain = "staging.myplatform.com"
+# Webhook URL for DNS automation.
+# webhook_url = "https://dns-api.example.com/records"
+# Webhook authentication token.
+# webhook_token = "secret"
+
+[health]
+# Health check loop interval (seconds).
+check_interval_secs = 5
+# Instance idle timeout (seconds).
+default_idle_timeout_secs = 300
+# Maximum instances per app on this node.
+default_max_instances = 10
+# Default fuel quota per execution.
+default_fuel_quota = 500000000
+# Default memory limit in pages (1 page = 64 KiB).
+default_memory_pages = 2048

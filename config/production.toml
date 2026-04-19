@@ -1,0 +1,143 @@
+# production.toml — Production environment configuration
+#
+# Usage: wasm-node --config config/production.toml
+#
+# This configuration is intended for production deployments.
+# All values are tuned for stability, security, and performance under
+# sustained load. Adjust thresholds based on your actual hardware and
+# traffic patterns.
+#
+# Environment variables (WASM_NODE_<SECTION>_<KEY>) override values in
+# this file. CLI flags override everything. Merge priority:
+#   defaults < TOML file < environment variables < CLI flags
+
+[node]
+# Unique node identifier within the cluster.
+# Override per-node via WASM_NODE_NODE_ID or --node-id.
+node_id = "prod-node-0"
+
+[storage]
+# Path to the redb database file. Ensure the directory exists and
+# the wasm-node process has read/write permissions.
+db_path = "/var/lib/wasm-node/state.redb"
+
+[nats]
+# NATS server URL (production cluster).
+url = "nats://nats.prod:4222"
+# Credentials file for authenticated NATS connections.
+# Required in production if the NATS cluster requires authentication.
+creds_file = "/etc/wasm-node/nats.creds"
+
+[proxy]
+# HTTP proxy port (North-South traffic).
+http_port = 80
+# HTTPS proxy port (0 = disabled). Set to 443 when terminating TLS here.
+https_port = 443
+# TLS certificate and private key paths (required when https_port > 0).
+tls_cert = "/etc/wasm-node/tls/server.crt"
+tls_key = "/etc/wasm-node/tls/server.key"
+
+[admin]
+# Admin API port (metrics, health, config changes).
+# Bind to localhost only in production or use a firewall rule.
+port = 9090
+# Artifact server port (Wasm binary distribution).
+artifact_port = 9091
+# Bearer token for admin API authentication — REQUIRED in production.
+auth_token = "CHANGE-ME-USE-A-STRONG-RANDOM-TOKEN"
+
+[runtime]
+# Port range for Wasm instance binding.
+# 10 000 ports supports up to ~100 apps with 100 instances each.
+port_start = 10000
+port_end = 19999
+# Key source: "generate" (ephemeral), "file" (from key_file), "env:VAR_NAME"
+# Use "file" in production so secrets survive restarts.
+key_source = "file"
+key_file = "/etc/wasm-node/master.key"
+
+[database]
+# Default database URL injected into Wasm apps via DATABASE_URL env var.
+default_url = "postgres://db.prod:5432/wasm_platform"
+# pgBouncer health check address.
+pgbouncer_addr = "pgbouncer.prod:5432"
+# Enable built-in TCP proxy (not PostgreSQL-aware).
+enable_db_proxy = false
+db_proxy_addr = "127.0.0.1:5433"
+db_proxy_backend = "db.internal:5432"
+db_proxy_max_connections = 50
+
+[logging]
+# Log level: trace, debug, info, warn, error
+# Use "info" in production; switch to "debug" temporarily via hot-reload.
+level = "info"
+# Optional OpenTelemetry OTLP endpoint for centralized log collection.
+# otlp_endpoint = "http://collector.prod:4317"
+
+[billing]
+# Directory for billing record exports (enables periodic export).
+export_dir = "/var/lib/wasm-node/billing"
+# Export interval in seconds (1 hour).
+export_interval_secs = 3600
+
+[gc]
+# How many compiled artifact versions to retain per app.
+# Keep 3 versions to allow quick rollbacks without recompilation.
+artifact_keep_versions = 3
+# How many days of metric buckets to retain.
+metrics_retain_days = 7
+# Grace period after undeploy before purging state (seconds).
+# 1 hour gives operators time to notice and recover if undeployed by mistake.
+undeploy_grace_secs = 3600
+# GC loop interval (seconds). 10 minutes balances cleanup frequency vs I/O.
+gc_interval_secs = 600
+# Disk usage warning threshold (0.0–1.0). Alert at 80%.
+disk_warning_threshold = 0.80
+
+[rate_limit]
+# Default per-app requests per second.
+default_requests_per_second = 1000
+# Default per-app burst capacity.
+default_burst_capacity = 200
+# Default per-IP requests per second.
+default_per_ip_limit = 200
+
+[ebpf]
+# Enable eBPF monitoring (requires Linux kernel >= 5.8 with BTF).
+enabled = true
+# FD soft limit per Wasm instance (warning at 80%).
+fd_soft_limit = 8192
+# FD hard limit per Wasm instance (kill at 95%).
+fd_hard_limit = 9728
+# Memory pressure low threshold (pages). 65536 pages = 4 GiB.
+mem_low_threshold_pages = 65536
+# Memory pressure critical threshold (pages). 16384 pages = 1 GiB.
+mem_critical_threshold_pages = 16384
+# Disk I/O latency threshold for "slow" alert (nanoseconds). 50 ms.
+disk_slow_threshold_ns = 50000000
+# Maximum TCP connections per PID before alert.
+tcp_conn_limit_per_pid = 10000
+# Syscall rate limit per second for suspicious categories.
+syscall_rate_limit = 100000
+# Sampling period for periodic counters (seconds).
+sampling_period_secs = 10
+
+[dns]
+# Platform domain for subdomain routing.
+platform_domain = "myplatform.com"
+# Webhook URL for DNS automation (creates DNS records on deploy).
+# webhook_url = "https://dns-api.example.com/records"
+# Webhook authentication token.
+# webhook_token = "secret"
+
+[health]
+# Health check loop interval (seconds).
+check_interval_secs = 5
+# Instance idle timeout (seconds). Kill instances idle for 5 minutes.
+default_idle_timeout_secs = 300
+# Maximum instances per app on this node.
+default_max_instances = 10
+# Default fuel quota per execution (Wasm instruction count).
+default_fuel_quota = 500000000
+# Default memory limit in pages (1 page = 64 KiB). 2048 pages = 128 MiB.
+default_memory_pages = 2048

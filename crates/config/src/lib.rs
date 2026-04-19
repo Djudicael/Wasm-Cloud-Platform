@@ -366,8 +366,7 @@ fn validate_config(config: &NodeConfig) -> Result<(), PlatformError> {
     // Port range
     if config.runtime.port_start >= config.runtime.port_end {
         errors.push("port_start must be less than port_end".to_string());
-    }
-    if config.runtime.port_end - config.runtime.port_start < 100 {
+    } else if config.runtime.port_end - config.runtime.port_start < 100 {
         errors.push("port range must span at least 100 ports".to_string());
     }
 
@@ -477,6 +476,17 @@ pub struct HotConfigHandle {
     node_id: String,
 }
 
+impl Clone for HotConfigHandle {
+    fn clone(&self) -> Self {
+        HotConfigHandle {
+            inner: self.inner.clone(),
+            cold_config: self.cold_config.clone(),
+            store: self.store.clone(),
+            node_id: self.node_id.clone(),
+        }
+    }
+}
+
 impl HotConfigHandle {
     /// Create a new handle, loading any persisted overrides from redb.
     pub fn new(
@@ -573,7 +583,7 @@ impl HotConfigHandle {
 
 /// Partial update for hot-reloadable configuration.
 /// Only fields that are Some will be applied.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct HotConfigUpdate {
     pub rate_limit_default_rps: Option<u32>,
     pub rate_limit_default_burst: Option<u32>,
@@ -771,3 +781,416 @@ fn validate_hot_config(config: &HotConfig) -> Result<(), PlatformError> {
 // -----------------------------------------------------------------------------
 
 const HOT_CONFIG_KEY: &str = "hot_config_overrides";
+
+// -----------------------------------------------------------------------------
+// Tests
+// -----------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use common::config::NodeConfig;
+
+    /// Default NodeConfig passes validation.
+    #[test]
+    fn test_default_config_valid() {
+        let config = NodeConfig::default();
+        assert!(validate_config(&config).is_ok());
+    }
+
+    /// Minimal TOML file parses correctly.
+    #[test]
+    fn test_toml_parse_minimal() {
+        let toml_str = r#"
+[node]
+node_id = "dev-node"
+
+[nats]
+url = "nats://127.0.0.1:4222"
+
+[logging]
+level = "debug"
+"#;
+        let config: NodeConfig = toml::from_str(toml_str).expect("failed to parse minimal TOML");
+        assert_eq!(config.node.node_id, "dev-node");
+        assert_eq!(config.nats.url, "nats://127.0.0.1:4222");
+        assert_eq!(config.logging.level, "debug");
+        // All other fields should be defaults
+        assert_eq!(config.proxy.http_port, 8080);
+        assert_eq!(config.admin.port, 9090);
+    }
+
+    /// Full TOML file with all sections parses correctly.
+    #[test]
+    fn test_toml_parse_full() {
+        let toml_str = r#"
+[node]
+node_id = "prod-node-1"
+
+[storage]
+db_path = "/var/lib/wasm-node/state.redb"
+
+[nats]
+url = "nats://nats.prod:4222"
+creds_file = "/etc/wasm-node/nats.creds"
+
+[proxy]
+http_port = 80
+https_port = 443
+tls_cert = "/etc/wasm-node/tls/server.crt"
+tls_key = "/etc/wasm-node/tls/server.key"
+
+[admin]
+port = 9090
+artifact_port = 9091
+auth_token = "secret-token"
+
+[runtime]
+port_start = 10000
+port_end = 19999
+key_source = "file"
+key_file = "/etc/wasm-node/master.key"
+
+[database]
+default_url = "postgres://db.prod:5432"
+pgbouncer_addr = "127.0.0.1:5432"
+enable_db_proxy = true
+db_proxy_addr = "127.0.0.1:5433"
+db_proxy_backend = "db.internal:5432"
+db_proxy_max_connections = 50
+
+[logging]
+level = "warn"
+otlp_endpoint = "http://collector:4317"
+
+[billing]
+export_dir = "/var/lib/wasm-node/billing"
+export_interval_secs = 1800
+
+[gc]
+artifact_keep_versions = 5
+metrics_retain_days = 14
+undeploy_grace_secs = 7200
+gc_interval_secs = 300
+disk_warning_threshold = 0.85
+
+[rate_limit]
+default_requests_per_second = 5000
+default_burst_capacity = 1000
+default_per_ip_limit = 500
+
+[ebpf]
+enabled = true
+fd_soft_limit = 8192
+fd_hard_limit = 9728
+mem_low_threshold_pages = 65536
+mem_critical_threshold_pages = 16384
+disk_slow_threshold_ns = 50000000
+tcp_conn_limit_per_pid = 10000
+syscall_rate_limit = 100000
+sampling_period_secs = 10
+
+[dns]
+platform_domain = "myplatform.com"
+webhook_url = "https://dns-api.example.com/records"
+webhook_token = "secret"
+
+[health]
+check_interval_secs = 10
+default_idle_timeout_secs = 600
+default_max_instances = 20
+default_fuel_quota = 1000000000
+default_memory_pages = 4096
+"#;
+        let config: NodeConfig = toml::from_str(toml_str).expect("failed to parse full TOML");
+        assert_eq!(config.node.node_id, "prod-node-1");
+        assert_eq!(config.proxy.http_port, 80);
+        assert_eq!(config.proxy.https_port, 443);
+        assert_eq!(
+            config.proxy.tls_cert,
+            Some("/etc/wasm-node/tls/server.crt".to_string())
+        );
+        assert_eq!(config.admin.auth_token, Some("secret-token".to_string()));
+        assert_eq!(config.runtime.key_source, "file");
+        assert_eq!(config.database.enable_db_proxy, true);
+        assert_eq!(config.database.db_proxy_max_connections, 50);
+        assert_eq!(config.logging.level, "warn");
+        assert_eq!(
+            config.billing.export_dir,
+            Some("/var/lib/wasm-node/billing".to_string())
+        );
+        assert_eq!(config.gc.disk_warning_threshold, 0.85);
+        assert_eq!(config.rate_limit.default_requests_per_second, 5000);
+        assert_eq!(config.ebpf.fd_soft_limit, 8192);
+        assert_eq!(
+            config.dns.platform_domain,
+            Some("myplatform.com".to_string())
+        );
+        assert_eq!(config.health.check_interval_secs, 10);
+        assert_eq!(config.health.default_fuel_quota, 1000000000);
+    }
+
+    /// Environment variable overrides TOML value.
+    #[test]
+    fn test_merge_priority_env_over_toml() {
+        let mut config = NodeConfig::default();
+        config.node.node_id = "from-toml".to_string();
+        config.nats.url = "nats://toml:4222".to_string();
+
+        // Simulate env override by manually applying
+        std::env::set_var("WASM_NODE_NODE_ID", "from-env");
+        std::env::set_var("WASM_NODE_NATS_URL", "nats://env:4222");
+        let config = apply_env_overrides(config);
+        std::env::remove_var("WASM_NODE_NODE_ID");
+        std::env::remove_var("WASM_NODE_NATS_URL");
+
+        assert_eq!(config.node.node_id, "from-env");
+        assert_eq!(config.nats.url, "nats://env:4222");
+    }
+
+    /// CLI flag overrides environment variable.
+    #[test]
+    fn test_merge_priority_cli_over_env() {
+        let mut config = NodeConfig::default();
+        config.node.node_id = "from-env".to_string();
+        config.proxy.http_port = 8080;
+
+        let cli = CliOverrides {
+            node_id: Some("from-cli".to_string()),
+            http_port: Some(9090),
+            ..Default::default()
+        };
+        let config = apply_cli_overrides(config, &cli);
+
+        assert_eq!(config.node.node_id, "from-cli");
+        assert_eq!(config.proxy.http_port, 9090);
+    }
+
+    /// port_start > port_end is rejected.
+    #[test]
+    fn test_validation_port_range_swapped() {
+        let mut config = NodeConfig::default();
+        config.runtime.port_start = 20000;
+        config.runtime.port_end = 10000;
+        let result = validate_config(&config);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("port_start must be less than port_end"));
+    }
+
+    /// Port range too small is rejected.
+    #[test]
+    fn test_validation_port_range_too_small() {
+        let mut config = NodeConfig::default();
+        config.runtime.port_start = 10000;
+        config.runtime.port_end = 10050;
+        let result = validate_config(&config);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("port range must span at least 100 ports"));
+    }
+
+    /// Invalid log level is rejected.
+    #[test]
+    fn test_validation_invalid_log_level() {
+        let mut config = NodeConfig::default();
+        config.logging.level = "verbose".to_string();
+        let result = validate_config(&config);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("invalid log level"));
+    }
+
+    /// Only one of tls_cert/tls_key set is rejected.
+    #[test]
+    fn test_validation_tls_consistency() {
+        let mut config = NodeConfig::default();
+        config.proxy.tls_cert = Some("/path/to/cert".to_string());
+        config.proxy.tls_key = None;
+        let result = validate_config(&config);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("tls_cert and tls_key must both be set or both be unset"));
+    }
+
+    /// HTTPS port with no TLS is rejected.
+    #[test]
+    fn test_validation_https_without_tls() {
+        let mut config = NodeConfig::default();
+        config.proxy.https_port = 443;
+        config.proxy.tls_cert = None;
+        config.proxy.tls_key = None;
+        let result = validate_config(&config);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("https_port requires tls_cert and tls_key"));
+    }
+
+    /// eBPF fd_soft_limit >= fd_hard_limit is rejected.
+    #[test]
+    fn test_validation_ebpf_fd_limits() {
+        let mut config = NodeConfig::default();
+        config.ebpf.fd_soft_limit = 10000;
+        config.ebpf.fd_hard_limit = 8000;
+        let result = validate_config(&config);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("fd_soft_limit must be less than fd_hard_limit"));
+    }
+
+    /// HotConfigUpdate only applies Some fields.
+    #[test]
+    fn test_hot_config_update_partial() {
+        let base = HotConfig::from_cold_config(&NodeConfig::default());
+        let original_rps = base.rate_limit.default_requests_per_second;
+        let original_level = base.logging.level.clone();
+
+        let update = HotConfigUpdate {
+            rate_limit_default_rps: Some(9999),
+            // All other fields are None — they should NOT change
+            ..Default::default()
+        };
+
+        let updated = merge_hot_config_update(&base, update);
+        assert_eq!(updated.rate_limit.default_requests_per_second, 9999);
+        // Other fields should remain unchanged
+        assert_eq!(
+            updated.rate_limit.default_burst_capacity,
+            base.rate_limit.default_burst_capacity
+        );
+        assert_eq!(
+            updated.rate_limit.default_per_ip_limit,
+            base.rate_limit.default_per_ip_limit
+        );
+        assert_eq!(updated.logging.level, original_level);
+        assert_eq!(updated.ebpf.fd_soft_limit, base.ebpf.fd_soft_limit);
+    }
+
+    /// HotConfig validation rejects invalid log level.
+    #[test]
+    fn test_hot_config_validation_invalid_log_level() {
+        let mut config = HotConfig::from_cold_config(&NodeConfig::default());
+        config.logging.level = "invalid".to_string();
+        let result = validate_hot_config(&config);
+        assert!(result.is_err());
+    }
+
+    /// HotConfig validation rejects fd_soft >= fd_hard.
+    #[test]
+    fn test_hot_config_validation_fd_limits() {
+        let mut config = HotConfig::from_cold_config(&NodeConfig::default());
+        config.ebpf.fd_soft_limit = 10000;
+        config.ebpf.fd_hard_limit = 8000;
+        let result = validate_hot_config(&config);
+        assert!(result.is_err());
+    }
+
+    /// HotConfig validation rejects disk_warning_threshold out of range.
+    #[test]
+    fn test_hot_config_validation_disk_threshold() {
+        let mut config = HotConfig::from_cold_config(&NodeConfig::default());
+        config.gc.disk_warning_threshold = 1.5;
+        let result = validate_hot_config(&config);
+        assert!(result.is_err());
+
+        config.gc.disk_warning_threshold = 0.0;
+        let result = validate_hot_config(&config);
+        assert!(result.is_err());
+    }
+
+    /// HotConfig validation accepts valid config.
+    #[test]
+    fn test_hot_config_validation_valid() {
+        let config = HotConfig::from_cold_config(&NodeConfig::default());
+        assert!(validate_hot_config(&config).is_ok());
+    }
+
+    /// count_changes returns correct count.
+    #[test]
+    fn test_hot_config_update_count_changes() {
+        let update = HotConfigUpdate {
+            rate_limit_default_rps: Some(5000),
+            gc_interval_secs: Some(120),
+            logging_level: Some("debug".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(update.count_changes(), 3);
+
+        let empty = HotConfigUpdate::default();
+        assert_eq!(empty.count_changes(), 0);
+    }
+
+    /// HotConfig::from_cold_config correctly copies hot-reloadable fields.
+    #[test]
+    fn test_hot_config_from_cold() {
+        let mut cold = NodeConfig::default();
+        cold.rate_limit.default_requests_per_second = 5000;
+        cold.ebpf.fd_soft_limit = 4096;
+        cold.gc.gc_interval_secs = 120;
+        cold.health.check_interval_secs = 10;
+        cold.logging.level = "debug".to_string();
+
+        let hot = HotConfig::from_cold_config(&cold);
+        assert_eq!(hot.rate_limit.default_requests_per_second, 5000);
+        assert_eq!(hot.ebpf.fd_soft_limit, 4096);
+        assert_eq!(hot.gc.gc_interval_secs, 120);
+        assert_eq!(hot.health.check_interval_secs, 10);
+        assert_eq!(hot.logging.level, "debug");
+    }
+
+    /// merge_config: Option fields from overlay override base; None keeps base.
+    #[test]
+    fn test_merge_config_option_fields() {
+        let mut base = NodeConfig::default();
+        base.nats.creds_file = Some("base-creds".to_string());
+        base.proxy.tls_cert = Some("base-cert".to_string());
+        base.proxy.tls_key = Some("base-key".to_string());
+
+        let mut overlay = NodeConfig::default();
+        overlay.nats.creds_file = None; // Should keep base value
+        overlay.proxy.tls_cert = Some("overlay-cert".to_string());
+        overlay.proxy.tls_key = Some("overlay-key".to_string());
+
+        let merged = merge_config(base, overlay);
+        assert_eq!(merged.nats.creds_file, Some("base-creds".to_string())); // kept from base
+        assert_eq!(merged.proxy.tls_cert, Some("overlay-cert".to_string())); // overridden
+        assert_eq!(merged.proxy.tls_key, Some("overlay-key".to_string())); // overridden
+    }
+
+    /// load_config with no file and no overrides returns valid default config.
+    #[test]
+    fn test_load_config_defaults_only() {
+        let result = load_config(None, &CliOverrides::default());
+        assert!(result.is_ok());
+        let config = result.unwrap();
+        assert_eq!(config.node.node_id, "node-0");
+        assert_eq!(config.proxy.http_port, 8080);
+    }
+
+    /// load_config with a non-existent path falls back to defaults with warning.
+    #[test]
+    fn test_load_config_missing_file() {
+        let result = load_config(
+            Some(Path::new("/nonexistent/config.toml")),
+            &CliOverrides::default(),
+        );
+        assert!(result.is_ok());
+    }
+
+    /// load_config with CLI overrides applies them correctly.
+    #[test]
+    fn test_load_config_with_cli_overrides() {
+        let cli = CliOverrides {
+            node_id: Some("cli-node".to_string()),
+            http_port: Some(3000),
+            log_level: Some("trace".to_string()),
+            ..Default::default()
+        };
+        let result = load_config(None, &cli);
+        assert!(result.is_ok());
+        let config = result.unwrap();
+        assert_eq!(config.node.node_id, "cli-node");
+        assert_eq!(config.proxy.http_port, 3000);
+        assert_eq!(config.logging.level, "trace");
+    }
+}
