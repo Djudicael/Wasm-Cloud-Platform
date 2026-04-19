@@ -1,0 +1,520 @@
+//! Configuration structures for the Wasm Cloud Platform.
+//! All fields have defaults — a completely empty TOML file is valid.
+
+use serde::{Deserialize, Serialize};
+use std::net::IpAddr;
+use std::path::PathBuf;
+
+/// Top-level configuration for a wasm-node.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NodeConfig {
+    #[serde(default)]
+    pub node: NodeSection,
+    #[serde(default)]
+    pub storage: StorageSection,
+    #[serde(default)]
+    pub nats: NatsSection,
+    #[serde(default)]
+    pub proxy: ProxySection,
+    #[serde(default)]
+    pub admin: AdminSection,
+    #[serde(default)]
+    pub runtime: RuntimeSection,
+    #[serde(default)]
+    pub database: DatabaseSection,
+    #[serde(default)]
+    pub logging: LoggingSection,
+    #[serde(default)]
+    pub billing: BillingSection,
+    #[serde(default)]
+    pub gc: GcSection,
+    #[serde(default)]
+    pub rate_limit: RateLimitSection,
+    #[serde(default)]
+    pub ebpf: EbpfSection,
+    #[serde(default)]
+    pub dns: DnsSection,
+    #[serde(default)]
+    pub health: HealthSection,
+}
+
+impl Default for NodeConfig {
+    fn default() -> Self {
+        NodeConfig {
+            node: NodeSection::default(),
+            storage: StorageSection::default(),
+            nats: NatsSection::default(),
+            proxy: ProxySection::default(),
+            admin: AdminSection::default(),
+            runtime: RuntimeSection::default(),
+            database: DatabaseSection::default(),
+            logging: LoggingSection::default(),
+            billing: BillingSection::default(),
+            gc: GcSection::default(),
+            rate_limit: RateLimitSection::default(),
+            ebpf: EbpfSection::default(),
+            dns: DnsSection::default(),
+            health: HealthSection::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NodeSection {
+    #[serde(default = "default_node_id")]
+    pub node_id: String,
+}
+
+fn default_node_id() -> String {
+    std::env::var("NODE_ID").unwrap_or_else(|_| "node-0".to_string())
+}
+
+impl Default for NodeSection {
+    fn default() -> Self {
+        NodeSection {
+            node_id: default_node_id(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StorageSection {
+    #[serde(default = "default_db_path")]
+    pub db_path: PathBuf,
+}
+
+fn default_db_path() -> PathBuf {
+    PathBuf::from("/tmp/wasm-node/state.redb")
+}
+
+impl Default for StorageSection {
+    fn default() -> Self {
+        StorageSection {
+            db_path: default_db_path(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NatsSection {
+    #[serde(default = "default_nats_url")]
+    pub url: String,
+    #[serde(default)]
+    pub creds_file: Option<String>,
+}
+
+fn default_nats_url() -> String {
+    "nats://127.0.0.1:4222".to_string()
+}
+
+impl Default for NatsSection {
+    fn default() -> Self {
+        NatsSection {
+            url: default_nats_url(),
+            creds_file: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProxySection {
+    #[serde(default = "default_http_port")]
+    pub http_port: u16,
+    #[serde(default = "default_https_port")]
+    pub https_port: u16,
+    #[serde(default)]
+    pub tls_cert: Option<String>,
+    #[serde(default)]
+    pub tls_key: Option<String>,
+}
+
+fn default_http_port() -> u16 {
+    8080
+}
+
+fn default_https_port() -> u16 {
+    8443
+}
+
+impl Default for ProxySection {
+    fn default() -> Self {
+        ProxySection {
+            http_port: default_http_port(),
+            https_port: default_https_port(),
+            tls_cert: None,
+            tls_key: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminSection {
+    #[serde(default = "default_admin_port")]
+    pub port: u16,
+    #[serde(default = "default_artifact_port")]
+    pub artifact_port: u16,
+    #[serde(default)]
+    pub auth_token: Option<String>,
+}
+
+fn default_admin_port() -> u16 {
+    9090
+}
+
+fn default_artifact_port() -> u16 {
+    9091
+}
+
+impl Default for AdminSection {
+    fn default() -> Self {
+        AdminSection {
+            port: default_admin_port(),
+            artifact_port: default_artifact_port(),
+            auth_token: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuntimeSection {
+    #[serde(default = "default_port_start")]
+    pub port_start: u16,
+    #[serde(default = "default_port_end")]
+    pub port_end: u16,
+    #[serde(default = "default_key_source")]
+    pub key_source: String,
+    #[serde(default)]
+    pub key_file: Option<String>,
+}
+
+fn default_port_start() -> u16 {
+    10000
+}
+
+fn default_port_end() -> u16 {
+    19999
+}
+
+fn default_key_source() -> String {
+    "generate".to_string()
+}
+
+impl Default for RuntimeSection {
+    fn default() -> Self {
+        RuntimeSection {
+            port_start: default_port_start(),
+            port_end: default_port_end(),
+            key_source: default_key_source(),
+            key_file: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DatabaseSection {
+    #[serde(default = "default_db_url")]
+    pub default_url: String,
+    #[serde(default = "default_pgbouncer_addr")]
+    pub pgbouncer_addr: String,
+    #[serde(default)]
+    pub enable_db_proxy: bool,
+    #[serde(default = "default_db_proxy_addr")]
+    pub db_proxy_addr: String,
+    #[serde(default = "default_db_proxy_backend")]
+    pub db_proxy_backend: String,
+    #[serde(default = "default_db_proxy_max_conn")]
+    pub db_proxy_max_connections: usize,
+}
+
+fn default_db_url() -> String {
+    "postgres://127.0.0.1:5432".to_string()
+}
+
+fn default_pgbouncer_addr() -> String {
+    "127.0.0.1:5432".to_string()
+}
+
+fn default_db_proxy_addr() -> String {
+    "127.0.0.1:5433".to_string()
+}
+
+fn default_db_proxy_backend() -> String {
+    "db.internal:5432".to_string()
+}
+
+fn default_db_proxy_max_conn() -> usize {
+    20
+}
+
+impl Default for DatabaseSection {
+    fn default() -> Self {
+        DatabaseSection {
+            default_url: default_db_url(),
+            pgbouncer_addr: default_pgbouncer_addr(),
+            enable_db_proxy: false,
+            db_proxy_addr: default_db_proxy_addr(),
+            db_proxy_backend: default_db_proxy_backend(),
+            db_proxy_max_connections: default_db_proxy_max_conn(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LoggingSection {
+    #[serde(default = "default_log_level")]
+    pub level: String,
+    #[serde(default)]
+    pub otlp_endpoint: Option<String>,
+}
+
+fn default_log_level() -> String {
+    "info".to_string()
+}
+
+impl Default for LoggingSection {
+    fn default() -> Self {
+        LoggingSection {
+            level: default_log_level(),
+            otlp_endpoint: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BillingSection {
+    #[serde(default)]
+    pub export_dir: Option<String>,
+    #[serde(default = "default_billing_interval")]
+    pub export_interval_secs: u64,
+}
+
+fn default_billing_interval() -> u64 {
+    3600
+}
+
+impl Default for BillingSection {
+    fn default() -> Self {
+        BillingSection {
+            export_dir: None,
+            export_interval_secs: default_billing_interval(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GcSection {
+    #[serde(default = "default_gc_keep_versions")]
+    pub artifact_keep_versions: usize,
+    #[serde(default = "default_gc_metrics_days")]
+    pub metrics_retain_days: u32,
+    #[serde(default = "default_gc_grace_secs")]
+    pub undeploy_grace_secs: u64,
+    #[serde(default = "default_gc_interval_secs")]
+    pub gc_interval_secs: u64,
+    #[serde(default = "default_gc_disk_threshold")]
+    pub disk_warning_threshold: f64,
+}
+
+fn default_gc_keep_versions() -> usize {
+    5
+}
+
+fn default_gc_metrics_days() -> u32 {
+    30
+}
+
+fn default_gc_grace_secs() -> u64 {
+    300
+}
+
+fn default_gc_interval_secs() -> u64 {
+    3600
+}
+
+fn default_gc_disk_threshold() -> f64 {
+    0.9
+}
+
+impl Default for GcSection {
+    fn default() -> Self {
+        GcSection {
+            artifact_keep_versions: default_gc_keep_versions(),
+            metrics_retain_days: default_gc_metrics_days(),
+            undeploy_grace_secs: default_gc_grace_secs(),
+            gc_interval_secs: default_gc_interval_secs(),
+            disk_warning_threshold: default_gc_disk_threshold(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RateLimitSection {
+    #[serde(default = "default_rps")]
+    pub default_requests_per_second: u32,
+    #[serde(default = "default_burst")]
+    pub default_burst_capacity: u32,
+    #[serde(default = "default_per_ip")]
+    pub default_per_ip_limit: u32,
+}
+
+fn default_rps() -> u32 {
+    100
+}
+
+fn default_burst() -> u32 {
+    200
+}
+
+fn default_per_ip() -> u32 {
+    10
+}
+
+impl Default for RateLimitSection {
+    fn default() -> Self {
+        RateLimitSection {
+            default_requests_per_second: default_rps(),
+            default_burst_capacity: default_burst(),
+            default_per_ip_limit: default_per_ip(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EbpfSection {
+    #[serde(default = "default_ebpf_enabled")]
+    pub enabled: bool,
+    #[serde(default = "default_fd_soft")]
+    pub fd_soft_limit: u32,
+    #[serde(default = "default_fd_hard")]
+    pub fd_hard_limit: u32,
+    #[serde(default = "default_mem_low")]
+    pub mem_low_threshold_pages: u64,
+    #[serde(default = "default_mem_critical")]
+    pub mem_critical_threshold_pages: u64,
+    #[serde(default = "default_disk_slow")]
+    pub disk_slow_threshold_ns: u64,
+    #[serde(default = "default_tcp_limit")]
+    pub tcp_conn_limit_per_pid: u32,
+    #[serde(default = "default_syscall_rate")]
+    pub syscall_rate_limit: u64,
+    #[serde(default = "default_sampling")]
+    pub sampling_period_secs: u64,
+}
+
+fn default_ebpf_enabled() -> bool {
+    true
+}
+
+fn default_fd_soft() -> u32 {
+    8192
+}
+
+fn default_fd_hard() -> u32 {
+    9728
+}
+
+fn default_mem_low() -> u64 {
+    65536
+}
+
+fn default_mem_critical() -> u64 {
+    16384
+}
+
+fn default_disk_slow() -> u64 {
+    50_000_000
+}
+
+fn default_tcp_limit() -> u32 {
+    10000
+}
+
+fn default_syscall_rate() -> u64 {
+    100_000
+}
+
+fn default_sampling() -> u64 {
+    10
+}
+
+impl Default for EbpfSection {
+    fn default() -> Self {
+        EbpfSection {
+            enabled: default_ebpf_enabled(),
+            fd_soft_limit: default_fd_soft(),
+            fd_hard_limit: default_fd_hard(),
+            mem_low_threshold_pages: default_mem_low(),
+            mem_critical_threshold_pages: default_mem_critical(),
+            disk_slow_threshold_ns: default_disk_slow(),
+            tcp_conn_limit_per_pid: default_tcp_limit(),
+            syscall_rate_limit: default_syscall_rate(),
+            sampling_period_secs: default_sampling(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DnsSection {
+    #[serde(default)]
+    pub platform_domain: Option<String>,
+    #[serde(default)]
+    pub webhook_url: Option<String>,
+    #[serde(default)]
+    pub webhook_token: Option<String>,
+}
+
+impl Default for DnsSection {
+    fn default() -> Self {
+        DnsSection {
+            platform_domain: None,
+            webhook_url: None,
+            webhook_token: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HealthSection {
+    #[serde(default = "default_check_interval")]
+    pub check_interval_secs: u64,
+    #[serde(default = "default_idle_timeout")]
+    pub default_idle_timeout_secs: u64,
+    #[serde(default = "default_max_instances")]
+    pub default_max_instances: usize,
+    #[serde(default = "default_fuel_quota")]
+    pub default_fuel_quota: u64,
+    #[serde(default = "default_memory_pages")]
+    pub default_memory_pages: u32,
+}
+
+fn default_check_interval() -> u64 {
+    5
+}
+
+fn default_idle_timeout() -> u64 {
+    300
+}
+
+fn default_max_instances() -> usize {
+    10
+}
+
+fn default_fuel_quota() -> u64 {
+    10_000_000
+}
+
+fn default_memory_pages() -> u32 {
+    65536
+}
+
+impl Default for HealthSection {
+    fn default() -> Self {
+        HealthSection {
+            check_interval_secs: default_check_interval(),
+            default_idle_timeout_secs: default_idle_timeout(),
+            default_max_instances: default_max_instances(),
+            default_fuel_quota: default_fuel_quota(),
+            default_memory_pages: default_memory_pages(),
+        }
+    }
+}

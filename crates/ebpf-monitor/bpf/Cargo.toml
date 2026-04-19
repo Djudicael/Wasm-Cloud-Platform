@@ -1,0 +1,32 @@
+[package]
+name = "ebpf-monitor-bpf"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+aya-ebpf = "0.1"
+aya-log-ebpf = "0.1"
+
+[[bin]]
+name = "process_tracker"
+path = "src/process_tracker.rs"
+
+[[bin]]
+name = "tcp_monitor"
+path = "src/tcp_monitor.rs"
+
+[[bin]]
+name = "fd_watcher"
+path = "src/fd_watcher.rs"
+
+[[bin]]
+name = "mem_pressure"
+path = "src/mem_pressure.rs"
+
+[[bin]]
+name = "disk_monitor"
+path = "src/disk_monitor.rs"
+
+[[bin]]
+name = "syscall_counter"
+path = "src/syscall_counter.rs"

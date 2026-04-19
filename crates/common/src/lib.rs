@@ -1,4 +1,5 @@
 pub mod billing;
+pub mod config;
 pub mod error;
 pub mod gc;
 pub mod protocol;

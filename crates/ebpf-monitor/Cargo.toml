@@ -1,0 +1,24 @@
+[package]
+name = "ebpf-monitor"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+default = []
+ebpf = ["dep:aya", "dep:aya-log"]
+
+[dependencies]
+aya = { version = "0.12", optional = true }
+aya-log = { version = "0.2", optional = true }
+common = { path = "../common" }
+metrics = { path = "../metrics" }
+prometheus = { version = "0.14", features = ["process"] }
+tokio = { version = "1.52", features = ["full"] }
+tracing = "0.1"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+anyhow = "1.0"
+libc = "0.2"
+
+[dev-dependencies]
+tokio = { version = "1.52", features = ["full", "test-util"] }

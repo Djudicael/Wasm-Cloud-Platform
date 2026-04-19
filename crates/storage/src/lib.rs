@@ -319,4 +319,32 @@ impl Store {
         tracing::info!("v2→v3: added rate_limit to all app configs");
         Ok(())
     }
+    /// Save a metadata key-value pair in the SCHEMA_META table.
+    pub fn save_meta(&self, key: &str, value: &str) -> Result<(), redb::Error> {
+        let tx = self.db.begin_write()?;
+        {
+            let mut table = tx.open_table(tables::SCHEMA_META)?;
+            table.insert(key, value)?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Load a metadata value by key from the SCHEMA_META table.
+    pub fn load_meta(&self, key: &str) -> Result<Option<String>, redb::Error> {
+        let tx = self.db.begin_read()?;
+        let table = tx.open_table(tables::SCHEMA_META)?;
+        Ok(table.get(key)?.map(|v| v.value().to_string()))
+    }
+
+    /// Delete a metadata key from the SCHEMA_META table.
+    pub fn delete_meta(&self, key: &str) -> Result<(), redb::Error> {
+        let tx = self.db.begin_write()?;
+        {
+            let mut table = tx.open_table(tables::SCHEMA_META)?;
+            table.remove(key)?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
 }

@@ -13,6 +13,8 @@ members = [
     "crates/billing",
     "crates/ctl",
     "crates/e2e",
+    "crates/ebpf-monitor",
+    "crates/config",
     "apps/hello-axum",
     "apps/echo-service",
     "apps/postgres-app"
@@ -80,3 +82,7 @@ url = "2"
 
 # Concurrent
 dashmap = "6.1"
+
+# eBPF monitoring
+aya = "0.12"
+aya-log = "0.2"

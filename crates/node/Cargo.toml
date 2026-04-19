@@ -8,6 +8,9 @@ edition = "2021"
 name = "wasm-node"
 path = "src/main.rs"
 
+[features]
+ebpf = ["ebpf-monitor/ebpf"]
+
 [dev-dependencies]
 testcontainers = { workspace = true }
 uuid = { workspace = true }
@@ -38,3 +41,5 @@ metrics = { path = "../metrics" }
 secrets = { path = "../secrets" }
 billing = { path = "../billing" }
 async-nats = { workspace = true }
+ebpf-monitor = { path = "../ebpf-monitor", optional = true }
+config = { path = "../config" }

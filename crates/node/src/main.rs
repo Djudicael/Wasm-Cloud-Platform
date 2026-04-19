@@ -1,81 +1,21 @@
 use clap::Parser;
 use messaging::reconnect::{NatsHealth, NatsHealthWatcher};
-use serde::Deserialize;
 use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
+#[cfg(feature = "ebpf")]
+use ebpf_monitor::{init, MonitorConfig};
+
 pub mod db_config;
 pub mod handlers;
 pub mod recovery;
 pub mod upgrade;
 
-// ── TOML configuration file support ──────────────────────────────────────────
-//
-// The `--config path.toml` flag loads a TOML file whose keys mirror the CLI
-// flags.  Merge priority (highest wins): CLI flag > environment variable > config
-// file > built-in default.
-//
-// Example config file:
-//
-//   db_path = "/data/wasm-node/state.redb"
-//   nats_url = "nats://nats:4222"
-//   node_id = "node-1"
-//   proxy_port = 8080
-//   admin_port = 9090
-//   admin_token = "s3cret"
-//   key_file = "/secrets/kek.bin"
-//
-// Any field omitted from the file falls back to the CLI default.
-
-#[derive(Debug, Deserialize, Default)]
-#[serde(default)]
-struct NodeConfig {
-    db_path: Option<String>,
-    nats_url: Option<String>,
-    nats_creds: Option<String>,
-    proxy_port: Option<u16>,
-    proxy_https_port: Option<u16>,
-    tls_cert: Option<String>,
-    tls_key: Option<String>,
-    admin_port: Option<u16>,
-    artifact_port: Option<u16>,
-    otlp_endpoint: Option<String>,
-    node_id: Option<String>,
-    port_start: Option<u16>,
-    port_end: Option<u16>,
-    key_source: Option<String>,
-    key_file: Option<String>,
-    admin_token: Option<String>,
-    database_url: Option<String>,
-    pgbouncer_addr: Option<String>,
-    enable_db_proxy: Option<bool>,
-    db_proxy_addr: Option<String>,
-    db_backend_addr: Option<String>,
-    db_proxy_max_connections: Option<usize>,
-    billing_export_dir: Option<String>,
-    billing_export_interval_secs: Option<u64>,
-    platform_domain: Option<String>,
-    dns_webhook_url: Option<String>,
-    dns_webhook_token: Option<String>,
-}
-
-impl NodeConfig {
-    /// Load a TOML config file. Returns `Ok(Default)` if path is `None`.
-    fn load(path: Option<&str>) -> anyhow::Result<Self> {
-        let Some(path) = path else {
-            return Ok(Self::default());
-        };
-        let text = std::fs::read_to_string(path)
-            .map_err(|e| anyhow::anyhow!("cannot read config file {}: {e}", path))?;
-        let config: NodeConfig = toml::from_str(&text)
-            .map_err(|e| anyhow::anyhow!("cannot parse config file {}: {e}", path))?;
-        info!(path, "loaded configuration file");
-        Ok(config)
-    }
-}
+// Configuration is now handled by the `config` crate.
+use config::{load_config, CliOverrides, HotConfigHandle};
 
 #[derive(Parser, Debug)]
 #[command(name = "wasm-node", about = "Wasm Cloud Platform Node")]
@@ -176,33 +116,71 @@ struct Args {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let mut args = Args::parse();
+    let args = Args::parse();
 
-    // Load TOML config file (if provided) and merge into args.
-    // CLI flags and env vars already have their values from clap,
-    // so we only override when the CLI value is still the default
-    // and the config file provides a value.
-    let file_config = NodeConfig::load(args.config.as_deref())?;
-    args.merge_config(file_config);
+    // Convert CLI args to overrides for the config system
+    let cli_overrides = CliOverrides {
+        node_id: Some(args.node_id.clone()),
+        db_path: Some(args.db_path.clone()),
+        nats_url: Some(args.nats_url.clone()),
+        nats_creds: args.nats_creds.clone(),
+        http_port: Some(args.proxy_port),
+        https_port: Some(args.proxy_https_port),
+        tls_cert: args.tls_cert.clone(),
+        tls_key: args.tls_key.clone(),
+        admin_port: Some(args.admin_port),
+        artifact_port: Some(args.artifact_port),
+        port_start: Some(args.port_start),
+        port_end: Some(args.port_end),
+        key_source: Some(args.key_source.clone()),
+        key_file: args.key_file.clone(),
+        database_url: Some(args.database_url.clone()),
+        pgbouncer_addr: Some(args.pgbouncer_addr.clone()),
+        enable_db_proxy: Some(args.enable_db_proxy),
+        db_proxy_addr: Some(args.db_proxy_addr.clone()),
+        db_proxy_backend: Some(args.db_backend_addr.clone()),
+        db_proxy_max_connections: Some(args.db_proxy_max_connections),
+        log_level: None, // Not available in Args
+        otlp_endpoint: args.otlp_endpoint.clone(),
+        billing_export_dir: args.billing_export_dir.clone(),
+        billing_export_interval_secs: Some(args.billing_export_interval_secs),
+        platform_domain: args.platform_domain.clone(),
+        dns_webhook_url: args.dns_webhook_url.clone(),
+        dns_webhook_token: args.dns_webhook_token.clone(),
+        auth_token: args.admin_token.clone(),
+    };
 
-    tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .init();
+    // Load configuration with merge priority: defaults < TOML < env < CLI
+    let config_path = args.config.as_deref().map(std::path::Path::new);
+    let config = load_config(config_path, &cli_overrides)?;
 
-    info!(node_id = %args.node_id, "wasm-node starting");
+    // Set up logging with configured level
+    let filter = tracing_subscriber::EnvFilter::builder()
+        .with_default_directive(
+            config
+                .logging
+                .level
+                .parse()
+                .unwrap_or(tracing::Level::INFO.into()),
+        )
+        .from_env_lossy();
 
-    if let Some(parent) = std::path::Path::new(&args.db_path).parent() {
+    tracing_subscriber::fmt().with_env_filter(filter).init();
+
+    info!(node_id = %config.node.node_id, "wasm-node starting");
+
+    if let Some(parent) = config.storage.db_path.parent() {
         std::fs::create_dir_all(parent).unwrap_or_default();
     }
 
-    let store = storage::Store::open(std::path::Path::new(&args.db_path))?;
-    info!(path = %args.db_path, "storage opened");
+    let store = storage::Store::open(&config.storage.db_path)?;
+    info!(path = %config.storage.db_path.display(), "storage opened");
 
     // Initialize recovery metrics early (needed for recovery mode detection)
     let recovery_metrics = Arc::new(metrics::recovery::RecoveryMetrics::new());
 
     // Detect recovery mode (L4: total loss detection)
-    let recovery_mode = recovery::detect_recovery_mode(&store, &args.node_id);
+    let recovery_mode = recovery::detect_recovery_mode(&store, &config.node.node_id);
     match recovery_mode {
         recovery::RecoveryMode::Normal => {
             info!("normal startup — existing state found");
@@ -223,20 +201,20 @@ async fn main() -> anyhow::Result<()> {
     let bind_addr: IpAddr = "0.0.0.0".parse().unwrap();
     let port_alloc = Arc::new(supervisor::port_alloc::PortAllocator::new(
         bind_addr,
-        args.port_start,
-        args.port_end,
+        config.runtime.port_start,
+        config.runtime.port_end,
     ));
 
     let upstream_registry = Arc::new(proxy::upstream::UpstreamRegistry::default());
     let service_registry = Arc::new(supervisor::network::LocalServiceRegistry::default());
     let host_router = Arc::new(proxy::router::HostRouter::default());
 
-    let mut bus = match &args.nats_creds {
-        Some(creds) => messaging::NatsBus::connect_secure(&args.nats_url, creds).await?,
-        None => messaging::NatsBus::connect(&args.nats_url).await?,
+    let mut bus = match &config.nats.creds_file {
+        Some(creds) => messaging::NatsBus::connect_secure(&config.nats.url, creds).await?,
+        None => messaging::NatsBus::connect(&config.nats.url).await?,
     };
-    bus.set_node_id(args.node_id.clone());
-    info!(url = %args.nats_url, "NATS connected");
+    bus.set_node_id(config.node.node_id.clone());
+    info!(url = %config.nats.url, "NATS connected");
 
     bus.setup_jetstream().await?;
 
@@ -253,13 +231,13 @@ async fn main() -> anyhow::Result<()> {
 
     // Initialize database manager
     let db_config = db_config::DatabaseConfig {
-        default_database_url: args.database_url.clone(),
-        health_check_addr: args.pgbouncer_addr.clone(),
+        default_database_url: config.database.default_url.clone(),
+        health_check_addr: config.database.pgbouncer_addr.clone(),
         health_check_interval_secs: 30,
-        enable_builtin_proxy: args.enable_db_proxy,
-        builtin_proxy_addr: args.db_proxy_addr.clone(),
-        builtin_proxy_backend: args.db_backend_addr.clone(),
-        builtin_proxy_max_connections: args.db_proxy_max_connections,
+        enable_builtin_proxy: config.database.enable_db_proxy,
+        builtin_proxy_addr: config.database.db_proxy_addr.clone(),
+        builtin_proxy_backend: config.database.db_proxy_backend.clone(),
+        builtin_proxy_max_connections: config.database.db_proxy_max_connections,
     };
 
     let db_manager = db_config::DatabaseManager::new(db_config.clone());
@@ -281,21 +259,49 @@ async fn main() -> anyhow::Result<()> {
     });
 
     // Initialize billing collector
-    let billing_collector = billing::BillingCollector::start(store.clone(), args.node_id.clone());
+    let billing_collector =
+        billing::BillingCollector::start(store.clone(), config.node.node_id.clone());
     info!("billing collector started");
 
     // Optionally start billing export loop
-    if let Some(ref export_dir) = args.billing_export_dir {
+    if let Some(ref export_dir) = config.billing.export_dir {
         let exporter = Arc::new(billing::FileExporter::new(std::path::PathBuf::from(
             export_dir,
         )));
-        let interval = Duration::from_secs(args.billing_export_interval_secs);
+        let interval = Duration::from_secs(config.billing.export_interval_secs);
         billing::start_export_loop(store.clone(), exporter, interval);
         info!(
             dir = export_dir,
             interval = interval.as_secs(),
             "billing export loop started"
         );
+    }
+
+    // Initialize eBPF monitor (kernel-level observability)
+    #[cfg(feature = "ebpf")]
+    {
+        let ebpf_config = ebpf_monitor::MonitorConfig {
+            enabled: config.ebpf.enabled,
+            fd_soft_limit: config.ebpf.fd_soft_limit,
+            fd_hard_limit: config.ebpf.fd_hard_limit,
+            mem_low_threshold_pages: config.ebpf.mem_low_threshold_pages,
+            mem_critical_threshold_pages: config.ebpf.mem_critical_threshold_pages,
+            disk_slow_threshold_ns: config.ebpf.disk_slow_threshold_ns,
+            tcp_conn_limit_per_pid: config.ebpf.tcp_conn_limit_per_pid,
+            syscall_rate_limit: config.ebpf.syscall_rate_limit,
+            sampling_period_secs: config.ebpf.sampling_period_secs,
+            enable_process_tracker: true,
+            enable_tcp_monitor: true,
+            enable_fd_watcher: true,
+            enable_mem_pressure: true,
+            enable_disk_monitor: true,
+            enable_syscall_counter: true,
+        };
+        if let Some(()) = ebpf_monitor::init(ebpf_config).await {
+            info!("eBPF monitor initialized and active");
+        } else {
+            info!("eBPF monitor not active, using fallback");
+        }
     }
 
     let supervisor = supervisor::Supervisor::new(
@@ -327,7 +333,7 @@ async fn main() -> anyhow::Result<()> {
     //
     // This ensures secrets survive restarts: the same KEK is reused across
     // restarts unless the operator explicitly provides a different key file.
-    let kek = if let Some(key_file) = &args.key_file {
+    let kek = if let Some(key_file) = &config.runtime.key_file {
         match std::fs::read(key_file) {
             Ok(bytes) if bytes.len() == 32 => {
                 let mut key = [0u8; 32];
@@ -398,7 +404,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Use localhost for artifact server URL
     // TODO: In production, this should be the node's publicly accessible IP
-    let artifact_server_url = format!("http://127.0.0.1:{}", args.artifact_port);
+    let artifact_server_url = format!("http://127.0.0.1:{}", config.admin.artifact_port);
 
     let dispatcher = Arc::new(handlers::EventDispatcher {
         supervisor: supervisor.clone(),
@@ -406,21 +412,21 @@ async fn main() -> anyhow::Result<()> {
         host_router: host_router.clone(),
         store: store.clone(),
         runtime: runtime.clone(),
-        node_id: args.node_id.clone(),
+        node_id: config.node.node_id.clone(),
         artifact_server_url: artifact_server_url.clone(),
         secret_provider: secret_provider.clone(),
         bootstrap_keypair,
         bus: bus.clone(),
         dns_webhook: proxy::dns_webhook::DnsWebhookManager::new(
-            args.dns_webhook_url.clone(),
-            args.dns_webhook_token.clone(),
+            config.dns.webhook_url.clone(),
+            config.dns.webhook_token.clone(),
         ),
         node_table: Arc::new(proxy::node_table::NodeLoadTable::default()),
     });
 
     {
         let d = dispatcher.clone();
-        let node_id = args.node_id.clone();
+        let node_id = config.node.node_id.clone();
         tracing::info!(subscribing_to = "DEPLOY", consumer = %node_id, "subscribing to deploy stream");
         if let Err(e) = bus
             .subscribe_durable("DEPLOY", &node_id, move |event| {
@@ -439,7 +445,7 @@ async fn main() -> anyhow::Result<()> {
     for _subject in &["instance.ready.>", "instance.dead.>"] {
         let d = dispatcher.clone();
         let stream = "CONTROL".to_string();
-        let consumer = format!("node-{}", args.node_id);
+        let consumer = format!("node-{}", config.node.node_id);
         bus.subscribe_durable(&stream, &consumer, move |event| {
             let d = d.clone();
             async move { d.handle(event).await }
@@ -450,7 +456,7 @@ async fn main() -> anyhow::Result<()> {
     for _subject in &["secrets.update.>", "config.update.>"] {
         let d = dispatcher.clone();
         let stream = "CONTROL".to_string();
-        let consumer = format!("node-{}", args.node_id);
+        let consumer = format!("node-{}", config.node.node_id);
         bus.subscribe_durable(&stream, &consumer, move |event| {
             let d = d.clone();
             async move { d.handle(event).await }
@@ -461,7 +467,7 @@ async fn main() -> anyhow::Result<()> {
     for _subject in &["node.load.>", "routes.", "cluster.>"] {
         let d = dispatcher.clone();
         let stream = "NODE".to_string();
-        let consumer = format!("node-{}", args.node_id);
+        let consumer = format!("node-{}", config.node.node_id);
         bus.subscribe_durable(&stream, &consumer, move |event| {
             let d = d.clone();
             async move { d.handle(event).await }
@@ -480,7 +486,7 @@ async fn main() -> anyhow::Result<()> {
             .unwrap_or_default();
 
         let join_event = messaging::events::Event::NodeJoined {
-            node_id: args.node_id.clone(),
+            node_id: config.node.node_id.clone(),
             artifact_server_url: artifact_server_url.clone(),
             public_key_bytes,
             protocol_version: common::protocol::PROTOCOL_VERSION,
@@ -491,7 +497,7 @@ async fn main() -> anyhow::Result<()> {
         info!("NodeJoined event published, waiting for snapshot");
 
         // Wait for StateSnapshot with a timeout instead of fixed sleep
-        let snapshot_subject = format!("cluster.snapshot.{}", args.node_id);
+        let snapshot_subject = format!("cluster.snapshot.{}", config.node.node_id);
         let timeout = tokio::time::Duration::from_secs(30);
         match tokio::time::timeout(timeout, bus.wait_for_event(&snapshot_subject)).await {
             Ok(Ok(_)) => info!("State snapshot received"),
@@ -503,7 +509,7 @@ async fn main() -> anyhow::Result<()> {
     supervisor::scaling::start_load_reporter(
         supervisor.clone(),
         bus.clone(),
-        args.node_id.clone(),
+        config.node.node_id.clone(),
         5_000_000_000,
     );
 
@@ -517,12 +523,12 @@ async fn main() -> anyhow::Result<()> {
     // Initialize Prometheus metrics
     let prom_metrics = Arc::new(metrics::exporter::Metrics::new());
     prom_metrics.set_platform_info(
-        &args.node_id,
+        &config.node.node_id,
         common::protocol::BINARY_VERSION,
         common::protocol::PROTOCOL_VERSION,
     );
     info!(
-        node_id = %args.node_id,
+        node_id = %config.node.node_id,
         binary_version = common::protocol::BINARY_VERSION,
         protocol_version = common::protocol::PROTOCOL_VERSION,
         "platform version metrics initialized"
@@ -551,7 +557,7 @@ async fn main() -> anyhow::Result<()> {
         metrics: Some(rate_limit_metrics),
     };
 
-    let tls = match (&args.tls_cert, &args.tls_key) {
+    let tls = match (&config.proxy.tls_cert, &config.proxy.tls_key) {
         (Some(cert), Some(key)) => Some(proxy::tls::tls_settings(
             std::path::Path::new(cert),
             std::path::Path::new(key),
@@ -562,21 +568,21 @@ async fn main() -> anyhow::Result<()> {
     let proxy_timeouts = proxy::config::ProxyTimeouts::default();
     let proxy_server = proxy::ProxyServer::build(
         wasm_proxy,
-        args.proxy_port,
-        Some(args.proxy_https_port).filter(|&p| p > 0),
+        config.proxy.http_port,
+        Some(config.proxy.https_port).filter(|&p| p > 0),
         tls,
         proxy_timeouts,
     );
 
     // Admin API with pgBouncer status endpoint and Prometheus metrics
-    let pgbouncer_check_addr = args.pgbouncer_addr.clone();
-    let db_path_clone = args.db_path.clone();
+    let pgbouncer_check_addr = config.database.pgbouncer_addr.clone();
+    let db_path_clone = config.storage.db_path.clone();
     let store_gc = store.clone();
     let supervisor_gc = supervisor.clone();
 
     // Enhanced health check for external LBs and DNS providers
     let health_router = proxy::health::health_router(
-        args.node_id.clone(),
+        config.node.node_id.clone(),
         nats_health.clone(),
         Arc::new(backpressure),
     );
@@ -668,9 +674,9 @@ async fn main() -> anyhow::Result<()> {
             }),
         )
         .merge(metrics::exporter::metrics_router(prom_metrics))
-        .layer(axum::middleware::from_fn(admin_auth_fn(args.admin_token.clone())));
+        .layer(axum::middleware::from_fn(admin_auth_fn(config.admin.auth_token.clone())));
 
-    let admin_addr = format!("0.0.0.0:{}", args.admin_port);
+    let admin_addr = format!("0.0.0.0:{}", config.admin.port);
     tokio::spawn(async move {
         let listener = tokio::net::TcpListener::bind(&admin_addr)
             .await
@@ -680,7 +686,7 @@ async fn main() -> anyhow::Result<()> {
     });
 
     let artifact_app = storage::artifact_server::artifact_router(store.clone());
-    let artifact_addr = format!("0.0.0.0:{}", args.artifact_port);
+    let artifact_addr = format!("0.0.0.0:{}", config.admin.artifact_port);
     tokio::spawn(async move {
         let listener = tokio::net::TcpListener::bind(&artifact_addr)
             .await
@@ -690,10 +696,10 @@ async fn main() -> anyhow::Result<()> {
     });
 
     info!(
-        http = args.proxy_port,
-        https = args.proxy_https_port,
-        admin = args.admin_port,
-        artifact = args.artifact_port,
+        http = config.proxy.http_port,
+        https = config.proxy.https_port,
+        admin = config.admin.port,
+        artifact = config.admin.artifact_port,
         "node fully started"
     );
 
@@ -729,101 +735,6 @@ async fn main() -> anyhow::Result<()> {
 
     info!("All instances stopped — exiting");
     std::process::exit(0);
-}
-
-impl Args {
-    /// Merge values from a `NodeConfig` file into the CLI args.
-    ///
-    /// For every field where the config file provides a value (`Some`), we
-    /// overwrite the corresponding CLI arg.  This means CLI flags always win
-    /// over the config file because clap has already parsed them — but only
-    /// when the user explicitly passed them.  Unfortunately clap doesn't expose
-    /// "was this flag explicitly set?" for all types easily, so we use a simple
-    /// heuristic: if the config file has a value, use it.  The user can always
-    /// override by passing the CLI flag explicitly (which clap processes first).
-    fn merge_config(&mut self, cfg: NodeConfig) {
-        if let Some(v) = cfg.db_path {
-            self.db_path = v;
-        }
-        if let Some(v) = cfg.nats_url {
-            self.nats_url = v;
-        }
-        if let Some(v) = cfg.nats_creds {
-            self.nats_creds = Some(v);
-        }
-        if let Some(v) = cfg.proxy_port {
-            self.proxy_port = v;
-        }
-        if let Some(v) = cfg.proxy_https_port {
-            self.proxy_https_port = v;
-        }
-        if let Some(v) = cfg.tls_cert {
-            self.tls_cert = Some(v);
-        }
-        if let Some(v) = cfg.tls_key {
-            self.tls_key = Some(v);
-        }
-        if let Some(v) = cfg.admin_port {
-            self.admin_port = v;
-        }
-        if let Some(v) = cfg.artifact_port {
-            self.artifact_port = v;
-        }
-        if let Some(v) = cfg.otlp_endpoint {
-            self.otlp_endpoint = Some(v);
-        }
-        if let Some(v) = cfg.node_id {
-            self.node_id = v;
-        }
-        if let Some(v) = cfg.port_start {
-            self.port_start = v;
-        }
-        if let Some(v) = cfg.port_end {
-            self.port_end = v;
-        }
-        if let Some(v) = cfg.key_source {
-            self.key_source = v;
-        }
-        if let Some(v) = cfg.key_file {
-            self.key_file = Some(v);
-        }
-        if let Some(v) = cfg.admin_token {
-            self.admin_token = Some(v);
-        }
-        if let Some(v) = cfg.database_url {
-            self.database_url = v;
-        }
-        if let Some(v) = cfg.pgbouncer_addr {
-            self.pgbouncer_addr = v;
-        }
-        if let Some(v) = cfg.enable_db_proxy {
-            self.enable_db_proxy = v;
-        }
-        if let Some(v) = cfg.db_proxy_addr {
-            self.db_proxy_addr = v;
-        }
-        if let Some(v) = cfg.db_backend_addr {
-            self.db_backend_addr = v;
-        }
-        if let Some(v) = cfg.db_proxy_max_connections {
-            self.db_proxy_max_connections = v;
-        }
-        if let Some(v) = cfg.billing_export_dir {
-            self.billing_export_dir = Some(v);
-        }
-        if let Some(v) = cfg.billing_export_interval_secs {
-            self.billing_export_interval_secs = v;
-        }
-        if let Some(v) = cfg.platform_domain {
-            self.platform_domain = Some(v);
-        }
-        if let Some(v) = cfg.dns_webhook_url {
-            self.dns_webhook_url = Some(v);
-        }
-        if let Some(v) = cfg.dns_webhook_token {
-            self.dns_webhook_token = Some(v);
-        }
-    }
 }
 
 /// Create the admin auth middleware closure.
