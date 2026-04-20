@@ -50,6 +50,59 @@ pub struct DeployArgs {
     /// Node API URL to upload the artifact to (overrides global --node-api)
     #[arg(long)]
     node_api: Option<String>,
+
+    // ── Policy flags ──────────────────────────────────────────────────
+    /// Apply a pre-defined policy profile (http_api, background_worker, static_site, database_proxy, unrestricted)
+    #[arg(long)]
+    policy_profile: Option<String>,
+
+    /// Allow outbound TCP (overrides profile)
+    #[arg(long)]
+    policy_network_allow_outbound_tcp: Option<bool>,
+
+    /// Allow outbound UDP (overrides profile)
+    #[arg(long)]
+    policy_network_allow_outbound_udp: Option<bool>,
+
+    /// Allow DNS lookups (overrides profile)
+    #[arg(long)]
+    policy_network_allow_dns: Option<bool>,
+
+    /// Comma-separated allowed CIDRs (e.g. "10.0.0.0/8,172.16.0.0/12")
+    #[arg(long)]
+    policy_network_allowed_cidrs: Option<String>,
+
+    /// Comma-separated denied CIDRs (e.g. "169.254.169.254/32")
+    #[arg(long)]
+    policy_network_denied_cidrs: Option<String>,
+
+    /// Max concurrent outbound connections
+    #[arg(long)]
+    policy_network_max_outbound_connections: Option<u32>,
+
+    /// Max egress bytes (0 = unlimited)
+    #[arg(long)]
+    policy_network_max_egress_bytes: Option<u64>,
+
+    /// Max open file descriptors
+    #[arg(long)]
+    policy_fs_max_open_fds: Option<u32>,
+
+    /// Max filesystem write bytes (0 = unlimited)
+    #[arg(long)]
+    policy_fs_max_write_bytes: Option<u64>,
+
+    /// Allow file creation
+    #[arg(long)]
+    policy_fs_allow_file_create: Option<bool>,
+
+    /// Allow file deletion
+    #[arg(long)]
+    policy_fs_allow_file_delete: Option<bool>,
+
+    /// Comma-separated allowed filesystem paths
+    #[arg(long)]
+    policy_fs_allowed_paths: Option<String>,
 }
 
 fn parse_env_var(s: &str) -> Result<(String, String), String> {
@@ -108,7 +161,10 @@ pub async fn run(
     }
     println!("{} Artifact uploaded to {}", "✓".green(), upload_url);
 
-    // 4. Build AppConfig
+    // 4. Build policy config from CLI flags
+    let policy = build_policy_config(&args)?;
+
+    // 5. Build AppConfig
     let config = AppConfig {
         id: app_id.clone(),
         fuel_quota: FuelQuota(args.fuel),
@@ -123,10 +179,10 @@ pub async fn run(
         db_max_connections: None,
         rate_limit: None, // Use default rate limiting
         tenant_id: None,
-        policy: None,
+        policy,
     };
 
-    // 5. Publish deploy event
+    // 6. Publish deploy event
     let event = Event::DeployApp {
         app_id: app_id.clone(),
         config,
@@ -142,6 +198,132 @@ pub async fn run(
         app_id.0.cyan()
     );
     Ok(())
+}
+
+/// Build a `PolicyConfig` from the CLI flags.
+///
+/// If `--policy-profile` is given, start from that profile and overlay any
+/// explicit `--policy-network-*` / `--policy-fs-*` overrides on top.
+/// If no profile is given but individual flags are present, build a config
+/// with only the specified overrides (defaults fill in on `resolve()`).
+fn build_policy_config(args: &DeployArgs) -> Result<Option<common::policy::PolicyConfig>> {
+    use common::policy::{FilesystemPolicyConfig, NetworkPolicyConfig, PolicyProfile};
+
+    // Start from a profile if specified
+    let mut config = match args.policy_profile.as_deref() {
+        Some("http_api") => Some(PolicyProfile::HttpApi.to_config()),
+        Some("background_worker") => Some(PolicyProfile::BackgroundWorker.to_config()),
+        Some("static_site") => Some(PolicyProfile::StaticSite.to_config()),
+        Some("database_proxy") => Some(PolicyProfile::DatabaseProxy.to_config()),
+        Some("unrestricted") => Some(PolicyProfile::Unrestricted.to_config()),
+        Some(other) => {
+            anyhow::bail!(
+                "Unknown policy profile '{}'. Available: http_api, background_worker, static_site, database_proxy, unrestricted",
+                other
+            );
+        }
+        None => None,
+    };
+
+    // If any individual policy flag is set, we need a config to overlay onto
+    let has_network_overrides = args.policy_network_allow_outbound_tcp.is_some()
+        || args.policy_network_allow_outbound_udp.is_some()
+        || args.policy_network_allow_dns.is_some()
+        || args.policy_network_allowed_cidrs.is_some()
+        || args.policy_network_denied_cidrs.is_some()
+        || args.policy_network_max_outbound_connections.is_some()
+        || args.policy_network_max_egress_bytes.is_some();
+
+    let has_fs_overrides = args.policy_fs_max_open_fds.is_some()
+        || args.policy_fs_max_write_bytes.is_some()
+        || args.policy_fs_allow_file_create.is_some()
+        || args.policy_fs_allow_file_delete.is_some()
+        || args.policy_fs_allowed_paths.is_some();
+
+    if has_network_overrides || has_fs_overrides {
+        config = Some(config.unwrap_or_default());
+
+        let cfg = config.as_mut().unwrap();
+
+        // Overlay network overrides
+        if has_network_overrides {
+            let net = cfg.network.get_or_insert_with(NetworkPolicyConfig::default);
+            if let Some(v) = args.policy_network_allow_outbound_tcp {
+                net.allow_outbound_tcp = Some(v);
+            }
+            if let Some(v) = args.policy_network_allow_outbound_udp {
+                net.allow_outbound_udp = Some(v);
+            }
+            if let Some(v) = args.policy_network_allow_dns {
+                net.allow_dns = Some(v);
+            }
+            if let Some(ref cidrs) = args.policy_network_allowed_cidrs {
+                net.allowed_cidrs = Some(parse_cidr_list(cidrs)?);
+            }
+            if let Some(ref cidrs) = args.policy_network_denied_cidrs {
+                net.denied_cidrs = Some(parse_cidr_list(cidrs)?);
+            }
+            if let Some(v) = args.policy_network_max_outbound_connections {
+                net.max_outbound_connections = Some(v);
+            }
+            if let Some(v) = args.policy_network_max_egress_bytes {
+                net.max_egress_bytes = Some(v);
+            }
+        }
+
+        // Overlay filesystem overrides
+        if has_fs_overrides {
+            let fs = cfg
+                .filesystem
+                .get_or_insert_with(FilesystemPolicyConfig::default);
+            if let Some(v) = args.policy_fs_max_open_fds {
+                fs.max_open_fds = Some(v);
+            }
+            if let Some(v) = args.policy_fs_max_write_bytes {
+                fs.max_fs_write_bytes = Some(v);
+            }
+            if let Some(v) = args.policy_fs_allow_file_create {
+                fs.allow_file_create = Some(v);
+            }
+            if let Some(v) = args.policy_fs_allow_file_delete {
+                fs.allow_file_delete = Some(v);
+            }
+            if let Some(ref paths) = args.policy_fs_allowed_paths {
+                fs.allowed_paths = Some(paths.split(',').map(|s| s.trim().to_string()).collect());
+            }
+        }
+    }
+
+    // Validate CIDRs early so we reject bad deployments
+    if let Some(ref cfg) = config {
+        if let Some(ref net) = cfg.network {
+            if let Some(ref cidrs) = net.allowed_cidrs {
+                for cidr in cidrs {
+                    if cidr.parse::<ipnet::IpNet>().is_err() {
+                        anyhow::bail!("Invalid allowed CIDR: {:?}", cidr);
+                    }
+                }
+            }
+            if let Some(ref cidrs) = net.denied_cidrs {
+                for cidr in cidrs {
+                    if cidr.parse::<ipnet::IpNet>().is_err() {
+                        anyhow::bail!("Invalid denied CIDR: {:?}", cidr);
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(config)
+}
+
+/// Parse a comma-separated CIDR string into a Vec<String>.
+fn parse_cidr_list(cidrs: &str) -> Result<Vec<String>> {
+    Ok(cidrs
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect())
 }
 
 pub async fn remove(app_id_str: &str, bus: &NatsBus) -> Result<()> {

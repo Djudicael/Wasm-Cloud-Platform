@@ -3,6 +3,7 @@ pub mod custom_pipe;
 pub mod executor;
 pub mod limits;
 pub mod policy_tracker;
+pub mod policy_wasi;
 
 #[cfg(test)]
 mod tests;

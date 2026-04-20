@@ -11,6 +11,7 @@ async-trait = "0.1"
 tokio = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+chrono = { workspace = true }
 common = { path = "../common" }
 runtime = { path = "../runtime" }
 storage = { path = "../storage" }

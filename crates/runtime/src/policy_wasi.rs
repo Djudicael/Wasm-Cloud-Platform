@@ -4,7 +4,7 @@
 //! per-instance policies before delegating to the real implementation.
 
 use crate::executor::StoreState;
-use crate::policy_tracker::{PolicyDenied, PolicyEnforcer};
+use crate::policy_tracker::PolicyDenied;
 use wasmtime::AsContextMut;
 
 /// Check outbound connection policy before a TCP connect.
@@ -14,7 +14,8 @@ pub fn check_tcp_connect_policy(
     dest_ip: std::net::IpAddr,
     dest_port: u16,
 ) -> Result<(), PolicyDenied> {
-    let state = store.as_context_mut().data_mut();
+    let mut ctx = store.as_context_mut();
+    let state = ctx.data_mut();
     state
         .policy_enforcer
         .check_outbound_tcp_connect(dest_ip, dest_port)
@@ -22,13 +23,15 @@ pub fn check_tcp_connect_policy(
 
 /// Record a successful TCP connection.
 pub fn record_tcp_connect(store: &mut impl AsContextMut<Data = StoreState>) {
-    let state = store.as_context_mut().data_mut();
+    let mut ctx = store.as_context_mut();
+    let state = ctx.data_mut();
     state.policy_enforcer.record_outbound_connect();
 }
 
 /// Record a TCP disconnection.
 pub fn record_tcp_disconnect(store: &mut impl AsContextMut<Data = StoreState>) {
-    let state = store.as_context_mut().data_mut();
+    let mut ctx = store.as_context_mut();
+    let state = ctx.data_mut();
     state.policy_enforcer.record_outbound_disconnect();
 }
 
@@ -37,13 +40,15 @@ pub fn check_egress_policy(
     store: &mut impl AsContextMut<Data = StoreState>,
     bytes: u64,
 ) -> Result<(), PolicyDenied> {
-    let state = store.as_context_mut().data_mut();
+    let mut ctx = store.as_context_mut();
+    let state = ctx.data_mut();
     state.policy_enforcer.check_egress(bytes)
 }
 
 /// Record egress bytes after a successful send.
 pub fn record_egress(store: &mut impl AsContextMut<Data = StoreState>, bytes: u64) {
-    let state = store.as_context_mut().data_mut();
+    let mut ctx = store.as_context_mut();
+    let state = ctx.data_mut();
     state.policy_enforcer.record_egress(bytes);
 }
 
@@ -51,7 +56,8 @@ pub fn record_egress(store: &mut impl AsContextMut<Data = StoreState>, bytes: u6
 pub fn check_dns_policy(
     store: &mut impl AsContextMut<Data = StoreState>,
 ) -> Result<(), PolicyDenied> {
-    let state = store.as_context_mut().data_mut();
+    let mut ctx = store.as_context_mut();
+    let state = ctx.data_mut();
     state.policy_enforcer.check_dns_lookup()
 }
 
@@ -60,7 +66,8 @@ pub fn check_bind_policy(
     store: &mut impl AsContextMut<Data = StoreState>,
     port: u16,
 ) -> Result<(), PolicyDenied> {
-    let state = store.as_context_mut().data_mut();
+    let mut ctx = store.as_context_mut();
+    let state = ctx.data_mut();
     state.policy_enforcer.check_bind(port)
 }
 
@@ -68,19 +75,22 @@ pub fn check_bind_policy(
 pub fn check_fd_open_policy(
     store: &mut impl AsContextMut<Data = StoreState>,
 ) -> Result<(), PolicyDenied> {
-    let state = store.as_context_mut().data_mut();
+    let mut ctx = store.as_context_mut();
+    let state = ctx.data_mut();
     state.policy_enforcer.check_fd_open()
 }
 
 /// Record an FD open.
 pub fn record_fd_open(store: &mut impl AsContextMut<Data = StoreState>) {
-    let state = store.as_context_mut().data_mut();
+    let mut ctx = store.as_context_mut();
+    let state = ctx.data_mut();
     state.policy_enforcer.record_fd_open();
 }
 
 /// Record an FD close.
 pub fn record_fd_close(store: &mut impl AsContextMut<Data = StoreState>) {
-    let state = store.as_context_mut().data_mut();
+    let mut ctx = store.as_context_mut();
+    let state = ctx.data_mut();
     state.policy_enforcer.record_fd_close();
 }
 
@@ -89,12 +99,14 @@ pub fn check_fs_write_policy(
     store: &mut impl AsContextMut<Data = StoreState>,
     bytes: u64,
 ) -> Result<(), PolicyDenied> {
-    let state = store.as_context_mut().data_mut();
+    let mut ctx = store.as_context_mut();
+    let state = ctx.data_mut();
     state.policy_enforcer.check_fs_write(bytes)
 }
 
 /// Record filesystem write bytes.
 pub fn record_fs_write(store: &mut impl AsContextMut<Data = StoreState>, bytes: u64) {
-    let state = store.as_context_mut().data_mut();
+    let mut ctx = store.as_context_mut();
+    let state = ctx.data_mut();
     state.policy_enforcer.record_fs_write(bytes);
 }

@@ -1,0 +1,119 @@
+# Prometheus alerting rules for WASI policy enforcement violations.
+#
+# These rules fire when Wasm instances repeatedly hit policy limits,
+# indicating either misconfigured policies or potentially malicious behavior.
+#
+# Deploy alongside the platform's Prometheus scrape config.
+# Usage: prometheus --rule.files=deploy/prometheus/wasi_policy_alerts.yml
+
+groups:
+  - name: wasi_policy
+    rules:
+      - alert: WasiPolicyConnectionDenied
+        expr: rate(wasm_policy_connection_denied_total[5m]) > 10
+        for: 2m
+        labels:
+          severity: warning
+          component: wasi_policy
+        annotations:
+          summary: "High rate of denied outbound connections on {{ $labels.node }}"
+          description: >-
+            An app is attempting outbound connections that violate its network
+            policy at a rate exceeding 10/min over the last 5 minutes. This may
+            indicate a misconfigured policy or an app trying to reach
+            unauthorized external services.
+
+      - alert: WasiPolicyFdExhaustion
+        expr: rate(wasm_policy_fd_denied_total[5m]) > 5
+        for: 2m
+        labels:
+          severity: warning
+          component: wasi_policy
+        annotations:
+          summary: "FD limit being hit frequently on {{ $labels.node }}"
+          description: >-
+            An app is trying to open more file descriptors than its policy
+            allows at a rate exceeding 5/min over the last 5 minutes. This may
+            indicate a file descriptor leak or a need to raise the max_open_fds
+            limit in the app's policy configuration.
+
+      - alert: WasiPolicyEgressDenied
+        expr: rate(wasm_policy_egress_denied_total[5m]) > 5
+        for: 2m
+        labels:
+          severity: warning
+          component: wasi_policy
+        annotations:
+          summary: "Egress limit being hit on {{ $labels.node }}"
+          description: >-
+            An app is trying to send more data than its egress policy allows at
+            a rate exceeding 5/min over the last 5 minutes. This may indicate a
+            need to raise the max_egress_bytes limit or investigate unexpected
+            data exfiltration attempts.
+
+      - alert: WasiPolicyDnsDenied
+        expr: rate(wasm_policy_dns_denied_total[5m]) > 5
+        for: 2m
+        labels:
+          severity: info
+          component: wasi_policy
+        annotations:
+          summary: "DNS lookups denied on {{ $labels.node }}"
+          description: >-
+            An app is attempting DNS lookups while DNS is disabled by policy.
+            This may indicate a misconfigured app or a potential DNS
+            exfiltration attempt. Consider enabling DNS or investigating the
+            app's network behavior.
+
+      - alert: WasiPolicyBindDenied
+        expr: rate(wasm_policy_bind_denied_total[5m]) > 3
+        for: 2m
+        labels:
+          severity: info
+          component: wasi_policy
+        annotations:
+          summary: "Port bind attempts denied on {{ $labels.node }}"
+          description: >-
+            An app is attempting to bind to ports not allowed by its policy.
+            This may indicate a misconfigured app trying to listen on
+            unauthorized ports.
+
+      - alert: WasiPolicyFsWriteDenied
+        expr: rate(wasm_policy_fs_write_denied_total[5m]) > 5
+        for: 2m
+        labels:
+          severity: info
+          component: wasi_policy
+        annotations:
+          summary: "Filesystem write denied on {{ $labels.node }}"
+          description: >-
+            An app is attempting filesystem writes that exceed its policy
+            limits. This may indicate a need to raise max_fs_write_bytes or
+            enable allow_file_create in the app's policy configuration.
+
+      - alert: WasiPolicyHighOutboundConnections
+        expr: wasm_policy_active_outbound_connections > 500
+        for: 5m
+        labels:
+          severity: info
+          component: wasi_policy
+        annotations:
+          summary: "High number of active outbound connections on {{ $labels.node }}"
+          description: >-
+            The total active outbound connections across all instances exceeds
+            500. This may indicate a connection leak or an app making excessive
+            outbound connections. Consider lowering max_outbound_connections in
+            the relevant app policies.
+
+      - alert: WasiPolicyHighOpenFds
+        expr: wasm_policy_open_fds > 1000
+        for: 5m
+        labels:
+          severity: info
+          component: wasi_policy
+        annotations:
+          summary: "High number of open file descriptors on {{ $labels.node }}"
+          description: >-
+            The total open file descriptors across all instances exceeds 1000.
+            This may indicate an FD leak or apps opening too many files.
+            Consider lowering max_open_fds in the relevant app policies.

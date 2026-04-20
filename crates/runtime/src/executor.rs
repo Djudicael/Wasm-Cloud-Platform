@@ -74,15 +74,11 @@ impl PreparedModule {
         tracing::info!(instance_id = %id.0, "instance ID created");
 
         // Resolve the policy for this instance
-        let policy = self
-            .config
-            .policy
-            .as_ref()
-            .map(|p| p.resolve(port))
-            .unwrap_or_else(|| {
-                // If no policy config, create a default one with the assigned port
-                common::policy::PolicyConfig::default().resolve(port)
-            });
+        let policy = match self.config.policy.as_ref() {
+            Some(p) => p.resolve(port),
+            None => common::policy::PolicyConfig::default().resolve(port),
+        }
+        .map_err(|e| PlatformError::runtime(format!("invalid policy config: {e}")))?;
 
         // Build WASI environment (Preview 2)
         // Use inherit for now - can add custom streams later
@@ -90,11 +86,30 @@ impl PreparedModule {
         builder.inherit_stdout();
         builder.inherit_stderr();
 
-        // Network configuration based on policy
+        // Network configuration based on policy.
+        //
+        // TODO(step-33): Per-connection CIDR filtering is not possible with
+        // Wasmtime 43.x's WASI Preview 2 API. The builder only exposes coarse
+        // allow_tcp(bool) / allow_udp(bool) / allow_ip_name_lookup(bool) switches.
+        // There is no hook to intercept individual socket connect() calls and
+        // inspect the destination IP before the connection is established.
+        // The PolicyEnforcer still checks CIDRs (for audit/metrics), but the
+        // actual enforcement at the WASI layer is all-or-nothing per protocol.
+        // If Wasmtime adds socket-level interception hooks in a future version,
+        // we can upgrade to true per-destination filtering here.
         builder.inherit_network();
         builder.allow_tcp(policy.network.allow_outbound_tcp || policy.network.allow_inbound);
         builder.allow_udp(policy.network.allow_outbound_udp);
         builder.allow_ip_name_lookup(policy.network.allow_dns);
+
+        // TODO(step-33): PolicyTcpStream wrapper for egress byte-counting is not
+        // feasible with WASI Preview 2's Component Model. Sockets are managed as
+        // opaque resource handles inside the ResourceTable — the host cannot
+        // intercept individual write() calls on a TcpStream to count bytes or
+        // enforce max_egress_bytes per-write. The PolicyEnforcer tracks egress
+        // bytes when record_egress() is called explicitly, but there is no
+        // automatic per-write enforcement. This would require Wasmtime to expose
+        // a writable-stream wrapper or write-hook API.
 
         tracing::debug!(
             allow_tcp = %(policy.network.allow_outbound_tcp || policy.network.allow_inbound),
@@ -109,6 +124,14 @@ impl PreparedModule {
         // The app will bind to 0.0.0.0:<port>; the Supervisor maps this port.
         let port_str = port.to_string();
         builder.env("PORT", &port_str);
+
+        // TODO(step-33): Preopened directories are not yet configured from
+        // policy.filesystem.allowed_paths. WasiCtxBuilder::preopened_dir()
+        // exists and can be wired up here — this is a complexity gap, not a
+        // library limitation. When implemented, each path in allowed_paths
+        // should be preopened with read-only or read-write permissions based
+        // on allow_file_create / allow_file_delete. Currently the Wasm module
+        // inherits the host filesystem with no restrictions at the WASI layer.
 
         let state = StoreState {
             ctx: builder.build(),
@@ -262,12 +285,20 @@ impl RunningInstance {
         let ram_bytes = self.read_memory_usage();
         let wall_clock_ms = start.elapsed().as_millis() as u64;
 
-        // TODO: Update to collect policy counters instead of io_stats
+        // Populate io_stats from policy counters
+        let counters = &self.store.data().policy_enforcer.counters;
         let io_stats = IoStats {
-            open_fds_peak: 0,
-            fs_bytes_written: 0,
-            net_egress_bytes: 0,
-            outbound_connections: 0,
+            open_fds_peak: counters.open_fds.load(std::sync::atomic::Ordering::Relaxed),
+            fs_bytes_written: counters
+                .fs_write_bytes
+                .load(std::sync::atomic::Ordering::Relaxed),
+            net_egress_bytes: counters
+                .egress_bytes
+                .load(std::sync::atomic::Ordering::Relaxed),
+            outbound_connections: counters
+                .outbound_connections_total
+                .load(std::sync::atomic::Ordering::Relaxed)
+                as u32,
         };
 
         ExecutionStats {

@@ -27,3 +27,4 @@ common = { path = "../common" }
 messaging = { path = "../messaging" }
 storage = { path = "../storage" }
 billing = { path = "../billing" }
+ipnet = "2.12.0"

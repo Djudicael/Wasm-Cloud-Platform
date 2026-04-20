@@ -1,7 +1,8 @@
 // crates/metrics/src/exporter.rs
 use axum::{response::IntoResponse, routing::get, Router};
 use prometheus::{
-    CounterVec, GaugeVec, HistogramOpts, HistogramVec, IntCounterVec, Opts, Registry,
+    CounterVec, GaugeVec, HistogramOpts, HistogramVec, IntCounter, IntCounterVec, IntGauge, Opts,
+    Registry,
 };
 use std::sync::Arc;
 
@@ -15,12 +16,14 @@ pub struct Metrics {
     pub active_instances: GaugeVec,
     pub trap_total: IntCounterVec,
     pub platform_info: IntCounterVec,
+    pub policy: PolicyMetrics,
 }
 
 impl Metrics {
     #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
         let registry = Registry::new();
+        let policy = PolicyMetrics::new(&registry);
 
         let requests_total = IntCounterVec::new(
             Opts::new("wasm_requests_total", "Total HTTP requests handled"),
@@ -100,6 +103,7 @@ impl Metrics {
             active_instances,
             trap_total,
             platform_info,
+            policy,
         }
     }
 
@@ -153,4 +157,121 @@ pub fn metrics_router(metrics: Arc<Metrics>) -> Router {
     Router::new()
         .route("/metrics", get(metrics_handler))
         .with_state(metrics)
+}
+
+/// Prometheus metrics for WASI policy enforcement violations.
+///
+/// Tracks how many times each policy type was denied across all instances,
+/// plus gauges for current active outbound connections and open FDs.
+/// These feed the alerting rules in `deploy/prometheus/wasi_policy_alerts.yml`.
+#[derive(Clone)]
+pub struct PolicyMetrics {
+    /// Total outbound connections denied by policy.
+    pub connection_denied_total: IntCounter,
+
+    /// Total egress operations denied by policy.
+    pub egress_denied_total: IntCounter,
+
+    /// Total FD open operations denied by policy.
+    pub fd_denied_total: IntCounter,
+
+    /// Total filesystem write operations denied by policy.
+    pub fs_write_denied_total: IntCounter,
+
+    /// Total bind operations denied by policy.
+    pub bind_denied_total: IntCounter,
+
+    /// Total DNS lookups denied by policy.
+    pub dns_denied_total: IntCounter,
+
+    /// Current active outbound connections across all instances.
+    pub active_outbound_connections: IntGauge,
+
+    /// Current open FDs across all instances.
+    pub open_fds: IntGauge,
+}
+
+impl PolicyMetrics {
+    pub fn new(registry: &Registry) -> Self {
+        let connection_denied_total = IntCounter::with_opts(Opts::new(
+            "wasm_policy_connection_denied_total",
+            "Outbound connections denied by WASI policy",
+        ))
+        .unwrap();
+        registry
+            .register(Box::new(connection_denied_total.clone()))
+            .unwrap();
+
+        let egress_denied_total = IntCounter::with_opts(Opts::new(
+            "wasm_policy_egress_denied_total",
+            "Egress operations denied by WASI policy",
+        ))
+        .unwrap();
+        registry
+            .register(Box::new(egress_denied_total.clone()))
+            .unwrap();
+
+        let fd_denied_total = IntCounter::with_opts(Opts::new(
+            "wasm_policy_fd_denied_total",
+            "FD open operations denied by WASI policy",
+        ))
+        .unwrap();
+        registry
+            .register(Box::new(fd_denied_total.clone()))
+            .unwrap();
+
+        let fs_write_denied_total = IntCounter::with_opts(Opts::new(
+            "wasm_policy_fs_write_denied_total",
+            "Filesystem write operations denied by WASI policy",
+        ))
+        .unwrap();
+        registry
+            .register(Box::new(fs_write_denied_total.clone()))
+            .unwrap();
+
+        let bind_denied_total = IntCounter::with_opts(Opts::new(
+            "wasm_policy_bind_denied_total",
+            "Bind operations denied by WASI policy",
+        ))
+        .unwrap();
+        registry
+            .register(Box::new(bind_denied_total.clone()))
+            .unwrap();
+
+        let dns_denied_total = IntCounter::with_opts(Opts::new(
+            "wasm_policy_dns_denied_total",
+            "DNS lookups denied by WASI policy",
+        ))
+        .unwrap();
+        registry
+            .register(Box::new(dns_denied_total.clone()))
+            .unwrap();
+
+        let active_outbound_connections = IntGauge::with_opts(Opts::new(
+            "wasm_policy_active_outbound_connections",
+            "Current active outbound connections across all instances",
+        ))
+        .unwrap();
+        registry
+            .register(Box::new(active_outbound_connections.clone()))
+            .unwrap();
+
+        let open_fds = IntGauge::with_opts(Opts::new(
+            "wasm_policy_open_fds",
+            "Current open file descriptors across all instances",
+        ))
+        .unwrap();
+        registry.register(Box::new(open_fds.clone())).unwrap();
+
+        PolicyMetrics {
+            connection_denied_total,
+            egress_denied_total,
+            fd_denied_total,
+            fs_write_denied_total,
+            bind_denied_total,
+            dns_denied_total,
+            active_outbound_connections,
+            open_fds,
+        }
+    }
 }

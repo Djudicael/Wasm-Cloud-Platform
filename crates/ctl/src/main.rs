@@ -9,6 +9,7 @@ mod cmds {
     pub mod logs;
     pub mod node;
     pub mod platform;
+    pub mod policy;
     pub mod routes;
     pub mod secrets;
     pub mod status;
@@ -75,6 +76,11 @@ enum Commands {
         store_path: String,
         #[command(subcommand)]
         action: BillingAction,
+    },
+    /// WASI policy enforcement: view policies, violations, and profiles
+    Policy {
+        #[command(subcommand)]
+        action: cmds::policy::PolicyCommand,
     },
 }
 
@@ -436,6 +442,7 @@ async fn main() -> anyhow::Result<()> {
             }
             BillingAction::Export { output } => cmds::billing::export(&store_path, &output).await?,
         },
+        Commands::Policy { action } => cmds::policy::run(action, &cli.node_api, &http).await?,
     }
     Ok(())
 }

@@ -368,6 +368,18 @@ impl Supervisor {
             })
             .await;
 
+        // TODO(step-33): eBPF coordination — the instance's host PID should be
+        // registered in the eBPF MONITORED_PIDS map so the kernel-level monitor
+        // can enforce per-process limits (defense in depth behind WASI layer).
+        // Additionally, the PolicyCounters from the instance's PolicyEnforcer
+        // should be exported to the eBPF metrics pipeline so that kernel-level
+        // observations (e.g. actual syscall counts) can be cross-referenced with
+        // WASI-layer denials. This is an integration gap, not a library limitation
+        // — both the eBPF monitor (Step 30) and the PolicyEnforcer exist, they
+        // just need to be wired together. The PID is available from the
+        // spawn_blocking task via std::thread::current().id() or by tracking the
+        // tokio task's thread after it starts.
+
         info!(app = %app_id.0, %addr, "instance ready");
         Ok(addr)
     }

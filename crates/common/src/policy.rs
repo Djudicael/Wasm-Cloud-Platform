@@ -124,7 +124,7 @@ impl Default for PolicyConfig {
 
 /// Operator-facing network policy config (in TOML / deploy manifest).
 /// All fields are optional — None means "use the platform default".
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct NetworkPolicyConfig {
     pub allow_outbound_tcp: Option<bool>,
     pub allow_outbound_udp: Option<bool>,
@@ -136,7 +136,7 @@ pub struct NetworkPolicyConfig {
 }
 
 /// Operator-facing filesystem policy config.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct FilesystemPolicyConfig {
     pub max_open_fds: Option<u32>,
     pub max_fs_write_bytes: Option<u64>,
@@ -149,31 +149,49 @@ pub struct FilesystemPolicyConfig {
 impl PolicyConfig {
     /// Resolve this config into a full InstancePolicy, applying defaults
     /// for any fields not explicitly set.
-    pub fn resolve(&self, assigned_port: u16) -> InstancePolicy {
+    ///
+    /// Validates CIDR strings and policy constraints. Returns an error if
+    /// any CIDR is malformed or if required limits are zero.
+    pub fn resolve(&self, assigned_port: u16) -> Result<InstancePolicy, String> {
         let net_default = NetworkPolicy::default();
         let fs_default = FilesystemPolicy::default();
 
         let network = match &self.network {
-            Some(cfg) => NetworkPolicy {
-                allow_outbound_tcp: cfg
-                    .allow_outbound_tcp
-                    .unwrap_or(net_default.allow_outbound_tcp),
-                allow_outbound_udp: cfg
-                    .allow_outbound_udp
-                    .unwrap_or(net_default.allow_outbound_udp),
-                allow_dns: cfg.allow_dns.unwrap_or(net_default.allow_dns),
-                allowed_cidrs: cfg
-                    .allowed_cidrs
-                    .clone()
-                    .unwrap_or(net_default.allowed_cidrs),
-                denied_cidrs: cfg.denied_cidrs.clone().unwrap_or(net_default.denied_cidrs),
-                max_outbound_connections: cfg
-                    .max_outbound_connections
-                    .unwrap_or(net_default.max_outbound_connections),
-                max_egress_bytes: cfg.max_egress_bytes.unwrap_or(net_default.max_egress_bytes),
-                allowed_bind_ports: vec![assigned_port],
-                allow_inbound: true,
-            },
+            Some(cfg) => {
+                // Validate CIDR strings before using them
+                if let Some(ref cidrs) = cfg.allowed_cidrs {
+                    validate_cidrs(cidrs)?;
+                }
+                if let Some(ref cidrs) = cfg.denied_cidrs {
+                    validate_cidrs(cidrs)?;
+                }
+                // Validate connection limit is positive
+                if let Some(limit) = cfg.max_outbound_connections {
+                    if limit == 0 {
+                        return Err("max_outbound_connections must be > 0".to_string());
+                    }
+                }
+                NetworkPolicy {
+                    allow_outbound_tcp: cfg
+                        .allow_outbound_tcp
+                        .unwrap_or(net_default.allow_outbound_tcp),
+                    allow_outbound_udp: cfg
+                        .allow_outbound_udp
+                        .unwrap_or(net_default.allow_outbound_udp),
+                    allow_dns: cfg.allow_dns.unwrap_or(net_default.allow_dns),
+                    allowed_cidrs: cfg
+                        .allowed_cidrs
+                        .clone()
+                        .unwrap_or(net_default.allowed_cidrs),
+                    denied_cidrs: cfg.denied_cidrs.clone().unwrap_or(net_default.denied_cidrs),
+                    max_outbound_connections: cfg
+                        .max_outbound_connections
+                        .unwrap_or(net_default.max_outbound_connections),
+                    max_egress_bytes: cfg.max_egress_bytes.unwrap_or(net_default.max_egress_bytes),
+                    allowed_bind_ports: vec![assigned_port],
+                    allow_inbound: true,
+                }
+            }
             None => NetworkPolicy {
                 allowed_bind_ports: vec![assigned_port],
                 ..net_default
@@ -181,33 +199,52 @@ impl PolicyConfig {
         };
 
         let filesystem = match &self.filesystem {
-            Some(cfg) => FilesystemPolicy {
-                max_open_fds: cfg.max_open_fds.unwrap_or(fs_default.max_open_fds),
-                max_fs_write_bytes: cfg
-                    .max_fs_write_bytes
-                    .unwrap_or(fs_default.max_fs_write_bytes),
-                max_fs_read_bytes: cfg
-                    .max_fs_read_bytes
-                    .unwrap_or(fs_default.max_fs_read_bytes),
-                allow_file_create: cfg
-                    .allow_file_create
-                    .unwrap_or(fs_default.allow_file_create),
-                allow_file_delete: cfg
-                    .allow_file_delete
-                    .unwrap_or(fs_default.allow_file_delete),
-                allowed_paths: cfg
-                    .allowed_paths
-                    .clone()
-                    .unwrap_or(fs_default.allowed_paths),
-            },
+            Some(cfg) => {
+                // Validate FD limit is positive
+                if let Some(limit) = cfg.max_open_fds {
+                    if limit == 0 {
+                        return Err("max_open_fds must be > 0".to_string());
+                    }
+                }
+                FilesystemPolicy {
+                    max_open_fds: cfg.max_open_fds.unwrap_or(fs_default.max_open_fds),
+                    max_fs_write_bytes: cfg
+                        .max_fs_write_bytes
+                        .unwrap_or(fs_default.max_fs_write_bytes),
+                    max_fs_read_bytes: cfg
+                        .max_fs_read_bytes
+                        .unwrap_or(fs_default.max_fs_read_bytes),
+                    allow_file_create: cfg
+                        .allow_file_create
+                        .unwrap_or(fs_default.allow_file_create),
+                    allow_file_delete: cfg
+                        .allow_file_delete
+                        .unwrap_or(fs_default.allow_file_delete),
+                    allowed_paths: cfg
+                        .allowed_paths
+                        .clone()
+                        .unwrap_or(fs_default.allowed_paths),
+                }
+            }
             None => fs_default,
         };
 
-        InstancePolicy {
+        Ok(InstancePolicy {
             network,
             filesystem,
+        })
+    }
+}
+
+/// Validate that all strings in a CIDR list are parseable.
+/// Returns `Ok(())` if all are valid, or `Err` with the first invalid CIDR.
+pub fn validate_cidrs(cidrs: &[String]) -> Result<(), String> {
+    for cidr in cidrs {
+        if cidr.parse::<ipnet::IpNet>().is_err() {
+            return Err(format!("invalid CIDR: {:?}", cidr));
         }
     }
+    Ok(())
 }
 
 /// Pre-defined policy profiles for common application types.
@@ -337,6 +374,92 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_validate_cidrs_valid() {
+        let cidrs = vec![
+            "10.0.0.0/8".to_string(),
+            "172.16.0.0/12".to_string(),
+            "192.168.0.0/16".to_string(),
+            "169.254.169.254/32".to_string(),
+            "::1/128".to_string(),
+            "fd00::/8".to_string(),
+        ];
+        assert!(validate_cidrs(&cidrs).is_ok());
+    }
+
+    #[test]
+    fn test_validate_cidrs_invalid() {
+        let cidrs = vec!["not-a-cidr".to_string()];
+        assert!(validate_cidrs(&cidrs).is_err());
+        assert!(validate_cidrs(&cidrs).unwrap_err().contains("invalid CIDR"));
+    }
+
+    #[test]
+    fn test_validate_cidrs_mixed() {
+        let cidrs = vec!["10.0.0.0/8".to_string(), "garbage".to_string()];
+        let result = validate_cidrs(&cidrs);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("garbage"));
+    }
+
+    #[test]
+    fn test_resolve_rejects_zero_max_connections() {
+        let config = PolicyConfig {
+            network: Some(NetworkPolicyConfig {
+                allow_outbound_tcp: Some(true),
+                allow_outbound_udp: None,
+                allow_dns: None,
+                allowed_cidrs: None,
+                denied_cidrs: None,
+                max_outbound_connections: Some(0),
+                max_egress_bytes: None,
+            }),
+            filesystem: None,
+        };
+        let result = config.resolve(8080);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .contains("max_outbound_connections must be > 0"));
+    }
+
+    #[test]
+    fn test_resolve_rejects_zero_max_open_fds() {
+        let config = PolicyConfig {
+            network: None,
+            filesystem: Some(FilesystemPolicyConfig {
+                max_open_fds: Some(0),
+                max_fs_write_bytes: None,
+                max_fs_read_bytes: None,
+                allow_file_create: None,
+                allow_file_delete: None,
+                allowed_paths: None,
+            }),
+        };
+        let result = config.resolve(8080);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("max_open_fds must be > 0"));
+    }
+
+    #[test]
+    fn test_resolve_rejects_invalid_cidr() {
+        let config = PolicyConfig {
+            network: Some(NetworkPolicyConfig {
+                allow_outbound_tcp: Some(true),
+                allow_outbound_udp: None,
+                allow_dns: None,
+                allowed_cidrs: Some(vec!["not-valid".to_string()]),
+                denied_cidrs: None,
+                max_outbound_connections: None,
+                max_egress_bytes: None,
+            }),
+            filesystem: None,
+        };
+        let result = config.resolve(8080);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("invalid CIDR"));
+    }
+
+    #[test]
     fn test_network_policy_default() {
         let policy = NetworkPolicy::default();
         assert!(policy.allow_outbound_tcp);
@@ -364,7 +487,7 @@ mod tests {
     #[test]
     fn test_policy_config_resolve_defaults() {
         let config = PolicyConfig::default();
-        let instance_policy = config.resolve(8080);
+        let instance_policy = config.resolve(8080).unwrap();
         assert_eq!(instance_policy.network.allowed_bind_ports, vec![8080]);
         assert!(instance_policy.network.allow_outbound_tcp);
         assert!(!instance_policy.network.allow_outbound_udp);
@@ -393,7 +516,7 @@ mod tests {
                 allowed_paths: Some(vec!["/tmp".to_string()]),
             }),
         };
-        let instance_policy = config.resolve(9090);
+        let instance_policy = config.resolve(9090).unwrap();
         assert_eq!(instance_policy.network.allowed_bind_ports, vec![9090]);
         assert!(!instance_policy.network.allow_outbound_tcp);
         assert!(instance_policy.network.allow_outbound_udp);
