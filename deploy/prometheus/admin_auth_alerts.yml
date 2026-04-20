@@ -1,0 +1,109 @@
+# Admin API Authentication Alerting Rules
+#
+# These alerts detect brute-force attacks, misconfigured tokens,
+# and other security issues on the admin API.
+#
+# Prerequisites:
+#   - wasm-node must be running with auth.enabled = true
+#   - Prometheus must be scraping the admin API /status/metrics endpoint
+#   - The wasm_admin_auth_successes_total, wasm_admin_auth_failures_total,
+#     and wasm_admin_rate_limited_total counters must be exposed
+
+groups:
+  - name: admin_auth
+    rules:
+      # ── Brute-Force Detection ──────────────────────────────────────────
+      # A high rate of authentication failures suggests someone is trying
+      # to guess bearer tokens. At 10 req/s per IP, a 64-char hex token
+      # would take ~10^57 years to brute-force, but this alert catches
+      # distributed attacks from multiple IPs or compromised tokens.
+      - alert: AdminAuthBruteForce
+        expr: rate(wasm_admin_auth_failures_total[5m]) > 5
+        for: 2m
+        labels:
+          severity: critical
+          component: admin_api
+        annotations:
+          summary: "High rate of admin API auth failures on {{ $labels.node }}"
+          description: >-
+            More than 5 admin API authentication failures per second over the
+            last 5 minutes. This may indicate a brute-force attack on the admin
+            API. Consider blocking the source IP or rotating tokens immediately.
+
+      # ── No Successful Auth ─────────────────────────────────────────────
+      # If auth failures are occurring but no successful authentications,
+      # all configured tokens may be wrong or revoked.
+      - alert: AdminAuthNoToken
+        expr: >
+          rate(wasm_admin_auth_failures_total[1h]) > 0 and
+          rate(wasm_admin_auth_successes_total[1h]) == 0
+        for: 5m
+        labels:
+          severity: warning
+          component: admin_api
+        annotations:
+          summary: "Admin API auth failures with no successes on {{ $labels.node }}"
+          description: >-
+            All admin API requests are failing authentication over the last
+            hour. Check that the configured tokens are correct and that
+            operators have the right tokens. This may also indicate a
+            misconfigured monitoring system or CI/CD pipeline.
+
+      # ── Rate Limiting Active ───────────────────────────────────────────
+      # If the rate limiter is actively rejecting requests, someone is
+      # hitting the admin API too hard. This could be a misconfigured
+      # scraper, a DoS attempt, or a buggy client.
+      - alert: AdminRateLimitActive
+        expr: rate(wasm_admin_rate_limited_total[5m]) > 1
+        for: 5m
+        labels:
+          severity: warning
+          component: admin_api
+        annotations:
+          summary: "Admin API rate limiting is active on {{ $labels.node }}"
+          description: >-
+            The admin API rate limiter is rejecting more than 1 request per
+            second over the last 5 minutes. This could indicate a misconfigured
+            client, a DoS attempt, or an automated tool hitting the admin API
+            too aggressively.
+
+      # ── Auth Disabled in Production ────────────────────────────────────
+      # If the admin API has no auth metrics at all, authentication may be
+      # disabled. This alert fires when the node has been up for at least
+      # 10 minutes but no auth metrics have been recorded.
+      - alert: AdminAuthDisabled
+        expr: >
+          (time() - process_start_time_seconds) > 600 and
+          wasm_admin_auth_successes_total == 0 and
+          wasm_admin_auth_failures_total == 0
+        for: 5m
+        labels:
+          severity: info
+          component: admin_api
+        annotations:
+          summary: "Admin API authentication may be disabled on {{ $labels.node }}"
+          description: >-
+            No admin API authentication metrics have been recorded for over 10
+            minutes after node startup. This likely means authentication is
+            disabled (auth.enabled = false). In production, the admin API should
+            have authentication enabled to prevent unauthorized access to
+            configuration, rebuild, and garbage collection endpoints.
+
+      # ── Sustained Auth Failures ────────────────────────────────────────
+      # A low but sustained rate of auth failures over a long period may
+      # indicate a slow brute-force attack or a misconfigured service
+      # that keeps retrying with an old token.
+      - alert: AdminAuthSustainedFailures
+        expr: rate(wasm_admin_auth_failures_total[30m]) > 0.1
+        for: 15m
+        labels:
+          severity: warning
+          component: admin_api
+        annotations:
+          summary: "Sustained admin API auth failures on {{ $labels.node }}"
+          description: >-
+            A low but sustained rate of admin API authentication failures (more
+            than 0.1/sec over 30 minutes). This may indicate a misconfigured
+            service using an old/rotated token, or a slow brute-force attack.
+            Check if any services need their tokens updated after a recent
+            rotation.

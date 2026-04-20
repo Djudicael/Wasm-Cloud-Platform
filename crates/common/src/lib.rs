@@ -1,5 +1,7 @@
+pub mod auth;
 pub mod billing;
 pub mod config;
+pub mod crypto;
 pub mod error;
 pub mod gc;
 pub mod policy;

@@ -578,3 +578,141 @@ fn test_no_migration_when_already_current() {
     // No backup should be created since no migration was needed
     assert!(!backup_path.exists());
 }
+
+// ── Auth Config Persistence Tests ─────────────────────────────────────────────
+
+#[test]
+fn test_auth_config_save_load_roundtrip() {
+    let (store, _f) = make_store();
+
+    // No auth config saved yet
+    assert!(store.load_auth_config().unwrap().is_none());
+
+    // Save an auth config
+    let config = common::auth::AuthConfig {
+        enabled: true,
+        read_token: Some("read_token_abcdef1234567890".to_string()),
+        write_token: Some("write_token_fedcba0987654321".to_string()),
+        require_tls: true,
+        rate_limit_per_second: 10,
+        rate_limit_burst: 20,
+    };
+    store.save_auth_config(&config).unwrap();
+
+    // Load it back
+    let loaded = store.load_auth_config().unwrap().unwrap();
+    assert!(loaded.enabled);
+    assert_eq!(
+        loaded.read_token,
+        Some("read_token_abcdef1234567890".to_string())
+    );
+    assert_eq!(
+        loaded.write_token,
+        Some("write_token_fedcba0987654321".to_string())
+    );
+    assert!(loaded.require_tls);
+    assert_eq!(loaded.rate_limit_per_second, 10);
+    assert_eq!(loaded.rate_limit_burst, 20);
+}
+
+#[test]
+fn test_auth_config_survives_restart() {
+    let f = tempfile::NamedTempFile::new().unwrap();
+    let path = f.path().to_path_buf();
+
+    // Save auth config in first session
+    {
+        let store = Store::open(&path).unwrap();
+        let config = common::auth::AuthConfig {
+            enabled: true,
+            write_token: Some("my_secret_write_token_1234".to_string()),
+            read_token: None,
+            require_tls: false,
+            rate_limit_per_second: 5,
+            rate_limit_burst: 10,
+        };
+        store.save_auth_config(&config).unwrap();
+    }
+
+    // Reopen and verify the config persisted
+    {
+        let store = Store::open(&path).unwrap();
+        let loaded = store.load_auth_config().unwrap().unwrap();
+        assert!(loaded.enabled);
+        assert_eq!(
+            loaded.write_token,
+            Some("my_secret_write_token_1234".to_string())
+        );
+        assert!(loaded.read_token.is_none());
+        assert!(!loaded.require_tls);
+        assert_eq!(loaded.rate_limit_per_second, 5);
+        assert_eq!(loaded.rate_limit_burst, 10);
+    }
+}
+
+#[test]
+fn test_auth_config_delete() {
+    let (store, _f) = make_store();
+
+    // Save an auth config
+    let config = common::auth::AuthConfig {
+        enabled: true,
+        write_token: Some("token_to_be_deleted_1234".to_string()),
+        ..Default::default()
+    };
+    store.save_auth_config(&config).unwrap();
+    assert!(store.load_auth_config().unwrap().is_some());
+
+    // Delete it
+    store.delete_auth_config().unwrap();
+    assert!(store.load_auth_config().unwrap().is_none());
+}
+
+#[test]
+fn test_auth_config_overwrite() {
+    let (store, _f) = make_store();
+
+    // Save initial config
+    let config1 = common::auth::AuthConfig {
+        enabled: true,
+        write_token: Some("first_write_token_123456".to_string()),
+        read_token: Some("first_read_token_1234567".to_string()),
+        ..Default::default()
+    };
+    store.save_auth_config(&config1).unwrap();
+
+    // Overwrite with new config (simulates token rotation)
+    let config2 = common::auth::AuthConfig {
+        enabled: true,
+        write_token: Some("rotated_write_token_abcdef".to_string()),
+        read_token: Some("first_read_token_1234567".to_string()), // unchanged
+        ..Default::default()
+    };
+    store.save_auth_config(&config2).unwrap();
+
+    // Load and verify the new config
+    let loaded = store.load_auth_config().unwrap().unwrap();
+    assert_eq!(
+        loaded.write_token,
+        Some("rotated_write_token_abcdef".to_string())
+    );
+    assert_eq!(
+        loaded.read_token,
+        Some("first_read_token_1234567".to_string())
+    );
+}
+
+#[test]
+fn test_auth_config_disabled_default() {
+    let (store, _f) = make_store();
+
+    // Save a disabled (default) auth config
+    let config = common::auth::AuthConfig::default();
+    assert!(!config.enabled);
+    store.save_auth_config(&config).unwrap();
+
+    let loaded = store.load_auth_config().unwrap().unwrap();
+    assert!(!loaded.enabled);
+    assert!(loaded.read_token.is_none());
+    assert!(loaded.write_token.is_none());
+}

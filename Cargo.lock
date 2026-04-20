@@ -1069,6 +1069,7 @@ dependencies = [
  "chrono",
  "hex",
  "ipnet",
+ "rand 0.8.5",
  "serde",
  "serde_json",
  "sha2 0.11.0",
@@ -1418,6 +1419,7 @@ dependencies = [
  "storage",
  "tabled",
  "tokio",
+ "toml 0.8.23",
 ]
 
 [[package]]
@@ -3165,6 +3167,7 @@ dependencies = [
  "async-nats",
  "axum 0.8.8",
  "billing",
+ "chrono",
  "clap",
  "common",
  "config",

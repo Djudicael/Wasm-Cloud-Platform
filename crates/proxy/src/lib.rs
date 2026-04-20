@@ -1,4 +1,5 @@
 pub mod admin;
+pub mod auth_middleware;
 pub mod backpressure;
 pub mod config;
 pub mod dns_webhook;

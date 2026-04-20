@@ -24,6 +24,9 @@ pub enum AuditEventType {
     BinaryHashMismatch,
     RateLimitExceeded,
     PolicyViolation,
+    AdminApiCall,
+    AuthFailure,
+    TokenRotated,
 }
 
 pub fn write_audit_event(path: &str, event: &AuditEvent) {
@@ -136,5 +139,121 @@ mod tests {
         assert_eq!(parsed["details"]["denial_type"], "ConnectionLimitExceeded");
 
         fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn test_admin_api_call_audit_event() {
+        let path = "test_admin_api_call_audit.log";
+        let _ = fs::remove_file(path);
+
+        let event = AuditEvent {
+            timestamp: 1698158400,
+            node_id: "node-1".to_string(),
+            event_type: AuditEventType::AdminApiCall,
+            actor: "admin:write_token".to_string(),
+            app_id: "_platform".to_string(),
+            details: serde_json::json!({
+                "path": "/admin/rebuild",
+                "method": "POST",
+                "client_ip": "10.0.0.1",
+                "status_code": 200,
+            }),
+        };
+        write_audit_event(path, &event);
+
+        let contents = fs::read_to_string(path).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&contents).unwrap();
+        assert_eq!(parsed["event_type"], "admin_api_call");
+        assert_eq!(parsed["actor"], "admin:write_token");
+        assert_eq!(parsed["details"]["path"], "/admin/rebuild");
+        assert_eq!(parsed["details"]["method"], "POST");
+        assert_eq!(parsed["details"]["status_code"], 200);
+
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn test_auth_failure_audit_event() {
+        let path = "test_auth_failure_audit.log";
+        let _ = fs::remove_file(path);
+
+        let event = AuditEvent {
+            timestamp: 1698158400,
+            node_id: "node-1".to_string(),
+            event_type: AuditEventType::AuthFailure,
+            actor: "admin:read_token".to_string(),
+            app_id: "_platform".to_string(),
+            details: serde_json::json!({
+                "path": "/admin/config",
+                "method": "GET",
+                "client_ip": "192.168.1.100",
+                "status_code": 401,
+            }),
+        };
+        write_audit_event(path, &event);
+
+        let contents = fs::read_to_string(path).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&contents).unwrap();
+        assert_eq!(parsed["event_type"], "auth_failure");
+        assert_eq!(parsed["actor"], "admin:read_token");
+        assert_eq!(parsed["details"]["status_code"], 401);
+
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn test_token_rotated_audit_event() {
+        let path = "test_token_rotated_audit.log";
+        let _ = fs::remove_file(path);
+
+        let event = AuditEvent {
+            timestamp: 1698158400,
+            node_id: "node-1".to_string(),
+            event_type: AuditEventType::TokenRotated,
+            actor: "admin:write_token".to_string(),
+            app_id: "_platform".to_string(),
+            details: serde_json::json!({
+                "token_type": "write",
+            }),
+        };
+        write_audit_event(path, &event);
+
+        let contents = fs::read_to_string(path).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&contents).unwrap();
+        assert_eq!(parsed["event_type"], "token_rotated");
+        assert_eq!(parsed["actor"], "admin:write_token");
+        assert_eq!(parsed["details"]["token_type"], "write");
+
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn test_all_audit_event_types_serialize() {
+        // Verify all AuditEventType variants serialize to snake_case as expected
+        let cases = vec![
+            (AuditEventType::AppDeployed, "app_deployed"),
+            (AuditEventType::AppRemoved, "app_removed"),
+            (AuditEventType::InstanceSpawned, "instance_spawned"),
+            (AuditEventType::InstanceKilled, "instance_killed"),
+            (AuditEventType::SecretRotated, "secret_rotated"),
+            (AuditEventType::TrapOccurred, "trap_occurred"),
+            (AuditEventType::BinaryHashMismatch, "binary_hash_mismatch"),
+            (AuditEventType::RateLimitExceeded, "rate_limit_exceeded"),
+            (AuditEventType::PolicyViolation, "policy_violation"),
+            (AuditEventType::AdminApiCall, "admin_api_call"),
+            (AuditEventType::AuthFailure, "auth_failure"),
+            (AuditEventType::TokenRotated, "token_rotated"),
+        ];
+
+        for (event_type, expected) in cases {
+            let json = serde_json::to_string(&event_type).unwrap();
+            assert_eq!(
+                json.trim_matches('"'),
+                expected,
+                "AuditEventType::{:?} should serialize to \"{}\"",
+                event_type,
+                expected
+            );
+        }
     }
 }

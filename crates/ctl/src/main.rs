@@ -35,6 +35,12 @@ struct Cli {
     #[arg(long, env = "WASM_CTL_NATS_CREDS")]
     nats_creds: Option<String>,
 
+    /// Bearer token for admin API authentication.
+    /// Can also be set via WASM_CTL_AUTH_TOKEN environment variable,
+    /// or in ~/.wasm-ctl/config.toml under [auth] token = "...".
+    #[arg(long, env = "WASM_CTL_AUTH_TOKEN")]
+    auth_token: Option<String>,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -415,7 +421,8 @@ async fn main() -> anyhow::Result<()> {
         Some(creds) => messaging::NatsBus::connect_secure(&cli.nats_url, creds).await?,
         None => messaging::NatsBus::connect(&cli.nats_url).await?,
     };
-    let http = reqwest::Client::new();
+    let auth_token = resolve_auth_token(cli.auth_token.as_deref());
+    let http = build_http_client(auth_token.as_deref());
 
     match cli.command {
         Commands::Deploy(args) => cmds::deploy::run(args, &bus, &cli.node_api, &http).await?,
@@ -445,4 +452,89 @@ async fn main() -> anyhow::Result<()> {
         Commands::Policy { action } => cmds::policy::run(action, &cli.node_api, &http).await?,
     }
     Ok(())
+}
+
+/// Build an HTTP client with an optional Bearer token in the default headers.
+fn build_http_client(token: Option<&str>) -> reqwest::Client {
+    let mut headers = reqwest::header::HeaderMap::new();
+
+    if let Some(t) = token {
+        if let Ok(value) = reqwest::header::HeaderValue::from_str(&format!("Bearer {}", t)) {
+            headers.insert(reqwest::header::AUTHORIZATION, value);
+        } else {
+            eprintln!(
+                "warning: auth token contains invalid header characters — sending without auth"
+            );
+        }
+    }
+
+    reqwest::Client::builder()
+        .default_headers(headers)
+        .build()
+        .expect("failed to build HTTP client")
+}
+
+/// Resolve the auth token from: CLI flag > env var > config file.
+fn resolve_auth_token(cli_token: Option<&str>) -> Option<String> {
+    // 1. CLI flag (highest priority)
+    if cli_token.is_some() {
+        return cli_token.map(|s| s.to_string());
+    }
+
+    // 2. Environment variable
+    if let Ok(t) = std::env::var("WASM_CTL_AUTH_TOKEN") {
+        return Some(t);
+    }
+
+    // 3. Config file (~/.wasm-ctl/config.toml)
+    if let Some(home) = dirs_home_dir() {
+        let config_path = home.join(".wasm-ctl").join("config.toml");
+        if config_path.exists() {
+            if let Ok(content) = std::fs::read_to_string(&config_path) {
+                if let Ok(value) = toml::from_str::<toml::Value>(&content) {
+                    if let Some(token) = value
+                        .get("auth")
+                        .and_then(|a| a.get("token"))
+                        .and_then(|t| t.as_str())
+                    {
+                        return Some(token.to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    None
+}
+
+/// Best-effort home directory resolution (avoids adding the `dirs` crate).
+fn dirs_home_dir() -> Option<std::path::PathBuf> {
+    std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .ok()
+        .map(std::path::PathBuf::from)
+}
+
+/// Check an HTTP response for authentication-related errors and produce
+/// user-friendly error messages.
+pub fn handle_auth_response(response: reqwest::Response) -> anyhow::Result<reqwest::Response> {
+    let status = response.status();
+    if status == reqwest::StatusCode::UNAUTHORIZED {
+        anyhow::bail!(
+            "Authentication failed. Set --auth-token or WASM_CTL_AUTH_TOKEN environment variable."
+        );
+    }
+    if status == reqwest::StatusCode::FORBIDDEN {
+        anyhow::bail!(
+            "Permission denied. Your token has read-only access but this operation requires write access.\n\
+             Use the write token (auth.write_token in config.toml)."
+        );
+    }
+    if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+        anyhow::bail!("Admin API rate limit exceeded. Wait a moment and try again.");
+    }
+    if status.is_server_error() {
+        anyhow::bail!("Server error: {}", status);
+    }
+    Ok(response)
 }

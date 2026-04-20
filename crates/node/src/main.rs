@@ -187,6 +187,34 @@ struct Args {
     #[arg(long, env = "ADMIN_TOKEN")]
     admin_token: Option<String>,
 
+    /// Enable admin API authentication (requires tokens).
+    #[arg(long)]
+    auth_enabled: Option<bool>,
+
+    /// Read-only bearer token for admin API (for Prometheus, monitoring).
+    #[arg(long, env = "WASM_NODE_AUTH_READ_TOKEN")]
+    auth_read_token: Option<String>,
+
+    /// Read-write bearer token for admin API (for operators, CI/CD).
+    #[arg(long, env = "WASM_NODE_AUTH_WRITE_TOKEN")]
+    auth_write_token: Option<String>,
+
+    /// Require TLS for admin API when auth is enabled (default: true).
+    #[arg(long)]
+    auth_require_tls: Option<bool>,
+
+    /// Admin API rate limit per second per IP (default: 10).
+    #[arg(long)]
+    auth_rate_limit_per_second: Option<u32>,
+
+    /// Admin API rate limit burst capacity (default: 20).
+    #[arg(long)]
+    auth_rate_limit_burst: Option<u32>,
+
+    /// Generate random auth tokens and print to stdout, then exit.
+    #[arg(long)]
+    generate_tokens: bool,
+
     #[arg(long, default_value = "postgres://127.0.0.1:5432")]
     database_url: String,
 
@@ -249,6 +277,29 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
+    // --generate-tokens: generate random auth tokens and print to stdout, then exit
+    if args.generate_tokens {
+        let auth_config = common::auth::AuthConfig::generate_default();
+        println!("# Add these to your config.toml under [auth] section:");
+        println!("[auth]");
+        println!("enabled = true");
+        println!(
+            "read_token = \"{}\"",
+            auth_config.read_token.as_deref().unwrap_or("")
+        );
+        println!(
+            "write_token = \"{}\"",
+            auth_config.write_token.as_deref().unwrap_or("")
+        );
+        println!("require_tls = true");
+        println!(
+            "rate_limit_per_second = {}",
+            auth_config.rate_limit_per_second
+        );
+        println!("rate_limit_burst = {}", auth_config.rate_limit_burst);
+        return Ok(());
+    }
+
     // --validate-config: load and validate a config file, then exit
     if let Some(ref path) = args.validate_config {
         match config::load_config(Some(std::path::Path::new(path)), &CliOverrides::default()) {
@@ -293,6 +344,12 @@ async fn main() -> anyhow::Result<()> {
         dns_webhook_url: args.dns_webhook_url.clone(),
         dns_webhook_token: args.dns_webhook_token.clone(),
         auth_token: args.admin_token.clone(),
+        auth_enabled: args.auth_enabled,
+        auth_read_token: args.auth_read_token.clone(),
+        auth_write_token: args.auth_write_token.clone(),
+        auth_require_tls: args.auth_require_tls,
+        auth_rate_limit_per_second: args.auth_rate_limit_per_second,
+        auth_rate_limit_burst: args.auth_rate_limit_burst,
     };
 
     // Load configuration with merge priority: defaults < TOML < env < CLI
@@ -787,6 +844,124 @@ async fn main() -> anyhow::Result<()> {
         Arc::new(backpressure),
     );
 
+    // ── Admin API Authentication Setup ──────────────────────────────────
+    // Resolve the effective AuthConfig from: [auth] section > legacy admin.auth_token > defaults.
+    // Persisted overrides from redb (token rotations) take the highest priority.
+    let mut effective_auth_config: common::auth::AuthConfig = if config.auth.enabled {
+        let ac: common::auth::AuthConfig = config.auth.clone().into();
+        ac
+    } else if config.admin.auth_token.is_some() {
+        tracing::info!(
+            "using legacy admin.auth_token as write token — \
+             consider migrating to the [auth] section for separate read/write tokens"
+        );
+        common::auth::AuthConfig::from_legacy_token(config.admin.auth_token.as_deref().unwrap())
+    } else {
+        common::auth::AuthConfig::default()
+    };
+
+    // Load persisted auth config overrides from redb (survives restarts)
+    match store.load_auth_config() {
+        Ok(Some(persisted)) => {
+            tracing::info!("loaded persisted auth config from database (overrides TOML values)");
+            effective_auth_config = persisted;
+        }
+        Ok(None) => {
+            tracing::debug!("no persisted auth config found — using TOML/CLI values");
+        }
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "failed to load persisted auth config — falling back to TOML file values"
+            );
+        }
+    }
+
+    // Validate the effective auth config
+    if let Err(e) = effective_auth_config.validate() {
+        anyhow::bail!("Invalid auth configuration: {}", e);
+    }
+
+    // Check TLS requirement (warn for now — admin TLS not yet implemented)
+    if effective_auth_config.enabled && effective_auth_config.require_tls {
+        tracing::warn!(
+            "Admin API authentication is enabled with require_tls=true, \
+             but admin API TLS is not yet implemented. \
+             Bearer tokens will be sent over plaintext HTTP. \
+             Set auth.require_tls = false to suppress this warning, \
+             or ensure the admin port is only accessible on a secure network."
+        );
+    } else if effective_auth_config.enabled && !effective_auth_config.require_tls {
+        tracing::warn!(
+            "Admin API authentication is enabled but TLS is NOT required. \
+             Bearer tokens will be sent over plaintext HTTP. \
+             Set auth.require_tls = true in production."
+        );
+    }
+
+    // Check config file permissions (warn if world-readable)
+    if let Some(ref config_path) = args.config {
+        proxy::auth_middleware::check_config_file_permissions(std::path::Path::new(config_path));
+    }
+
+    // Create shared auth state for the middleware
+    let auth_config_shared = Arc::new(tokio::sync::RwLock::new(effective_auth_config.clone()));
+    let auth_metrics = Arc::new(proxy::auth_middleware::AuthMetrics::new(
+        &prom_metrics.registry,
+    ));
+    let admin_rate_limiter = Arc::new(proxy::auth_middleware::AdminRateLimiter::new(
+        effective_auth_config.rate_limit_per_second,
+        effective_auth_config.rate_limit_burst,
+    ));
+
+    // Audit callback — bridges proxy auth middleware to supervisor audit trail
+
+    let audit_fn: proxy::auth_middleware::AuditCallback = Arc::new(
+        move |info: proxy::auth_middleware::AuditInfo| {
+            let event_type = if info.status_code >= 400 {
+                supervisor::audit::AuditEventType::AuthFailure
+            } else {
+                supervisor::audit::AuditEventType::AdminApiCall
+            };
+            let event = supervisor::audit::AuditEvent {
+                timestamp: chrono::Utc::now().timestamp_millis() as u64,
+                node_id: info.node_id.clone(),
+                event_type,
+                actor: format!("admin:{}", info.token_type),
+                app_id: "_platform".to_string(),
+                details: serde_json::json!({
+                    "path": info.path,
+                    "method": info.method,
+                    "client_ip": info.client_ip.map(|ip| ip.to_string()).unwrap_or("unknown".to_string()),
+                    "status_code": info.status_code,
+                }),
+            };
+            supervisor::audit::write_audit_event("/var/log/wasm-node/audit.jsonl", &event);
+        },
+    );
+
+    let auth_state = proxy::auth_middleware::AuthState {
+        config: auth_config_shared.clone(),
+        metrics: auth_metrics,
+        rate_limiter: admin_rate_limiter.clone(),
+        audit_fn: Some(audit_fn),
+        node_id: config.node.node_id.clone(),
+    };
+
+    if effective_auth_config.enabled {
+        info!(
+            "admin API authentication enabled (rate limit: {}/s per IP, burst: {})",
+            effective_auth_config.rate_limit_per_second, effective_auth_config.rate_limit_burst,
+        );
+    } else {
+        info!("admin API authentication disabled — all endpoints accessible without token");
+    }
+
+    // Clone for token rotation endpoint
+    let rotate_auth_config = auth_config_shared.clone();
+    let rotate_store = store.clone();
+    let rotate_node_id = config.node.node_id.clone();
+
     let admin_app = axum::Router::new()
         .merge(health_router)
         .route(
@@ -1148,7 +1323,103 @@ async fn main() -> anyhow::Result<()> {
                 }
             }),
         )
-        .layer(axum::middleware::from_fn(admin_auth_fn(config.admin.auth_token.clone())));
+        // ── Token Rotation Endpoint ────────────────────────────────────
+        .route(
+            "/admin/auth/rotate-token",
+            axum::routing::post(move |body: axum::Json<serde_json::Value>| {
+                let auth_config = rotate_auth_config.clone();
+                let store = rotate_store.clone();
+                let node_id = rotate_node_id.clone();
+                async move {
+                    // Parse the request body
+                    let req: proxy::auth_middleware::RotateTokenRequest = match serde_json::from_value(body.0) {
+                        Ok(r) => r,
+                        Err(e) => {
+                            return (
+                                axum::http::StatusCode::BAD_REQUEST,
+                                axum::Json(serde_json::json!({
+                                    "error": "invalid_request",
+                                    "message": format!("Failed to parse request: {}", e)
+                                })),
+                            );
+                        }
+                    };
+
+                    // Validate the rotation request
+                    let new_token = match proxy::auth_middleware::validate_rotation_request(&req) {
+                        Ok(t) => t,
+                        Err(e) => {
+                            return (
+                                axum::http::StatusCode::BAD_REQUEST,
+                                axum::Json(serde_json::json!({
+                                    "error": "validation_failed",
+                                    "message": e
+                                })),
+                            );
+                        }
+                    };
+
+                    // Apply the rotation
+                    let mut config = auth_config.write().await;
+                    match req.token_type.as_str() {
+                        "read" => {
+                            let old = config.read_token.clone();
+                            config.read_token = Some(new_token.clone());
+                            tracing::warn!(
+                                old_prefix = old.map(|t| t[..8.min(t.len())].to_string()).unwrap_or_else(|| "none".to_string()),
+                                new_prefix = &new_token[..8.min(new_token.len())],
+                                "read token rotated via admin API"
+                            );
+                        }
+                        "write" => {
+                            let old = config.write_token.clone();
+                            config.write_token = Some(new_token.clone());
+                            tracing::warn!(
+                                old_prefix = old.map(|t| t[..8.min(t.len())].to_string()).unwrap_or_else(|| "none".to_string()),
+                                new_prefix = &new_token[..8.min(new_token.len())],
+                                "write token rotated via admin API"
+                            );
+                        }
+                        _ => unreachable!("validate_rotation_request should have caught this"),
+                    }
+
+                    // Persist the updated config to redb
+                    if let Err(e) = store.save_auth_config(&config) {
+                        tracing::error!(error = %e, "failed to persist rotated token to database");
+                    }
+
+                    // Audit log the rotation
+                    let audit_event = supervisor::audit::AuditEvent {
+                        timestamp: chrono::Utc::now().timestamp_millis() as u64,
+                        node_id,
+                        event_type: supervisor::audit::AuditEventType::TokenRotated,
+                        actor: "admin:write_token".to_string(),
+                        app_id: "_platform".to_string(),
+                        details: serde_json::json!({
+                            "token_type": req.token_type,
+                        }),
+                    };
+                    supervisor::audit::write_audit_event("/var/log/wasm-node/audit.jsonl", &audit_event);
+
+                    drop(config);
+
+                    (
+                        axum::http::StatusCode::OK,
+                        axum::Json(serde_json::json!({
+                            "status": "rotated",
+                            "token_type": req.token_type,
+                            "new_token": new_token,
+                            "warning": "Save this token securely. It will not be shown again.",
+                        })),
+                    )
+                }
+            }),
+        )
+        // ── Auth Middleware Layer ───────────────────────────────────────
+        .layer(axum::middleware::from_fn_with_state(
+            auth_state,
+            proxy::auth_middleware::auth_middleware,
+        ));
 
     // ── Config Sync Loop ──────────────────────────────────────────────
     // Periodically reads HotConfigHandle and pushes updates to components
@@ -1209,6 +1480,27 @@ async fn main() -> anyhow::Result<()> {
             }
         });
         info!("config sync loop started (10s interval, pushes hot-reload updates to components)");
+    }
+
+    // ── SIGHUP Handler for Auth Config Reload ──────────────────────────
+    // When the operator edits the config file with new tokens and sends
+    // SIGHUP, the node reads the updated file and applies the new tokens
+    // immediately. Old tokens are invalidated as soon as the new config
+    // is loaded into the RwLock.
+    setup_sighup_handler(auth_config_shared.clone(), args.config.clone());
+
+    // ── Periodic Rate Limiter Pruning ──────────────────────────────────
+    // Prune stale IP buckets every 60 seconds to prevent memory leaks
+    // on long-running nodes with many unique client IPs.
+    {
+        let prune_limiter = admin_rate_limiter.clone();
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(Duration::from_secs(60));
+            loop {
+                ticker.tick().await;
+                prune_limiter.prune_stale(Duration::from_secs(300)); // 5-minute idle threshold
+            }
+        });
     }
 
     let admin_addr = format!("0.0.0.0:{}", config.admin.port);
@@ -1278,60 +1570,75 @@ async fn main() -> anyhow::Result<()> {
 /// - Health-check paths (`/health`, `/_platform/health`, `/status/`) are always allowed
 ///   so that load-balancers can probe the node without credentials.
 /// - Otherwise the `Authorization` header must be `Bearer <token>`.
-fn admin_auth_fn(
-    token: Option<String>,
-) -> impl Fn(
-    axum::extract::Request,
-    axum::middleware::Next,
-) -> std::pin::Pin<Box<dyn std::future::Future<Output = axum::response::Response> + Send>>
-       + Clone
-       + Send
-       + Sync
-       + 'static {
-    use axum::extract::Request;
-    use axum::http::StatusCode;
-    use axum::middleware::Next;
-    use axum::response::IntoResponse;
+/// Set up a SIGHUP handler that reloads auth configuration from the config file.
+///
+/// When the operator edits the config file with new tokens and sends SIGHUP,
+/// the node reads the updated file and applies the new tokens immediately.
+/// Old tokens are invalidated as soon as the new config is loaded.
+fn setup_sighup_handler(
+    auth_config: Arc<tokio::sync::RwLock<common::auth::AuthConfig>>,
+    config_path: Option<String>,
+) {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
 
-    move |req: Request, next: Next| {
-        let expected = token.clone();
-        Box::pin(async move {
-            // No token configured → auth disabled
-            let expected = match expected {
-                Some(t) => t,
-                None => return next.run(req).await,
+        tokio::spawn(async move {
+            let mut stream = match signal(SignalKind::hangup()) {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::error!(error = %e, "failed to install SIGHUP handler");
+                    return;
+                }
             };
+            loop {
+                stream.recv().await;
 
-            // Health/readiness endpoints are always unauthenticated
-            let path = req.uri().path();
-            if path.starts_with("/_platform/health")
-                || path == "/health"
-                || path.starts_with("/status/")
-            {
-                return next.run(req).await;
+                if let Some(ref path) = config_path {
+                    tracing::info!("SIGHUP received — reloading auth config from file");
+
+                    match std::fs::read_to_string(path) {
+                        Ok(content) => {
+                            match toml::from_str::<common::config::NodeConfig>(&content) {
+                                Ok(new_config) => {
+                                    let new_auth: common::auth::AuthConfig =
+                                        new_config.auth.clone().into();
+                                    if let Err(e) = new_auth.validate() {
+                                        tracing::error!(
+                                            error = %e,
+                                            "auth config in file is invalid — keeping current config"
+                                        );
+                                    } else {
+                                        let mut auth = auth_config.write().await;
+                                        *auth = new_auth;
+                                        tracing::info!("auth config reloaded from file");
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::error!(
+                                        error = %e,
+                                        "failed to parse config file on SIGHUP reload"
+                                    );
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            tracing::error!(
+                                error = %e,
+                                path = %path,
+                                "failed to read config file on SIGHUP reload"
+                            );
+                        }
+                    }
+                } else {
+                    tracing::warn!("SIGHUP received but no config file path — cannot reload auth");
+                }
             }
-
-            // Extract and validate Bearer token
-            let authorized = req
-                .headers()
-                .get("Authorization")
-                .and_then(|v| v.to_str().ok())
-                .and_then(|v| v.strip_prefix("Bearer "))
-                .map(|t| t == expected)
-                .unwrap_or(false);
-
-            if authorized {
-                next.run(req).await
-            } else {
-                (
-                    StatusCode::UNAUTHORIZED,
-                    axum::Json(serde_json::json!({
-                        "error": "unauthorized",
-                        "message": "valid Bearer token required via Authorization header (set ADMIN_TOKEN env var)"
-                    })),
-                )
-                    .into_response()
-            }
-        })
+        });
+    }
+    #[cfg(not(unix))]
+    {
+        // SIGHUP is not available on non-Unix platforms
+        let _ = (auth_config, config_path);
     }
 }

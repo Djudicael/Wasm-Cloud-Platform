@@ -18,6 +18,8 @@ pub struct NodeConfig {
     #[serde(default)]
     pub admin: AdminSection,
     #[serde(default)]
+    pub auth: AuthSection,
+    #[serde(default)]
     pub runtime: RuntimeSection,
     #[serde(default)]
     pub database: DatabaseSection,
@@ -45,6 +47,7 @@ impl Default for NodeConfig {
             nats: NatsSection::default(),
             proxy: ProxySection::default(),
             admin: AdminSection::default(),
+            auth: AuthSection::default(),
             runtime: RuntimeSection::default(),
             database: DatabaseSection::default(),
             logging: LoggingSection::default(),
@@ -152,6 +155,8 @@ pub struct AdminSection {
     pub port: u16,
     #[serde(default = "default_artifact_port")]
     pub artifact_port: u16,
+    /// Legacy single admin token (deprecated in favor of [auth] section).
+    /// When set and [auth] is not configured, this token is used as the write token.
     #[serde(default)]
     pub auth_token: Option<String>,
 }
@@ -170,6 +175,105 @@ impl Default for AdminSection {
             port: default_admin_port(),
             artifact_port: default_artifact_port(),
             auth_token: None,
+        }
+    }
+}
+
+/// Authentication configuration for the admin API.
+///
+/// This section provides bearer-token authentication with separate read/write
+/// permission levels, rate limiting, and TLS enforcement.
+///
+/// When `enabled = false` (the default), all admin API endpoints are accessible
+/// without authentication (backward compatible).
+///
+/// When `enabled = true`, requests must include an `Authorization: Bearer <token>`
+/// header. The read token grants GET access only; the write token grants full access.
+///
+/// # TOML Example
+///
+/// ```toml
+/// [auth]
+/// enabled = true
+/// read_token = "a1b2c3d4e5f6789012345678901234567890abcdef1234567890abcdef123456"
+/// write_token = "f6e5d4c3b2a1098765432109876543210987fedcba0987654321fedcba098765"
+/// require_tls = true
+/// rate_limit_per_second = 10
+/// rate_limit_burst = 20
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuthSection {
+    /// Enable authentication on admin API endpoints.
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Read-only bearer token. Grants access to GET endpoints.
+    #[serde(default)]
+    pub read_token: Option<String>,
+
+    /// Read-write bearer token. Grants access to all endpoints.
+    #[serde(default)]
+    pub write_token: Option<String>,
+
+    /// Require TLS for admin API when authentication is enabled.
+    #[serde(default = "default_auth_require_tls")]
+    pub require_tls: bool,
+
+    /// Rate limit for admin API requests (requests per second per IP).
+    /// Set to 0 to disable rate limiting.
+    #[serde(default = "default_auth_rate_limit")]
+    pub rate_limit_per_second: u32,
+
+    /// Maximum burst for admin API rate limiting.
+    #[serde(default = "default_auth_burst")]
+    pub rate_limit_burst: u32,
+}
+
+fn default_auth_require_tls() -> bool {
+    true
+}
+fn default_auth_rate_limit() -> u32 {
+    10
+}
+fn default_auth_burst() -> u32 {
+    20
+}
+
+impl Default for AuthSection {
+    fn default() -> Self {
+        AuthSection {
+            enabled: false,
+            read_token: None,
+            write_token: None,
+            require_tls: default_auth_require_tls(),
+            rate_limit_per_second: default_auth_rate_limit(),
+            rate_limit_burst: default_auth_burst(),
+        }
+    }
+}
+
+impl From<AuthSection> for crate::auth::AuthConfig {
+    fn from(section: AuthSection) -> Self {
+        crate::auth::AuthConfig {
+            enabled: section.enabled,
+            read_token: section.read_token,
+            write_token: section.write_token,
+            require_tls: section.require_tls,
+            rate_limit_per_second: section.rate_limit_per_second,
+            rate_limit_burst: section.rate_limit_burst,
+        }
+    }
+}
+
+impl From<crate::auth::AuthConfig> for AuthSection {
+    fn from(config: crate::auth::AuthConfig) -> Self {
+        AuthSection {
+            enabled: config.enabled,
+            read_token: config.read_token,
+            write_token: config.write_token,
+            require_tls: config.require_tls,
+            rate_limit_per_second: config.rate_limit_per_second,
+            rate_limit_burst: config.rate_limit_burst,
         }
     }
 }

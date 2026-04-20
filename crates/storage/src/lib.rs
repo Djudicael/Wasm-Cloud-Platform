@@ -1,5 +1,7 @@
 #![allow(clippy::result_large_err)]
 
+use common::auth::AuthConfig;
+use common::error::PlatformError;
 use redb::{Database, ReadableDatabase};
 use std::path::Path;
 use std::sync::Arc;
@@ -345,6 +347,91 @@ impl Store {
             table.remove(key)?;
         }
         tx.commit()?;
+        Ok(())
+    }
+
+    // ── Auth Config Persistence ────────────────────────────────────────────────
+
+    /// Key used to store auth config overrides in the SCHEMA_META table.
+    ///
+    /// When auth tokens are rotated via the admin API, the updated config is
+    /// persisted here so it survives node restarts. On startup, the persisted
+    /// config takes precedence over the TOML file values.
+    const AUTH_CONFIG_KEY: &'static str = "auth_config_override";
+
+    /// Save the auth configuration to the database.
+    ///
+    /// This is called after token rotation to persist the new tokens.
+    /// The config is stored as JSON in the SCHEMA_META table.
+    pub fn save_auth_config(&self, config: &AuthConfig) -> Result<(), PlatformError> {
+        let json = serde_json::to_string(config)
+            .map_err(|e| PlatformError::storage_with_msg("failed to serialize auth config", e))?;
+        let tx = self
+            .db
+            .begin_write()
+            .map_err(|e| PlatformError::storage_with_msg("failed to begin write transaction", e))?;
+        {
+            let mut table = tx.open_table(tables::SCHEMA_META).map_err(|e| {
+                PlatformError::storage_with_msg("failed to open SCHEMA_META table", e)
+            })?;
+            table
+                .insert(Self::AUTH_CONFIG_KEY, json.as_str())
+                .map_err(|e| PlatformError::storage_with_msg("failed to write auth config", e))?;
+        }
+        tx.commit()
+            .map_err(|e| PlatformError::storage_with_msg("failed to commit auth config", e))?;
+        Ok(())
+    }
+
+    /// Load the persisted auth configuration from the database.
+    ///
+    /// Returns `Ok(Some(config))` if a persisted config exists,
+    /// `Ok(None)` if no override has been saved (use TOML file values),
+    /// or an error if the stored config is corrupt.
+    pub fn load_auth_config(&self) -> Result<Option<AuthConfig>, PlatformError> {
+        let tx = self
+            .db
+            .begin_read()
+            .map_err(|e| PlatformError::storage_with_msg("failed to begin read transaction", e))?;
+        let table = tx
+            .open_table(tables::SCHEMA_META)
+            .map_err(|e| PlatformError::storage_with_msg("failed to open SCHEMA_META table", e))?;
+        match table
+            .get(Self::AUTH_CONFIG_KEY)
+            .map_err(|e| PlatformError::storage_with_msg("failed to read auth config", e))?
+        {
+            Some(v) => {
+                let config: AuthConfig = serde_json::from_str(v.value()).map_err(|e| {
+                    PlatformError::storage_with_msg(
+                        "failed to deserialize persisted auth config — falling back to TOML file",
+                        e,
+                    )
+                })?;
+                Ok(Some(config))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Delete the persisted auth configuration from the database.
+    ///
+    /// This is used when resetting auth config to TOML file defaults.
+    pub fn delete_auth_config(&self) -> Result<(), PlatformError> {
+        let tx = self
+            .db
+            .begin_write()
+            .map_err(|e| PlatformError::storage_with_msg("failed to begin write transaction", e))?;
+        {
+            let mut table = tx.open_table(tables::SCHEMA_META).map_err(|e| {
+                PlatformError::storage_with_msg("failed to open SCHEMA_META table", e)
+            })?;
+            table
+                .remove(Self::AUTH_CONFIG_KEY)
+                .map_err(|e| PlatformError::storage_with_msg("failed to delete auth config", e))?;
+        }
+        tx.commit().map_err(|e| {
+            PlatformError::storage_with_msg("failed to commit auth config deletion", e)
+        })?;
         Ok(())
     }
 }
