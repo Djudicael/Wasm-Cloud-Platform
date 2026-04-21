@@ -12,7 +12,6 @@ use tokio::time::sleep;
 
 /// Test: Billing records are created and stored correctly
 #[tokio::test]
-#[ignore]
 async fn test_billing_records_created_on_instance_exit() {
     let nats = NatsContainer::start(14250)
         .await
@@ -118,7 +117,6 @@ async fn test_billing_records_created_on_instance_exit() {
 
 /// Test: Tampering with a billing record is detected
 #[tokio::test]
-#[ignore]
 async fn test_billing_tampering_detected() {
     let nats = NatsContainer::start(14252)
         .await
@@ -213,7 +211,6 @@ async fn test_billing_tampering_detected() {
 
 /// Test: Billing report generation
 #[tokio::test]
-#[ignore]
 async fn test_billing_report_generation() {
     let nats = NatsContainer::start(14253)
         .await

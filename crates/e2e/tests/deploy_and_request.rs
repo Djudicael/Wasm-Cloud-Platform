@@ -22,7 +22,6 @@ mod harness;
 use harness::*;
 
 #[tokio::test]
-#[ignore] // Requires built binaries and NATS (via testcontainers)
 async fn test_deploy_and_serve_http() {
     // 1. Start NATS
     let nats = NatsContainer::start(4222)

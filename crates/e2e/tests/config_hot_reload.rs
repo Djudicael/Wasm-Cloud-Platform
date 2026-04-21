@@ -76,7 +76,6 @@ async fn delete_config(http: &reqwest::Client, admin_port: u16) -> reqwest::Resp
 // ─── Test: GET /admin/config returns expected structure ────────────────────
 
 #[tokio::test]
-#[ignore]
 async fn test_get_config_returns_cold_and_hot() {
     let nats = NatsContainer::start(14229)
         .await
@@ -131,7 +130,6 @@ async fn test_get_config_returns_cold_and_hot() {
 // ─── Test: PATCH /admin/config applies partial updates ─────────────────────
 
 #[tokio::test]
-#[ignore]
 async fn test_patch_config_updates_hot_fields() {
     let nats = NatsContainer::start(14230)
         .await
@@ -191,7 +189,6 @@ async fn test_patch_config_updates_hot_fields() {
 // ─── Test: PATCH with multiple fields ──────────────────────────────────────
 
 #[tokio::test]
-#[ignore]
 async fn test_patch_config_multiple_fields() {
     let nats = NatsContainer::start(14231)
         .await
@@ -228,7 +225,6 @@ async fn test_patch_config_multiple_fields() {
 // ─── Test: PATCH with no changes returns 400 ───────────────────────────────
 
 #[tokio::test]
-#[ignore]
 async fn test_patch_config_no_changes_returns_error() {
     let nats = NatsContainer::start(14232)
         .await
@@ -253,7 +249,6 @@ async fn test_patch_config_no_changes_returns_error() {
 // ─── Test: PATCH with invalid values returns 400 ───────────────────────────
 
 #[tokio::test]
-#[ignore]
 async fn test_patch_config_invalid_value_rejected() {
     let nats = NatsContainer::start(14233)
         .await
@@ -297,7 +292,6 @@ async fn test_patch_config_invalid_value_rejected() {
 // ─── Test: DELETE /admin/config resets to defaults ─────────────────────────
 
 #[tokio::test]
-#[ignore]
 async fn test_delete_config_resets_to_defaults() {
     let nats = NatsContainer::start(14234)
         .await
@@ -346,7 +340,6 @@ async fn test_delete_config_resets_to_defaults() {
 // ─── Test: Hot config persists across node restart ─────────────────────────
 
 #[tokio::test]
-#[ignore]
 async fn test_config_persistence_across_restart() {
     let nats = NatsContainer::start(14235)
         .await
@@ -372,13 +365,11 @@ async fn test_config_persistence_across_restart() {
         4242
     );
 
-    // Stop the node
-    let db_path = node.db_path.clone();
-    let temp_dir = node._temp_dir;
-    node.kill();
+    // Stop the node and extract its database + temp directory
+    let (db_path, temp_dir) = node.extract_db();
 
-    // Restart the node with the same database
-    let node2 = NodeProcess::start_with_db(
+    // Restart the node with the same database and admin port
+    let node2 = NodeProcess::start_with_db_and_admin(
         "config-test-persist",
         &nats.url,
         18086,
@@ -406,7 +397,6 @@ async fn test_config_persistence_across_restart() {
 // ─── Test: Log level change takes effect ───────────────────────────────────
 
 #[tokio::test]
-#[ignore]
 async fn test_log_level_change_takes_effect() {
     let nats = NatsContainer::start(14236)
         .await
@@ -444,7 +434,6 @@ async fn test_log_level_change_takes_effect() {
 // ─── Test: GC interval change is accepted ──────────────────────────────────
 
 #[tokio::test]
-#[ignore]
 async fn test_gc_interval_change_accepted() {
     let nats = NatsContainer::start(14237)
         .await
@@ -472,7 +461,6 @@ async fn test_gc_interval_change_accepted() {
 // ─── Test: Health check interval change is accepted ────────────────────────
 
 #[tokio::test]
-#[ignore]
 async fn test_health_interval_change_accepted() {
     let nats = NatsContainer::start(14238)
         .await
@@ -500,7 +488,6 @@ async fn test_health_interval_change_accepted() {
 // ─── Test: eBPF threshold changes are accepted ─────────────────────────────
 
 #[tokio::test]
-#[ignore]
 async fn test_ebpf_threshold_change_accepted() {
     let nats = NatsContainer::start(14239)
         .await

@@ -12,7 +12,6 @@ use tokio::time::sleep;
 
 /// Test: L3 — Corrupted routes table rebuilds from JetStream replay
 #[tokio::test]
-#[ignore]
 async fn test_corrupted_routes_rebuild_from_jetstream() {
     // This test simulates a partial corruption where only the routes table
     // is damaged, and verifies it gets rebuilt from JetStream events.
@@ -123,7 +122,6 @@ async fn test_corrupted_routes_rebuild_from_jetstream() {
 
 /// Test: L4 — Total node loss recovery (empty redb, re-bootstrap from cluster)
 #[tokio::test]
-#[ignore]
 async fn test_total_node_loss_recovery() {
     // Test that a node with completely empty redb can recover
     // by requesting state from existing cluster members.
@@ -211,7 +209,6 @@ async fn test_total_node_loss_recovery() {
 
 /// Test: L5 — NATS partition handling
 #[tokio::test]
-#[ignore]
 async fn test_nats_partition_degraded_mode() {
     // Test that a node disconnected from NATS continues serving existing apps
     // but cannot receive new deploys.
@@ -287,7 +284,6 @@ async fn test_nats_partition_degraded_mode() {
 
 /// Test: Integrity check runs at startup
 #[tokio::test]
-#[ignore]
 async fn test_integrity_check_at_startup() {
     // Verify that startup integrity check runs and passes for healthy database
 

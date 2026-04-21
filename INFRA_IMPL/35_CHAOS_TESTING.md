@@ -2037,77 +2037,77 @@ pub fn register_cleanup(nats_ip: &str, nats_port: u16) {
 **This step is done when all boxes are checked.**
 
 ### Test Harness
-- [ ] `ClusterFixture` starts NATS + N wasm-node instances
-- [ ] `NodeProcess` manages process lifecycle (start, kill, restart)
-- [ ] `wait_for_health()` verifies node readiness
-- [ ] `wait_for_app_instances()` verifies app deployment
-- [ ] All fixtures clean up on drop (processes killed, files removed)
-- [ ] Network cleanup registered for Ctrl+C interruption
+- [x] `ClusterFixture` starts NATS + N wasm-node instances
+- [x] `NodeProcess` manages process lifecycle (start, kill, restart)
+- [x] `wait_for_health()` verifies node readiness
+- [x] `wait_for_app_instances()` verifies app deployment
+- [x] All fixtures clean up on drop (processes killed, files removed)
+- [x] Network cleanup registered for Ctrl+C interruption
 
 ### Fault Injection
-- [ ] `inject_instance_crash()` kills a specific Wasm instance (L1)
-- [ ] `inject_node_kill()` sends SIGKILL to the node process (L2)
-- [ ] `inject_redb_corruption()` overwrites a redb data page (L3)
-- [ ] `inject_nats_partition()` blocks NATS connectivity (L5)
-- [ ] `remove_nats_partition()` restores NATS connectivity
-- [ ] `inject_memory_pressure()` allocates large memory (extra)
-- [ ] `inject_disk_latency()` simulates slow I/O (extra)
-- [ ] All injection methods return `InjectionResult` with timestamp
+- [x] `inject_instance_crash()` kills a specific Wasm instance (L1)
+- [x] `inject_node_kill()` sends SIGKILL to the node process (L2)
+- [x] `inject_redb_corruption()` overwrites a redb data page (L3)
+- [x] `inject_nats_partition()` blocks NATS connectivity (L5)
+- [x] `remove_nats_partition()` restores NATS connectivity
+- [x] `inject_memory_pressure()` allocates large memory (extra)
+- [x] `inject_disk_latency()` simulates slow I/O (extra)
+- [x] All injection methods return `InjectionResult` with timestamp
 
 ### Recovery Verification
-- [ ] `wait_for_node_healthy()` waits for health endpoint
-- [ ] `wait_for_app_instances()` waits for app deployment
-- [ ] `verify_proxy_request()` sends HTTP request through proxy
-- [ ] `verify_billing_chain()` checks billing hash chain integrity
-- [ ] `verify_route_exists()` checks route table
+- [x] `wait_for_node_healthy()` waits for health endpoint
+- [x] `wait_for_app_instances()` waits for app deployment
+- [x] `verify_proxy_request()` sends HTTP request through proxy
+- [x] `verify_billing_chain()` checks billing hash chain integrity
+- [x] `verify_route_exists()` checks route table
 - [ ] `verify_secret_accessible()` checks secret availability
-- [ ] `verify_nats_connected()` checks NATS connectivity
-- [ ] All verifiers return TTR (Time To Recovery)
+- [x] `verify_nats_connected()` checks NATS connectivity
+- [x] All verifiers return TTR (Time To Recovery)
 
 ### Chaos Scenarios
-- [ ] L1: Instance crash — kill instance, verify respawn
-- [ ] L2: Node restart — kill process, verify state restore from redb
-- [ ] L3: Redb corruption — corrupt page, verify integrity check + partial rebuild
-- [ ] L4: Full rebuild — delete redb, verify cluster re-bootstrap
-- [ ] L5: NATS partition — block NATS, verify degraded mode + reconnection
-- [ ] L6: Multi-node failure — kill 2/3 nodes, verify survivor + rebuild
-- [ ] Extra: Memory pressure — allocate RAM, verify backpressure
-- [ ] Extra: Disk latency — slow I/O, verify degraded mode
+- [x] L1: Instance crash — kill instance, verify respawn
+- [x] L2: Node restart — kill process, verify state restore from redb
+- [x] L3: Redb corruption — corrupt page, verify integrity check + partial rebuild
+- [x] L4: Full rebuild — delete redb, verify cluster re-bootstrap
+- [x] L5: NATS partition — block NATS, verify degraded mode + reconnection
+- [x] L6: Multi-node failure — kill 2/3 nodes, verify survivor + rebuild
+- [x] Extra: Memory pressure — allocate RAM, verify backpressure
+- [x] Extra: Disk latency — slow I/O, verify degraded mode
 
 ### Test Reports
-- [ ] `TestReport` struct with name, result, steps, TTR
-- [ ] `StepResult` tracks pass/fail per step with timing
-- [ ] `print_summary()` produces human-readable output
-- [ ] `to_json()` exports for CI integration
-- [ ] Reports saved to `target/chaos-reports/`
+- [x] `TestReport` struct with name, result, steps, TTR
+- [x] `StepResult` tracks pass/fail per step with timing
+- [x] `print_summary()` produces human-readable output
+- [x] `to_json()` exports for CI integration
+- [x] Reports saved to `target/chaos-reports/`
 
 ### CI Integration
-- [ ] Chaos tests run with `--ignored` flag (requires NATS)
-- [ ] `--test-threads=1` enforced (sequential execution)
-- [ ] `WASM_NODE_BINARY` env var for binary path
-- [ ] `TESTCONTAINERS_RYUK_DISABLED=true` for Podman
+- [x] Chaos tests run with `--ignored` flag (requires NATS)
+- [x] `--test-threads=1` enforced (sequential execution)
+- [x] `WASM_NODE_BINARY` env var for binary path
+- [x] `TESTCONTAINERS_RYUK_DISABLED=true` for Podman
 - [ ] CI pipeline step added after integration tests
-- [ ] Chaos report artifacts uploaded on failure
+- [x] Chaos report artifacts uploaded on failure
 
 ### TTR Targets
-- [ ] L1 (instance crash): TTR < 10s
-- [ ] L2 (node restart): TTR < 60s
-- [ ] L3 (redb corruption): TTR < 30s
-- [ ] L4 (full rebuild): TTR < 300s
-- [ ] L5 (NATS partition): TTR < 90s
-- [ ] L6 (multi-node): TTR < 600s
+- [x] L1 (instance crash): TTR < 10s
+- [x] L2 (node restart): TTR < 60s
+- [x] L3 (redb corruption): TTR < 30s
+- [x] L4 (full rebuild): TTR < 300s
+- [x] L5 (NATS partition): TTR < 90s
+- [x] L6 (multi-node): TTR < 600s
 
 ### Safety
-- [ ] All tests clean up processes on drop
-- [ ] All tests clean up redb files on drop
-- [ ] Network rules cleaned up on interruption
-- [ ] Tests run sequentially (no parallel chaos)
-- [ ] Memory pressure allocation bounded and freed
-- [ ] No test modifies the host's production redb
+- [x] All tests clean up processes on drop
+- [x] All tests clean up redb files on drop
+- [x] Network rules cleaned up on interruption
+- [x] Tests run sequentially (no parallel chaos)
+- [x] Memory pressure allocation bounded and freed
+- [x] No test modifies the host's production redb
 
 ### Documentation
 - [ ] `AGENTS.md` updated with chaos test commands
-- [ ] System requirements documented (Linux, CAP_NET_ADMIN)
-- [ ] Environment variables documented
-- [ ] TTR targets documented
-- [ ] Cleanup procedures documented for interrupted tests
+- [x] System requirements documented (Linux, CAP_NET_ADMIN)
+- [x] Environment variables documented
+- [x] TTR targets documented
+- [x] Cleanup procedures documented for interrupted tests

@@ -2,25 +2,85 @@
 name    = "e2e"
 version = "0.1.0"
 edition = "2021"
+description = "End-to-end and chaos testing framework for the Wasm Cloud Platform"
 
-# E2E tests are only run via `cargo test -p e2e`
-# They do not need to be a library
+# This crate provides both a library (chaos test harness) and
+# integration tests. Build and test must run inside WSL (Linux)
+# because chaos tests require Unix process signals (SIGKILL/SIGTERM),
+# tc/iptables for network partition, and Podman for containers.
+#
+# WSL build:
+#   wsl cargo build -p e2e
+#   wsl cargo test -p e2e -- --ignored --test-threads=1 chaos
 
-[dev-dependencies]
+[dependencies]
+# Async runtime
 tokio         = { workspace = true }
-reqwest       = { workspace = true }
-assert_cmd    = "2"
-tempfile      = "3"
-async-nats    = { workspace = true }
+
+# HTTP client (verification probes, admin API calls)
+reqwest       = { workspace = true, features = ["json"] }
+
+# Serialization
+serde         = { workspace = true, features = ["derive"] }
 serde_json    = { workspace = true }
+
+# Logging
+tracing       = { workspace = true }
+
+# Container management (NATS, future: Postgres)
+testcontainers = { workspace = true }
+
+# NATS client (event bus, JetStream replay)
+async-nats    = { workspace = true }
+
+# Hashing (SHA-256 for artifact verification)
 sha2          = { workspace = true }
 hex           = { workspace = true }
-testcontainers = { workspace = true }
-axum          = { workspace = true }
 
-# Local crates
+# Unix signals (SIGTERM for graceful node shutdown) — Linux/WSL only
+libc          = "0.2"
+
+# Temp directories (per-node redb isolation)
+tempfile      = "3"
+
+# Ctrl+C handler (cleanup iptables rules on interrupt)
+ctrlc         = "3"
+
+# Timestamps in test reports
+chrono        = { workspace = true, features = ["serde"] }
+
+# UUID (unique test run identifiers)
+uuid          = { workspace = true, features = ["v4"] }
+
+# Local crates — types, events, storage, supervisor
 common        = { path = "../common" }
 messaging     = { path = "../messaging" }
 storage       = { path = "../storage" }
+supervisor    = { path = "../supervisor" }
+
+[dev-dependencies]
+# Tracing subscriber (test log initialization)
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+
+# CLI assertion helpers
+assert_cmd    = "2"
+
+# Axum for embedded file servers in tests
+axum          = { workspace = true }
+
+# Runtime and billing for test-only direct access
 runtime       = { path = "../runtime" }
 billing       = { path = "../billing" }
+
+[features]
+default = []
+
+# Chaos tests require Linux (WSL) — Unix signals, tc, iptables.
+# Enable this feature when running chaos tests inside WSL.
+chaos-linux = []
+
+# Run only L1-L2 chaos tests (no root/CAP_NET_ADMIN needed)
+chaos-basic = ["chaos-linux"]
+
+# Run all L1-L6 chaos tests (requires CAP_NET_ADMIN for network partition)
+chaos-full = ["chaos-linux"]

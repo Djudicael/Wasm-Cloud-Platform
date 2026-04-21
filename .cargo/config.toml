@@ -5,5 +5,5 @@
 # This allows the messaging tests to run with Podman instead of Docker
 TESTCONTAINERS_RYUK_DISABLED = "true"
 
-# For WSL users with Podman, uncomment the line below:
-# DOCKER_HOST = "unix:///run/user/1000/podman/podman.sock"
+# For WSL users with Podman (auto-detected by setup_container_runtime):
+DOCKER_HOST = "unix:///run/user/1000/podman/podman.sock"

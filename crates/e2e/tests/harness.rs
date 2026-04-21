@@ -56,9 +56,22 @@ impl NatsContainer {
     pub async fn start(port: u16) -> Result<Self, Box<dyn std::error::Error>> {
         setup_container_runtime();
 
+        // Use host networking so the container shares the host's network
+        // namespace. This is critical for Podman rootless mode where port
+        // mappings are only reachable from the process that created the
+        // container (slirp4netns limitation). With --network=host, NATS
+        // binds directly to the host port and any child process can connect.
+        // We pass --port to NATS so it listens on the requested host port
+        // instead of the default 4222.
+        // We use `with_host_config_modifier` to set `network_mode = "host"`
+        // directly on the Docker/Podman HostConfig, because `with_network("host")`
+        // would try to *create* a Docker network named "host" which conflicts
+        // with the reserved network mode.
         let image = GenericImage::new("nats", "2.10-alpine")
-            .with_mapped_port(port, ContainerPort::Tcp(4222))
-            .with_cmd(vec!["-js"]);
+            .with_host_config_modifier(|config| {
+                config.network_mode = Some("host".to_string());
+            })
+            .with_cmd(vec!["-js", "--port", &port.to_string()]);
 
         let container = image.start().await?;
 
