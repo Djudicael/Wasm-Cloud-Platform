@@ -102,7 +102,10 @@ pub async fn test_l4_full_rebuild_recovery() -> TestReport {
     let mut report = TestReport::new("L4: Full Node Rebuild Recovery");
 
     // ── Setup ──────────────────────────────────────────────────────
-    // Two nodes: node-0 will lose its database, node-1 is the survivor
+    // Two nodes: node-1 will lose its database, node-0 is the survivor.
+    // The survivor must have the lexicographically smallest node_id so
+    // that its handle_node_joined handler wins the leader election and
+    // sends the StateSnapshot to the rebuilt node.
     let mut fixture = match ClusterFixture::dual().await {
         Ok(f) => f,
         Err(e) => {
@@ -119,7 +122,7 @@ pub async fn test_l4_full_rebuild_recovery() -> TestReport {
     let proxy_addr_0 = fixture.node(0).proxy_addr_str();
     let admin_addr_1 = fixture.node(1).admin_addr_str();
     let proxy_addr_1 = fixture.node(1).proxy_addr_str();
-    let db_path = fixture.node(0).db_path.clone();
+    let db_path = fixture.node(1).db_path.clone();
 
     // Deploy an app with a route
     let step = match helpers::setup_deploy_app(&fixture, app_id, host).await {
@@ -130,6 +133,12 @@ pub async fn test_l4_full_rebuild_recovery() -> TestReport {
 
     if report.failed() {
         return report;
+    }
+
+    // Trigger cold start on both nodes before waiting for instances
+    for i in 0..2 {
+        let proxy_addr = fixture.node(i).proxy_addr_str();
+        let _ = verifier::verify_proxy_request_any_2xx(&proxy_addr, host).await;
     }
 
     // Wait for both nodes to have the app
@@ -181,12 +190,12 @@ pub async fn test_l4_full_rebuild_recovery() -> TestReport {
         return report;
     }
 
-    // ── Stop: Kill node-0 ──────────────────────────────────────────
+    // ── Stop: Kill node-1 ──────────────────────────────────────────
     let recovery_start = std::time::Instant::now();
 
-    let step = match injector::inject_node_kill(fixture.node_mut(0)) {
-        Ok(result) => StepResult::pass("stop_node_0", &result.description),
-        Err(e) => StepResult::fail("stop_node_0", &e),
+    let step = match injector::inject_node_kill(fixture.node_mut(1)) {
+        Ok(result) => StepResult::pass("stop_node_1", &result.description),
+        Err(e) => StepResult::fail("stop_node_1", &e),
     };
     report.add_step(step);
 
@@ -197,10 +206,10 @@ pub async fn test_l4_full_rebuild_recovery() -> TestReport {
     // Wait for the process to fully exit
     tokio::time::sleep(Duration::from_secs(2)).await;
 
-    let step = if fixture.node_mut(0).is_running() {
-        StepResult::fail("wait_for_exit", "node-0 is still running after SIGKILL")
+    let step = if fixture.node_mut(1).is_running() {
+        StepResult::fail("wait_for_exit", "node-1 is still running after SIGKILL")
     } else {
-        StepResult::pass("wait_for_exit", "node-0 process exited")
+        StepResult::pass("wait_for_exit", "node-1 process exited")
     };
     report.add_step(step);
 
@@ -208,10 +217,10 @@ pub async fn test_l4_full_rebuild_recovery() -> TestReport {
         return report;
     }
 
-    // ── Inject: Delete node-0's redb file entirely ─────────────────
+    // ── Inject: Delete node-1's redb file entirely ─────────────────
     // This simulates total disk loss — the node has no local state at all.
     // On restart, it will detect an empty database and enter FullRebuild
-    // mode, requesting a StateSnapshot from node-1.
+    // mode, requesting a StateSnapshot from node-0 (the survivor).
     let step = match std::fs::remove_file(&db_path) {
         Ok(_) => StepResult::pass(
             "delete_database",
@@ -242,7 +251,7 @@ pub async fn test_l4_full_rebuild_recovery() -> TestReport {
                 let name_str = name.to_string_lossy();
                 // Clean up redb auxiliary files (wal, lock) but leave the
                 // temp directory and config file intact
-                if name_str.starts_with("chaos_chaos-node-0.redb") {
+                if name_str.starts_with("chaos_chaos-node-1.redb") {
                     let _ = std::fs::remove_file(entry.path());
                     cleaned = true;
                 }
@@ -256,13 +265,13 @@ pub async fn test_l4_full_rebuild_recovery() -> TestReport {
     };
     report.add_step(step);
 
-    // ── Restart: Start node-0 with an empty database ───────────────
+    // ── Restart: Start node-1 with an empty database ───────────────
     // The node will detect an empty database (0 artifacts) and enter
     // FullRebuild mode. It will publish a NodeJoined event and wait
-    // for a StateSnapshot from node-1.
-    let step = match fixture.node_mut(0).restart() {
-        Ok(_) => StepResult::pass("restart_node_0", "ok"),
-        Err(e) => StepResult::fail("restart_node_0", &e),
+    // for a StateSnapshot from node-0.
+    let step = match fixture.node_mut(1).restart().await {
+        Ok(_) => StepResult::pass("restart_node_1", "ok"),
+        Err(e) => StepResult::fail("restart_node_1", &e),
     };
     report.add_step(step);
 
@@ -270,17 +279,17 @@ pub async fn test_l4_full_rebuild_recovery() -> TestReport {
         return report;
     }
 
-    // ── Verify: Node-0 becomes healthy ──────────────────────────────
+    // ── Verify: Node-1 becomes healthy ──────────────────────────────
     // The node needs time to:
     // 1. Start up and detect empty redb
     // 2. Publish NodeJoined event
-    // 3. Receive StateSnapshot from node-1
+    // 3. Receive StateSnapshot from node-0
     // 4. Process the snapshot (save configs, routes, secrets)
-    // 5. Fetch artifacts from node-1's artifact server
+    // 5. Fetch artifacts from node-0's artifact server
     // 6. Reconnect to NATS
     //
     // This can take a while, especially the artifact fetch step.
-    let step = match verifier::wait_for_node_healthy(&admin_addr_0, Duration::from_secs(120)).await
+    let step = match verifier::wait_for_node_healthy(&admin_addr_1, Duration::from_secs(120)).await
     {
         Ok(ttr) => StepResult::pass("wait_for_healthy", &format!("{}ms", ttr.as_millis())),
         Err(e) => StepResult::fail("wait_for_healthy", &e),
@@ -294,9 +303,9 @@ pub async fn test_l4_full_rebuild_recovery() -> TestReport {
         return report;
     }
 
-    // ── Verify: Node-0 received a StateSnapshot from node-1 ────────
+    // ── Verify: Node-1 received a StateSnapshot from node-0 ────────
     // The StateSnapshot contains all app configs, routes, and encrypted
-    // secrets. After processing, node-0 should have the route in its
+    // secrets. After processing, node-1 should have the route in its
     // redb and host router.
     //
     // We give the node extra time to process the snapshot and fetch
@@ -304,20 +313,20 @@ pub async fn test_l4_full_rebuild_recovery() -> TestReport {
     // involves downloading the .wasm file over HTTP.
     tokio::time::sleep(Duration::from_secs(10)).await;
 
-    let step = match verifier::verify_route_exists(&admin_addr_0, host).await {
+    let step = match verifier::verify_route_exists(&admin_addr_1, host).await {
         Ok(_) => StepResult::pass("wait_for_state_snapshot", "route exists"),
         Err(e) => StepResult::fail("wait_for_state_snapshot", &e),
     };
     report.add_step(step);
 
-    // ── Verify: The app can be cold-started on node-0 ───────────────
-    // After the StateSnapshot is processed, node-0 has the app config
+    // ── Verify: The app can be cold-started on node-1 ───────────────
+    // After the StateSnapshot is processed, node-1 has the app config
     // and artifact. A cold start (triggered by the first request) should
     // spawn a new instance.
-    let _ = verifier::verify_proxy_request_any_2xx(&proxy_addr_0, host).await;
+    let _ = verifier::verify_proxy_request_any_2xx(&proxy_addr_1, host).await;
 
     let step =
-        match verifier::wait_for_app_instances(&admin_addr_0, app_id, 1, Duration::from_secs(60))
+        match verifier::wait_for_app_instances(&admin_addr_1, app_id, 1, Duration::from_secs(60))
             .await
         {
             Ok(ttr) => StepResult::pass(
@@ -328,40 +337,40 @@ pub async fn test_l4_full_rebuild_recovery() -> TestReport {
         };
     report.add_step(step);
 
-    // ── Verify: The proxy serves traffic on node-0 ──────────────────
-    let step = match verifier::verify_proxy_request(&proxy_addr_0, host, 200).await {
+    // ── Verify: The proxy serves traffic on node-1 ──────────────────
+    let step = match verifier::verify_proxy_request(&proxy_addr_1, host, 200).await {
         Ok(ttr) => StepResult::pass("verify_traffic_served", &format!("{}ms", ttr.as_millis())),
         Err(e) => StepResult::fail("verify_traffic_served", &e),
     };
     report.add_step(step);
 
-    // ── Verify: NATS is reconnected on node-0 ──────────────────────
-    let step = match verifier::verify_nats_connected(&admin_addr_0, Duration::from_secs(10)).await {
+    // ── Verify: NATS is reconnected on node-1 ──────────────────────
+    let step = match verifier::verify_nats_connected(&admin_addr_1, Duration::from_secs(10)).await {
         Ok(ttr) => StepResult::pass("verify_nats_reconnected", &format!("{}ms", ttr.as_millis())),
         Err(e) => StepResult::fail("verify_nats_reconnected", &e),
     };
     report.add_step(step);
 
-    // ── Verify: Node-1 is still healthy (survivor) ──────────────────
-    // Node-1 should not have been affected by node-0's database loss.
-    let step = match verifier::wait_for_node_healthy(&admin_addr_1, Duration::from_secs(10)).await {
-        Ok(ttr) => StepResult::pass("verify_node_1_healthy", &format!("{}ms", ttr.as_millis())),
-        Err(e) => StepResult::fail("verify_node_1_healthy", &e),
+    // ── Verify: Node-0 is still healthy (survivor) ──────────────────
+    // Node-0 should not have been affected by node-1's database loss.
+    let step = match verifier::wait_for_node_healthy(&admin_addr_0, Duration::from_secs(10)).await {
+        Ok(ttr) => StepResult::pass("verify_node_0_healthy", &format!("{}ms", ttr.as_millis())),
+        Err(e) => StepResult::fail("verify_node_0_healthy", &e),
     };
     report.add_step(step);
 
-    // ── Verify: Node-1 still serves traffic ─────────────────────────
-    let step = match verifier::verify_proxy_request(&proxy_addr_1, host, 200).await {
-        Ok(ttr) => StepResult::pass("verify_node_1_traffic", &format!("{}ms", ttr.as_millis())),
-        Err(e) => StepResult::fail("verify_node_1_traffic", &e),
+    // ── Verify: Node-0 still serves traffic ─────────────────────────
+    let step = match verifier::verify_proxy_request(&proxy_addr_0, host, 200).await {
+        Ok(ttr) => StepResult::pass("verify_node_0_traffic", &format!("{}ms", ttr.as_millis())),
+        Err(e) => StepResult::fail("verify_node_0_traffic", &e),
     };
     report.add_step(step);
 
-    // ── Verify: Billing chain is intact on node-1 ──────────────────
-    // Node-1's billing chain should be unaffected by node-0's rebuild.
-    let step = match verifier::verify_billing_chain(&admin_addr_1).await {
-        Ok(_) => StepResult::pass("verify_billing_chain_node_1", "valid"),
-        Err(e) => StepResult::fail("verify_billing_chain_node_1", &e),
+    // ── Verify: Billing chain is intact on node-0 ──────────────────
+    // Node-0's billing chain should be unaffected by node-1's rebuild.
+    let step = match verifier::verify_billing_chain(&admin_addr_0).await {
+        Ok(_) => StepResult::pass("verify_billing_chain_node_0", "valid"),
+        Err(e) => StepResult::fail("verify_billing_chain_node_0", &e),
     };
     report.add_step(step);
 
@@ -394,6 +403,8 @@ pub async fn test_l4_rebuilt_node_receives_new_deployments() -> TestReport {
     let mut report = TestReport::new("L4: Rebuilt Node Receives New Deployments");
 
     // ── Setup ──────────────────────────────────────────────────────
+    // node-0 is the survivor (smallest ID) so it wins leader election
+    // and sends the StateSnapshot to the rebuilt node-1.
     let mut fixture = match ClusterFixture::dual().await {
         Ok(f) => f,
         Err(e) => {
@@ -406,10 +417,11 @@ pub async fn test_l4_rebuilt_node_receives_new_deployments() -> TestReport {
     let host_1 = "chaos.local";
 
     // Extract owned addresses before any mutable operations on fixture
-    let admin_addr_0 = fixture.node(0).admin_addr_str();
-    let proxy_addr_0 = fixture.node(0).proxy_addr_str();
-    let _admin_addr_1 = fixture.node(1).admin_addr_str();
-    let db_path = fixture.node(0).db_path.clone();
+    let _admin_addr_0 = fixture.node(0).admin_addr_str();
+    let _proxy_addr_0 = fixture.node(0).proxy_addr_str();
+    let admin_addr_1 = fixture.node(1).admin_addr_str();
+    let proxy_addr_1 = fixture.node(1).proxy_addr_str();
+    let db_path = fixture.node(1).db_path.clone();
 
     // Deploy the first app
     let step = match helpers::setup_deploy_app(&fixture, app_id_1, host_1).await {
@@ -420,6 +432,12 @@ pub async fn test_l4_rebuilt_node_receives_new_deployments() -> TestReport {
 
     if report.failed() {
         return report;
+    }
+
+    // Trigger cold start on both nodes before waiting for instances
+    for i in 0..2 {
+        let proxy_addr = fixture.node(i).proxy_addr_str();
+        let _ = verifier::verify_proxy_request_any_2xx(&proxy_addr, host_1).await;
     }
 
     // Wait for both nodes
@@ -446,22 +464,22 @@ pub async fn test_l4_rebuilt_node_receives_new_deployments() -> TestReport {
         return report;
     }
 
-    // ── Rebuild: Delete node-0's redb and restart ──────────────────
+    // ── Rebuild: Delete node-1's redb and restart ──────────────────
     let recovery_start = std::time::Instant::now();
 
-    let step = match injector::inject_node_kill(fixture.node_mut(0)) {
-        Ok(result) => StepResult::pass("stop_node_0", &result.description),
-        Err(e) => StepResult::fail("stop_node_0", &e),
+    let step = match injector::inject_node_kill(fixture.node_mut(1)) {
+        Ok(result) => StepResult::pass("stop_node_1", &result.description),
+        Err(e) => StepResult::fail("stop_node_1", &e),
     };
     report.add_step(step);
 
     // Wait for exit
     tokio::time::sleep(Duration::from_secs(2)).await;
 
-    let step = if fixture.node_mut(0).is_running() {
-        StepResult::fail("wait_for_exit", "node-0 is still running after SIGKILL")
+    let step = if fixture.node_mut(1).is_running() {
+        StepResult::fail("wait_for_exit", "node-1 is still running after SIGKILL")
     } else {
-        StepResult::pass("wait_for_exit", "node-0 process exited")
+        StepResult::pass("wait_for_exit", "node-1 process exited")
     };
     report.add_step(step);
 
@@ -479,10 +497,10 @@ pub async fn test_l4_rebuilt_node_receives_new_deployments() -> TestReport {
     };
     report.add_step(step);
 
-    // Restart node-0
-    let step = match fixture.node_mut(0).restart() {
-        Ok(_) => StepResult::pass("restart_node_0", "ok"),
-        Err(e) => StepResult::fail("restart_node_0", &e),
+    // Restart node-1
+    let step = match fixture.node_mut(1).restart().await {
+        Ok(_) => StepResult::pass("restart_node_1", "ok"),
+        Err(e) => StepResult::fail("restart_node_1", &e),
     };
     report.add_step(step);
 
@@ -490,8 +508,8 @@ pub async fn test_l4_rebuilt_node_receives_new_deployments() -> TestReport {
         return report;
     }
 
-    // Wait for node-0 to become healthy
-    let step = match verifier::wait_for_node_healthy(&admin_addr_0, Duration::from_secs(120)).await
+    // Wait for node-1 to become healthy
+    let step = match verifier::wait_for_node_healthy(&admin_addr_1, Duration::from_secs(120)).await
     {
         Ok(ttr) => StepResult::pass("wait_for_healthy", &format!("{}ms", ttr.as_millis())),
         Err(e) => StepResult::fail("wait_for_healthy", &e),
@@ -508,7 +526,7 @@ pub async fn test_l4_rebuilt_node_receives_new_deployments() -> TestReport {
     // Wait for the StateSnapshot to be processed
     tokio::time::sleep(Duration::from_secs(10)).await;
 
-    let step = match verifier::verify_route_exists(&admin_addr_0, host_1).await {
+    let step = match verifier::verify_route_exists(&admin_addr_1, host_1).await {
         Ok(_) => StepResult::pass("wait_for_snapshot", "route exists"),
         Err(e) => StepResult::fail("wait_for_snapshot", &e),
     };
@@ -555,23 +573,23 @@ pub async fn test_l4_rebuilt_node_receives_new_deployments() -> TestReport {
         report.add_step(step);
     }
 
-    // ── Verify: Node-0 serves traffic for the second app ───────────
-    let step = match verifier::verify_proxy_request(&proxy_addr_0, host_2, 200).await {
+    // ── Verify: Node-1 serves traffic for the second app ───────────
+    let step = match verifier::verify_proxy_request(&proxy_addr_1, host_2, 200).await {
         Ok(ttr) => StepResult::pass(
-            "verify_app2_traffic_node_0",
+            "verify_app2_traffic_node_1",
             &format!("{}ms", ttr.as_millis()),
         ),
-        Err(e) => StepResult::fail("verify_app2_traffic_node_0", &e),
+        Err(e) => StepResult::fail("verify_app2_traffic_node_1", &e),
     };
     report.add_step(step);
 
-    // ── Verify: Node-0 still serves traffic for the first app ──────
-    let step = match verifier::verify_proxy_request(&proxy_addr_0, host_1, 200).await {
+    // ── Verify: Node-1 still serves traffic for the first app ──────
+    let step = match verifier::verify_proxy_request(&proxy_addr_1, host_1, 200).await {
         Ok(ttr) => StepResult::pass(
-            "verify_app1_traffic_node_0",
+            "verify_app1_traffic_node_1",
             &format!("{}ms", ttr.as_millis()),
         ),
-        Err(e) => StepResult::fail("verify_app1_traffic_node_0", &e),
+        Err(e) => StepResult::fail("verify_app1_traffic_node_1", &e),
     };
     report.add_step(step);
 

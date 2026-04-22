@@ -153,6 +153,23 @@ impl HostRouter {
             Err(e) => tracing::error!(error = %e, "failed to load routes"),
         }
     }
+
+    /// List all currently loaded routes for the admin API.
+    pub async fn list_routes(&self) -> Vec<serde_json::Value> {
+        let map = self.routes.read().await;
+        let mut result = Vec::new();
+        for (host, entries) in map.iter() {
+            for entry in entries {
+                result.push(serde_json::json!({
+                    "host": host,
+                    "path_prefix": entry.path_prefix,
+                    "app_id": entry.app_id.0,
+                    "strip_prefix": entry.strip_prefix,
+                }));
+            }
+        }
+        result
+    }
 }
 
 #[cfg(test)]

@@ -141,6 +141,11 @@ pub async fn test_l2_node_restart_recovery() -> TestReport {
         return report;
     }
 
+    // Wait briefly for the OS to reap the process after SIGKILL.
+    // try_wait() returns Ok(None) until the kernel has cleaned up the
+    // child — this can take a few milliseconds after the signal is sent.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
     // ── Verify: The process is dead ────────────────────────────────
     let step = if fixture.node_mut(0).is_running() {
         StepResult::fail(
@@ -160,7 +165,7 @@ pub async fn test_l2_node_restart_recovery() -> TestReport {
     tokio::time::sleep(Duration::from_secs(2)).await;
 
     // ── Recover: Restart the node process ──────────────────────────
-    let step = match fixture.node_mut(0).restart() {
+    let step = match fixture.node_mut(0).restart().await {
         Ok(_) => StepResult::pass("restart_node", "ok"),
         Err(e) => StepResult::fail("restart_node", &e),
     };
@@ -347,7 +352,7 @@ pub async fn test_l2_node_graceful_restart_recovery() -> TestReport {
     tokio::time::sleep(Duration::from_secs(2)).await;
 
     // ── Recover: Restart the node process ──────────────────────────
-    let step = match fixture.node_mut(0).restart() {
+    let step = match fixture.node_mut(0).restart().await {
         Ok(_) => StepResult::pass("restart_node", "ok"),
         Err(e) => StepResult::fail("restart_node", &e),
     };

@@ -50,6 +50,57 @@
 //! - The `remove_nats_partition` function is called in the cleanup phase,
 //!   even if the test fails.
 //! - Tests run sequentially (`--test-threads=1`) to avoid rule conflicts.
+//!
+//! ## `CAP_NET_ADMIN` in Production & CI
+//!
+//! `CAP_NET_ADMIN` is a Linux capability that allows a process to perform
+//! network administration tasks: configuring interfaces, setting up firewall
+//! rules, and manipulating traffic control (`tc`). In the context of these
+//! chaos tests, it is required because simulating a network partition
+//! involves injecting global `iptables` DROP rules or `tc netem` packet-loss
+//! policies on the host's loopback interface.
+//!
+//! ### Why this is safe in production CI
+//!
+//! In a real production CI pipeline (e.g., GitHub Actions, GitLab CI, or a
+//! dedicated test runner), the test job typically runs inside an ephemeral
+//! VM or container. The host is destroyed immediately after the test run,
+//! so any lingering `iptables`/`tc` rules are irrelevant. This is the
+//! recommended approach for automated chaos testing.
+//!
+//! ### How to grant `CAP_NET_ADMIN` in different environments
+//!
+//! | Environment | Command / Configuration |
+//! |-------------|------------------------|
+//! | **Local WSL (development)** | `sudo cargo test -p e2e --test chaos test_l5 -- --test-threads=1` |
+//! | **Docker** | `docker run --cap-add=NET_ADMIN ...` |
+//! | **Podman** | `podman run --cap-add=NET_ADMIN ...` |
+//! | **Kubernetes** | Add `NET_ADMIN` to the container's `securityContext.capabilities.add` |
+//! | **GitHub Actions** | No action needed — `ubuntu-latest` runners run as root |
+//! | **systemd service** | `AmbientCapabilities=CAP_NET_ADMIN` in the unit file |
+//!
+//! ### Kubernetes example (Helm / raw YAML)
+//!
+//! ```yaml
+//! securityContext:
+//!   capabilities:
+//!     add:
+//!       - NET_ADMIN
+//! ```
+//!
+//! ### Emergency cleanup
+//!
+//! If a test is killed with `kill -9` or the process panics during a
+//! partition, the cleanup handler may not run. You can manually restore
+//! connectivity with:
+//!
+//! ```bash
+//! # Remove tc netem rules
+//! sudo tc qdisc del dev lo root 2>/dev/null
+//!
+//! # Flush iptables OUTPUT chain (use with caution)
+//! sudo iptables -F OUTPUT 2>/dev/null
+//! ```
 
 use crate::fixture::ClusterFixture;
 use crate::helpers;

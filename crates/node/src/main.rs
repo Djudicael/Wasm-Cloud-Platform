@@ -369,8 +369,36 @@ async fn main() -> anyhow::Result<()> {
         std::fs::create_dir_all(parent).unwrap_or_default();
     }
 
-    let store = storage::Store::open(&config.storage.db_path)?;
-    info!(path = %config.storage.db_path.display(), "storage opened");
+    let store = match storage::Store::open(&config.storage.db_path) {
+        Ok(s) => {
+            info!(path = %config.storage.db_path.display(), "storage opened");
+            s
+        }
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                path = %config.storage.db_path.display(),
+                "failed to open redb — database may be corrupted, deleting and recreating"
+            );
+            if config.storage.db_path.exists() {
+                if let Err(remove_err) = std::fs::remove_file(&config.storage.db_path) {
+                    return Err(anyhow::anyhow!(
+                        "failed to open redb and could not delete corrupted file: {e} (delete error: {remove_err})"
+                    ));
+                }
+            }
+            let s = match storage::Store::open(&config.storage.db_path) {
+                Ok(s) => s,
+                Err(e2) => {
+                    return Err(anyhow::anyhow!(
+                        "failed to open redb even after deleting corrupted file: {e2}"
+                    ));
+                }
+            };
+            info!(path = %config.storage.db_path.display(), "storage recreated after corruption");
+            s
+        }
+    };
 
     // Initialize hot-reloadable configuration handle.
     // Loads any persisted overrides from redb so they survive restarts.
@@ -835,6 +863,10 @@ async fn main() -> anyhow::Result<()> {
     let db_path_clone = config.storage.db_path.clone();
     let store_gc = store.clone();
     let supervisor_gc = supervisor.clone();
+    let supervisor_instances = supervisor.clone();
+    let supervisor_kill = supervisor.clone();
+    let store_billing = store.clone();
+    let host_router_admin = host_router.clone();
     let ebpf_cmd_tx = supervisor.command_tx();
 
     // Enhanced health check for external LBs and DNS providers
@@ -980,6 +1012,112 @@ async fn main() -> anyhow::Result<()> {
             }),
         )
         .route(
+            "/admin/instances/{app_id}",
+            axum::routing::get({
+                let supervisor = supervisor_instances.clone();
+                move |axum::extract::Path(app_id): axum::extract::Path<String>| {
+                    let supervisor = supervisor.clone();
+                    async move {
+                        let app_id = common::types::AppId(app_id);
+                        let instances = supervisor.list_instances(&app_id).await;
+                        axum::Json(serde_json::json!({
+                            "app_id": app_id.0,
+                            "instances": instances.iter().map(|id| serde_json::json!({
+                                "id": id.0.to_string(),
+                            })).collect::<Vec<_>>(),
+                            "count": instances.len(),
+                        }))
+                    }
+                }
+            }),
+        )
+        .route(
+            "/admin/instances/{app_id}/kill",
+            axum::routing::post({
+                let supervisor = supervisor_kill.clone();
+                move |axum::extract::Path(app_id): axum::extract::Path<String>| {
+                    let supervisor = supervisor.clone();
+                    async move {
+                        let app_id = common::types::AppId(app_id);
+                        match supervisor.kill_all_instances(&app_id).await {
+                            Ok(()) => (
+                                axum::http::StatusCode::OK,
+                                axum::Json(serde_json::json!({
+                                    "status": "killed",
+                                    "app_id": app_id.0,
+                                    "message": "all instances killed"
+                                })),
+                            ),
+                            Err(e) => (
+                                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                                axum::Json(serde_json::json!({
+                                    "status": "error",
+                                    "app_id": app_id.0,
+                                    "message": format!("failed to kill instances: {e}")
+                                })),
+                            ),
+                        }
+                    }
+                }
+            }),
+        )
+        .route(
+            "/admin/billing/count",
+            axum::routing::get({
+                let store = store_billing.clone();
+                move || {
+                    let store = store.clone();
+                    async move {
+                        match store.get_all_billing_records() {
+                            Ok(records) => axum::Json(serde_json::json!({
+                                "count": records.len() as u64,
+                            })),
+                            Err(e) => axum::Json(serde_json::json!({
+                                "count": 0,
+                                "error": format!("{e}"),
+                            })),
+                        }
+                    }
+                }
+            }),
+        )
+        .route(
+            "/admin/billing/verify",
+            axum::routing::post({
+                let store = store_billing.clone();
+                move || {
+                    let store = store.clone();
+                    async move {
+                        match store.get_all_billing_records() {
+                            Ok(records) => match billing::verify_chain(&records) {
+                                Ok(count) => (
+                                    axum::http::StatusCode::OK,
+                                    axum::Json(serde_json::json!({
+                                        "valid": true,
+                                        "count": count,
+                                    })),
+                                ),
+                                Err(e) => (
+                                    axum::http::StatusCode::OK,
+                                    axum::Json(serde_json::json!({
+                                        "valid": false,
+                                        "error": format!("{:?}", e),
+                                    })),
+                                ),
+                            },
+                            Err(e) => (
+                                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                                axum::Json(serde_json::json!({
+                                    "valid": false,
+                                    "error": format!("failed to read records: {:?}", e),
+                                })),
+                            ),
+                        }
+                    }
+                }
+            }),
+        )
+        .route(
             "/admin/rebuild",
             axum::routing::post(move || {
                 let db_path = db_path_clone.clone();
@@ -999,7 +1137,7 @@ async fn main() -> anyhow::Result<()> {
                                 axum::http::StatusCode::INTERNAL_SERVER_ERROR,
                                 axum::Json(serde_json::json!({
                                     "status": "error",
-                                    "message": format!("Failed to delete database: {}", e)
+                                    "message": format!("failed to delete database: {e}")
                                 })),
                             )
                         }
@@ -1129,6 +1267,22 @@ async fn main() -> anyhow::Result<()> {
                             "actions": actions,
                         })),
                     )
+                }
+            }),
+        )
+        .route(
+            "/admin/routes",
+            axum::routing::get({
+                let router = host_router_admin.clone();
+                move || {
+                    let router = router.clone();
+                    async move {
+                        let routes = router.list_routes().await;
+                        axum::Json(serde_json::json!({
+                            "routes": routes,
+                            "count": routes.len(),
+                        }))
+                    }
                 }
             }),
         )

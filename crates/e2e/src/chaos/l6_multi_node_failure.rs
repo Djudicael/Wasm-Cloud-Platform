@@ -219,6 +219,9 @@ pub async fn test_l6_multi_node_failure_recovery() -> TestReport {
         return report;
     }
 
+    // Wait for the OS to reap the processes
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
     // ── Verify: The killed nodes are actually dead ──────────────────
     let step = if fixture.node_mut(1).is_running() {
         StepResult::fail(
@@ -302,13 +305,13 @@ pub async fn test_l6_multi_node_failure_recovery() -> TestReport {
     // Restart both failed nodes. They will reconnect to NATS and
     // restore their state from redb (which was not corrupted — only
     // the processes were killed).
-    let step = match fixture.node_mut(1).restart() {
+    let step = match fixture.node_mut(1).restart().await {
         Ok(_) => StepResult::pass("restart_node_1", "ok"),
         Err(e) => StepResult::fail("restart_node_1", &e),
     };
     report.add_step(step);
 
-    let step = match fixture.node_mut(2).restart() {
+    let step = match fixture.node_mut(2).restart().await {
         Ok(_) => StepResult::pass("restart_node_2", "ok"),
         Err(e) => StepResult::fail("restart_node_2", &e),
     };
@@ -594,13 +597,13 @@ pub async fn test_l6_survivor_receives_new_deployments() -> TestReport {
         "OS resources released",
     ));
 
-    let step = match fixture.node_mut(1).restart() {
+    let step = match fixture.node_mut(1).restart().await {
         Ok(_) => StepResult::pass("restart_node_1", "ok"),
         Err(e) => StepResult::fail("restart_node_1", &e),
     };
     report.add_step(step);
 
-    let step = match fixture.node_mut(2).restart() {
+    let step = match fixture.node_mut(2).restart().await {
         Ok(_) => StepResult::pass("restart_node_2", "ok"),
         Err(e) => StepResult::fail("restart_node_2", &e),
     };
@@ -774,7 +777,7 @@ pub async fn test_l6_sequential_node_failures() -> TestReport {
         "resources released",
     ));
 
-    let step = match fixture.node_mut(1).restart() {
+    let step = match fixture.node_mut(1).restart().await {
         Ok(_) => StepResult::pass("round1_restart_node_1", "ok"),
         Err(e) => StepResult::fail("round1_restart_node_1", &e),
     };
@@ -814,7 +817,7 @@ pub async fn test_l6_sequential_node_failures() -> TestReport {
         "resources released",
     ));
 
-    let step = match fixture.node_mut(2).restart() {
+    let step = match fixture.node_mut(2).restart().await {
         Ok(_) => StepResult::pass("round2_restart_node_2", "ok"),
         Err(e) => StepResult::fail("round2_restart_node_2", &e),
     };
@@ -857,7 +860,7 @@ pub async fn test_l6_sequential_node_failures() -> TestReport {
         "resources released",
     ));
 
-    let step = match fixture.node_mut(0).restart() {
+    let step = match fixture.node_mut(0).restart().await {
         Ok(_) => StepResult::pass("round3_restart_node_0", "ok"),
         Err(e) => StepResult::fail("round3_restart_node_0", &e),
     };

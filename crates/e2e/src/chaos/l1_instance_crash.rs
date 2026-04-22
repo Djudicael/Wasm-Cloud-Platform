@@ -93,6 +93,9 @@ pub async fn test_l1_instance_crash_recovery() -> TestReport {
         return report;
     }
 
+    // Trigger a cold start so an instance is spawned
+    let _ = verifier::verify_proxy_request_any_2xx(&proxy_addr, host).await;
+
     // Wait for the app to have a running instance
     let step =
         match verifier::wait_for_app_instances(&admin_addr, app_id, 1, Duration::from_secs(30))

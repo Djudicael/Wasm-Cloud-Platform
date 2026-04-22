@@ -146,25 +146,18 @@ pub fn check_environment() -> Result<(), String> {
     // Check that we're on a Unix-like system
     #[cfg(not(unix))]
     {
-        return Err(
-            "chaos tests require a Unix-like system (Linux/WSL). \
+        return Err("chaos tests require a Unix-like system (Linux/WSL). \
              Process signals (SIGKILL, SIGTERM) are not available on this platform."
-                .to_string(),
-        );
+            .to_string());
     }
 
     // Check that the wasm-node binary exists
-    let binary_path = std::env::var("WASM_NODE_BINARY")
-        .unwrap_or_else(|_| "target/debug/wasm-node".to_string());
+    let binary_path = crate::fixture::find_node_binary();
     if !std::path::Path::new(&binary_path).exists() {
-        // Also check release
-        let release_path = "target/release/wasm-node";
-        if !std::path::Path::new(release_path).exists() {
-            return Err(format!(
-                "wasm-node binary not found at '{binary_path}' or 'target/release/wasm-node'. \
-                 Build it with: cargo build --bin wasm-node"
-            ));
-        }
+        return Err(format!(
+            "wasm-node binary not found at '{binary_path}' or 'target/release/wasm-node'. \
+             Build it with: cargo build --bin wasm-node"
+        ));
     }
 
     // Check that a container runtime is available
@@ -182,7 +175,7 @@ pub fn check_environment() -> Result<(), String> {
 
     if !podman_available && !docker_available {
         return Err(
-            "no container runtime found. Install Podman or Docker for testcontainers.".to_string()
+            "no container runtime found. Install Podman or Docker for testcontainers.".to_string(),
         );
     }
 

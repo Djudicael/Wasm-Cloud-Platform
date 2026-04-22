@@ -17,6 +17,71 @@
 /// NATS is provisioned automatically via testcontainers — no external
 /// NATS server is needed.
 ///
+/// ## `CAP_NET_ADMIN` (L5 Tests Only)
+///
+/// The L5 NATS partition test manipulates the host's network stack to drop
+/// packets destined for the NATS server. This requires `CAP_NET_ADMIN`,
+/// a Linux capability that allows a process to configure `tc` (traffic
+/// control) and `iptables` firewall rules.
+///
+/// ### Running L5 on your WSL + Podman setup
+///
+/// **Option 1 — `sudo` (recommended for local development):**
+///
+/// ```bash
+/// wsl
+/// sudo cargo test -p e2e --test chaos test_l5 -- --test-threads=1
+/// ```
+///
+/// **Option 2 — Grant capability to your user ( persists until reboot ):**
+///
+/// ```bash
+/// # Add CAP_NET_ADMIN to the cargo binary
+/// sudo setcap cap_net_admin+eip $(which cargo)
+///
+/// # Verify
+/// getcap $(which cargo)
+/// ```
+///
+/// **Option 3 — Rootless Podman with `netavark` / `slirp4netns`:**
+///
+/// If you are already running Podman rootless, the user namespace may not
+/// have `NET_ADMIN` mapped. You can run the tests inside a Podman container
+/// that explicitly requests the capability:
+///
+/// ```bash
+/// podman run --rm -it \
+///   --cap-add=NET_ADMIN \
+///   --network=host \
+///   -v $(pwd):/workspace \
+///   -w /workspace \
+///   rust:latest \
+///   bash -c "cargo test -p e2e --test chaos test_l5 -- --test-threads=1"
+/// ```
+///
+/// ### Why not just skip L5?
+///
+/// L1–L4 and L6 cover process crashes, database corruption, full rebuilds,
+/// and multi-node failures. L5 specifically tests **network partition**
+/// resilience — a distinct failure mode where the node loses connectivity
+/// to NATS but must continue serving existing traffic. If you skip it,
+/// you are not verifying the `NatsHealthWatcher` degraded-mode logic.
+///
+/// ### Cleanup after a crashed L5 test
+///
+/// `tc` and `iptables` rules are global. If the test panics or is killed
+/// with `kill -9` during a partition, rules may persist and break local
+/// networking. The test registers a Ctrl+C handler and calls cleanup on
+/// failure, but as a safety net:
+///
+/// ```bash
+/// # Remove tc netem rules from loopback
+/// sudo tc qdisc del dev lo root 2>/dev/null
+///
+/// # Or flush iptables OUTPUT chain (use with caution)
+/// sudo iptables -F OUTPUT 2>/dev/null
+/// ```
+///
 /// ## Building (inside WSL)
 ///
 /// ```bash

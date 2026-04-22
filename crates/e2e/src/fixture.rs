@@ -55,7 +55,7 @@ static CLUSTER_COUNTER: std::sync::atomic::AtomicU16 = std::sync::atomic::Atomic
 /// Allocate a unique port range for a cluster instance.
 fn allocate_port_base() -> u16 {
     let idx = CLUSTER_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    idx * 20 // 20 ports per cluster (enough for 3 nodes + NATS)
+    idx * 350 // 350 ports per cluster (enough for 3 nodes * 101 WASI ports + admin/proxy/artifact ports)
 }
 
 // ── NodeProcess ──────────────────────────────────────────────────────
@@ -79,6 +79,8 @@ pub struct NodeProcess {
     pub config_path: PathBuf,
     _temp_dir: TempDir,
     nats_url: String,
+    port_start: u16,
+    port_end: u16,
 }
 
 impl NodeProcess {
@@ -93,10 +95,18 @@ impl NodeProcess {
         admin_port: u16,
         proxy_port: u16,
         artifact_port: u16,
+        port_start: u16,
+        port_end: u16,
     ) -> Result<Self, String> {
         info!(
             node_id,
-            admin_port, proxy_port, artifact_port, nats_url, "NodeProcess::start called"
+            admin_port,
+            proxy_port,
+            artifact_port,
+            port_start,
+            port_end,
+            nats_url,
+            "NodeProcess::start called"
         );
 
         let temp_dir =
@@ -182,6 +192,10 @@ check_interval_secs = 2
             .arg(admin_port.to_string())
             .arg("--artifact-port")
             .arg(artifact_port.to_string())
+            .arg("--port-start")
+            .arg(port_start.to_string())
+            .arg("--port-end")
+            .arg(port_end.to_string())
             .env(
                 "RUST_LOG",
                 std::env::var("RUST_LOG").unwrap_or_else(|_| "info".into()),
@@ -229,6 +243,8 @@ check_interval_secs = 2
             config_path,
             _temp_dir: temp_dir,
             nats_url: nats_url.to_string(),
+            port_start,
+            port_end,
         })
     }
 
@@ -289,7 +305,7 @@ check_interval_secs = 2
     ///
     /// If the process is still running, it is killed first. The same config
     /// file and database path are reused so the node restores state from redb.
-    pub fn restart(&mut self) -> Result<(), String> {
+    pub async fn restart(&mut self) -> Result<(), String> {
         info!(node_id = %self.node_id, "restarting wasm-node");
 
         // Kill if still running
@@ -317,6 +333,10 @@ check_interval_secs = 2
             .arg(self.admin_port.to_string())
             .arg("--artifact-port")
             .arg(self.artifact_port.to_string())
+            .arg("--port-start")
+            .arg(self.port_start.to_string())
+            .arg("--port-end")
+            .arg(self.port_end.to_string())
             .env(
                 "RUST_LOG",
                 std::env::var("RUST_LOG").unwrap_or_else(|_| "info".into()),
@@ -328,19 +348,16 @@ check_interval_secs = 2
 
         // Wait for the restarted node to become healthy
         // Use a longer timeout since the node needs to do integrity checks
-        let rt = tokio::runtime::Handle::current();
-        rt.block_on(async {
-            crate::helpers::wait_for_health(
-                &format!("127.0.0.1:{}", self.admin_port),
-                Duration::from_secs(60),
+        crate::helpers::wait_for_health(
+            &format!("127.0.0.1:{}", self.admin_port),
+            Duration::from_secs(60),
+        )
+        .await
+        .map_err(|e| {
+            format!(
+                "restarted node {} did not become healthy: {e}",
+                self.node_id
             )
-            .await
-            .map_err(|e| {
-                format!(
-                    "restarted node {} did not become healthy: {e}",
-                    self.node_id
-                )
-            })
         })
     }
 
@@ -489,6 +506,7 @@ pub struct ClusterFixture {
     pub nats_url: String,
     pub nodes: Vec<NodeProcess>,
     pub http: reqwest::Client,
+    #[allow(dead_code)]
     port_base: u16,
 }
 
@@ -544,9 +562,30 @@ impl ClusterFixture {
                 node_id,
                 admin_port, proxy_port, artifact_port, "starting cluster node"
             );
-            let node =
-                NodeProcess::start(&node_id, &nats_url, admin_port, proxy_port, artifact_port)
-                    .await?;
+            // Each node gets a unique WASI port range so they don't collide
+            // on the shared host OS. Range size = 101 ports per node.
+            let port_start = 10000 + port_base + (i as u16) * 101;
+            let port_end = port_start + 100;
+
+            info!(
+                node_id,
+                admin_port,
+                proxy_port,
+                artifact_port,
+                port_start,
+                port_end,
+                "starting cluster node"
+            );
+            let node = NodeProcess::start(
+                &node_id,
+                &nats_url,
+                admin_port,
+                proxy_port,
+                artifact_port,
+                port_start,
+                port_end,
+            )
+            .await?;
 
             nodes.push(node);
         }
@@ -646,7 +685,7 @@ impl Drop for ClusterFixture {
 ///
 /// Looks in `target/debug/wasm-node` and `target/release/wasm-node` relative
 /// to the workspace root. If not found, attempts to build it.
-fn find_node_binary() -> String {
+pub fn find_node_binary() -> String {
     // Try the WASM_NODE_BINARY env var first
     if let Ok(path) = std::env::var("WASM_NODE_BINARY") {
         if Path::new(&path).exists() {

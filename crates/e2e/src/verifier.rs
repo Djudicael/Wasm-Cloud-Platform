@@ -77,7 +77,7 @@ impl VerificationResult {
     }
 
     /// Compute TTR relative to a given injection timestamp.
-    pub fn ttr_since(&self, injected_at: Instant) -> Duration {
+    pub fn ttr_since(&self, _injected_at: Instant) -> Duration {
         // The TTR stored here is the elapsed time of the verification itself.
         // The overall TTR from injection to recovery is:
         //   injected_at + self.ttr - injected_at = self.ttr
@@ -141,7 +141,11 @@ pub async fn wait_for_node_healthy(
         match client.get(&url).send().await {
             Ok(resp) if resp.status().is_success() => {
                 let ttr = start.elapsed();
-                info!(addr = admin_addr, ttr_ms = ttr.as_millis(), "node is healthy");
+                info!(
+                    addr = admin_addr,
+                    ttr_ms = ttr.as_millis(),
+                    "node is healthy"
+                );
                 return Ok(ttr);
             }
             Ok(resp) => {
@@ -180,15 +184,16 @@ pub async fn wait_for_admin_reachable(
     let start = Instant::now();
     let parts: Vec<&str> = admin_addr.split(':').collect();
     let host = parts.first().unwrap_or(&"127.0.0.1");
-    let port: u16 = parts
-        .get(1)
-        .and_then(|p| p.parse().ok())
-        .unwrap_or(9090);
+    let port: u16 = parts.get(1).and_then(|p| p.parse().ok()).unwrap_or(9090);
 
     loop {
         if crate::helpers::check_tcp(host, port) {
             let ttr = start.elapsed();
-            info!(addr = admin_addr, ttr_ms = ttr.as_millis(), "admin API reachable");
+            info!(
+                addr = admin_addr,
+                ttr_ms = ttr.as_millis(),
+                "admin API reachable"
+            );
             return Ok(ttr);
         }
         if start.elapsed() > timeout {
@@ -293,7 +298,11 @@ pub async fn wait_for_app_zero_instances(
 
                 if count == 0 {
                     let ttr = start.elapsed();
-                    info!(app = app_id, ttr_ms = ttr.as_millis(), "app has zero instances");
+                    info!(
+                        app = app_id,
+                        ttr_ms = ttr.as_millis(),
+                        "app has zero instances"
+                    );
                     return Ok(ttr);
                 }
             }
@@ -462,22 +471,20 @@ pub async fn verify_billing_chain(admin_addr: &str) -> Result<Duration, String> 
         .map_err(|e| format!("billing verify request failed: {e}"))?;
 
     if !resp.status().is_success() {
-        return Err(format!(
-            "billing verify returned status {}",
-            resp.status()
-        ));
+        return Err(format!("billing verify returned status {}", resp.status()));
     }
 
     let body: serde_json::Value = resp.json().await.unwrap_or_default();
-    let valid = body
-        .get("valid")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
+    let valid = body.get("valid").and_then(|v| v.as_bool()).unwrap_or(false);
 
     let ttr = start.elapsed();
 
     if valid {
-        info!(admin_addr, ttr_ms = ttr.as_millis(), "billing chain verified");
+        info!(
+            admin_addr,
+            ttr_ms = ttr.as_millis(),
+            "billing chain verified"
+        );
         Ok(ttr)
     } else {
         let reason = body
@@ -506,17 +513,11 @@ pub async fn count_billing_records(admin_addr: &str) -> Result<u64, String> {
         .map_err(|e| format!("billing count request failed: {e}"))?;
 
     if !resp.status().is_success() {
-        return Err(format!(
-            "billing count returned status {}",
-            resp.status()
-        ));
+        return Err(format!("billing count returned status {}", resp.status()));
     }
 
     let body: serde_json::Value = resp.json().await.unwrap_or_default();
-    Ok(body
-        .get("count")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0))
+    Ok(body.get("count").and_then(|v| v.as_u64()).unwrap_or(0))
 }
 
 // ── Routes ───────────────────────────────────────────────────────────
@@ -541,10 +542,7 @@ pub async fn verify_route_exists(admin_addr: &str, host: &str) -> Result<Duratio
         .map_err(|e| format!("routes request failed: {e}"))?;
 
     if !resp.status().is_success() {
-        return Err(format!(
-            "routes endpoint returned status {}",
-            resp.status()
-        ));
+        return Err(format!("routes endpoint returned status {}", resp.status()));
     }
 
     let body: serde_json::Value = resp.json().await.unwrap_or_default();
@@ -589,10 +587,7 @@ pub async fn verify_route_absent(admin_addr: &str, host: &str) -> Result<Duratio
         .map_err(|e| format!("routes request failed: {e}"))?;
 
     if !resp.status().is_success() {
-        return Err(format!(
-            "routes endpoint returned status {}",
-            resp.status()
-        ));
+        return Err(format!("routes endpoint returned status {}", resp.status()));
     }
 
     let body: serde_json::Value = resp.json().await.unwrap_or_default();
@@ -612,7 +607,9 @@ pub async fn verify_route_absent(admin_addr: &str, host: &str) -> Result<Duratio
         info!(host, ttr_ms = ttr.as_millis(), "route correctly absent");
         Ok(ttr)
     } else {
-        Err(format!("route for host '{host}' still exists (should have been removed)"))
+        Err(format!(
+            "route for host '{host}' still exists (should have been removed)"
+        ))
     }
 }
 
@@ -675,12 +672,12 @@ pub async fn verify_nats_connected(
         match client.get(&url).send().await {
             Ok(resp) if resp.status().is_success() => {
                 let body: serde_json::Value = resp.json().await.unwrap_or_default();
-                let nats_status = body
-                    .get("nats")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("unknown");
+                let nats_connected = body
+                    .get("nats_connected")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
 
-                if nats_status == "connected" {
+                if nats_connected {
                     let ttr = start.elapsed();
                     info!(ttr_ms = ttr.as_millis(), "NATS reconnected");
                     return Ok(ttr);
@@ -716,12 +713,12 @@ pub async fn verify_nats_disconnected(
         match client.get(&url).send().await {
             Ok(resp) if resp.status().is_success() => {
                 let body: serde_json::Value = resp.json().await.unwrap_or_default();
-                let nats_status = body
-                    .get("nats")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("unknown");
+                let nats_connected = body
+                    .get("nats_connected")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(true);
 
-                if nats_status == "disconnected" {
+                if !nats_connected {
                     let ttr = start.elapsed();
                     info!(ttr_ms = ttr.as_millis(), "NATS confirmed disconnected");
                     return Ok(ttr);
@@ -766,7 +763,10 @@ pub async fn verify_full_recovery(
     // 1. Node health
     match wait_for_node_healthy(admin_addr, timeout).await {
         Ok(ttr) => {
-            checks.push(CheckResult::pass("node_healthy", &format!("TTR={}ms", ttr.as_millis())));
+            checks.push(CheckResult::pass(
+                "node_healthy",
+                &format!("TTR={}ms", ttr.as_millis()),
+            ));
         }
         Err(e) => {
             checks.push(CheckResult::fail("node_healthy", &e));
@@ -778,7 +778,10 @@ pub async fn verify_full_recovery(
     if all_passed {
         match verify_nats_connected(admin_addr, Duration::from_secs(30)).await {
             Ok(ttr) => {
-                checks.push(CheckResult::pass("nats_connected", &format!("TTR={}ms", ttr.as_millis())));
+                checks.push(CheckResult::pass(
+                    "nats_connected",
+                    &format!("TTR={}ms", ttr.as_millis()),
+                ));
             }
             Err(e) => {
                 checks.push(CheckResult::fail("nats_connected", &e));
@@ -791,7 +794,10 @@ pub async fn verify_full_recovery(
     if all_passed {
         match wait_for_app_instances(admin_addr, app_id, 1, timeout).await {
             Ok(ttr) => {
-                checks.push(CheckResult::pass("app_instances", &format!("TTR={}ms", ttr.as_millis())));
+                checks.push(CheckResult::pass(
+                    "app_instances",
+                    &format!("TTR={}ms", ttr.as_millis()),
+                ));
             }
             Err(e) => {
                 checks.push(CheckResult::fail("app_instances", &e));
@@ -804,7 +810,10 @@ pub async fn verify_full_recovery(
     if all_passed {
         match verify_proxy_request(proxy_addr, host, 200).await {
             Ok(ttr) => {
-                checks.push(CheckResult::pass("proxy_serves", &format!("TTR={}ms", ttr.as_millis())));
+                checks.push(CheckResult::pass(
+                    "proxy_serves",
+                    &format!("TTR={}ms", ttr.as_millis()),
+                ));
             }
             Err(e) => {
                 checks.push(CheckResult::fail("proxy_serves", &e));
@@ -817,7 +826,10 @@ pub async fn verify_full_recovery(
     if all_passed {
         match verify_billing_chain(admin_addr).await {
             Ok(ttr) => {
-                checks.push(CheckResult::pass("billing_chain", &format!("TTR={}ms", ttr.as_millis())));
+                checks.push(CheckResult::pass(
+                    "billing_chain",
+                    &format!("TTR={}ms", ttr.as_millis()),
+                ));
             }
             Err(e) => {
                 checks.push(CheckResult::fail("billing_chain", &e));
@@ -836,10 +848,7 @@ pub async fn verify_full_recovery(
             checks,
         )
     } else {
-        VerificationResult::fail(
-            &format!("full recovery failed for {app_id}"),
-            checks,
-        )
+        VerificationResult::fail(&format!("full recovery failed for {app_id}"), checks)
     }
 }
 
@@ -916,7 +925,10 @@ pub async fn verify_cluster_serves_traffic(
 
     if all_passed {
         VerificationResult::ok_with_checks(
-            &format!("cluster serves traffic for '{host}' ({} nodes)", proxy_addrs.len()),
+            &format!(
+                "cluster serves traffic for '{host}' ({} nodes)",
+                proxy_addrs.len()
+            ),
             overall_ttr,
             checks,
         )
