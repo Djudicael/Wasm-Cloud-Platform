@@ -12,6 +12,7 @@ pub mod billing;
 pub mod config;
 pub mod gc;
 pub mod gc_metrics;
+pub mod health;
 pub mod integrity;
 pub mod metrics;
 pub mod routes;
@@ -39,6 +40,52 @@ pub struct Store {
 }
 
 impl Store {
+    /// Write a health probe key to verify that redb is writable.
+    /// This writes a small record and immediately deletes it.
+    pub fn write_health_probe(&self) -> Result<(), PlatformError> {
+        const HEALTH_PROBE_TABLE: redb::TableDefinition<&str, &str> =
+            redb::TableDefinition::new("__health_probe");
+
+        let write_txn = self
+            .db
+            .begin_write()
+            .map_err(|e| PlatformError::storage(format!("health probe write begin: {}", e)))?;
+
+        {
+            let mut table = write_txn
+                .open_table(HEALTH_PROBE_TABLE)
+                .map_err(|e| PlatformError::storage(format!("health probe open: {}", e)))?;
+            table
+                .insert("probe", chrono::Utc::now().to_rfc3339().as_str())
+                .map_err(|e| PlatformError::storage(format!("health probe insert: {}", e)))?;
+        }
+
+        write_txn
+            .commit()
+            .map_err(|e| PlatformError::storage(format!("health probe commit: {}", e)))?;
+
+        // Clean up the probe key
+        let delete_txn = self
+            .db
+            .begin_write()
+            .map_err(|e| PlatformError::storage(format!("health probe delete begin: {}", e)))?;
+
+        {
+            let mut table = delete_txn
+                .open_table(HEALTH_PROBE_TABLE)
+                .map_err(|e| PlatformError::storage(format!("health probe open: {}", e)))?;
+            table
+                .remove("probe")
+                .map_err(|e| PlatformError::storage(format!("health probe remove: {}", e)))?;
+        }
+
+        delete_txn
+            .commit()
+            .map_err(|e| PlatformError::storage(format!("health probe delete commit: {}", e)))?;
+
+        Ok(())
+    }
+
     /// Open (or create) the database at the given path.
     /// Creates all table definitions on first run, then runs any pending migrations.
     pub fn open(path: &Path) -> Result<Self, redb::Error> {

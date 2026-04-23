@@ -159,6 +159,34 @@ pub enum Event {
         /// The hot-config fields that changed (serialized HotConfigUpdate).
         changes: serde_json::Value,
     },
+
+    // ── Health Events ──────────────────────────────────────────────
+    /// Published when a node's health status changes.
+    NodeHealthChanged {
+        node_id: String,
+        /// The new health status: "healthy", "degraded", or "unhealthy".
+        status: String,
+        /// Which dependency caused the change (if applicable).
+        cause: Option<String>,
+        /// ISO-8601 timestamp.
+        timestamp: String,
+        /// Number of active instances.
+        active_instances: u32,
+        /// Whether the node is accepting requests.
+        accepting_requests: bool,
+    },
+
+    /// Published periodically with the node's current health snapshot.
+    NodeHealthSnapshot {
+        node_id: String,
+        status: String,
+        active_instances: u32,
+        deployed_apps: u32,
+        nats_connected: bool,
+        disk_free_mb: u64,
+        memory_used_mb: u64,
+        timestamp: String,
+    },
 }
 
 impl Event {
@@ -222,6 +250,14 @@ impl Event {
             // ── Configuration Hot-Reload ──────────────────────────────────────
             Event::ConfigHotReload { node_id, .. } => {
                 format!("config.hot_reload.{}", node_id)
+            }
+
+            // ── Health Events ──────────────────────────────────────────────
+            Event::NodeHealthChanged { node_id, .. } => {
+                format!("cluster.health.changed.{}", node_id)
+            }
+            Event::NodeHealthSnapshot { node_id, .. } => {
+                format!("cluster.health.snapshot.{}", node_id)
             }
         }
     }

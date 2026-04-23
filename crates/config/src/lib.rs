@@ -206,10 +206,17 @@ fn merge_config(base: NodeConfig, overlay: NodeConfig) -> NodeConfig {
         },
         health: HealthSection {
             check_interval_secs: overlay.health.check_interval_secs,
+            check_timeout_secs: overlay.health.check_timeout_secs,
             default_idle_timeout_secs: overlay.health.default_idle_timeout_secs,
             default_max_instances: overlay.health.default_max_instances,
             default_fuel_quota: overlay.health.default_fuel_quota,
             default_memory_pages: overlay.health.default_memory_pages,
+            failure_threshold: overlay.health.failure_threshold,
+            success_threshold: overlay.health.success_threshold,
+            min_disk_free_bytes: overlay.health.min_disk_free_bytes,
+            max_memory_bytes: overlay.health.max_memory_bytes,
+            snapshot_interval_secs: overlay.health.snapshot_interval_secs,
+            app_defaults: overlay.health.app_defaults.clone(),
         },
     }
 }

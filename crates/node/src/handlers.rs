@@ -143,6 +143,7 @@ impl EventDispatcher {
                     fuel_used_percent: fuel_budget_used_percent,
                     active_instances,
                     last_seen: now,
+                    health_status: common::health::NodeHealthStatus::Healthy,
                 };
                 self.node_table.update(entry).await;
 
@@ -278,6 +279,63 @@ impl EventDispatcher {
                         "security incident on peer node — consider quarantining artifact"
                     );
                 }
+            }
+
+            // ── Health Events ─────────────────────────────────────────────
+            Event::NodeHealthChanged {
+                node_id,
+                status,
+                cause,
+                active_instances,
+                accepting_requests,
+                timestamp: _,
+            } => {
+                tracing::info!(
+                    node = %node_id,
+                    status = %status,
+                    cause = ?cause,
+                    active_instances,
+                    accepting_requests,
+                    "node health status changed"
+                );
+                // Update our node table with the new health status
+                let health_status = match status.as_str() {
+                    "healthy" => common::health::NodeHealthStatus::Healthy,
+                    "degraded" => common::health::NodeHealthStatus::Degraded,
+                    "unhealthy" => common::health::NodeHealthStatus::Unhealthy,
+                    _ => common::health::NodeHealthStatus::Degraded,
+                };
+                self.node_table.update_health(&node_id, health_status).await;
+            }
+
+            Event::NodeHealthSnapshot {
+                node_id,
+                status,
+                active_instances,
+                deployed_apps,
+                nats_connected,
+                disk_free_mb,
+                memory_used_mb,
+                ..
+            } => {
+                tracing::debug!(
+                    node = %node_id,
+                    status = %status,
+                    active_instances,
+                    deployed_apps,
+                    nats_connected,
+                    disk_free_mb,
+                    memory_used_mb,
+                    "node health snapshot received"
+                );
+                // Update node table health status from snapshot
+                let health_status = match status.as_str() {
+                    "healthy" => common::health::NodeHealthStatus::Healthy,
+                    "degraded" => common::health::NodeHealthStatus::Degraded,
+                    "unhealthy" => common::health::NodeHealthStatus::Unhealthy,
+                    _ => common::health::NodeHealthStatus::Degraded,
+                };
+                self.node_table.update_health(&node_id, health_status).await;
             }
 
             // ── Configuration Hot-Reload ──────────────────────────────────

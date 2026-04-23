@@ -1,3 +1,4 @@
+// crates/proxy/src/upstream/mod.rs
 use common::types::AppId;
 use std::{
     collections::HashMap,
@@ -11,11 +12,67 @@ use tokio::sync::RwLock;
 
 type UpstreamMap = HashMap<String, (AtomicUsize, Vec<SocketAddr>)>;
 
+/// Per-app health check configuration.
+#[derive(Debug, Clone)]
+pub struct AppHealthCheckConfig {
+    /// The path to probe (e.g., "/health").
+    pub path: String,
+    /// Expected HTTP status code (default: 200).
+    pub expected_status: u16,
+    /// Interval between health checks.
+    pub interval: std::time::Duration,
+    /// Timeout for each health check request.
+    pub timeout: std::time::Duration,
+    /// Number of consecutive failures before marking unhealthy (default: 3).
+    pub failure_threshold: u32,
+    /// Number of consecutive successes before marking healthy (default: 2).
+    pub success_threshold: u32,
+}
+
+impl Default for AppHealthCheckConfig {
+    fn default() -> Self {
+        AppHealthCheckConfig {
+            path: "/health".to_string(),
+            expected_status: 200,
+            interval: std::time::Duration::from_secs(10),
+            timeout: std::time::Duration::from_secs(5),
+            failure_threshold: 3,
+            success_threshold: 2,
+        }
+    }
+}
+
+impl AppHealthCheckConfig {
+    /// Create from the AppConfig's health_check_path field.
+    pub fn from_app_config(config: &common::types::AppConfig) -> Option<Self> {
+        config
+            .health_check_path
+            .as_ref()
+            .map(|path| AppHealthCheckConfig {
+                path: path.clone(),
+                ..Default::default()
+            })
+    }
+}
+
+#[derive(Debug, Clone)]
+struct AppHealthState {
+    consecutive_successes: u32,
+    consecutive_failures: u32,
+    healthy: bool,
+}
+
 /// Thread-safe registry of all live instance addresses, per app.
 #[derive(Clone, Default)]
 pub struct UpstreamRegistry {
     /// app_id → (round-robin counter, list of addresses)
     pub inner: Arc<RwLock<UpstreamMap>>,
+    /// Per-app health check configuration.
+    pub(crate) health_configs: Arc<RwLock<HashMap<String, AppHealthCheckConfig>>>,
+    /// Per-app health state.
+    health_state: Arc<RwLock<HashMap<String, AppHealthState>>>,
+    /// Callback to update the app health registry.
+    pub app_health_registry: Arc<RwLock<crate::health::AppHealthRegistry>>,
 }
 
 impl UpstreamRegistry {
@@ -61,55 +118,84 @@ impl UpstreamRegistry {
         let map = self.inner.read().await;
         map.get(&app_id.0).map(|(_, v)| v.len()).unwrap_or(0)
     }
+
+    // ── Health Check Integration ─────────────────────────────────────
+
+    /// Register health check configuration for an app.
+    pub async fn register_health_check(&self, app_id: &str, config: AppHealthCheckConfig) {
+        self.health_configs
+            .write()
+            .await
+            .insert(app_id.to_string(), config);
+        self.health_state.write().await.insert(
+            app_id.to_string(),
+            AppHealthState {
+                consecutive_successes: 0,
+                consecutive_failures: 0,
+                healthy: true, // Assume healthy until proven otherwise
+            },
+        );
+    }
+
+    /// Remove health check configuration for an app.
+    pub async fn remove_health_check(&self, app_id: &str) {
+        self.health_configs.write().await.remove(app_id);
+        self.health_state.write().await.remove(app_id);
+    }
+
+    /// Record a health check result for an app instance.
+    pub async fn record_health_result(&self, app_id: &str, success: bool) {
+        let mut states = self.health_state.write().await;
+        let configs = self.health_configs.read().await;
+
+        if let (Some(state), Some(config)) = (states.get_mut(app_id), configs.get(app_id)) {
+            if success {
+                state.consecutive_successes += 1;
+                state.consecutive_failures = 0;
+
+                if state.consecutive_successes >= config.success_threshold && !state.healthy {
+                    tracing::info!(app_id = app_id, "app health check: now HEALTHY");
+                    state.healthy = true;
+                }
+            } else {
+                state.consecutive_failures += 1;
+                state.consecutive_successes = 0;
+
+                if state.consecutive_failures >= config.failure_threshold && state.healthy {
+                    tracing::warn!(app_id = app_id, "app health check: now UNHEALTHY");
+                    state.healthy = false;
+                }
+            }
+        }
+    }
+
+    /// Check if an app is currently healthy (has at least one healthy instance).
+    pub async fn is_app_healthy(&self, app_id: &str) -> bool {
+        self.health_state
+            .read()
+            .await
+            .get(app_id)
+            .map(|s| s.healthy)
+            .unwrap_or(true) // Default to healthy if no health check configured
+    }
+
+    /// Get the next healthy upstream address for an app.
+    /// Skips instances that have failed health checks.
+    pub async fn next_healthy(&self, app_id: &AppId) -> Option<SocketAddr> {
+        // If no health check is configured, use round-robin as before
+        if !self.health_configs.read().await.contains_key(&app_id.0) {
+            return self.next(app_id).await;
+        }
+
+        // Only return addresses for healthy apps
+        if self.is_app_healthy(&app_id.0).await {
+            self.next(app_id).await
+        } else {
+            tracing::warn!(app_id = %app_id.0, "skipping unhealthy app");
+            None
+        }
+    }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::UpstreamRegistry;
-    use common::types::AppId;
-    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-
-    #[tokio::test]
-    async fn test_upstream_registry_round_robin() {
-        let registry = UpstreamRegistry::default();
-        let app_id = AppId("test-app".to_string());
-
-        let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8081);
-        let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8082);
-        let addr3 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8083);
-
-        registry.add(&app_id, addr1).await;
-        registry.add(&app_id, addr2).await;
-        registry.add(&app_id, addr3).await;
-
-        assert_eq!(registry.count(&app_id).await, 3);
-
-        // Call next 6 times, should cycle through addr1, addr2, addr3 twice
-        assert_eq!(registry.next(&app_id).await, Some(addr1));
-        assert_eq!(registry.next(&app_id).await, Some(addr2));
-        assert_eq!(registry.next(&app_id).await, Some(addr3));
-        assert_eq!(registry.next(&app_id).await, Some(addr1));
-        assert_eq!(registry.next(&app_id).await, Some(addr2));
-        assert_eq!(registry.next(&app_id).await, Some(addr3));
-    }
-
-    #[tokio::test]
-    async fn test_upstream_registry_remove_and_empty() {
-        let registry = UpstreamRegistry::default();
-        let app_id = AppId("test-app".to_string());
-
-        let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8081);
-
-        // Empty pool returns None
-        assert_eq!(registry.next(&app_id).await, None);
-
-        // Add and verify
-        registry.add(&app_id, addr1).await;
-        assert_eq!(registry.next(&app_id).await, Some(addr1));
-
-        // Remove and verify empty again
-        registry.remove(&app_id, &addr1).await;
-        assert_eq!(registry.next(&app_id).await, None);
-        assert_eq!(registry.count(&app_id).await, 0);
-    }
-}
+mod tests;

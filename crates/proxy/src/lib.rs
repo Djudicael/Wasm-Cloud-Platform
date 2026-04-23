@@ -4,6 +4,7 @@ pub mod backpressure;
 pub mod config;
 pub mod dns_webhook;
 pub mod health;
+pub mod health_events;
 pub mod metrics;
 pub mod node_table;
 pub mod rate_limiter;
@@ -11,6 +12,7 @@ pub mod router;
 pub mod service;
 pub mod tls;
 pub mod upstream;
+pub mod upstream_health;
 
 use config::ProxyTimeouts;
 use pingora::server::Server;

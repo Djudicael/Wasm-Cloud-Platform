@@ -25,6 +25,7 @@ messaging = { path = "../messaging" }
 dashmap = { workspace = true }
 rand = "0.8"
 hex = { workspace = true }
+chrono = { workspace = true }
 
 [dev-dependencies]
 tower = "0.5"

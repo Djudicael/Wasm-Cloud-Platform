@@ -77,6 +77,41 @@ impl NatsHealth {
             .as_secs();
         self.last_connected_at.store(now, Ordering::Relaxed);
     }
+
+    /// Perform a health check on the NATS connection.
+    pub fn check_health(&self) -> common::health::DependencyHealth {
+        let connected = self.is_connected();
+        let degraded = self.is_degraded();
+        let last_msg_age = self.last_message_age_secs();
+
+        let (status, message) = if connected && !degraded {
+            (
+                common::health::DependencyStatus::Healthy,
+                "connected".to_string(),
+            )
+        } else if connected && degraded {
+            (
+                common::health::DependencyStatus::Degraded,
+                format!(
+                    "connected but degraded (last message {}s ago)",
+                    last_msg_age
+                ),
+            )
+        } else {
+            (
+                common::health::DependencyStatus::Unhealthy,
+                format!("disconnected (last message {}s ago)", last_msg_age),
+            )
+        };
+
+        common::health::DependencyHealth {
+            name: "nats".to_string(),
+            status,
+            message,
+            latency_ms: None,
+            last_check: chrono::Utc::now().to_rfc3339(),
+        }
+    }
 }
 
 impl Default for NatsHealth {

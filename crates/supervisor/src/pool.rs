@@ -40,4 +40,9 @@ impl InstancePool {
             .map(|i| i.id.clone())
             .collect()
     }
+
+    /// Get the total number of instances in this pool.
+    pub fn instance_count(&self) -> usize {
+        self.instances.len()
+    }
 }

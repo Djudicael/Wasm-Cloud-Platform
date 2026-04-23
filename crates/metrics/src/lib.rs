@@ -1,5 +1,6 @@
 pub mod collector;
 pub mod exporter;
+pub mod health_metrics;
 pub mod log_dispatcher;
 pub mod nats;
 pub mod recovery;

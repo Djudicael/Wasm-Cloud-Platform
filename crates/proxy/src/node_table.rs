@@ -13,6 +13,7 @@ pub struct NodeEntry {
     pub fuel_used_percent: f32,
     pub active_instances: u32,
     pub last_seen: u64,
+    pub health_status: common::health::NodeHealthStatus,
 }
 
 impl NodeEntry {
@@ -48,13 +49,25 @@ impl NodeLoadTable {
         let unhealthy = self.unhealthy.read().await;
         nodes
             .values()
-            .filter(|n| !n.is_stale() && !unhealthy.contains(&n.node_id))
+            .filter(|n| {
+                !n.is_stale()
+                    && !unhealthy.contains(&n.node_id)
+                    && n.health_status != common::health::NodeHealthStatus::Unhealthy
+            })
             .min_by(|a, b| {
                 a.fuel_used_percent
                     .partial_cmp(&b.fuel_used_percent)
                     .unwrap()
             })
             .cloned()
+    }
+
+    /// Update a node's health status from a NATS health event.
+    pub async fn update_health(&self, node_id: &str, status: common::health::NodeHealthStatus) {
+        let mut table = self.nodes.write().await;
+        if let Some(node) = table.get_mut(node_id) {
+            node.health_status = status;
+        }
     }
 
     /// Mark a node as unhealthy (e.g., under memory/I/O pressure).
@@ -103,6 +116,7 @@ mod tests {
             fuel_used_percent: 50.0,
             active_instances: 5,
             last_seen: now,
+            health_status: common::health::NodeHealthStatus::Healthy,
         };
 
         let node2 = NodeEntry {
@@ -111,6 +125,7 @@ mod tests {
             fuel_used_percent: 20.0,
             active_instances: 2,
             last_seen: now,
+            health_status: common::health::NodeHealthStatus::Healthy,
         };
 
         let node3 = NodeEntry {
@@ -119,6 +134,7 @@ mod tests {
             fuel_used_percent: 10.0,
             active_instances: 1,
             last_seen: now - 40,
+            health_status: common::health::NodeHealthStatus::Healthy,
         };
 
         table.update(node1).await;
@@ -143,6 +159,7 @@ mod tests {
             fuel_used_percent: 20.0,
             active_instances: 2,
             last_seen: now,
+            health_status: common::health::NodeHealthStatus::Healthy,
         };
 
         let node2 = NodeEntry {
@@ -151,6 +168,7 @@ mod tests {
             fuel_used_percent: 50.0,
             active_instances: 5,
             last_seen: now,
+            health_status: common::health::NodeHealthStatus::Healthy,
         };
 
         table.update(node1).await;

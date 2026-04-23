@@ -141,7 +141,24 @@ impl NatsBus {
         // Create "NODE" stream for node load and cluster events
         js.get_or_create_stream(StreamConfig {
             name: "NODE".to_string(),
-            subjects: vec!["node.load.>".to_string(), "cluster.>".to_string()],
+            subjects: vec![
+                "node.load.>".to_string(),
+                "cluster.node_joined.>".to_string(),
+                "cluster.snapshot.>".to_string(),
+            ],
+            max_messages: 10_000,
+            ..Default::default()
+        })
+        .await
+        .map_err(PlatformError::messaging_source)?;
+
+        // Create "HEALTH" stream for health events
+        js.get_or_create_stream(StreamConfig {
+            name: "HEALTH".to_string(),
+            subjects: vec![
+                "cluster.health.changed.>".to_string(),
+                "cluster.health.snapshot.>".to_string(),
+            ],
             max_messages: 10_000,
             ..Default::default()
         })

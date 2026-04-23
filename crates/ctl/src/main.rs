@@ -120,8 +120,14 @@ enum LoggingAction {
 
 #[derive(Subcommand)]
 enum NodeAction {
-    /// Check node health status
+    /// Check node health status (detailed /status)
     Health,
+    /// Check startup probe (/livez)
+    Startup,
+    /// Check liveness probe (/healthz)
+    Liveness,
+    /// Check readiness probe (/readyz)
+    Readiness,
     /// Force a full node rebuild from cluster state
     Rebuild,
     /// Show eBPF kernel-level monitor status
@@ -189,6 +195,54 @@ impl NodeAction {
     pub async fn run(&self, node_api: &str, http: &reqwest::Client) -> anyhow::Result<()> {
         match self {
             NodeAction::Health => cmds::node::health(node_api, http).await,
+            NodeAction::Startup => {
+                match cmds::node::startup_probe(node_api, http).await {
+                    Ok(true) => {
+                        println!("Startup probe: PASS (startup complete)");
+                    }
+                    Ok(false) => {
+                        println!("Startup probe: FAIL (still starting)");
+                        std::process::exit(1);
+                    }
+                    Err(e) => {
+                        eprintln!("Startup probe error: {}", e);
+                        std::process::exit(1);
+                    }
+                }
+                Ok(())
+            }
+            NodeAction::Liveness => {
+                match cmds::node::liveness_probe(node_api, http).await {
+                    Ok(true) => {
+                        println!("Liveness probe: PASS");
+                    }
+                    Ok(false) => {
+                        println!("Liveness probe: FAIL");
+                        std::process::exit(1);
+                    }
+                    Err(e) => {
+                        eprintln!("Liveness probe error: {}", e);
+                        std::process::exit(1);
+                    }
+                }
+                Ok(())
+            }
+            NodeAction::Readiness => {
+                match cmds::node::readiness_probe(node_api, http).await {
+                    Ok(true) => {
+                        println!("Readiness probe: PASS");
+                    }
+                    Ok(false) => {
+                        println!("Readiness probe: FAIL");
+                        std::process::exit(1);
+                    }
+                    Err(e) => {
+                        eprintln!("Readiness probe error: {}", e);
+                        std::process::exit(1);
+                    }
+                }
+                Ok(())
+            }
             NodeAction::Rebuild => cmds::node::rebuild(node_api, http).await,
             NodeAction::EbpfStatus => {
                 let url = format!("{}/admin/ebpf/status", node_api);

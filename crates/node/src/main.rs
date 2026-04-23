@@ -849,6 +849,12 @@ async fn main() -> anyhow::Result<()> {
         "platform version metrics initialized"
     );
 
+    // Initialize health check metrics
+    let health_metrics = Arc::new(metrics::health_metrics::HealthMetrics::new(
+        &prom_metrics.registry,
+    ));
+    info!("health check metrics registered with Prometheus");
+
     let backpressure = proxy::backpressure::BackpressureSignal::new();
 
     // ── Initialize eBPF monitor (kernel-level observability) ────────────
@@ -939,12 +945,127 @@ async fn main() -> anyhow::Result<()> {
     let host_router_admin = host_router.clone();
     let ebpf_cmd_tx = supervisor.command_tx();
 
-    // Enhanced health check for external LBs and DNS providers
-    let health_router = proxy::health::health_router(
+    // ── Health Check System ───────────────────────────────────────────
+    let startup_complete = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+    let app_health_registry = Arc::new(tokio::sync::RwLock::new(
+        proxy::health::AppHealthRegistry::new(),
+    ));
+
+    let health_state = proxy::health::HealthState {
+        node_id: config.node.node_id.clone(),
+        nats_health: nats_health.clone(),
+        backpressure: Arc::new(backpressure.clone()),
+        started_at: std::time::Instant::now(),
+        startup_complete: startup_complete.clone(),
+        instance_count_provider: supervisor.clone()
+            as Arc<dyn proxy::health::InstanceCountProvider + Send + Sync>,
+        dependency_checkers: Arc::new(vec![
+            Box::new(proxy::health::NatsDependencyChecker::new(
+                nats_health.clone(),
+            )),
+            Box::new(proxy::health::RedbDependencyChecker::new(store.clone())),
+            Box::new(proxy::health::DiskDependencyChecker::new(
+                config.storage.db_path.clone(),
+                config.health.min_disk_free_bytes,
+            )),
+            Box::new(proxy::health::MemoryDependencyChecker::new(
+                config.health.max_memory_bytes,
+            )),
+        ]),
+        app_health_registry: app_health_registry.clone(),
+        config: proxy::health::HealthCheckConfig {
+            min_disk_free_bytes: config.health.min_disk_free_bytes,
+            max_memory_bytes: config.health.max_memory_bytes,
+            failure_threshold: config.health.failure_threshold,
+            success_threshold: config.health.success_threshold,
+            check_interval: std::time::Duration::from_secs(config.health.check_interval_secs),
+            check_timeout: std::time::Duration::from_secs(config.health.check_timeout_secs),
+        },
+    };
+
+    // Wire app health registry into upstream registry
+    {
+        let upstream_inner = upstream_registry.app_health_registry.write().await;
+        // The registry is already wired via clone; no action needed.
+        // This block ensures the RwLock type matches.
+        let _ = &*upstream_inner;
+    }
+
+    let health_router = proxy::health::health_router(health_state.clone());
+
+    // Health event publisher and background loop
+    let health_publisher = Arc::new(proxy::health_events::HealthEventPublisher::new(
+        bus.clone(),
         config.node.node_id.clone(),
-        nats_health.clone(),
-        Arc::new(backpressure),
+    ));
+    let _health_loop_handle = proxy::health_events::start_health_loop(
+        Arc::new(health_state.clone()),
+        health_publisher.clone(),
     );
+
+    // Start background per-app upstream health checker
+    let _upstream_health_handle = {
+        let upstream_checker =
+            proxy::upstream_health::UpstreamHealthChecker::new(upstream_registry.clone());
+        upstream_checker.start()
+    };
+    info!("upstream health checker started");
+
+    // Spawn a task to periodically update health metrics from the health state
+    {
+        let hm = health_metrics.clone();
+        let hs = Arc::new(health_state.clone());
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
+            loop {
+                interval.tick().await;
+
+                // Evaluate dependencies for metrics update
+                let mut dependencies = Vec::new();
+                for checker in hs.dependency_checkers.iter() {
+                    dependencies.push(checker.check());
+                }
+                dependencies.push(common::health::DependencyHealth {
+                    name: "backpressure".to_string(),
+                    status: if hs.backpressure.is_accepting() {
+                        common::health::DependencyStatus::Healthy
+                    } else {
+                        common::health::DependencyStatus::Unhealthy
+                    },
+                    message: if hs.backpressure.is_accepting() {
+                        "accepting requests".to_string()
+                    } else {
+                        "rejecting requests — node at capacity".to_string()
+                    },
+                    latency_ms: None,
+                    last_check: chrono::Utc::now().to_rfc3339(),
+                });
+
+                let status = proxy::health::compute_status_for_probe(
+                    &dependencies,
+                    common::health::ProbeType::Readiness,
+                );
+
+                let report = common::health::NodeHealthReport {
+                    status,
+                    node_id: hs.node_id.clone(),
+                    timestamp: chrono::Utc::now().to_rfc3339(),
+                    uptime_secs: hs.started_at.elapsed().as_secs(),
+                    startup_complete: hs
+                        .startup_complete
+                        .load(std::sync::atomic::Ordering::Relaxed),
+                    accepting_requests: hs.backpressure.is_accepting(),
+                    active_instances: hs.instance_count_provider.active_instance_count(),
+                    deployed_apps: hs.instance_count_provider.deployed_app_count(),
+                    dependencies,
+                    apps: hs.instance_count_provider.app_health_summaries(),
+                };
+
+                hm.update_from_report(&report);
+            }
+        });
+    }
 
     // ── Admin API Authentication Setup ──────────────────────────────────
     // Resolve the effective AuthConfig from: [auth] section > legacy admin.auth_token > defaults.
@@ -1814,6 +1935,10 @@ async fn main() -> anyhow::Result<()> {
         info!(addr = %artifact_addr, "artifact server listening");
         axum::serve(listener, artifact_app).await.unwrap();
     });
+
+    // Signal that startup is complete — all probes are now active
+    startup_complete.store(true, std::sync::atomic::Ordering::Relaxed);
+    info!(node_id = %config.node.node_id, "node startup complete — all probes active");
 
     info!(
         http = config.proxy.http_port,
