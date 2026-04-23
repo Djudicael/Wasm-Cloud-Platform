@@ -159,7 +159,18 @@ fn merge_config(base: NodeConfig, overlay: NodeConfig) -> NodeConfig {
         },
         logging: LoggingSection {
             level: overlay.logging.level,
+            format: overlay.logging.format,
+            output: overlay.logging.output.or(base.logging.output),
             otlp_endpoint: overlay.logging.otlp_endpoint.or(base.logging.otlp_endpoint),
+            modules: if overlay.logging.modules.is_empty() {
+                base.logging.modules.clone()
+            } else {
+                overlay.logging.modules.clone()
+            },
+            sampling: overlay.logging.sampling.clone(),
+            rotation: overlay.logging.rotation.clone(),
+            forward: overlay.logging.forward.clone(),
+            audit: overlay.logging.audit.clone(),
         },
         billing: BillingSection {
             export_dir: overlay.billing.export_dir.or(base.billing.export_dir),

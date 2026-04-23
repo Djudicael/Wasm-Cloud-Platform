@@ -57,7 +57,7 @@ impl WasmProxy {
         }
 
         // 4. Cold start on local node (last resort)
-        tracing::info!(app = %app_id.0, "cold start on local node");
+        tracing::info!(app_id = %app_id.0, "cold start on local node");
         (self.cold_start)(app_id.clone()).await
     }
 
@@ -166,7 +166,7 @@ impl ProxyHttp for WasmProxy {
                         }
                         crate::rate_limiter::RateLimitDenied::IpLimitExceeded { .. } => "ip_limit",
                     };
-                    tracing::warn!(app = %app_id.0, %source_ip, reason = %e, "rate limit exceeded");
+                    tracing::warn!(app_id = %app_id.0, %source_ip, reason = %e, "rate limit exceeded");
                     if let Some(ref metrics) = self.metrics {
                         metrics.record_rejection(&app_id.0, reason);
                     }
@@ -288,7 +288,7 @@ impl ProxyHttp for WasmProxy {
             .map(|r| r.status.as_u16())
             .unwrap_or(0);
         tracing::info!(
-            app = ctx
+            app_id = ctx
                 .app_id
                 .as_ref()
                 .map(|a| a.0.as_str())

@@ -13,3 +13,9 @@ sha2        = { workspace = true }
 hex         = { workspace = true }
 ipnet       = "2.12.0"
 rand        = "0.8"
+tracing     = { workspace = true }
+tracing-core = "0.1"
+tracing-subscriber = { workspace = true }
+tokio       = { workspace = true }
+async-nats  = { workspace = true }
+flate2      = "1.0"

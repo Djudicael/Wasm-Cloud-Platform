@@ -262,6 +262,34 @@ struct Args {
     /// Validate a config file without starting the node, then exit.
     #[arg(long)]
     validate_config: Option<String>,
+
+    /// Log output format: "json" or "text"
+    #[arg(long, default_value = "json", env = "WASM_NODE_LOG_FORMAT")]
+    log_format: String,
+
+    /// Log output destination: "stdout", "stderr", or a file path
+    #[arg(long, env = "WASM_NODE_LOG_OUTPUT")]
+    log_output: Option<String>,
+
+    /// Default log level (overridden by RUST_LOG)
+    #[arg(long, default_value = "info", env = "WASM_NODE_LOG_LEVEL")]
+    log_level: String,
+
+    /// Enable log sampling for high-throughput scenarios
+    #[arg(long, default_value = "false")]
+    log_sampling: bool,
+
+    /// INFO log sampling rate (1 = 100%, 10 = 10%)
+    #[arg(long, default_value = "1")]
+    log_info_sample_rate: u64,
+
+    /// DEBUG log sampling rate
+    #[arg(long, default_value = "10")]
+    log_debug_sample_rate: u64,
+
+    /// TRACE log sampling rate
+    #[arg(long, default_value = "100")]
+    log_trace_sample_rate: u64,
 }
 
 #[tokio::main]
@@ -336,7 +364,7 @@ async fn main() -> anyhow::Result<()> {
         db_proxy_addr: Some(args.db_proxy_addr.clone()),
         db_proxy_backend: Some(args.db_backend_addr.clone()),
         db_proxy_max_connections: Some(args.db_proxy_max_connections),
-        log_level: None, // Not available in Args
+        log_level: Some(args.log_level.clone()),
         otlp_endpoint: args.otlp_endpoint.clone(),
         billing_export_dir: args.billing_export_dir.clone(),
         billing_export_interval_secs: Some(args.billing_export_interval_secs),
@@ -356,8 +384,50 @@ async fn main() -> anyhow::Result<()> {
     let config_path = args.config.as_deref().map(std::path::Path::new);
     let config = load_config(config_path, &cli_overrides)?;
 
-    // Set up logging with reload handle (allows runtime log-level changes)
-    let log_reload_handle = log_reload::LogReloadHandle::init(&config.logging.level);
+    // Set up structured logging with reload handle (allows runtime log-level changes)
+    let format = match config.logging.format.as_str() {
+        "text" => common::logging::LogFormat::Text,
+        _ => common::logging::LogFormat::Json,
+    };
+
+    let output = if let Some(ref path) = args.log_output {
+        common::logging::LogOutput::File {
+            path: std::path::PathBuf::from(path),
+        }
+    } else if let Some(ref path) = config.logging.output {
+        common::logging::LogOutput::File {
+            path: std::path::PathBuf::from(path),
+        }
+    } else {
+        common::logging::LogOutput::Stdout
+    };
+
+    let logging_config = common::logging::LoggingConfig {
+        format,
+        output,
+        default_level: config.logging.level.clone(),
+        module_levels: config.logging.modules.clone(),
+        sampling_enabled: args.log_sampling || config.logging.sampling.enabled,
+        info_sample_rate: if args.log_info_sample_rate != 1 {
+            args.log_info_sample_rate
+        } else {
+            config.logging.sampling.info_rate
+        },
+        debug_sample_rate: if args.log_debug_sample_rate != 10 {
+            args.log_debug_sample_rate
+        } else {
+            config.logging.sampling.debug_rate
+        },
+        trace_sample_rate: if args.log_trace_sample_rate != 100 {
+            args.log_trace_sample_rate
+        } else {
+            config.logging.sampling.trace_rate
+        },
+        node_id: config.node.node_id.clone(),
+        include_source: cfg!(debug_assertions),
+    };
+
+    let log_reload_handle = common::logging::init_logging(&logging_config);
 
     info!(node_id = %config.node.node_id, "wasm-node starting");
     info!(
@@ -1401,7 +1471,7 @@ async fn main() -> anyhow::Result<()> {
                             Ok(()) => {
                                 // If log level changed, apply it to the tracing subscriber
                                 if let Some(ref level) = update.logging_level {
-                                    if let Err(e) = log_h.set_level(level) {
+                                    if let Err(e) = log_h.update_levels(level) {
                                         tracing::warn!(error = %e, "failed to apply log level change via reload handle");
                                     } else {
                                         tracing::info!(new_level = %level, "log level changed at runtime");
@@ -1472,6 +1542,75 @@ async fn main() -> anyhow::Result<()> {
                                     "message": e.to_string(),
                                 })),
                             ),
+                        }
+                    }
+                }
+            }),
+        )
+        // ── Logging Admin Endpoints ────────────────────────────────────
+        .route(
+            "/admin/logging/levels",
+            axum::routing::get({
+                let _log_h = log_reload_handle.clone();
+                move || {
+                    let _log_h = _log_h.clone();
+                    async move {
+                        axum::Json(serde_json::json!({
+                            "message": "Current log levels are managed by the tracing subscriber. \
+                                        Use RUST_LOG format for updates.",
+                            "hint": "PATCH /admin/logging/levels with {\"directives\": \"debug,supervisor=trace\"}"
+                        }))
+                    }
+                }
+            }),
+        )
+        .route(
+            "/admin/logging/levels",
+            axum::routing::patch({
+                let log_h = log_reload_handle.clone();
+                let nid = config.node.node_id.clone();
+                move |body: axum::Json<serde_json::Value>| {
+                    let log_h = log_h.clone();
+                    let nid = nid.clone();
+                    async move {
+                        let directives = match body.0.get("directives").and_then(|v| v.as_str()) {
+                            Some(d) => d,
+                            None => {
+                                return (
+                                    axum::http::StatusCode::BAD_REQUEST,
+                                    axum::Json(serde_json::json!({
+                                        "status": "error",
+                                        "message": "Missing field 'directives' in request body",
+                                    })),
+                                );
+                            }
+                        };
+
+                        match log_h.update_levels(directives) {
+                            Ok(()) => {
+                                tracing::info!(
+                                    config_key = "logging.levels",
+                                    new_value = %directives,
+                                    node_id = %nid,
+                                    "log levels updated via admin API"
+                                );
+                                (
+                                    axum::http::StatusCode::OK,
+                                    axum::Json(serde_json::json!({
+                                        "status": "updated",
+                                        "directives": directives,
+                                    })),
+                                )
+                            }
+                            Err(e) => {
+                                (
+                                    axum::http::StatusCode::BAD_REQUEST,
+                                    axum::Json(serde_json::json!({
+                                        "status": "error",
+                                        "message": format!("Invalid log directives: {}", e),
+                                    })),
+                                )
+                            }
                         }
                     }
                 }
@@ -1628,7 +1767,7 @@ async fn main() -> anyhow::Result<()> {
                 let _ = sync_health_tx.send(hot.health.check_interval_secs);
 
                 // 5. Log level (apply via reload handle if changed)
-                if let Err(e) = sync_log_handle.set_level(&hot.logging.level) {
+                if let Err(e) = sync_log_handle.update_levels(&hot.logging.level) {
                     tracing::debug!(error = %e, "config sync: log level unchanged or invalid");
                 }
             }

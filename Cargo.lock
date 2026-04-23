@@ -1075,7 +1075,9 @@ dependencies = [
 name = "common"
 version = "0.1.0"
 dependencies = [
+ "async-nats",
  "chrono",
+ "flate2",
  "hex",
  "ipnet",
  "rand 0.8.5",
@@ -1083,6 +1085,10 @@ dependencies = [
  "serde_json",
  "sha2 0.11.0",
  "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "tracing-core",
+ "tracing-subscriber",
  "uuid",
 ]
 

@@ -366,19 +366,190 @@ impl Default for DatabaseSection {
 pub struct LoggingSection {
     #[serde(default = "default_log_level")]
     pub level: String,
+    #[serde(default = "default_log_format")]
+    pub format: String,
+    #[serde(default)]
+    pub output: Option<String>,
     #[serde(default)]
     pub otlp_endpoint: Option<String>,
+    /// Per-module log level overrides.
+    #[serde(default)]
+    pub modules: std::collections::HashMap<String, String>,
+    /// Log sampling configuration.
+    #[serde(default)]
+    pub sampling: LogSamplingSection,
+    /// Log file rotation (only when output is a file path).
+    #[serde(default)]
+    pub rotation: LogRotationSection,
+    /// Log forwarding to external aggregators.
+    #[serde(default)]
+    pub forward: LogForwardSection,
+    /// Audit logging configuration.
+    #[serde(default)]
+    pub audit: LogAuditSection,
 }
 
 fn default_log_level() -> String {
     "info".to_string()
 }
 
+fn default_log_format() -> String {
+    "json".to_string()
+}
+
 impl Default for LoggingSection {
     fn default() -> Self {
         LoggingSection {
             level: default_log_level(),
+            format: default_log_format(),
+            output: None,
             otlp_endpoint: None,
+            modules: std::collections::HashMap::new(),
+            sampling: LogSamplingSection::default(),
+            rotation: LogRotationSection::default(),
+            forward: LogForwardSection::default(),
+            audit: LogAuditSection::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LogSamplingSection {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_sample_rate_info")]
+    pub info_rate: u64,
+    #[serde(default = "default_sample_rate_debug")]
+    pub debug_rate: u64,
+    #[serde(default = "default_sample_rate_trace")]
+    pub trace_rate: u64,
+}
+
+fn default_sample_rate_info() -> u64 {
+    1
+}
+
+fn default_sample_rate_debug() -> u64 {
+    10
+}
+
+fn default_sample_rate_trace() -> u64 {
+    100
+}
+
+impl Default for LogSamplingSection {
+    fn default() -> Self {
+        LogSamplingSection {
+            enabled: false,
+            info_rate: default_sample_rate_info(),
+            debug_rate: default_sample_rate_debug(),
+            trace_rate: default_sample_rate_trace(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LogRotationSection {
+    #[serde(default = "default_rotation_max_file_size_mb")]
+    pub max_file_size_mb: u64,
+    #[serde(default = "default_rotation_max_files")]
+    pub max_files: u32,
+    #[serde(default = "default_rotation_max_age_hours")]
+    pub max_age_hours: u64,
+    #[serde(default = "default_rotation_compress")]
+    pub compress: bool,
+}
+
+fn default_rotation_max_file_size_mb() -> u64 {
+    100
+}
+
+fn default_rotation_max_files() -> u32 {
+    10
+}
+
+fn default_rotation_max_age_hours() -> u64 {
+    24
+}
+
+fn default_rotation_compress() -> bool {
+    true
+}
+
+impl Default for LogRotationSection {
+    fn default() -> Self {
+        LogRotationSection {
+            max_file_size_mb: default_rotation_max_file_size_mb(),
+            max_files: default_rotation_max_files(),
+            max_age_hours: default_rotation_max_age_hours(),
+            compress: default_rotation_compress(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LogForwardSection {
+    #[serde(default = "default_forward_buffer_capacity")]
+    pub buffer_capacity: usize,
+    #[serde(default = "default_forward_batch_size")]
+    pub batch_size: usize,
+    #[serde(default = "default_forward_flush_interval_ms")]
+    pub flush_interval_ms: u64,
+    #[serde(default)]
+    pub sinks: Vec<LogForwardSinkSection>,
+}
+
+fn default_forward_buffer_capacity() -> usize {
+    8192
+}
+
+fn default_forward_batch_size() -> usize {
+    200
+}
+
+fn default_forward_flush_interval_ms() -> u64 {
+    1000
+}
+
+impl Default for LogForwardSection {
+    fn default() -> Self {
+        LogForwardSection {
+            buffer_capacity: default_forward_buffer_capacity(),
+            batch_size: default_forward_batch_size(),
+            flush_interval_ms: default_forward_flush_interval_ms(),
+            sinks: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LogForwardSinkSection {
+    #[serde(rename = "type")]
+    pub sink_type: String,
+    pub endpoint: Option<String>,
+    pub index_prefix: Option<String>,
+    pub subject: Option<String>,
+    #[serde(default)]
+    pub labels: std::collections::HashMap<String, String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LogAuditSection {
+    pub output: Option<String>,
+    #[serde(default)]
+    pub rotation: LogRotationSection,
+}
+
+impl Default for LogAuditSection {
+    fn default() -> Self {
+        LogAuditSection {
+            output: None,
+            rotation: LogRotationSection {
+                max_file_size_mb: 50,
+                max_files: 30,
+                max_age_hours: 168,
+                compress: true,
+            },
         }
     }
 }

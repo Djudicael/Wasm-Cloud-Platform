@@ -61,6 +61,11 @@ enum Commands {
     Secrets(cmds::secrets::SecretsArgs),
     /// Stream logs from a running application
     Logs { app_id: String },
+    /// Logging configuration and management
+    Logging {
+        #[command(subcommand)]
+        action: LoggingAction,
+    },
     /// Show cluster health status
     Status,
     /// Platform binary management and upgrades
@@ -87,6 +92,29 @@ enum Commands {
     Policy {
         #[command(subcommand)]
         action: cmds::policy::PolicyCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum LoggingAction {
+    /// Show current log levels
+    Levels,
+    /// Update log levels (e.g. "debug,supervisor=trace")
+    SetLevels {
+        /// Log level directives in RUST_LOG format
+        directives: String,
+    },
+    /// Update log sampling rates
+    SetSampling {
+        /// INFO sample rate (1 = 100%)
+        #[arg(long, default_value = "1")]
+        info_rate: u64,
+        /// DEBUG sample rate (10 = 10%)
+        #[arg(long, default_value = "10")]
+        debug_rate: u64,
+        /// TRACE sample rate (100 = 1%)
+        #[arg(long, default_value = "100")]
+        trace_rate: u64,
     },
 }
 
@@ -435,6 +463,52 @@ async fn main() -> anyhow::Result<()> {
         Commands::Status => cmds::status::run(&cli.node_api, &http).await?,
         Commands::Platform(args) => cmds::platform::run(args, &bus, &cli.node_api, &http).await?,
         Commands::Gc(args) => cmds::gc::run(args, &bus, &cli.node_api, &http).await?,
+        Commands::Logging { action } => match action {
+            LoggingAction::Levels => {
+                let url = format!("{}/admin/logging/levels", cli.node_api);
+                let resp = http.get(&url).send().await?;
+                let body: serde_json::Value = resp.json().await?;
+                println!("{}", serde_json::to_string_pretty(&body)?);
+            }
+            LoggingAction::SetLevels { directives } => {
+                let url = format!("{}/admin/logging/levels", cli.node_api);
+                let resp = http
+                    .patch(&url)
+                    .json(&serde_json::json!({ "directives": directives }))
+                    .send()
+                    .await?;
+                if resp.status().is_success() {
+                    println!("Log levels updated: {}", directives);
+                } else {
+                    let body: serde_json::Value = resp.json().await?;
+                    println!("Failed to update log levels: {}", body);
+                }
+            }
+            LoggingAction::SetSampling {
+                info_rate,
+                debug_rate,
+                trace_rate,
+            } => {
+                let url = format!("{}/admin/logging/sampling", cli.node_api);
+                let resp = http
+                    .patch(&url)
+                    .json(&serde_json::json!({
+                        "info_rate": info_rate,
+                        "debug_rate": debug_rate,
+                        "trace_rate": trace_rate,
+                    }))
+                    .send()
+                    .await?;
+                if resp.status().is_success() {
+                    println!(
+                        "Sampling rates updated: info=1/{} debug=1/{} trace=1/{}",
+                        info_rate, debug_rate, trace_rate
+                    );
+                } else {
+                    println!("Failed to update sampling rates");
+                }
+            }
+        },
         Commands::Node { target: _, action } => action.run(&cli.node_api, &http).await?,
         Commands::Cluster => cmds::node::cluster_health(&bus).await?,
         Commands::Billing { store_path, action } => match action {
