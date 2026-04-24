@@ -31,7 +31,8 @@ mod tests;
 /// - 2: Added db_max_connections field to AppConfig, added artifact_hashes table
 /// - 3: Added rate_limit field to AppConfig
 /// - 4: Added BILLING and KEK tables
-const CURRENT_SCHEMA_VERSION: u32 = 4;
+/// - 5: Added GATEWAY_CONFIGS table
+const CURRENT_SCHEMA_VERSION: u32 = 5;
 
 #[derive(Clone)]
 pub struct Store {
@@ -144,6 +145,7 @@ impl Store {
             tx.open_table(tables::ARTIFACT_HASHES)?;
             tx.open_table(tables::BILLING)?;
             tx.open_table(tables::KEK)?;
+            tx.open_table(tables::GATEWAY_CONFIGS)?;
         }
         tx.commit()?;
 
@@ -241,6 +243,10 @@ impl Store {
                 // These tables are created in open() for fresh databases,
                 // but older databases at v3 may not have them.
                 self.migrate_v3_to_v4()?;
+            }
+            5 => {
+                // v4 → v5: Ensure GATEWAY_CONFIGS table exists
+                self.migrate_v4_to_v5()?;
             }
             n => panic!("Unknown migration target: {n}"),
         }
@@ -480,5 +486,119 @@ impl Store {
             PlatformError::storage_with_msg("failed to commit auth config deletion", e)
         })?;
         Ok(())
+    }
+
+    /// Migration v4 → v5: Ensure GATEWAY_CONFIGS table exists.
+    fn migrate_v4_to_v5(&self) -> Result<(), redb::Error> {
+        let tx = self.db.begin_write()?;
+        {
+            let _ = tx.open_table(tables::GATEWAY_CONFIGS)?;
+            let mut meta_table = tx.open_table(tables::SCHEMA_META)?;
+            meta_table.insert("version", "5")?;
+        }
+        tx.commit()?;
+        tracing::info!("v4→v5: ensured GATEWAY_CONFIGS table exists");
+        Ok(())
+    }
+
+    // ── Gateway Config Persistence ─────────────────────────────────────────────
+
+    /// Save a gateway route config for an app.
+    pub fn save_gateway_config(
+        &self,
+        app_id: &str,
+        config: &common::types::GatewayRouteConfig,
+    ) -> Result<(), PlatformError> {
+        let json = serde_json::to_string(config)
+            .map_err(|e| PlatformError::storage_with_msg("failed to serialize gateway config", e))?;
+        let tx = self
+            .db
+            .begin_write()
+            .map_err(|e| PlatformError::storage_with_msg("failed to begin write transaction", e))?;
+        {
+            let mut table = tx
+                .open_table(tables::GATEWAY_CONFIGS)
+                .map_err(|e| PlatformError::storage_with_msg("failed to open GATEWAY_CONFIGS table", e))?;
+            table
+                .insert(app_id, json.as_str())
+                .map_err(|e| PlatformError::storage_with_msg("failed to write gateway config", e))?;
+        }
+        tx.commit()
+            .map_err(|e| PlatformError::storage_with_msg("failed to commit gateway config", e))?;
+        Ok(())
+    }
+
+    /// Load a gateway route config for an app.
+    pub fn load_gateway_config(
+        &self,
+        app_id: &str,
+    ) -> Result<Option<common::types::GatewayRouteConfig>, PlatformError> {
+        let tx = self
+            .db
+            .begin_read()
+            .map_err(|e| PlatformError::storage_with_msg("failed to begin read transaction", e))?;
+        let table = tx
+            .open_table(tables::GATEWAY_CONFIGS)
+            .map_err(|e| PlatformError::storage_with_msg("failed to open GATEWAY_CONFIGS table", e))?;
+        match table
+            .get(app_id)
+            .map_err(|e| PlatformError::storage_with_msg("failed to read gateway config", e))?
+        {
+            Some(v) => {
+                let config: common::types::GatewayRouteConfig =
+                    serde_json::from_str(v.value()).map_err(|e| {
+                        PlatformError::storage_with_msg(
+                            "failed to deserialize gateway config",
+                            e,
+                        )
+                    })?;
+                Ok(Some(config))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Delete a gateway route config for an app.
+    pub fn delete_gateway_config(&self, app_id: &str) -> Result<(), PlatformError> {
+        let tx = self
+            .db
+            .begin_write()
+            .map_err(|e| PlatformError::storage_with_msg("failed to begin write transaction", e))?;
+        {
+            let mut table = tx
+                .open_table(tables::GATEWAY_CONFIGS)
+                .map_err(|e| PlatformError::storage_with_msg("failed to open GATEWAY_CONFIGS table", e))?;
+            table
+                .remove(app_id)
+                .map_err(|e| PlatformError::storage_with_msg("failed to delete gateway config", e))?;
+        }
+        tx.commit()
+            .map_err(|e| PlatformError::storage_with_msg("failed to commit gateway config deletion", e))?;
+        Ok(())
+    }
+
+    /// List all gateway route configs.
+    pub fn list_gateway_configs(
+        &self,
+    ) -> Result<Vec<(String, common::types::GatewayRouteConfig)>, PlatformError> {
+        use redb::ReadableTable;
+        let tx = self
+            .db
+            .begin_read()
+            .map_err(|e| PlatformError::storage_with_msg("failed to begin read transaction", e))?;
+        let table = tx
+            .open_table(tables::GATEWAY_CONFIGS)
+            .map_err(|e| PlatformError::storage_with_msg("failed to open GATEWAY_CONFIGS table", e))?;
+        let mut configs = Vec::new();
+        for entry in table.iter().map_err(|e| PlatformError::storage_with_msg("failed to iterate gateway configs", e))? {
+            let (k, v) = entry.map_err(|e| PlatformError::storage_with_msg("failed to read gateway config entry", e))?;
+            let app_id = k.value().to_string();
+            let config: common::types::GatewayRouteConfig =
+                serde_json::from_str(v.value()).map_err(|e| {
+                    PlatformError::storage_with_msg("failed to deserialize gateway config", e)
+                })?;
+            configs.push((app_id, config));
+        }
+        Ok(configs)
     }
 }

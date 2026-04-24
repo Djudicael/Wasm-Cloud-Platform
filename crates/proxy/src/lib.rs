@@ -3,6 +3,7 @@ pub mod auth_middleware;
 pub mod backpressure;
 pub mod config;
 pub mod dns_webhook;
+pub mod gateway;
 pub mod health;
 pub mod health_events;
 pub mod metrics;

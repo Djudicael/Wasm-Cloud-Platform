@@ -7,8 +7,9 @@
 
 use common::config::{
     AdminSection, AuthSection, BillingSection, DatabaseSection, DnsSection, EbpfSection, GcSection,
-    HealthSection, LoggingSection, NatsSection, NodeConfig, NodeSection, ProxySection,
-    RateLimitSection, RuntimeSection, StorageSection,
+    GatewayCircuitBreakerSection, GatewayRateLimitSection, GatewaySection, HealthSection,
+    LoggingSection, NatsSection, NodeConfig, NodeSection, ProxySection, RateLimitSection,
+    RuntimeSection, StorageSection,
 };
 use common::error::PlatformError;
 use serde::{Deserialize, Serialize};
@@ -217,6 +218,21 @@ fn merge_config(base: NodeConfig, overlay: NodeConfig) -> NodeConfig {
             max_memory_bytes: overlay.health.max_memory_bytes,
             snapshot_interval_secs: overlay.health.snapshot_interval_secs,
             app_defaults: overlay.health.app_defaults.clone(),
+        },
+        gateway: GatewaySection {
+            oidc: overlay.gateway.oidc.or(base.gateway.oidc),
+            rate_limit: GatewayRateLimitSection {
+                kv_bucket: if overlay.gateway.rate_limit.kv_bucket.is_empty() {
+                    base.gateway.rate_limit.kv_bucket.clone()
+                } else {
+                    overlay.gateway.rate_limit.kv_bucket.clone()
+                },
+                sync_interval_ms: overlay.gateway.rate_limit.sync_interval_ms,
+            },
+            circuit_breaker: GatewayCircuitBreakerSection {
+                default_failure_threshold: overlay.gateway.circuit_breaker.default_failure_threshold,
+                default_reset_timeout_secs: overlay.gateway.circuit_breaker.default_reset_timeout_secs,
+            },
         },
     }
 }

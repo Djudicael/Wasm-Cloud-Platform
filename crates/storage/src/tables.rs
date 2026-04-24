@@ -49,3 +49,8 @@ pub const BILLING: TableDefinition<&str, &str> = TableDefinition::new("billing")
 // Key   : "kek" (singleton)
 // Value : Encrypted KEK bytes (nonce + ciphertext)
 pub const KEK: TableDefinition<&str, &[u8]> = TableDefinition::new("kek");
+
+// ── GATEWAY CONFIGS ────────────────────────────────────────────────────────────
+// Key   : app_id (e.g. "api-users:v2")
+// Value : JSON-serialized GatewayRouteConfig
+pub const GATEWAY_CONFIGS: TableDefinition<&str, &str> = TableDefinition::new("gateway_configs");

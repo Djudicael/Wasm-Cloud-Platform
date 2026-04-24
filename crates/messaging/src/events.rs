@@ -59,6 +59,13 @@ pub enum Event {
         app_id: AppId,
         config: AppConfig,
     },
+    GatewayConfigUpdate {
+        app_id: AppId,
+        config: common::types::GatewayRouteConfig,
+    },
+    GatewayConfigRemove {
+        app_id: AppId,
+    },
 
     // ── Load Reporting ────────────────────────────────────────────
     NodeLoad {
@@ -212,6 +219,12 @@ impl Event {
             }
             Event::ConfigUpdate { app_id, .. } => {
                 format!("config.update.{}", app_id.0)
+            }
+            Event::GatewayConfigUpdate { app_id, .. } => {
+                format!("gateway.config.update.{}", app_id.0)
+            }
+            Event::GatewayConfigRemove { app_id, .. } => {
+                format!("gateway.config.remove.{}", app_id.0)
             }
             Event::NodeLoad { node_id, .. } => {
                 format!("node.load.{}", node_id)

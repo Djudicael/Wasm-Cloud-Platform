@@ -338,6 +338,18 @@ impl EventDispatcher {
                 self.node_table.update_health(&node_id, health_status).await;
             }
 
+            Event::GatewayConfigUpdate { app_id, config } => {
+                info!(app = %app_id.0, "received gateway config update");
+                if let Err(e) = self.store.save_gateway_config(&app_id.0, &config) {
+                    error!(app = %app_id.0, error = %e, "failed to save gateway config");
+                }
+            }
+            Event::GatewayConfigRemove { app_id } => {
+                info!(app = %app_id.0, "received gateway config remove");
+                if let Err(e) = self.store.delete_gateway_config(&app_id.0) {
+                    error!(app = %app_id.0, error = %e, "failed to delete gateway config");
+                }
+            }
             // ── Configuration Hot-Reload ──────────────────────────────────
             Event::ConfigHotReload { node_id, changes } => {
                 tracing::info!(

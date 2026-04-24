@@ -37,6 +37,8 @@ pub struct NodeConfig {
     pub dns: DnsSection,
     #[serde(default)]
     pub health: HealthSection,
+    #[serde(default)]
+    pub gateway: GatewaySection,
 }
 
 impl Default for NodeConfig {
@@ -57,6 +59,7 @@ impl Default for NodeConfig {
             ebpf: EbpfSection::default(),
             dns: DnsSection::default(),
             health: HealthSection::default(),
+            gateway: GatewaySection::default(),
         }
     }
 }
@@ -887,6 +890,76 @@ impl Default for HealthSection {
             max_memory_bytes: default_max_memory_bytes(),
             snapshot_interval_secs: default_snapshot_interval(),
             app_defaults: AppHealthCheckDefaults::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GatewaySection {
+    #[serde(default)]
+    pub oidc: Option<crate::types::OidcConfig>,
+    #[serde(default)]
+    pub rate_limit: GatewayRateLimitSection,
+    #[serde(default)]
+    pub circuit_breaker: GatewayCircuitBreakerSection,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GatewayRateLimitSection {
+    #[serde(default = "default_rl_kv_bucket")]
+    pub kv_bucket: String,
+    #[serde(default = "default_rl_sync_interval_ms")]
+    pub sync_interval_ms: u64,
+}
+
+fn default_rl_kv_bucket() -> String {
+    "rate_limits".to_string()
+}
+
+fn default_rl_sync_interval_ms() -> u64 {
+    100
+}
+
+impl Default for GatewayRateLimitSection {
+    fn default() -> Self {
+        GatewayRateLimitSection {
+            kv_bucket: default_rl_kv_bucket(),
+            sync_interval_ms: default_rl_sync_interval_ms(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GatewayCircuitBreakerSection {
+    #[serde(default = "default_cb_failure_threshold")]
+    pub default_failure_threshold: u32,
+    #[serde(default = "default_cb_reset_timeout_secs")]
+    pub default_reset_timeout_secs: u32,
+}
+
+fn default_cb_failure_threshold() -> u32 {
+    5
+}
+
+fn default_cb_reset_timeout_secs() -> u32 {
+    30
+}
+
+impl Default for GatewayCircuitBreakerSection {
+    fn default() -> Self {
+        GatewayCircuitBreakerSection {
+            default_failure_threshold: default_cb_failure_threshold(),
+            default_reset_timeout_secs: default_cb_reset_timeout_secs(),
+        }
+    }
+}
+
+impl Default for GatewaySection {
+    fn default() -> Self {
+        GatewaySection {
+            oidc: None,
+            rate_limit: GatewayRateLimitSection::default(),
+            circuit_breaker: GatewayCircuitBreakerSection::default(),
         }
     }
 }

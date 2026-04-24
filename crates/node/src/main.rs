@@ -907,6 +907,85 @@ async fn main() -> anyhow::Result<()> {
     let rate_limiter = Arc::new(proxy::rate_limiter::RateLimiter::new(default_rate_config));
     let rate_limiter_sync = rate_limiter.clone();
 
+    // ── Gateway Setup ─────────────────────────────────────────────────
+    // 1. Create OIDC provider from config if available
+    let oidc_provider = config.gateway.oidc.as_ref().map(|oidc_cfg| {
+        let provider = Arc::new(proxy::gateway::oidc::OidcProvider::new(oidc_cfg.clone()));
+        provider.clone().start_refresh_loop();
+        tracing::info!(issuer = %oidc_cfg.issuer_url, "OIDC provider initialized");
+        provider
+    });
+
+    // 2. Create the gateway
+    let gateway = Arc::new(proxy::gateway::Gateway::new(oidc_provider));
+
+    // 3. Load gateway configs from storage
+    match store.list_gateway_configs() {
+        Ok(configs) => {
+            let count = configs.len();
+            for (app_id, cfg) in configs {
+                gateway.set_route_config(&app_id, cfg).await;
+            }
+            tracing::info!(count = count, "gateway configs loaded from storage");
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to load gateway configs from storage");
+        }
+    }
+
+    // 4. Setup NATS KV bucket for distributed rate limiting
+    let rate_limit_kv = if config.gateway.rate_limit.kv_bucket.is_empty() {
+        None
+    } else {
+        let js = async_nats::jetstream::new(bus.client().clone());
+        match js
+            .create_key_value(async_nats::jetstream::kv::Config {
+                bucket: config.gateway.rate_limit.kv_bucket.clone(),
+                max_age: std::time::Duration::from_secs(10),
+                history: 1,
+                ..Default::default()
+            })
+            .await
+        {
+            Ok(kv) => {
+                tracing::info!(bucket = %config.gateway.rate_limit.kv_bucket, "NATS KV bucket created for rate limiting");
+                Some(kv)
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, bucket = %config.gateway.rate_limit.kv_bucket, "failed to create NATS KV bucket");
+                None
+            }
+        }
+    };
+
+    // 5. Create distributed rate limiters for apps with gateway rate limit configs
+    if let Some(ref kv) = rate_limit_kv {
+        let gateway_configs = match store.list_gateway_configs() {
+            Ok(configs) => configs,
+            Err(_) => Vec::new(),
+        };
+        for (app_id, cfg) in gateway_configs {
+            if let Some(ref route_rl) = cfg.rate_limit {
+                if route_rl.distributed {
+                    let limiter = Arc::new(proxy::gateway::distributed_limiter::DistributedRateLimiter::new(
+                        app_id.clone(),
+                        config.node.node_id.clone(),
+                        proxy::gateway::distributed_limiter::DistributedRateLimitConfig {
+                            global_rps: route_rl.requests_per_second,
+                            per_node_burst: route_rl.burst_capacity,
+                            sync_interval_ms: config.gateway.rate_limit.sync_interval_ms,
+                            kv_bucket: config.gateway.rate_limit.kv_bucket.clone(),
+                        },
+                    ));
+                    limiter.set_kv_store(kv.clone()).await;
+                    let limiter_clone = limiter.clone();
+                    limiter_clone.start_sync_loop();
+                    gateway.distributed_limiters.write().await.insert(app_id, limiter);
+                }
+            }
+        }
+    }
+
     let wasm_proxy = proxy::service::WasmProxy {
         router: host_router.clone(),
         upstream: upstream_registry.clone(),
@@ -915,6 +994,7 @@ async fn main() -> anyhow::Result<()> {
         cold_start,
         backpressure: backpressure.clone(),
         metrics: Some(rate_limit_metrics),
+        gateway,
     };
 
     let tls = match (&config.proxy.tls_cert, &config.proxy.tls_key) {
@@ -1473,6 +1553,162 @@ async fn main() -> anyhow::Result<()> {
                             "routes": routes,
                             "count": routes.len(),
                         }))
+                    }
+                }
+            }),
+        )
+        // ── Gateway Configuration Endpoints ─────────────────────────────
+        .route(
+            "/admin/gateway",
+            axum::routing::get({
+                let store = store.clone();
+                move || {
+                    let store = store.clone();
+                    async move {
+                        match store.list_gateway_configs() {
+                            Ok(configs) => axum::Json(serde_json::json!({
+                                "configs": configs.iter().map(|(app_id, cfg)| serde_json::json!({
+                                    "app_id": app_id,
+                                    "config": cfg,
+                                })).collect::<Vec<_>>(),
+                                "count": configs.len(),
+                            })),
+                            Err(e) => axum::Json(serde_json::json!({
+                                "configs": Vec::<serde_json::Value>::new(),
+                                "count": 0,
+                                "error": format!("{e}"),
+                            })),
+                        }
+                    }
+                }
+            }),
+        )
+        .route(
+            "/admin/gateway/{app_id}",
+            axum::routing::get({
+                let store = store.clone();
+                move |axum::extract::Path(app_id): axum::extract::Path<String>| {
+                    let store = store.clone();
+                    async move {
+                        match store.load_gateway_config(&app_id) {
+                            Ok(Some(config)) => (
+                                axum::http::StatusCode::OK,
+                                axum::Json(serde_json::json!({
+                                    "app_id": app_id,
+                                    "config": config,
+                                })),
+                            ),
+                            Ok(None) => (
+                                axum::http::StatusCode::NOT_FOUND,
+                                axum::Json(serde_json::json!({
+                                    "error": "not_found",
+                                    "message": format!("no gateway config for {app_id}"),
+                                })),
+                            ),
+                            Err(e) => (
+                                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                                axum::Json(serde_json::json!({
+                                    "error": "storage_error",
+                                    "message": format!("{e}"),
+                                })),
+                            ),
+                        }
+                    }
+                }
+            }),
+        )
+        .route(
+            "/admin/gateway/{app_id}",
+            axum::routing::post({
+                let store = store.clone();
+                let bus = bus.clone();
+                move |axum::extract::Path(app_id): axum::extract::Path<String>,
+                      axum::Json(body): axum::Json<common::types::GatewayRouteConfig>| {
+                    let store = store.clone();
+                    let bus = bus.clone();
+                    async move {
+                        let app_id = match common::types::AppId::new_validate(&app_id) {
+                            Ok(id) => id,
+                            Err(e) => {
+                                return (
+                                    axum::http::StatusCode::BAD_REQUEST,
+                                    axum::Json(serde_json::json!({
+                                        "error": "invalid_app_id",
+                                        "message": e,
+                                    })),
+                                );
+                            }
+                        };
+                        if let Err(e) = store.save_gateway_config(&app_id.0, &body) {
+                            return (
+                                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                                axum::Json(serde_json::json!({
+                                    "error": "storage_error",
+                                    "message": format!("{e}"),
+                                })),
+                            );
+                        }
+                        let event = messaging::events::Event::GatewayConfigUpdate {
+                            app_id: app_id.clone(),
+                            config: body,
+                        };
+                        if let Err(e) = bus.publish(&event).await {
+                            tracing::warn!(error = %e, "failed to publish gateway config update");
+                        }
+                        (
+                            axum::http::StatusCode::OK,
+                            axum::Json(serde_json::json!({
+                                "status": "updated",
+                                "app_id": app_id.0,
+                            })),
+                        )
+                    }
+                }
+            }),
+        )
+        .route(
+            "/admin/gateway/{app_id}",
+            axum::routing::delete({
+                let store = store.clone();
+                let bus = bus.clone();
+                move |axum::extract::Path(app_id): axum::extract::Path<String>| {
+                    let store = store.clone();
+                    let bus = bus.clone();
+                    async move {
+                        let app_id = match common::types::AppId::new_validate(&app_id) {
+                            Ok(id) => id,
+                            Err(e) => {
+                                return (
+                                    axum::http::StatusCode::BAD_REQUEST,
+                                    axum::Json(serde_json::json!({
+                                        "error": "invalid_app_id",
+                                        "message": e,
+                                    })),
+                                );
+                            }
+                        };
+                        if let Err(e) = store.delete_gateway_config(&app_id.0) {
+                            return (
+                                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                                axum::Json(serde_json::json!({
+                                    "error": "storage_error",
+                                    "message": format!("{e}"),
+                                })),
+                            );
+                        }
+                        let event = messaging::events::Event::GatewayConfigRemove {
+                            app_id: app_id.clone(),
+                        };
+                        if let Err(e) = bus.publish(&event).await {
+                            tracing::warn!(error = %e, "failed to publish gateway config remove");
+                        }
+                        (
+                            axum::http::StatusCode::OK,
+                            axum::Json(serde_json::json!({
+                                "status": "removed",
+                                "app_id": app_id.0,
+                            })),
+                        )
                     }
                 }
             }),

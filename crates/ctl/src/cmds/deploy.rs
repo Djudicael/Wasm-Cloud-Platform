@@ -103,6 +103,39 @@ pub struct DeployArgs {
     /// Comma-separated allowed filesystem paths
     #[arg(long)]
     policy_fs_allowed_paths: Option<String>,
+
+    // ── Gateway flags ─────────────────────────────────────────────────
+    /// Gateway auth policy: none, authenticated, roles
+    #[arg(long)]
+    gateway_auth: Option<String>,
+
+    /// Comma-separated roles for gateway auth (when policy=roles)
+    #[arg(long, value_delimiter = ',')]
+    gateway_roles: Vec<String>,
+
+    /// Keycloak client ID for role checking
+    #[arg(long)]
+    gateway_oidc_client: Option<String>,
+
+    /// Comma-separated allowed CORS origins
+    #[arg(long, value_delimiter = ',')]
+    gateway_cors_origins: Vec<String>,
+
+    /// Allow credentials in CORS
+    #[arg(long)]
+    gateway_cors_credentials: bool,
+
+    /// Gateway rate limit: requests per second
+    #[arg(long)]
+    gateway_rps: Option<u32>,
+
+    /// Gateway rate limit burst capacity
+    #[arg(long)]
+    gateway_rps_burst: Option<u32>,
+
+    /// Make gateway rate limit distributed across nodes
+    #[arg(long)]
+    gateway_rps_distributed: bool,
 }
 
 fn parse_env_var(s: &str) -> Result<(String, String), String> {
@@ -164,7 +197,10 @@ pub async fn run(
     // 4. Build policy config from CLI flags
     let policy = build_policy_config(&args)?;
 
-    // 5. Build AppConfig
+    // 5. Build gateway config (before args is partially moved)
+    let gateway_config = build_gateway_config(&args);
+
+    // 6. Build AppConfig
     let config = AppConfig {
         id: app_id.clone(),
         fuel_quota: FuelQuota(args.fuel),
@@ -192,12 +228,71 @@ pub async fn run(
     };
     bus.publish(&event).await?;
 
+    // 7. Publish gateway config if any gateway flags were set
+    if let Some(gateway_config) = gateway_config {
+        let gw_event = Event::GatewayConfigUpdate {
+            app_id: app_id.clone(),
+            config: gateway_config,
+        };
+        bus.publish(&gw_event).await?;
+        println!(
+            "{} Gateway config published for {}",
+            "✓".green(),
+            app_id.0.cyan()
+        );
+    }
+
     println!(
         "{} Deploy event published for {} — all nodes are compiling.",
         "✓".green(),
         app_id.0.cyan()
     );
     Ok(())
+}
+
+fn build_gateway_config(args: &DeployArgs) -> Option<common::types::GatewayRouteConfig> {
+    let mut config = common::types::GatewayRouteConfig::default();
+    let mut has_config = false;
+
+    if let Some(ref auth) = args.gateway_auth {
+        config.auth = match auth.as_str() {
+            "none" => common::types::AuthPolicy::None,
+            "authenticated" => common::types::AuthPolicy::Authenticated,
+            "roles" => common::types::AuthPolicy::Roles {
+                allowed_roles: args.gateway_roles.clone(),
+                client_id: args.gateway_oidc_client.clone(),
+            },
+            _ => common::types::AuthPolicy::None,
+        };
+        has_config = true;
+    }
+
+    if !args.gateway_cors_origins.is_empty() {
+        config.cors = Some(common::types::CorsPolicy {
+            allowed_origins: args.gateway_cors_origins.clone(),
+            allowed_methods: common::types::CorsPolicy::default_methods(),
+            allowed_headers: common::types::CorsPolicy::default_headers(),
+            expose_headers: vec![],
+            allow_credentials: args.gateway_cors_credentials,
+            max_age_secs: 86400,
+        });
+        has_config = true;
+    }
+
+    if args.gateway_rps.is_some() || args.gateway_rps_burst.is_some() {
+        config.rate_limit = Some(common::types::RouteRateLimit {
+            requests_per_second: args.gateway_rps.unwrap_or(1000),
+            burst_capacity: args.gateway_rps_burst.unwrap_or(50),
+            distributed: args.gateway_rps_distributed,
+        });
+        has_config = true;
+    }
+
+    if has_config {
+        Some(config)
+    } else {
+        None
+    }
 }
 
 /// Build a `PolicyConfig` from the CLI flags.

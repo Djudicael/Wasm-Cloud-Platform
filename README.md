@@ -60,6 +60,7 @@ The implementation plan is split into ordered chapters in `INFRA_IMPL`:
 - `27_DISASTER_RECOVERY.md` — Failure classification and recovery playbooks
 - `28_BILLING_ACCOUNTING.md` — Tamper-evident fuel billing and accounting
 - `29_DNS_INTEGRATION.md` — DNS routing, custom domains, and TLS integration
+- `39_API_GATEWAY.md` — Built-in API Gateway: auth, CORS, circuit breaker, transforms
 
 ## How to use this repo
 
@@ -129,6 +130,136 @@ Selected parameters can be changed at runtime without restarting the node:
 Non-reloadable parameters (require restart): NATS URL, proxy ports, TLS certs, port range, database path, node ID, key source.
 
 See `INFRA_IMPL/32_CONFIGURATION_MANAGEMENT.md` for the full specification.
+
+## API Gateway
+
+The platform includes a built-in API Gateway that transforms the existing Pingora proxy into a full-featured gateway. Every Wasm application automatically gets authentication, authorization, distributed rate limiting, CORS, circuit breaking, and request transformation — without any external system.
+
+### Gateway Features
+
+- **JWT/OIDC Authentication** — Validate JWTs from Keycloak or any OIDC-compliant IdP
+- **Role-based Authorization** — Check realm and client roles from JWT claims
+- **Distributed Rate Limiting** — Share rate-limit counters across nodes via NATS KV
+- **CORS** — Per-route CORS policies with preflight handling
+- **Circuit Breaker** — Per-app circuit breaker with Closed → Open → HalfOpen states
+- **Request Transformation** — Header injection, removal, path rewriting, query param stripping
+- **Gateway Metrics** — Prometheus metrics for auth, rate limiting, circuit breaker, CORS
+
+### Quick Start
+
+```bash
+# Configure OIDC provider in node config.toml
+[gateway.oidc]
+issuer_url = "https://keycloak.example.com/realms/my-realm"
+audience = "my-platform-api"
+
+# Deploy with authentication
+wasm-ctl deploy \
+  --app api-users \
+  --version v2 \
+  --wasm api-users.wasm \
+  --gateway-auth roles \
+  --gateway-roles admin,user \
+  --gateway-oidc-client api-users \
+  --gateway-cors-origins "https://app.example.com" \
+  --gateway-rps 500
+
+# Set gateway config via CLI
+wasm-ctl gateway set-auth api-users:v2 --policy roles --roles admin,user
+wasm-ctl gateway set-cors api-users:v2 --origins "https://app.example.com" --credentials
+wasm-ctl gateway set-rate-limit api-users:v2 --rps 500 --burst 100 --distributed
+wasm-ctl gateway show api-users:v2
+wasm-ctl gateway reset api-users:v2
+
+# Admin API endpoints
+GET  /admin/gateway              # List all gateway configs
+GET  /admin/gateway/{app_id}     # Get config for an app
+POST /admin/gateway/{app_id}     # Set config for an app
+DELETE /admin/gateway/{app_id}   # Remove config for an app
+```
+
+### Deploy Manifest Format
+
+```toml
+[app]
+id = "api-users:v2"
+wasm_bind_port = 8080
+
+# Authentication
+[app.gateway.auth]
+policy = "roles"
+allowed_roles = ["admin", "user"]
+client_id = "api-users"
+
+# CORS
+[app.gateway.cors]
+allowed_origins = ["https://app.example.com"]
+allow_credentials = true
+max_age_secs = 3600
+
+# Rate limiting
+[app.gateway.rate_limit]
+requests_per_second = 500
+burst_capacity = 100
+distributed = true
+
+# Circuit breaker
+[app.gateway.circuit_breaker]
+failure_threshold = 5
+reset_timeout_secs = 30
+
+# Request transformation
+[app.gateway.transform]
+add_headers = [["X-Api-Version", "2"]]
+remove_headers = ["X-Internal-Token"]
+```
+
+### Architecture
+
+```
+Incoming Request
+     │
+     ▼
+┌─────────────────────────┐
+│ 1. Route Resolution     │
+└────────┬────────────────┘
+         ▼
+┌─────────────────────────┐
+│ 2. CORS Preflight       │
+└────────┬────────────────┘
+         ▼
+┌─────────────────────────┐
+│ 3. Authentication       │
+└────────┬────────────────┘
+         ▼
+┌─────────────────────────┐
+│ 4. Authorization        │
+└────────┬────────────────┘
+         ▼
+┌─────────────────────────┐
+│ 5. Rate Limiting        │
+└────────┬────────────────┘
+         ▼
+┌─────────────────────────┐
+│ 6. Circuit Breaker      │
+└────────┬────────────────┘
+         ▼
+┌─────────────────────────┐
+│ 7. Request Transform    │
+└────────┬────────────────┘
+         ▼
+    Upstream (Wasm App)
+```
+
+### Security Considerations
+
+- JWT validation happens **before** traffic reaches the Wasm app
+- The gateway does **not** forward the raw `Authorization` header upstream by default
+- User identity is injected as `X-User-Id`, `X-User-Email`, `X-User-Roles`
+- When `allow_credentials: true`, origins must be specific (not `*`)
+- JWKS is fetched over HTTPS; refresh failures are logged and alerted
+
+See `INFRA_IMPL/39_API_GATEWAY.md` for the full specification.
 
 ## Notes
 

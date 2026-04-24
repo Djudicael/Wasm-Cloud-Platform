@@ -4,6 +4,7 @@ use clap::{Parser, Subcommand};
 mod cmds {
     pub mod billing;
     pub mod deploy;
+    pub mod gateway;
     pub mod gc;
     pub mod list;
     pub mod logs;
@@ -93,6 +94,8 @@ enum Commands {
         #[command(subcommand)]
         action: cmds::policy::PolicyCommand,
     },
+    /// API gateway configuration
+    Gateway(cmds::gateway::GatewayArgs),
 }
 
 #[derive(Subcommand)]
@@ -578,6 +581,7 @@ async fn main() -> anyhow::Result<()> {
             BillingAction::Export { output } => cmds::billing::export(&store_path, &output).await?,
         },
         Commands::Policy { action } => cmds::policy::run(action, &cli.node_api, &http).await?,
+        Commands::Gateway(args) => cmds::gateway::run(args, &bus, &cli.node_api, &http).await?,
     }
     Ok(())
 }

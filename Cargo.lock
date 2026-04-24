@@ -1676,6 +1676,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9ed9a281f7bc9b7576e61468ba615a66a5c8cfdff42420a70aa82701a3b1e292"
 dependencies = [
  "block-buffer 0.10.4",
+ "const-oid 0.9.6",
  "crypto-common 0.1.7",
  "subtle",
 ]
@@ -2923,10 +2924,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "jsonwebtoken"
+version = "9.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5a87cc7a48537badeae96744432de36f4be2b4a34a05a5ef32e9dd8a1c169dde"
+dependencies = [
+ "base64 0.22.1",
+ "js-sys",
+ "pem",
+ "ring",
+ "serde",
+ "serde_json",
+ "simple_asn1",
+]
+
+[[package]]
 name = "lazy_static"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
+dependencies = [
+ "spin",
+]
 
 [[package]]
 name = "leb128"
@@ -3306,6 +3325,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "num-bigint-dig"
+version = "0.8.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e661dda6640fad38e827a6d4a310ff4763082116fe217f279885c97f511bb0b7"
+dependencies = [
+ "lazy_static",
+ "libm",
+ "num-integer",
+ "num-iter",
+ "num-traits",
+ "rand 0.8.5",
+ "smallvec",
+ "zeroize",
+]
+
+[[package]]
 name = "num-complex"
 version = "0.4.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3358,6 +3393,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "071dfc062690e90b734c0b2273ce72ad0ffa95f0c74596bc250dcfd960262841"
 dependencies = [
  "autocfg",
+ "libm",
 ]
 
 [[package]]
@@ -3621,6 +3657,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "pem"
+version = "3.0.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1d30c53c26bc5b31a98cd02d20f25a7c8567146caf63ed593a9d87b2775291be"
+dependencies = [
+ "base64 0.22.1",
+ "serde_core",
+]
+
+[[package]]
 name = "pem-rfc7468"
 version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3688,7 +3734,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "844a13b16e556293f4ea96dc5ac0923ac6f36855a9dfc13b640d0da183f6b5b7"
 dependencies = [
  "pingora-core",
- "pingora-http 0.8.0",
+ "pingora-http",
  "pingora-timeout",
 ]
 
@@ -3715,9 +3761,9 @@ dependencies = [
  "once_cell",
  "parking_lot",
  "pingora-core",
- "pingora-error 0.8.0",
+ "pingora-error",
  "pingora-header-serde",
- "pingora-http 0.8.0",
+ "pingora-http",
  "pingora-lru",
  "pingora-timeout",
  "rand 0.8.5",
@@ -3758,8 +3804,8 @@ dependencies = [
  "openssl-probe 0.1.6",
  "parking_lot",
  "percent-encoding",
- "pingora-error 0.8.0",
- "pingora-http 0.8.0",
+ "pingora-error",
+ "pingora-http",
  "pingora-pool",
  "pingora-runtime",
  "pingora-timeout",
@@ -3782,12 +3828,6 @@ dependencies = [
 
 [[package]]
 name = "pingora-error"
-version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6389511530152c535a554f592ae4a9691b1246cff20eb4564f2a34fc921195c0"
-
-[[package]]
-name = "pingora-error"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d9fa97a500e7e5c27a7b8609b9294c8922c9656322285268bfad9520f12feb38"
@@ -3801,22 +3841,11 @@ dependencies = [
  "bytes",
  "http 1.4.0",
  "httparse",
- "pingora-error 0.8.0",
- "pingora-http 0.8.0",
+ "pingora-error",
+ "pingora-http",
  "thread_local",
  "zstd",
  "zstd-safe",
-]
-
-[[package]]
-name = "pingora-http"
-version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "70202f126056f366549afc804741e12dd9f419cfc79a0063ab15653007a0f4c6"
-dependencies = [
- "bytes",
- "http 1.4.0",
- "pingora-error 0.4.0",
 ]
 
 [[package]]
@@ -3827,7 +3856,7 @@ checksum = "fbb52d4651b687fab6abf669539cfd97b7cd94b301fde8f57c63354f9c9cc5e2"
 dependencies = [
  "bytes",
  "http 1.4.0",
- "pingora-error 0.8.0",
+ "pingora-error",
 ]
 
 [[package]]
@@ -3853,8 +3882,8 @@ dependencies = [
  "http 1.4.0",
  "log",
  "pingora-core",
- "pingora-error 0.8.0",
- "pingora-http 0.8.0",
+ "pingora-error",
+ "pingora-http",
  "pingora-ketama",
  "pingora-runtime",
  "rand 0.8.5",
@@ -3904,8 +3933,8 @@ dependencies = [
  "once_cell",
  "pingora-cache",
  "pingora-core",
- "pingora-error 0.8.0",
- "pingora-http 0.8.0",
+ "pingora-error",
+ "pingora-http",
  "rand 0.8.5",
  "regex",
  "tokio",
@@ -3934,6 +3963,17 @@ dependencies = [
  "pin-project-lite",
  "thread_local",
  "tokio",
+]
+
+[[package]]
+name = "pkcs1"
+version = "0.7.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c8ffb9f10fa047879315e6625af03c164b16962a5368d724ed16323b68ace47f"
+dependencies = [
+ "der",
+ "pkcs8",
+ "spki",
 ]
 
 [[package]]
@@ -4263,22 +4303,26 @@ dependencies = [
 name = "proxy"
 version = "0.1.0"
 dependencies = [
+ "async-nats",
  "async-trait",
  "axum 0.8.8",
+ "base64 0.22.1",
  "chrono",
  "common",
  "dashmap",
  "futures",
  "hex",
+ "http 1.4.0",
+ "jsonwebtoken",
  "messaging",
  "pingora",
  "pingora-core",
- "pingora-http 0.4.0",
  "pingora-load-balancing",
  "pingora-proxy",
  "prometheus 0.14.0",
  "rand 0.8.5",
  "reqwest 0.13.2",
+ "rsa",
  "serde",
  "serde_json",
  "storage",
@@ -4716,6 +4760,26 @@ dependencies = [
  "libc",
  "rtoolbox",
  "windows-sys 0.59.0",
+]
+
+[[package]]
+name = "rsa"
+version = "0.9.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b8573f03f5883dcaebdfcf4725caa1ecb9c15b2ef50c43a07b816e06799bb12d"
+dependencies = [
+ "const-oid 0.9.6",
+ "digest 0.10.7",
+ "num-bigint-dig",
+ "num-integer",
+ "num-traits",
+ "pkcs1",
+ "pkcs8",
+ "rand_core 0.6.4",
+ "signature",
+ "spki",
+ "subtle",
+ "zeroize",
 ]
 
 [[package]]
@@ -5237,6 +5301,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "703d5c7ef118737c72f1af64ad2f6f8c5e1921f818cdcb97b8fe6fc69bf66214"
 
 [[package]]
+name = "simple_asn1"
+version = "0.6.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0d585997b0ac10be3c5ee635f1bab02d512760d14b7c468801ac8a01d9ae5f1d"
+dependencies = [
+ "num-bigint",
+ "num-traits",
+ "thiserror 2.0.18",
+ "time",
+]
+
+[[package]]
 name = "sized-chunks"
 version = "0.6.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5280,6 +5356,12 @@ dependencies = [
  "libc",
  "windows-sys 0.61.2",
 ]
+
+[[package]]
+name = "spin"
+version = "0.9.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6980e8d7511241f8acf4aebddbb1ff938df5eebe98691418c4468d0b72a96a67"
 
 [[package]]
 name = "spki"

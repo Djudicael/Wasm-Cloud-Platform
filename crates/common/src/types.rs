@@ -231,3 +231,221 @@ impl DnsConfig {
         }
     }
 }
+
+// ── Gateway Configuration ────────────────────────────────────────────────────
+
+/// Gateway configuration for a single route.
+/// Stored per-route in the route table. All fields are optional —
+/// a route with no gateway config is fully public (no auth, no CORS,
+/// default rate limits).
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct GatewayRouteConfig {
+    /// Authentication policy for this route.
+    #[serde(default)]
+    pub auth: AuthPolicy,
+
+    /// CORS policy. None = no CORS headers (browsers will block cross-origin).
+    #[serde(default)]
+    pub cors: Option<CorsPolicy>,
+
+    /// Request transformation rules.
+    #[serde(default)]
+    pub transform: Option<RequestTransform>,
+
+    /// Override the app-level rate limit for this route.
+    #[serde(default)]
+    pub rate_limit: Option<RouteRateLimit>,
+
+    /// Circuit breaker configuration for this route's upstream.
+    #[serde(default)]
+    pub circuit_breaker: Option<CircuitBreakerConfig>,
+}
+
+/// Authentication policy for a route.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AuthPolicy {
+    /// No authentication required. Anyone can access this route.
+    #[default]
+    None,
+
+    /// Valid JWT required. The token is validated against the OIDC provider's
+    /// JWKS endpoint. User identity is extracted and forwarded to the upstream
+    /// via X-User-Id, X-User-Roles headers.
+    Authenticated,
+
+    /// Valid JWT required AND the user must have at least one of the specified
+    /// roles. Roles are checked against the JWT's `realm_access.roles` or
+    /// `resource_access.<client_id>.roles` claims.
+    Roles {
+        /// Which roles are accepted (OR logic — any match passes).
+        allowed_roles: Vec<String>,
+        /// Which Keycloak client's roles to check.
+        /// None = check realm_access.roles.
+        /// Some("my-client") = check resource_access.my-client.roles.
+        client_id: Option<String>,
+    },
+}
+
+/// CORS policy for a route.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CorsPolicy {
+    /// Allowed origins. Use "*" for public APIs, or list specific origins.
+    pub allowed_origins: Vec<String>,
+
+    /// Allowed HTTP methods.
+    #[serde(default = "CorsPolicy::default_methods")]
+    pub allowed_methods: Vec<String>,
+
+    /// Allowed request headers.
+    #[serde(default = "CorsPolicy::default_headers")]
+    pub allowed_headers: Vec<String>,
+
+    /// Headers exposed to the browser.
+    #[serde(default)]
+    pub expose_headers: Vec<String>,
+
+    /// Whether to include credentials in cross-origin requests.
+    #[serde(default)]
+    pub allow_credentials: bool,
+
+    /// How long the browser can cache the preflight response (seconds).
+    #[serde(default = "CorsPolicy::default_max_age")]
+    pub max_age_secs: u32,
+}
+
+impl CorsPolicy {
+    pub fn default_methods() -> Vec<String> {
+        vec![
+            "GET".into(),
+            "POST".into(),
+            "PUT".into(),
+            "DELETE".into(),
+            "PATCH".into(),
+            "OPTIONS".into(),
+        ]
+    }
+    pub fn default_headers() -> Vec<String> {
+        vec![
+            "Authorization".into(),
+            "Content-Type".into(),
+            "X-Request-Id".into(),
+        ]
+    }
+    fn default_max_age() -> u32 {
+        86400
+    }
+}
+
+/// Request transformation rules applied before forwarding to upstream.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct RequestTransform {
+    /// Headers to add to the request before forwarding.
+    pub add_headers: Vec<(String, String)>,
+
+    /// Headers to remove from the request before forwarding.
+    pub remove_headers: Vec<String>,
+
+    /// Path prefix to add before the existing path.
+    pub path_prefix: Option<String>,
+
+    /// Query parameters to strip from the request before forwarding.
+    pub strip_query_params: Vec<String>,
+}
+
+/// Per-route rate limit override.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RouteRateLimit {
+    /// Requests per second for this specific route (overrides app-level).
+    pub requests_per_second: u32,
+
+    /// Burst capacity for this route.
+    pub burst_capacity: u32,
+
+    /// Whether this route's rate limit is shared across all nodes (distributed)
+    /// or node-local only. Default: distributed.
+    #[serde(default = "default_true")]
+    pub distributed: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// Circuit breaker configuration per upstream app.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CircuitBreakerConfig {
+    /// Number of consecutive failures before opening the circuit.
+    #[serde(default = "CircuitBreakerConfig::default_failure_threshold")]
+    pub failure_threshold: u32,
+
+    /// Duration in seconds to keep the circuit open before allowing a
+    /// half-open probe request through.
+    #[serde(default = "CircuitBreakerConfig::default_reset_timeout_secs")]
+    pub reset_timeout_secs: u32,
+
+    /// What counts as a "failure". Default: 5xx responses and connection errors.
+    #[serde(default)]
+    pub failure_criteria: FailureCriteria,
+}
+
+impl CircuitBreakerConfig {
+    fn default_failure_threshold() -> u32 {
+        5
+    }
+    fn default_reset_timeout_secs() -> u32 {
+        30
+    }
+}
+
+impl Default for CircuitBreakerConfig {
+    fn default() -> Self {
+        CircuitBreakerConfig {
+            failure_threshold: Self::default_failure_threshold(),
+            reset_timeout_secs: Self::default_reset_timeout_secs(),
+            failure_criteria: FailureCriteria::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum FailureCriteria {
+    /// Default: 5xx responses and connection errors.
+    #[default]
+    ServerErrors,
+    /// 5xx responses, connection errors, and 4xx responses.
+    AllErrors,
+    /// Custom: count only specific HTTP status codes as failures.
+    StatusCodes(Vec<u16>),
+}
+
+/// OIDC provider configuration. Stored once per platform (not per-route).
+/// All routes that require auth share the same OIDC provider.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OidcConfig {
+    /// The OIDC issuer URL (e.g., "https://keycloak.example.com/realms/my-realm")
+    /// Used to fetch /.well-known/openid-configuration
+    pub issuer_url: String,
+
+    /// Expected audience (aud claim) in the JWT.
+    /// Must match the client_id configured in Keycloak.
+    pub audience: String,
+
+    /// How often to refresh the JWKS cache (seconds).
+    /// Default: 3600 (1 hour). Keycloak rotates keys infrequently.
+    #[serde(default = "default_jwks_refresh_secs")]
+    pub jwks_refresh_secs: u64,
+
+    /// Clock skew tolerance (seconds). Allows JWTs that are slightly
+    /// expired due to clock differences between nodes.
+    #[serde(default = "default_clock_skew_secs")]
+    pub clock_skew_secs: u64,
+}
+
+fn default_jwks_refresh_secs() -> u64 {
+    3600
+}
+fn default_clock_skew_secs() -> u64 {
+    30
+}

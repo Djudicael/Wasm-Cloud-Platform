@@ -1,6 +1,7 @@
 use super::{
-    backpressure::BackpressureSignal, metrics::RateLimitMetrics, node_table::NodeLoadTable,
-    rate_limiter::RateLimiter, router::HostRouter, upstream::UpstreamRegistry,
+    backpressure::BackpressureSignal, gateway::Gateway, metrics::RateLimitMetrics,
+    node_table::NodeLoadTable, rate_limiter::RateLimiter, router::HostRouter,
+    upstream::UpstreamRegistry,
 };
 use async_trait::async_trait;
 use common::types::AppId;
@@ -20,9 +21,16 @@ pub struct RequestCtx {
     pub matched_prefix: Option<String>,
     /// Trace ID extracted from the incoming `traceparent` header, or generated.
     pub trace_id: Option<String>,
+
+    // ── New gateway fields ──────────────────────────────────────
+    /// Gateway configuration for the matched route.
+    pub route_config: Option<crate::gateway::config::GatewayRouteConfig>,
+
+    /// Authenticated user identity (set by auth middleware).
+    pub user_identity: Option<crate::gateway::oidc::UserIdentity>,
 }
 
-/// The main Pingora proxy service.
+/// The main Pingora proxy service — now with gateway capabilities.
 pub struct WasmProxy {
     pub router: Arc<HostRouter>,
     pub upstream: Arc<UpstreamRegistry>,
@@ -30,6 +38,11 @@ pub struct WasmProxy {
     pub backpressure: BackpressureSignal,
     pub node_table: Arc<NodeLoadTable>,
     pub metrics: Option<Arc<RateLimitMetrics>>,
+
+    // ── New gateway field ───────────────────────────────────────
+    /// The API gateway (auth, CORS, circuit breaker, transforms).
+    pub gateway: Arc<Gateway>,
+
     /// Callback to trigger a cold-start when no instances are running.
     /// Returns the address of the newly spawned instance.
     pub cold_start: Arc<
@@ -79,6 +92,8 @@ impl ProxyHttp for WasmProxy {
             strip_prefix: false,
             matched_prefix: None,
             trace_id: None,
+            route_config: None,
+            user_identity: None,
         }
     }
 
@@ -102,22 +117,16 @@ impl ProxyHttp for WasmProxy {
         }
 
         // Extract or generate trace ID for distributed tracing propagation.
-        // If the incoming request carries a W3C traceparent header, we parse
-        // the trace-id from it; otherwise we generate a random one so every
-        // request has a correlatable identifier in upstream logs.
         let trace_id = session
             .req_header()
             .headers
             .get("traceparent")
             .and_then(|v| v.to_str().ok())
             .and_then(|tp| {
-                // W3C traceparent format: version-trace_id-parent_id-flags
-                // e.g. "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
                 let parts: Vec<&str> = tp.split('-').collect();
                 parts.get(1).map(|id| id.to_string())
             })
             .or_else(|| {
-                // Generate a random 32-hex-char trace ID
                 let bytes: [u8; 16] = rand::random();
                 Some(hex::encode(bytes))
             });
@@ -125,40 +134,83 @@ impl ProxyHttp for WasmProxy {
 
         let path = session.req_header().uri.path().to_string();
         let resolved = self.router.resolve(&host, &path).await;
+
+        let route_config = match &resolved {
+            Some(r) => self.gateway.get_route_config(&r.app_id).await,
+            None => None,
+        };
+
         if let Some(r) = &resolved {
             ctx.app_id = Some(r.app_id.clone());
             ctx.strip_prefix = r.strip_prefix;
             ctx.matched_prefix = Some(r.matched_prefix.clone());
         }
+        ctx.route_config = route_config.clone();
+
         if ctx.app_id.is_none() {
             tracing::warn!(host, path, "no route found for host+path");
             session.respond_error(502).await?;
             return Ok(true);
         }
 
-        // Check backpressure first (node at capacity)
-        if !self.backpressure.is_accepting() {
-            tracing::warn!("node at capacity, rejecting request");
-            if let Some(ref metrics) = self.metrics {
-                metrics.record_rejection("*", "backpressure");
+        // 2. CORS preflight (new)
+        if let Some(ref cfg) = ctx.route_config {
+            if cfg.cors.is_some() && session.req_header().method == "OPTIONS" {
+                self.gateway.metrics.cors_preflight_total.inc();
+                return crate::gateway::cors::handle_cors_preflight(session, cfg).await;
             }
-            session.set_keepalive(None);
-            session.respond_error(503).await?;
-            return Ok(true); // true = abort the request
         }
 
-        // Check per-app and per-IP rate limits
+        // 3. Authentication (new)
+        if let Some(ref cfg) = ctx.route_config {
+            if cfg.auth != crate::gateway::config::AuthPolicy::None {
+                match self.gateway.authenticate(session).await {
+                    Ok(identity) => {
+                        self.gateway.metrics.auth_success_total.inc();
+                        ctx.user_identity = Some(identity);
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "authentication failed");
+                        self.gateway.metrics.auth_failure_total.inc();
+                        return crate::gateway::errors::send_gateway_error(
+                            session,
+                            401,
+                            "unauthorized",
+                            "missing or invalid JWT token",
+                        )
+                        .await;
+                    }
+                }
+            }
+        }
+
+        // 4. Authorization (new)
+        if let Some(ref cfg) = ctx.route_config {
+            if let Some(ref identity) = ctx.user_identity {
+                if !crate::gateway::authz::authorize(identity, &cfg.auth) {
+                    tracing::warn!(user = %identity.sub, "authorization denied");
+                    self.gateway.metrics.authz_denied_total.inc();
+                    return crate::gateway::errors::send_gateway_error(
+                        session,
+                        403,
+                        "forbidden",
+                        "user lacks required role",
+                    )
+                    .await;
+                }
+            }
+        }
+
+        // 5. Rate limiting (existing node-local, enhanced with distributed)
         if let Some(app_id) = &ctx.app_id {
-            // Extract source IP from session
             let source_ip = session
                 .client_addr()
                 .and_then(|addr| addr.as_inet().map(|inet| inet.ip()))
                 .unwrap_or_else(|| std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)));
 
+            // Check per-app and per-IP rate limits (existing local limiter)
             match self.rate_limiter.check_request(&app_id.0, source_ip) {
-                Ok(()) => {
-                    // Rate limit passed, continue
-                }
+                Ok(()) => {}
                 Err(e) => {
                     let reason = match e {
                         crate::rate_limiter::RateLimitDenied::AppLimitExceeded { .. } => {
@@ -172,9 +224,55 @@ impl ProxyHttp for WasmProxy {
                     }
                     session.set_keepalive(None);
                     session.respond_error(429).await?;
-                    return Ok(true); // true = abort the request
+                    return Ok(true);
                 }
             }
+
+            // Check distributed rate limiter if configured
+            if let Some(ref cfg) = ctx.route_config {
+                if let Some(ref route_rl) = cfg.rate_limit {
+                    if route_rl.distributed {
+                        let limiters = self.gateway.distributed_limiters.read().await;
+                        if let Some(limiter) = limiters.get(&app_id.0) {
+                            if !limiter.check_request().await {
+                                self.gateway.metrics.rate_limit_denied_total.inc();
+                                return crate::gateway::errors::send_gateway_error(
+                                    session,
+                                    429,
+                                    "rate_limit_exceeded",
+                                    &format!("app rate limit: {} req/s", route_rl.requests_per_second),
+                                )
+                                .await;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 6. Circuit breaker (new)
+        if let Some(ref app_id) = ctx.app_id {
+            if self.gateway.is_circuit_open(app_id) {
+                self.gateway.metrics.circuit_breaker_rejected_total.inc();
+                return crate::gateway::errors::send_gateway_error(
+                    session,
+                    503,
+                    "circuit_open",
+                    "upstream is unhealthy, retry later",
+                )
+                .await;
+            }
+        }
+
+        // 7. Backpressure (existing)
+        if !self.backpressure.is_accepting() {
+            tracing::warn!("node at capacity, rejecting request");
+            if let Some(ref metrics) = self.metrics {
+                metrics.record_rejection("*", "backpressure");
+            }
+            session.set_keepalive(None);
+            session.respond_error(503).await?;
+            return Ok(true);
         }
 
         Ok(false) // false = do NOT abort the request
@@ -216,9 +314,6 @@ impl ProxyHttp for WasmProxy {
         }
 
         // Propagate distributed tracing context to upstream.
-        // 1. Always inject X-Trace-Id so the upstream app can correlate logs.
-        // 2. If the downstream request had a traceparent header, forward it
-        //    unchanged so the W3C trace context is preserved across hops.
         if let Some(ref tid) = ctx.trace_id {
             let _ = upstream_request.insert_header("X-Trace-Id", tid.as_str());
         }
@@ -230,7 +325,6 @@ impl ProxyHttp for WasmProxy {
         {
             let _ = upstream_request.insert_header("traceparent", tp);
         }
-        // Also propagate tracestate if present (W3C companion to traceparent)
         if let Some(ts) = session
             .req_header()
             .headers
@@ -239,12 +333,8 @@ impl ProxyHttp for WasmProxy {
         {
             let _ = upstream_request.insert_header("tracestate", ts);
         }
+
         // Strip the matched path prefix if the route is configured for it.
-        // e.g. route "/api" with strip_prefix=true: /api/users → /users
-        //
-        // We set X-Forwarded-Prefix so the downstream app knows what was
-        // stripped, and rewrite the URI path. Pingora's RequestHeader.uri
-        // is a std http::Uri; we reconstruct it from parts.
         if ctx.strip_prefix {
             if let Some(ref prefix) = ctx.matched_prefix {
                 let original_uri = upstream_request.uri.to_string();
@@ -260,7 +350,6 @@ impl ProxyHttp for WasmProxy {
                     let _ = upstream_request
                         .insert_header("X-Original-Uri", &original_uri)
                         .map(|_| ());
-                    // Rebuild URI: preserve query string if present
                     let new_uri = if let Some(query) = upstream_request.uri.query() {
                         format!("{}?{}", new_path, query)
                     } else {
@@ -272,10 +361,55 @@ impl ProxyHttp for WasmProxy {
                 }
             }
         }
+
+        // 7. Request Transformation (new)
+        if let Some(ref cfg) = ctx.route_config {
+            if let Some(ref transform) = cfg.transform {
+                crate::gateway::transform::apply_request_transform(
+                    upstream_request,
+                    transform,
+                    ctx.user_identity.as_ref(),
+                );
+            }
+        }
+
         Ok(())
     }
 
-    /// Step 4 (optional): Log after the response is sent.
+    /// Step 4 (optional): Modify response headers from upstream.
+    async fn upstream_response_filter(
+        &self,
+        _session: &mut Session,
+        upstream_response: &mut pingora::http::ResponseHeader,
+        ctx: &mut Self::CTX,
+    ) -> PingoraResult<()> {
+        // Add CORS headers to normal responses
+        if let Some(ref cfg) = ctx.route_config {
+            if cfg.cors.is_some() {
+                let origin = _session
+                    .req_header()
+                    .headers
+                    .get("origin")
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or("");
+                crate::gateway::cors::add_cors_headers(upstream_response, cfg, origin);
+            }
+        }
+
+        // Record circuit breaker success/failure based on response status
+        if let Some(ref app_id) = ctx.app_id {
+            let status = upstream_response.status.as_u16();
+            if (500..600).contains(&status) {
+                self.gateway.circuit_breaker.record_failure(&app_id.0);
+            } else {
+                self.gateway.circuit_breaker.record_success(&app_id.0);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Step 5 (optional): Log after the response is sent.
     async fn logging(
         &self,
         session: &mut Session,
@@ -287,6 +421,10 @@ impl ProxyHttp for WasmProxy {
             .response_written()
             .map(|r| r.status.as_u16())
             .unwrap_or(0);
+
+        // Update circuit breaker metrics for open circuits
+        self.gateway.metrics.circuits_open.set(self.gateway.circuit_breaker.open_circuit_count());
+
         tracing::info!(
             app_id = ctx
                 .app_id
@@ -297,7 +435,6 @@ impl ProxyHttp for WasmProxy {
             latency_ms,
             "request completed"
         );
-        // TODO: push to metrics channel
     }
 }
 
@@ -310,8 +447,6 @@ mod tests {
     #[tokio::test]
     async fn test_unknown_host_returns_502_behavior() {
         let router = Arc::new(HostRouter::default());
-        // If a route doesn't exist, it returns None.
-        // In request_filter, this leaves ctx.app_id as None, which causes upstream_peer to return an error (502).
         let resolved = router.resolve("unknown.com", "/").await;
         assert!(
             resolved.is_none(),
@@ -344,17 +479,16 @@ mod tests {
             rate_limiter,
             backpressure: crate::backpressure::BackpressureSignal::new(),
             node_table: Arc::new(crate::node_table::NodeLoadTable::default()),
-            metrics: None, // No metrics in test
+            metrics: None,
+            gateway: Arc::new(Gateway::new(None)),
             cold_start,
         };
 
         let app_id = AppId("test-app".to_string());
 
-        // No upstreams added yet, so next() returns None
         let addr = proxy.upstream.next(&app_id).await;
         assert!(addr.is_none());
 
-        // This simulates the behavior in upstream_peer when next() is None
         let result = (proxy.cold_start)(app_id.clone()).await;
         assert!(result.is_some());
         assert!(
