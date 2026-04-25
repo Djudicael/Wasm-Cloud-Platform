@@ -1,0 +1,18 @@
+[package]
+name = "internal_gateway"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio = { workspace = true }
+axum = { workspace = true }
+tracing = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+common = { path = "../common" }
+supervisor = { path = "../supervisor" }
+proxy = { path = "../proxy" }
+reqwest = { workspace = true }
+http = "1"
+tower = "0.5"
+tower-http = { version = "0.6", features = ["trace"] }

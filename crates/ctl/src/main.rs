@@ -2,12 +2,14 @@
 use clap::{Parser, Subcommand};
 
 mod cmds {
+    pub mod app;
     pub mod billing;
     pub mod deploy;
     pub mod gateway;
     pub mod gc;
     pub mod list;
     pub mod logs;
+    pub mod manifest;
     pub mod node;
     pub mod platform;
     pub mod policy;
@@ -60,6 +62,8 @@ enum Commands {
     Routes(cmds::routes::RoutesArgs),
     /// Manage application secrets
     Secrets(cmds::secrets::SecretsArgs),
+    /// Application management (list, manifest)
+    App(cmds::app::AppArgs),
     /// Stream logs from a running application
     Logs { app_id: String },
     /// Logging configuration and management
@@ -516,6 +520,7 @@ async fn main() -> anyhow::Result<()> {
         Commands::Instances => cmds::list::instances(&cli.node_api, &http).await?,
         Commands::Routes(args) => cmds::routes::run(args, &bus).await?,
         Commands::Secrets(args) => cmds::secrets::run(args, &bus).await?,
+        Commands::App(args) => cmds::app::run(args, &cli.node_api, &http).await?,
         Commands::Logs { app_id } => cmds::logs::run(&app_id, &cli.node_api, &http).await?,
         Commands::Status => cmds::status::run(&cli.node_api, &http).await?,
         Commands::Platform(args) => cmds::platform::run(args, &bus, &cli.node_api, &http).await?,

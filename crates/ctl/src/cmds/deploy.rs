@@ -13,15 +13,23 @@ use std::collections::HashMap;
 pub struct DeployArgs {
     /// Application name (e.g. "api-users")
     #[arg(long)]
-    app: String,
+    app: Option<String>,
 
     /// Version string (e.g. "v2")
     #[arg(long, default_value = "v1")]
     version: String,
 
+    /// Namespace (default = "default")
+    #[arg(long, default_value = "default")]
+    namespace: String,
+
     /// Path to the .wasm binary
     #[arg(long)]
-    wasm: String,
+    wasm: Option<String>,
+
+    /// Path to a deployment manifest TOML file
+    #[arg(long)]
+    manifest: Option<String>,
 
     /// Fuel quota (CPU units per request)
     #[arg(long, default_value = "500000000")]
@@ -150,11 +158,36 @@ pub async fn run(
     default_node_api: &str,
     http: &reqwest::Client,
 ) -> Result<()> {
-    let app_id = AppId::new(&args.app, &args.version);
+    // If manifest is provided, parse it and use its values (CLI flags override manifest values)
+    let manifest = if let Some(ref path) = args.manifest {
+        Some(super::manifest::DeployManifest::from_toml(path)?)
+    } else {
+        None
+    };
+
+    // Resolve app name, version, wasm path from manifest or CLI flags
+    let app_name = args.app.clone()
+        .or_else(|| manifest.as_ref().map(|m| m.app.name.clone()))
+        .ok_or_else(|| anyhow::anyhow!("--app is required when no manifest is provided"))?;
+    let version = if args.version != "v1" {
+        args.version.clone()
+    } else {
+        manifest.as_ref().map(|m| m.app.version.clone()).unwrap_or_else(|| args.version.clone())
+    };
+    let namespace = if args.namespace != "default" {
+        args.namespace.clone()
+    } else {
+        manifest.as_ref().map(|m| m.app.namespace.clone()).unwrap_or_else(|| args.namespace.clone())
+    };
+    let wasm_path = args.wasm.clone()
+        .or_else(|| manifest.as_ref().map(|m| m.app.wasm_artifact.clone()))
+        .ok_or_else(|| anyhow::anyhow!("--wasm is required when no manifest is provided"))?;
+
+    let app_id = AppId::new_namespaced(&namespace, &app_name, &version);
 
     // 1. Read the .wasm file
-    let wasm_bytes = std::fs::read(&args.wasm)
-        .map_err(|e| anyhow::anyhow!("Cannot read {}: {}", args.wasm, e))?;
+    let wasm_bytes = std::fs::read(&wasm_path)
+        .map_err(|e| anyhow::anyhow!("Cannot read {}: {}", wasm_path, e))?;
 
     let size_bytes = wasm_bytes.len() as u64;
 
@@ -162,6 +195,7 @@ pub async fn run(
     let sha256 = hex::encode(Sha256::digest(&wasm_bytes));
     println!("{}", "Deploying application:".bold());
     println!("  App ID:  {}", app_id.0.cyan());
+    println!("  Namespace: {}", namespace.green());
     println!("  SHA-256: {}", sha256.yellow());
     println!(
         "  Size:    {} bytes ({:.1} MB)",
@@ -194,31 +228,62 @@ pub async fn run(
     }
     println!("{} Artifact uploaded to {}", "✓".green(), upload_url);
 
-    // 4. Build policy config from CLI flags
-    let policy = build_policy_config(&args)?;
+    // 4. Build config from manifest (if any), then overlay CLI flags
+    let (config, gateway_config, api_keys) = if let Some(manifest) = manifest {
+        let mut config = manifest.to_app_config();
+        // Override with CLI flags
+        config.id = app_id.clone();
+        if args.fuel != 500_000_000 {
+            config.fuel_quota = FuelQuota(args.fuel);
+        }
+        if args.memory_mb != 128 {
+            config.memory_limit = MemoryPages(args.memory_mb * 16);
+        }
+        if args.max_instances != 10 {
+            config.max_instances = args.max_instances;
+        }
+        if args.idle_timeout != 300 {
+            config.idle_timeout_secs = args.idle_timeout;
+        }
+        if !args.env_vars.is_empty() {
+            for (k, v) in &args.env_vars {
+                config.env_vars.insert(k.clone(), v.clone());
+            }
+        }
+        if !args.secret_keys.is_empty() {
+            config.secret_keys = args.secret_keys.clone();
+        }
+        let policy = build_policy_config(&args)?;
+        if policy.is_some() {
+            config.policy = policy;
+        }
 
-    // 5. Build gateway config (before args is partially moved)
-    let gateway_config = build_gateway_config(&args);
-
-    // 6. Build AppConfig
-    let config = AppConfig {
-        id: app_id.clone(),
-        fuel_quota: FuelQuota(args.fuel),
-        memory_limit: MemoryPages(args.memory_mb * 16), // 1 MB = 16 pages of 64KB
-        max_instances: args.max_instances,
-        idle_timeout_secs: args.idle_timeout,
-        wasm_bind_port: 8080,
-        env_vars: args.env_vars.into_iter().collect::<HashMap<_, _>>(),
-        secret_keys: args.secret_keys,
-        extended_limits: None,
-        health_check_path: None,
-        db_max_connections: None,
-        rate_limit: None, // Use default rate limiting
-        tenant_id: None,
-        policy,
+        let gateway_config = manifest.to_gateway_config();
+        (config, gateway_config, manifest.api_keys)
+    } else {
+        let policy = build_policy_config(&args)?;
+        let gateway_config = build_gateway_config(&args);
+        let config = AppConfig {
+            id: app_id.clone(),
+            fuel_quota: FuelQuota(args.fuel),
+            memory_limit: MemoryPages(args.memory_mb * 16),
+            max_instances: args.max_instances,
+            idle_timeout_secs: args.idle_timeout,
+            wasm_bind_port: 8080,
+            env_vars: args.env_vars.into_iter().collect::<HashMap<_, _>>(),
+            secret_keys: args.secret_keys,
+            extended_limits: None,
+            health_check_path: None,
+            db_max_connections: None,
+            rate_limit: None,
+            tenant_id: None,
+            policy,
+            namespace: namespace.clone(),
+        };
+        (config, gateway_config, Vec::new())
     };
 
-    // 6. Publish deploy event
+    // 5. Publish deploy event
     let event = Event::DeployApp {
         app_id: app_id.clone(),
         config,
@@ -228,7 +293,7 @@ pub async fn run(
     };
     bus.publish(&event).await?;
 
-    // 7. Publish gateway config if any gateway flags were set
+    // 6. Publish gateway config if present
     if let Some(gateway_config) = gateway_config {
         let gw_event = Event::GatewayConfigUpdate {
             app_id: app_id.clone(),
@@ -240,6 +305,24 @@ pub async fn run(
             "✓".green(),
             app_id.0.cyan()
         );
+    }
+
+    // 7. Publish API keys if present
+    if !api_keys.is_empty() {
+        // API keys are stored via the admin API / node storage.
+        // For now, we publish them as part of the deploy by sending
+        // a direct HTTP request to the node's admin API.
+        let url = format!("{}/admin/api_keys/{}", node_api, app_id.0);
+        let resp = http
+            .post(&url)
+            .json(&api_keys)
+            .send()
+            .await?;
+        if resp.status().is_success() {
+            println!("{} API keys stored for {}", "✓".green(), app_id.0.cyan());
+        } else {
+            println!("⚠ Failed to store API keys: {}", resp.status());
+        }
     }
 
     println!(

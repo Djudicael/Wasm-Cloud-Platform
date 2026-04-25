@@ -2776,6 +2776,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "internal_gateway"
+version = "0.1.0"
+dependencies = [
+ "axum 0.8.8",
+ "common",
+ "http 1.4.0",
+ "proxy",
+ "reqwest 0.13.2",
+ "serde",
+ "serde_json",
+ "supervisor",
+ "tokio",
+ "tower 0.5.3",
+ "tower-http",
+ "tracing",
+]
+
+[[package]]
 name = "io-extras"
 version = "0.18.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4325,6 +4343,7 @@ dependencies = [
  "rsa",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
  "storage",
  "tokio",
  "tower 0.5.3",
@@ -6082,6 +6101,7 @@ dependencies = [
  "tower 0.5.3",
  "tower-layer",
  "tower-service",
+ "tracing",
 ]
 
 [[package]]

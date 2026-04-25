@@ -1,6 +1,6 @@
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use sha2::Digest;
 
 /// Test: public route allows all requests without authentication.
 #[tokio::test]
@@ -300,6 +300,86 @@ async fn test_jwks_cache_refresh_on_stale() {
     // (this will fail because there's no real server, but it demonstrates the logic)
     let result = provider.validate_token("invalid.token.here").await;
     assert!(result.is_err());
+}
+
+/// Test: API key authentication at endpoint level.
+#[tokio::test]
+async fn test_endpoint_api_key_auth() {
+    let gateway = Arc::new(proxy::gateway::Gateway::new(None));
+
+    // Set up an API key validator for the app
+    let mut hasher = sha2::Sha256::new();
+    hasher.update("secret-key-123");
+    let hash = format!("sha256${}", hex::encode(hasher.finalize()));
+    let api_key_record = common::types::ApiKeyRecord {
+        name: "test-key".to_string(),
+        key_hash: hash,
+        scopes: vec!["/api/public".to_string()],
+    };
+    let validator = proxy::gateway::api_key::ApiKeyValidator::new(vec![api_key_record]);
+    gateway.set_api_key_validator("default/test-app:v1", validator).await;
+
+    // Valid key for allowed path
+    assert!(gateway.validate_api_key("default/test-app:v1", "secret-key-123", "/api/public/users").await);
+    // Valid key for disallowed path
+    assert!(!gateway.validate_api_key("default/test-app:v1", "secret-key-123", "/api/admin").await);
+    // Invalid key
+    assert!(!gateway.validate_api_key("default/test-app:v1", "wrong-key", "/api/public").await);
+}
+
+/// Test: endpoint rules with per-path auth overrides.
+#[tokio::test]
+async fn test_endpoint_rule_evaluation() {
+    let config = common::types::GatewayRouteConfig {
+        auth: common::types::AuthPolicy::Authenticated,
+        endpoints: vec![
+            common::types::EndpointRule {
+                path: "/health".to_string(),
+                methods: vec!["GET".to_string()],
+                auth: common::types::EndpointAuth::None,
+                rate_limit: None,
+            },
+            common::types::EndpointRule {
+                path: "/api/admin".to_string(),
+                methods: vec!["POST".to_string(), "DELETE".to_string()],
+                auth: common::types::EndpointAuth::Roles {
+                    allowed_roles: vec!["admin".to_string()],
+                    client_id: None,
+                },
+                rate_limit: None,
+            },
+        ],
+        ..Default::default()
+    };
+
+    // /health should override to None
+    let health_rule = config.endpoints.iter().find(|e| e.path == "/health");
+    assert!(health_rule.is_some());
+    assert_eq!(health_rule.unwrap().auth, common::types::EndpointAuth::None);
+
+    // /api/admin should require admin role
+    let admin_rule = config.endpoints.iter().find(|e| e.path == "/api/admin");
+    assert!(admin_rule.is_some());
+    match &admin_rule.unwrap().auth {
+        common::types::EndpointAuth::Roles { allowed_roles, .. } => {
+            assert_eq!(allowed_roles, &["admin"]);
+        }
+        other => panic!("expected Roles auth, got {:?}", other),
+    }
+}
+
+/// Test: namespace-qualified AppId resolution.
+#[test]
+fn test_namespaced_app_id() {
+    let app_id = common::types::AppId::new_namespaced("production", "payments", "v1");
+    assert_eq!(app_id.0, "production/payments:v1");
+    assert_eq!(app_id.namespace(), "production");
+    assert_eq!(app_id.bare_name(), "payments:v1");
+    assert_eq!(app_id.bare_app_name(), "payments");
+
+    // Legacy format (no namespace) defaults to "default"
+    let legacy = common::types::AppId::new("payments", "v1");
+    assert_eq!(legacy.namespace(), "default");
 }
 
 /// Helper: create a valid JWT for testing.

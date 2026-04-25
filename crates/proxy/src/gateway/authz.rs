@@ -9,18 +9,22 @@ pub fn authorize(identity: &UserIdentity, policy: &AuthPolicy) -> bool {
         AuthPolicy::Roles {
             allowed_roles,
             client_id,
-        } => {
-            // Check if the user has any of the allowed roles
-            allowed_roles.iter().any(|required| {
-                // Check realm roles (plain name)
-                identity.roles.iter().any(|r| r == required)
-                    // Also check client-scoped roles (client_id:role_name)
-                    || client_id.as_ref().map_or(false, |cid| {
-                        identity.roles.iter().any(|r| r == &format!("{}:{}", cid, required))
-                    })
-            })
-        }
+        } => authorize_roles(identity, allowed_roles, client_id.as_deref()),
     }
+}
+
+/// Check if a user has any of the allowed roles.
+pub fn authorize_roles(
+    identity: &UserIdentity,
+    allowed_roles: &[String],
+    client_id: Option<&str>,
+) -> bool {
+    allowed_roles.iter().any(|required| {
+        identity.roles.iter().any(|r| r == required)
+            || client_id.map_or(false, |cid| {
+                identity.roles.iter().any(|r| r == &format!("{}:{}", cid, required))
+            })
+    })
 }
 
 #[cfg(test)]

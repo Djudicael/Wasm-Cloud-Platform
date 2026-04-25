@@ -72,6 +72,7 @@ fn test_config_roundtrip_with_secrets() {
         }),
         tenant_id: None,
         policy: None,
+        namespace: "default".to_string(),
     };
 
     store.save_config(&config).unwrap();

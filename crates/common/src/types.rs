@@ -29,6 +29,15 @@ impl AppId {
         })
     }
 
+    /// Create a qualified AppId with namespace.
+    /// Format: "<namespace>/<name>:<version>"
+    pub fn new_namespaced(namespace: &str, name: &str, version: &str) -> Self {
+        let id = format!("{namespace}/{name}:{version}");
+        Self::new_validate(&id).unwrap_or_else(|_| {
+            panic!("Invalid AppId: namespace, name and version must be non-empty and contain no whitespace or NATS-invalid characters (> * . newline)")
+        })
+    }
+
     pub fn new_validate(s: &str) -> Result<Self, &'static str> {
         if s.is_empty() {
             return Err("AppId cannot be empty");
@@ -36,14 +45,44 @@ impl AppId {
         if s.contains(' ') || s.contains('\n') || s.contains('\t') {
             return Err("AppId cannot contain whitespace");
         }
-        if s.contains('>') || s.contains('*') || s.contains('.') {
-            return Err("AppId cannot contain >, *, or . (invalid in NATS subjects)");
+        if s.contains('>') || s.contains('*') {
+            return Err("AppId cannot contain > or * (invalid in NATS subjects)");
         }
+        // Allow '/' and ':' for qualified format
         Ok(AppId(s.to_string()))
     }
 
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+
+    /// Extract namespace from a qualified AppId.
+    /// For "default/api-users:v2" returns "default".
+    /// For "api-users:v2" returns "default".
+    pub fn namespace(&self) -> &str {
+        if self.0.contains('/') {
+            self.0.split('/').next().unwrap_or("default")
+        } else {
+            "default"
+        }
+    }
+
+    /// Extract bare name (without namespace) from a qualified AppId.
+    /// For "default/api-users:v2" returns "api-users:v2".
+    /// For "api-users:v2" returns "api-users:v2".
+    pub fn bare_name(&self) -> &str {
+        if self.0.contains('/') {
+            self.0.split('/').nth(1).unwrap_or(&self.0)
+        } else {
+            &self.0
+        }
+    }
+
+    /// Extract bare app name without version.
+    /// For "default/api-users:v2" returns "api-users".
+    pub fn bare_app_name(&self) -> &str {
+        let name_part = self.bare_name();
+        name_part.split(':').next().unwrap_or(name_part)
     }
 }
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -110,7 +149,7 @@ impl ExtendedLimitsConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AppConfig {
-    /// Unique app identifier: "<name>:<version>"
+    /// Unique app identifier: "<name>:<version>" or "<namespace>/<name>:<version>"
     pub id: AppId,
 
     /// Maximum Fuel units per execution.
@@ -158,6 +197,16 @@ pub struct AppConfig {
 
     #[serde(default)]
     pub policy: Option<crate::policy::PolicyConfig>,
+
+    /// The namespace this app belongs to.
+    /// Namespaces are flat strings (e.g., "production", "tenant-a").
+    /// Default = "default". The Wasm app never sees this value.
+    #[serde(default = "default_namespace")]
+    pub namespace: String,
+}
+
+fn default_namespace() -> String {
+    "default".to_string()
 }
 
 /// Rate limit configuration, stored as part of AppConfig.
@@ -201,6 +250,7 @@ impl AppConfig {
             rate_limit: None,
             tenant_id: None,
             policy: None,
+            namespace: default_namespace(),
         }
     }
 }
@@ -259,6 +309,11 @@ pub struct GatewayRouteConfig {
     /// Circuit breaker configuration for this route's upstream.
     #[serde(default)]
     pub circuit_breaker: Option<CircuitBreakerConfig>,
+
+    /// Per-endpoint security overrides.
+    /// Evaluated top-to-bottom; first match wins.
+    #[serde(default)]
+    pub endpoints: Vec<EndpointRule>,
 }
 
 /// Authentication policy for a route.
@@ -418,6 +473,58 @@ pub enum FailureCriteria {
     AllErrors,
     /// Custom: count only specific HTTP status codes as failures.
     StatusCodes(Vec<u16>),
+}
+
+/// Per-endpoint security rule for fine-grained gateway policy.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EndpointRule {
+    /// Path prefix to match. Exact match for now.
+    pub path: String,
+
+    /// HTTP methods this rule applies to. Empty = all methods.
+    #[serde(default)]
+    pub methods: Vec<String>,
+
+    /// Authentication policy for this endpoint.
+    #[serde(default)]
+    pub auth: EndpointAuth,
+
+    /// Optional rate limit override.
+    pub rate_limit: Option<RouteRateLimit>,
+}
+
+/// Authentication methods supported at the endpoint level.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum EndpointAuth {
+    /// Inherit from route-level config.
+    #[default]
+    Inherit,
+
+    /// No authentication required.
+    None,
+
+    /// Valid JWT required.
+    Authenticated,
+
+    /// Valid JWT + one of the specified roles.
+    Roles {
+        allowed_roles: Vec<String>,
+        client_id: Option<String>,
+    },
+
+    /// API key authentication via X-Api-Key header.
+    ApiKey,
+}
+
+/// API key record stored in redb.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ApiKeyRecord {
+    pub name: String,
+    /// "sha256$<hex>" hashed key
+    pub key_hash: String,
+    /// Allowed path prefixes
+    pub scopes: Vec<String>,
 }
 
 /// OIDC provider configuration. Stored once per platform (not per-route).

@@ -15,6 +15,7 @@ members = [
     "crates/e2e",
     "crates/ebpf-monitor",
     "crates/config",
+    "crates/internal_gateway",
     "apps/hello-axum",
     "apps/echo-service",
     "apps/postgres-app"

@@ -237,6 +237,7 @@ pub fn build_app_config(
         rate_limit: None,
         tenant_id: None,
         policy: None,
+        namespace: "default".to_string(),
     }
 }
 

@@ -127,6 +127,7 @@ fn test_multiple_instances_with_real_component() {
         rate_limit: None,
         tenant_id: None,
         policy: None,
+        namespace: "default".to_string(),
     };
 
     let prepared = rt.prepare(&artifact, config).expect("failed to prepare");
@@ -163,6 +164,7 @@ fn test_memory_limit_config() {
         rate_limit: None,
         tenant_id: None,
         policy: None,
+        namespace: "default".to_string(),
     };
 
     assert_eq!(config.memory_limit.0, 10);
@@ -187,6 +189,7 @@ fn test_fuel_quota_config() {
         rate_limit: None,
         tenant_id: None,
         policy: None,
+        namespace: "default".to_string(),
     };
 
     let low_fuel = AppConfig {
@@ -204,6 +207,7 @@ fn test_fuel_quota_config() {
         rate_limit: None,
         tenant_id: None,
         policy: None,
+        namespace: "default".to_string(),
     };
 
     assert_eq!(high_fuel.fuel_quota.0, 10_000_000);

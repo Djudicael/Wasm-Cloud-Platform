@@ -51,6 +51,7 @@ fn create_test_config(app_id: AppId) -> AppConfig {
         rate_limit: None,
         tenant_id: None,
         policy: None,
+        namespace: "default".to_string(),
     }
 }
 

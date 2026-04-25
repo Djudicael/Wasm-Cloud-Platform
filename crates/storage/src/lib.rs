@@ -32,7 +32,8 @@ mod tests;
 /// - 3: Added rate_limit field to AppConfig
 /// - 4: Added BILLING and KEK tables
 /// - 5: Added GATEWAY_CONFIGS table
-const CURRENT_SCHEMA_VERSION: u32 = 5;
+/// - 6: Added API_KEYS table
+const CURRENT_SCHEMA_VERSION: u32 = 6;
 
 #[derive(Clone)]
 pub struct Store {
@@ -146,6 +147,7 @@ impl Store {
             tx.open_table(tables::BILLING)?;
             tx.open_table(tables::KEK)?;
             tx.open_table(tables::GATEWAY_CONFIGS)?;
+            tx.open_table(tables::API_KEYS)?;
         }
         tx.commit()?;
 
@@ -247,6 +249,10 @@ impl Store {
             5 => {
                 // v4 → v5: Ensure GATEWAY_CONFIGS table exists
                 self.migrate_v4_to_v5()?;
+            }
+            6 => {
+                // v5 → v6: Ensure API_KEYS table exists
+                self.migrate_v5_to_v6()?;
             }
             n => panic!("Unknown migration target: {n}"),
         }
@@ -501,6 +507,19 @@ impl Store {
         Ok(())
     }
 
+    /// Migration v5 → v6: Ensure API_KEYS table exists.
+    fn migrate_v5_to_v6(&self) -> Result<(), redb::Error> {
+        let tx = self.db.begin_write()?;
+        {
+            let _ = tx.open_table(tables::API_KEYS)?;
+            let mut meta_table = tx.open_table(tables::SCHEMA_META)?;
+            meta_table.insert("version", "6")?;
+        }
+        tx.commit()?;
+        tracing::info!("v5→v6: ensured API_KEYS table exists");
+        Ok(())
+    }
+
     // ── Gateway Config Persistence ─────────────────────────────────────────────
 
     /// Save a gateway route config for an app.
@@ -600,5 +619,78 @@ impl Store {
             configs.push((app_id, config));
         }
         Ok(configs)
+    }
+
+    // ── API Key Persistence ────────────────────────────────────────────────────
+
+    /// Save API keys for an app.
+    pub fn save_api_keys(
+        &self,
+        app_id: &str,
+        keys: &[common::types::ApiKeyRecord],
+    ) -> Result<(), PlatformError> {
+        let json = serde_json::to_string(keys)
+            .map_err(|e| PlatformError::storage_with_msg("failed to serialize api keys", e))?;
+        let tx = self
+            .db
+            .begin_write()
+            .map_err(|e| PlatformError::storage_with_msg("failed to begin write transaction", e))?;
+        {
+            let mut table = tx
+                .open_table(tables::API_KEYS)
+                .map_err(|e| PlatformError::storage_with_msg("failed to open API_KEYS table", e))?;
+            table
+                .insert(app_id, json.as_str())
+                .map_err(|e| PlatformError::storage_with_msg("failed to write api keys", e))?;
+        }
+        tx.commit()
+            .map_err(|e| PlatformError::storage_with_msg("failed to commit api keys", e))?;
+        Ok(())
+    }
+
+    /// Load API keys for an app.
+    pub fn load_api_keys(
+        &self,
+        app_id: &str,
+    ) -> Result<Vec<common::types::ApiKeyRecord>, PlatformError> {
+        let tx = self
+            .db
+            .begin_read()
+            .map_err(|e| PlatformError::storage_with_msg("failed to begin read transaction", e))?;
+        let table = tx
+            .open_table(tables::API_KEYS)
+            .map_err(|e| PlatformError::storage_with_msg("failed to open API_KEYS table", e))?;
+        match table
+            .get(app_id)
+            .map_err(|e| PlatformError::storage_with_msg("failed to read api keys", e))?
+        {
+            Some(v) => {
+                let keys: Vec<common::types::ApiKeyRecord> =
+                    serde_json::from_str(v.value()).map_err(|e| {
+                        PlatformError::storage_with_msg("failed to deserialize api keys", e)
+                    })?;
+                Ok(keys)
+            }
+            None => Ok(Vec::new()),
+        }
+    }
+
+    /// Delete API keys for an app.
+    pub fn delete_api_keys(&self, app_id: &str) -> Result<(), PlatformError> {
+        let tx = self
+            .db
+            .begin_write()
+            .map_err(|e| PlatformError::storage_with_msg("failed to begin write transaction", e))?;
+        {
+            let mut table = tx
+                .open_table(tables::API_KEYS)
+                .map_err(|e| PlatformError::storage_with_msg("failed to open API_KEYS table", e))?;
+            table
+                .remove(app_id)
+                .map_err(|e| PlatformError::storage_with_msg("failed to delete api keys", e))?;
+        }
+        tx.commit()
+            .map_err(|e| PlatformError::storage_with_msg("failed to commit api keys deletion", e))?;
+        Ok(())
     }
 }

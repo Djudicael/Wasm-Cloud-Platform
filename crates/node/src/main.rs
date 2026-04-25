@@ -933,6 +933,25 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
+    // 3b. Load API keys from storage into gateway validators
+    match store.list_apps() {
+        Ok(app_ids) => {
+            for app_id in app_ids {
+                match store.load_api_keys(&app_id.0) {
+                    Ok(keys) if !keys.is_empty() => {
+                        let validator = proxy::gateway::api_key::ApiKeyValidator::new(keys);
+                        gateway.set_api_key_validator(&app_id.0, validator).await;
+                    }
+                    _ => {}
+                }
+            }
+            tracing::info!("api key validators loaded from storage");
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to load app list for api keys");
+        }
+    }
+
     // 4. Setup NATS KV bucket for distributed rate limiting
     let rate_limit_kv = if config.gateway.rate_limit.kv_bucket.is_empty() {
         None
@@ -1707,6 +1726,158 @@ async fn main() -> anyhow::Result<()> {
                             axum::Json(serde_json::json!({
                                 "status": "removed",
                                 "app_id": app_id.0,
+                            })),
+                        )
+                    }
+                }
+            }),
+        )
+        // ── App Management Endpoints ────────────────────────────────────
+        .route(
+            "/admin/apps",
+            axum::routing::get({
+                let store = store.clone();
+                let supervisor = supervisor_instances.clone();
+                move |axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>| {
+                    let store = store.clone();
+                    let supervisor = supervisor.clone();
+                    async move {
+                        let namespace = params.get("namespace").cloned().unwrap_or_else(|| "default".to_string());
+                        match store.list_apps() {
+                            Ok(app_ids) => {
+                                let mut apps = Vec::new();
+                                for app_id in app_ids {
+                                    if app_id.namespace() == namespace {
+                                        let instances = supervisor.list_instances(&app_id).await.len() as u64;
+                                        apps.push(serde_json::json!({
+                                            "id": app_id.0,
+                                            "namespace": app_id.namespace(),
+                                            "instances": instances,
+                                        }));
+                                    }
+                                }
+                                axum::Json(serde_json::json!(apps))
+                            }
+                            Err(e) => axum::Json(serde_json::json!({
+                                "error": format!("{e}"),
+                            })),
+                        }
+                    }
+                }
+            }),
+        )
+        .route(
+            "/admin/apps/{app_id}/manifest",
+            axum::routing::get({
+                let store = store.clone();
+                move |axum::extract::Path(app_id): axum::extract::Path<String>| {
+                    let store = store.clone();
+                    async move {
+                        let app_id = match common::types::AppId::new_validate(&app_id) {
+                            Ok(id) => id,
+                            Err(e) => {
+                                return (
+                                    axum::http::StatusCode::BAD_REQUEST,
+                                    axum::Json(serde_json::json!({
+                                        "error": "invalid_app_id",
+                                        "message": e,
+                                    })),
+                                );
+                            }
+                        };
+                        let config = match store.load_config(&app_id) {
+                            Ok(Some(c)) => c,
+                            Ok(None) => {
+                                return (
+                                    axum::http::StatusCode::NOT_FOUND,
+                                    axum::Json(serde_json::json!({
+                                        "error": "not_found",
+                                        "message": format!("no config for {}", app_id.0),
+                                    })),
+                                );
+                            }
+                            Err(e) => {
+                                return (
+                                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                                    axum::Json(serde_json::json!({
+                                        "error": "storage_error",
+                                        "message": format!("{e}"),
+                                    })),
+                                );
+                            }
+                        };
+                        let gateway_config = store.load_gateway_config(&app_id.0).unwrap_or(None);
+                        let api_keys = store.load_api_keys(&app_id.0).unwrap_or_default();
+                        let manifest = serde_json::json!({
+                            "app": {
+                                "name": config.id.bare_app_name(),
+                                "version": config.id.bare_name().split(':').nth(1).unwrap_or("v1"),
+                                "namespace": config.namespace,
+                                "wasm_bind_port": config.wasm_bind_port,
+                            },
+                            "fuel": {
+                                "quota": config.fuel_quota.0,
+                                "memory_pages": config.memory_limit.0,
+                                "max_instances": config.max_instances,
+                                "idle_timeout_secs": config.idle_timeout_secs,
+                            },
+                            "policy": config.policy,
+                            "gateway": gateway_config,
+                            "env": config.env_vars,
+                            "secrets": config.secret_keys,
+                            "api_keys": api_keys,
+                        });
+                        (
+                            axum::http::StatusCode::OK,
+                            axum::Json(manifest),
+                        )
+                    }
+                }
+            }),
+        )
+        .route(
+            "/admin/api_keys/{app_id}",
+            axum::routing::post({
+                let store = store.clone();
+                let bus = bus.clone();
+                move |axum::extract::Path(app_id): axum::extract::Path<String>,
+                      axum::Json(body): axum::Json<Vec<common::types::ApiKeyRecord>>| {
+                    let store = store.clone();
+                    let bus = bus.clone();
+                    async move {
+                        let app_id = match common::types::AppId::new_validate(&app_id) {
+                            Ok(id) => id,
+                            Err(e) => {
+                                return (
+                                    axum::http::StatusCode::BAD_REQUEST,
+                                    axum::Json(serde_json::json!({
+                                        "error": "invalid_app_id",
+                                        "message": e,
+                                    })),
+                                );
+                            }
+                        };
+                        if let Err(e) = store.save_api_keys(&app_id.0, &body) {
+                            return (
+                                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                                axum::Json(serde_json::json!({
+                                    "error": "storage_error",
+                                    "message": format!("{e}"),
+                                })),
+                            );
+                        }
+                        // Publish event so all nodes update their validators
+                        let event = messaging::events::Event::GatewayConfigUpdate {
+                            app_id: app_id.clone(),
+                            config: common::types::GatewayRouteConfig::default(),
+                        };
+                        let _ = bus.publish(&event).await;
+                        (
+                            axum::http::StatusCode::OK,
+                            axum::Json(serde_json::json!({
+                                "status": "updated",
+                                "app_id": app_id.0,
+                                "key_count": body.len(),
                             })),
                         )
                     }

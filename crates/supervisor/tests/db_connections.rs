@@ -55,6 +55,7 @@ async fn test_database_url_injection() {
         rate_limit: None,
         tenant_id: None,
         policy: None,
+        namespace: "default".to_string(),
     };
 
     // Simulate the env_resolver from node/main.rs
@@ -95,6 +96,7 @@ async fn test_database_url_injection() {
 
     let config_with_db = AppConfig {
         env_vars: env_with_db,
+        namespace: "default".to_string(),
         ..config
     };
 

@@ -28,6 +28,7 @@ chrono = { workspace = true }
 jsonwebtoken = "9"
 async-nats = { workspace = true }
 http = "1"
+sha2 = { workspace = true }
 
 [dev-dependencies]
 tower = "0.5"

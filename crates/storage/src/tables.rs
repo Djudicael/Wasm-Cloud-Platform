@@ -54,3 +54,8 @@ pub const KEK: TableDefinition<&str, &[u8]> = TableDefinition::new("kek");
 // Key   : app_id (e.g. "api-users:v2")
 // Value : JSON-serialized GatewayRouteConfig
 pub const GATEWAY_CONFIGS: TableDefinition<&str, &str> = TableDefinition::new("gateway_configs");
+
+// ── API KEYS ───────────────────────────────────────────────────────────────────
+// Key   : "<app_id>/api_keys"
+// Value : JSON-serialized Vec<ApiKeyRecord>
+pub const API_KEYS: TableDefinition<&str, &str> = TableDefinition::new("api_keys");

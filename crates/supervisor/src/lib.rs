@@ -6,6 +6,7 @@ pub mod env_resolver;
 pub mod instance;
 pub mod instance_manager;
 pub mod network;
+pub mod network_interceptor;
 pub mod pool;
 pub mod port_alloc;
 pub mod scaling;

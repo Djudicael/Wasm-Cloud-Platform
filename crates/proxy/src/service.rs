@@ -161,47 +161,114 @@ impl ProxyHttp for WasmProxy {
             }
         }
 
-        // 3. Authentication (new)
-        if let Some(ref cfg) = ctx.route_config {
-            if cfg.auth != crate::gateway::config::AuthPolicy::None {
-                match self.gateway.authenticate(session).await {
-                    Ok(identity) => {
-                        self.gateway.metrics.auth_success_total.inc();
-                        ctx.user_identity = Some(identity);
+        // 2.5. Find matching endpoint rule (if any)
+        let method = session.req_header().method.as_str();
+        let endpoint_rule = ctx.route_config.as_ref()
+            .and_then(|cfg| cfg.endpoints.iter()
+                .find(|e| {
+                    path.starts_with(&e.path) &&
+                    (e.methods.is_empty() || e.methods.iter().any(|m| m.eq_ignore_ascii_case(method)))
+                })
+            );
+
+        // 3. Authentication (new) — endpoint-level override or route default
+        let effective_auth = match endpoint_rule {
+            Some(rule) => match &rule.auth {
+                common::types::EndpointAuth::Inherit => {
+                    ctx.route_config.as_ref().map(|c| c.auth.clone()).unwrap_or(crate::gateway::config::AuthPolicy::None)
+                }
+                common::types::EndpointAuth::None => crate::gateway::config::AuthPolicy::None,
+                common::types::EndpointAuth::Authenticated => crate::gateway::config::AuthPolicy::Authenticated,
+                common::types::EndpointAuth::Roles { allowed_roles, client_id } => {
+                    crate::gateway::config::AuthPolicy::Roles {
+                        allowed_roles: allowed_roles.clone(),
+                        client_id: client_id.clone(),
                     }
-                    Err(e) => {
-                        tracing::warn!(error = %e, "authentication failed");
-                        self.gateway.metrics.auth_failure_total.inc();
+                }
+                common::types::EndpointAuth::ApiKey => {
+                    // API key auth: check X-Api-Key header
+                    let api_key = session.req_header().headers
+                        .get("x-api-key")
+                        .and_then(|v| v.to_str().ok());
+                    if let Some(key) = api_key {
+                        let app_id = ctx.app_id.as_ref().map(|a| a.0.as_str()).unwrap_or("");
+                        let path = session.req_header().uri.path();
+                        if !self.gateway.validate_api_key(app_id, key, path).await {
+                            return crate::gateway::errors::send_gateway_error(
+                                session,
+                                401,
+                                "unauthorized",
+                                "invalid X-Api-Key",
+                            ).await;
+                        }
+                        crate::gateway::config::AuthPolicy::None
+                    } else {
                         return crate::gateway::errors::send_gateway_error(
                             session,
                             401,
                             "unauthorized",
-                            "missing or invalid JWT token",
-                        )
-                        .await;
+                            "missing X-Api-Key header",
+                        ).await;
                     }
                 }
-            }
-        }
+            },
+            None => ctx.route_config.as_ref().map(|c| c.auth.clone()).unwrap_or(crate::gateway::config::AuthPolicy::None),
+        };
 
-        // 4. Authorization (new)
-        if let Some(ref cfg) = ctx.route_config {
-            if let Some(ref identity) = ctx.user_identity {
-                if !crate::gateway::authz::authorize(identity, &cfg.auth) {
-                    tracing::warn!(user = %identity.sub, "authorization denied");
-                    self.gateway.metrics.authz_denied_total.inc();
+        if effective_auth != crate::gateway::config::AuthPolicy::None {
+            match self.gateway.authenticate_with_policy(session, &effective_auth).await {
+                Ok(identity) => {
+                    self.gateway.metrics.auth_success_total.inc();
+                    ctx.user_identity = Some(identity);
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "authentication failed");
+                    self.gateway.metrics.auth_failure_total.inc();
                     return crate::gateway::errors::send_gateway_error(
                         session,
-                        403,
-                        "forbidden",
-                        "user lacks required role",
+                        401,
+                        "unauthorized",
+                        "missing or invalid JWT token",
                     )
                     .await;
                 }
             }
         }
 
+        // 4. Authorization (new) — endpoint-level role check
+        if let Some(ref identity) = ctx.user_identity {
+            let authorized = match endpoint_rule {
+                Some(rule) => match &rule.auth {
+                    common::types::EndpointAuth::Roles { allowed_roles, client_id } => {
+                        crate::gateway::authz::authorize_roles(identity, allowed_roles, client_id.as_deref())
+                    }
+                    _ => true, // other auth types already validated
+                },
+                None => {
+                    ctx.route_config.as_ref()
+                        .map(|cfg| crate::gateway::authz::authorize(identity, &cfg.auth))
+                        .unwrap_or(true)
+                }
+            };
+            if !authorized {
+                tracing::warn!(user = %identity.sub, "authorization denied");
+                self.gateway.metrics.authz_denied_total.inc();
+                return crate::gateway::errors::send_gateway_error(
+                    session,
+                    403,
+                    "forbidden",
+                    "user lacks required role",
+                )
+                .await;
+            }
+        }
+
         // 5. Rate limiting (existing node-local, enhanced with distributed)
+        // Use endpoint-level rate limit if present, otherwise route default
+        let effective_rate_limit = endpoint_rule
+            .and_then(|e| e.rate_limit.clone())
+            .or_else(|| ctx.route_config.as_ref().and_then(|c| c.rate_limit.clone()));
+
         if let Some(app_id) = &ctx.app_id {
             let source_ip = session
                 .client_addr()
@@ -229,21 +296,19 @@ impl ProxyHttp for WasmProxy {
             }
 
             // Check distributed rate limiter if configured
-            if let Some(ref cfg) = ctx.route_config {
-                if let Some(ref route_rl) = cfg.rate_limit {
-                    if route_rl.distributed {
-                        let limiters = self.gateway.distributed_limiters.read().await;
-                        if let Some(limiter) = limiters.get(&app_id.0) {
-                            if !limiter.check_request().await {
-                                self.gateway.metrics.rate_limit_denied_total.inc();
-                                return crate::gateway::errors::send_gateway_error(
-                                    session,
-                                    429,
-                                    "rate_limit_exceeded",
-                                    &format!("app rate limit: {} req/s", route_rl.requests_per_second),
-                                )
-                                .await;
-                            }
+            if let Some(ref route_rl) = effective_rate_limit {
+                if route_rl.distributed {
+                    let limiters = self.gateway.distributed_limiters.read().await;
+                    if let Some(limiter) = limiters.get(&app_id.0) {
+                        if !limiter.check_request().await {
+                            self.gateway.metrics.rate_limit_denied_total.inc();
+                            return crate::gateway::errors::send_gateway_error(
+                                session,
+                                429,
+                                "rate_limit_exceeded",
+                                &format!("app rate limit: {} req/s", route_rl.requests_per_second),
+                            )
+                            .await;
                         }
                     }
                 }

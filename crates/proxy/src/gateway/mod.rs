@@ -1,3 +1,4 @@
+pub mod api_key;
 pub mod authz;
 pub mod circuit_breaker;
 pub mod config;
@@ -29,6 +30,9 @@ pub struct Gateway {
     /// Per-route gateway configurations.
     pub route_configs: Arc<RwLock<HashMap<String, GatewayRouteConfig>>>,
 
+    /// Per-app API key validators (loaded from storage).
+    pub api_key_validators: Arc<RwLock<HashMap<String, api_key::ApiKeyValidator>>>,
+
     /// Gateway metrics.
     pub metrics: Arc<metrics::GatewayMetrics>,
 }
@@ -40,7 +44,23 @@ impl Gateway {
             circuit_breaker: Arc::new(circuit_breaker::CircuitBreakerManager::new()),
             distributed_limiters: Arc::new(RwLock::new(HashMap::new())),
             route_configs: Arc::new(RwLock::new(HashMap::new())),
+            api_key_validators: Arc::new(RwLock::new(HashMap::new())),
             metrics: Arc::new(metrics::GatewayMetrics::new()),
+        }
+    }
+
+    /// Set the API key validator for an app.
+    pub async fn set_api_key_validator(&self, app_id: &str, validator: api_key::ApiKeyValidator) {
+        self.api_key_validators.write().await.insert(app_id.to_string(), validator);
+    }
+
+    /// Validate an API key for an app and path.
+    pub async fn validate_api_key(&self, app_id: &str, api_key: &str, path: &str) -> bool {
+        let validators = self.api_key_validators.read().await;
+        if let Some(validator) = validators.get(app_id) {
+            validator.validate(api_key, path)
+        } else {
+            false
         }
     }
 
@@ -54,11 +74,25 @@ impl Gateway {
         self.route_configs.write().await.insert(app_id.to_string(), config);
     }
 
-    /// Authenticate a request. Returns the user identity if auth is required.
+    /// Authenticate a request using the route-level default auth.
     pub async fn authenticate(
         &self,
         session: &pingora_proxy::Session,
     ) -> Result<oidc::UserIdentity, GatewayError> {
+        self.authenticate_with_policy(session, &config::AuthPolicy::Authenticated).await
+    }
+
+    /// Authenticate a request with a specific auth policy.
+    pub async fn authenticate_with_policy(
+        &self,
+        session: &pingora_proxy::Session,
+        policy: &config::AuthPolicy,
+    ) -> Result<oidc::UserIdentity, GatewayError> {
+        // For None policy, skip auth
+        if *policy == config::AuthPolicy::None {
+            return Err(GatewayError::Auth("auth not required".to_string()));
+        }
+
         let provider = self
             .oidc
             .as_ref()

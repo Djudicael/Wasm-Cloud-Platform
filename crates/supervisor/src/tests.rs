@@ -80,17 +80,17 @@ async fn test_local_service_registry() {
     let addr = "127.0.0.1:8080".parse().unwrap();
 
     // Resolving an unknown app returns None (not an error)
-    assert!(registry.resolve(&app_id).await.is_none());
+    assert!(registry.resolve("default", "test-app:v1").await.is_none());
 
     // LocalServiceRegistry::register() stores an address for an app
     registry.register(&app_id, addr).await;
 
     // LocalServiceRegistry::resolve() returns the stored address
-    assert_eq!(registry.resolve(&app_id).await, Some(addr));
+    assert_eq!(registry.resolve("default", "test-app:v1").await, Some(addr));
 
     // LocalServiceRegistry::deregister() removes the address
     registry.deregister(&app_id, &addr).await;
-    assert!(registry.resolve(&app_id).await.is_none());
+    assert!(registry.resolve("default", "test-app:v1").await.is_none());
 }
 
 #[tokio::test]
