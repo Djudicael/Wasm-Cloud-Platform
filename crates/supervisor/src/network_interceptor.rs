@@ -34,17 +34,34 @@ impl NetworkInterceptor {
         _source_addr: SocketAddr,
         dest_addr: SocketAddr,
     ) -> ConnectDecision {
+        tracing::info!(
+            source_app = %self.source_app.0,
+            dest = %dest_addr,
+            "[INTERCEPTOR DEBUG] check_connect called"
+        );
+
         // 1. If the destination is on loopback, check if it's a known app port.
         if !dest_addr.ip().is_loopback() {
-            // External connection — allow (external NetworkPolicy from Step 33
-            // is enforced separately by the PolicyEnforcer).
+            tracing::info!(dest = %dest_addr, "[INTERCEPTOR DEBUG] external — allow");
             return ConnectDecision::Allow(dest_addr);
         }
 
         // 2. Check if the destination port belongs to a known local app.
         if let Some(target_app) = self.registry.resolve_app_by_port(dest_addr.port()).await {
+            tracing::info!(
+                target_app = %target_app.0,
+                target_ns = %target_app.namespace(),
+                source_ns = %self.source_app.namespace(),
+                "[INTERCEPTOR DEBUG] found target app by port"
+            );
+
             // Cross-namespace block
             if target_app.namespace() != self.source_app.namespace() {
+                tracing::warn!(
+                    source_ns = %self.source_app.namespace(),
+                    target_ns = %target_app.namespace(),
+                    "[INTERCEPTOR DEBUG] CROSS-NAMESPACE DENY"
+                );
                 return ConnectDecision::Deny {
                     reason: format!(
                         "cross-namespace connection blocked: {} → {}",
@@ -54,13 +71,14 @@ impl NetworkInterceptor {
                 };
             }
 
-            // Same namespace — allow direct connection.
+            tracing::info!("[INTERCEPTOR DEBUG] same-namespace — allow");
             return ConnectDecision::Allow(dest_addr);
         }
 
         // 3. Unknown loopback destination — could be the internal proxy port
         // or some other local service. Allow for now; the internal proxy
         // will apply its own policies.
+        tracing::info!(dest = %dest_addr, "[INTERCEPTOR DEBUG] unknown loopback — allow");
         ConnectDecision::Allow(dest_addr)
     }
 }

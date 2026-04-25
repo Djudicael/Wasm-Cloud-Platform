@@ -1,6 +1,6 @@
 use clap::Parser;
 use messaging::reconnect::{NatsHealth, NatsHealthWatcher};
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -8,6 +8,8 @@ use tracing::{debug, info, warn};
 
 use ebpf_monitor::{ActionDispatcher, EbpfMetrics, EventCallbacks, MonitorConfig};
 use supervisor::SupervisorCommand;
+
+mod dns_stub;
 
 /// Platform callbacks for the eBPF monitor's recovery actions.
 ///
@@ -721,6 +723,37 @@ async fn main() -> anyhow::Result<()> {
     // TODO: In production, this should be the node's publicly accessible IP
     let artifact_server_url = format!("http://127.0.0.1:{}", config.admin.artifact_port);
 
+    // ── Gateway Setup (early, so EventDispatcher can reference it) ────
+    let oidc_provider = config.gateway.oidc.as_ref().map(|oidc_cfg| {
+        let provider = Arc::new(proxy::gateway::oidc::OidcProvider::new(oidc_cfg.clone()));
+        provider.clone().start_refresh_loop();
+        tracing::info!(issuer = %oidc_cfg.issuer_url, "OIDC provider initialized");
+        provider
+    });
+    let gateway = Arc::new(proxy::gateway::Gateway::new(oidc_provider));
+
+    // ── Embedded DNS Stub (resolves *.internal without external DNS) ──
+    let _dns_stub_addr = if config.dns.stub_enabled {
+        match dns_stub::start_dns_stub(
+            format!("127.0.0.1:{}", config.dns.stub_port)
+                .parse()
+                .unwrap(),
+        )
+        .await
+        {
+            Ok(addr) => {
+                info!(%addr, "embedded DNS stub started for *.internal resolution");
+                Some(addr)
+            }
+            Err(e) => {
+                warn!(error = %e, "failed to start embedded DNS stub");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     let dispatcher = Arc::new(handlers::EventDispatcher {
         supervisor: supervisor.clone(),
         upstream: upstream_registry.clone(),
@@ -737,6 +770,7 @@ async fn main() -> anyhow::Result<()> {
             config.dns.webhook_token.clone(),
         ),
         node_table: Arc::new(proxy::node_table::NodeLoadTable::default()),
+        gateway: Some(gateway.clone()),
     });
 
     {
@@ -907,19 +941,9 @@ async fn main() -> anyhow::Result<()> {
     let rate_limiter = Arc::new(proxy::rate_limiter::RateLimiter::new(default_rate_config));
     let rate_limiter_sync = rate_limiter.clone();
 
-    // ── Gateway Setup ─────────────────────────────────────────────────
-    // 1. Create OIDC provider from config if available
-    let oidc_provider = config.gateway.oidc.as_ref().map(|oidc_cfg| {
-        let provider = Arc::new(proxy::gateway::oidc::OidcProvider::new(oidc_cfg.clone()));
-        provider.clone().start_refresh_loop();
-        tracing::info!(issuer = %oidc_cfg.issuer_url, "OIDC provider initialized");
-        provider
-    });
-
-    // 2. Create the gateway
-    let gateway = Arc::new(proxy::gateway::Gateway::new(oidc_provider));
-
-    // 3. Load gateway configs from storage
+    // ── Gateway Config Load ───────────────────────────────────────────
+    // Gateway was created early so EventDispatcher can reference it.
+    // Load persisted configs and API keys into the in-memory cache.
     match store.list_gateway_configs() {
         Ok(configs) => {
             let count = configs.len();
@@ -986,24 +1010,48 @@ async fn main() -> anyhow::Result<()> {
         for (app_id, cfg) in gateway_configs {
             if let Some(ref route_rl) = cfg.rate_limit {
                 if route_rl.distributed {
-                    let limiter = Arc::new(proxy::gateway::distributed_limiter::DistributedRateLimiter::new(
-                        app_id.clone(),
-                        config.node.node_id.clone(),
-                        proxy::gateway::distributed_limiter::DistributedRateLimitConfig {
-                            global_rps: route_rl.requests_per_second,
-                            per_node_burst: route_rl.burst_capacity,
-                            sync_interval_ms: config.gateway.rate_limit.sync_interval_ms,
-                            kv_bucket: config.gateway.rate_limit.kv_bucket.clone(),
-                        },
-                    ));
+                    let limiter = Arc::new(
+                        proxy::gateway::distributed_limiter::DistributedRateLimiter::new(
+                            app_id.clone(),
+                            config.node.node_id.clone(),
+                            proxy::gateway::distributed_limiter::DistributedRateLimitConfig {
+                                global_rps: route_rl.requests_per_second,
+                                per_node_burst: route_rl.burst_capacity,
+                                sync_interval_ms: config.gateway.rate_limit.sync_interval_ms,
+                                kv_bucket: config.gateway.rate_limit.kv_bucket.clone(),
+                            },
+                        ),
+                    );
                     limiter.set_kv_store(kv.clone()).await;
                     let limiter_clone = limiter.clone();
                     limiter_clone.start_sync_loop();
-                    gateway.distributed_limiters.write().await.insert(app_id, limiter);
+                    gateway
+                        .distributed_limiters
+                        .write()
+                        .await
+                        .insert(app_id, limiter);
                 }
             }
         }
     }
+
+    // ── Internal Mesh Gateway ─────────────────────────────────────────
+    // Starts a local Axum proxy for East-West traffic between apps.
+    // Listens on a single port (9080). Namespace isolation relies on
+    // service discovery: the Supervisor only injects service URLs for
+    // same-namespace apps. The gateway port is open to all namespaces.
+    let internal_gw = internal_gateway::InternalGateway::new(
+        service_registry.clone(),
+        rate_limiter.clone(),
+        gateway.circuit_breaker.clone(),
+        gateway.clone(),
+    );
+    tokio::spawn(async move {
+        if let Err(e) = internal_gw.run().await {
+            tracing::error!(error = %e, "internal gateway exited");
+        }
+    });
+    info!("internal gateway started for East-West traffic on port 9080");
 
     let wasm_proxy = proxy::service::WasmProxy {
         router: host_router.clone(),

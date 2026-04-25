@@ -5,8 +5,12 @@
 Fix three gaps left by Steps 04, 33, and 39 **without requiring the Wasm application to know anything about namespaces, gateways, or platform topology.**
 
 1. **Namespace segregation** — every app belongs to a namespace. Apps in the same namespace
-can reach each other transparently. Apps in different namespaces are blocked at the WASI
-layer and must use the external hostname (which flows through Pingora with full TLS/authz/audit).
+can reach each other transparently. Apps in different namespaces are isolated by service
+discovery (the Supervisor only injects service URLs for same-namespace apps). Direct
+cross-namespace connections to known app ports are blocked at the WASI layer, but the
+internal gateway port (9080) is currently open to all namespaces. Cross-namespace traffic
+that must be allowed should use the external hostname (which flows through Pingora with
+full TLS/authz/audit).
 
 2. **Transparent internal proxy for East-West traffic** — today, East-West calls bypass Pingora
 (Step 04) and lose rate limiting, circuit breaking, and JWT validation. A transparent internal
@@ -75,8 +79,10 @@ Namespaces provide three things without affecting application code:
    apps in `namespace: production`.
 2. **Multi-tenancy boundaries** — `tenant-a` and `tenant-b` can both deploy an app named
    `api-users` without collision.
-3. **Policy enforcement boundaries** — cross-namespace traffic is blocked at the WASI layer.
-   The only escape route is the external gateway, where the strictest policies live.
+3. **Policy enforcement boundaries** — cross-namespace traffic is isolated by service
+   discovery (apps only learn about same-namespace services). Direct cross-namespace
+   connections to known app ports are blocked at the WASI layer, but the internal gateway
+   port is currently open to all namespaces.
 
 ### The Cross-Namespace Rule
 
@@ -85,7 +91,9 @@ Same namespace    →  Transparent internal routing (WASI layer)
                      App uses: http://api-b.internal/...
                      Platform enforces: rate limit, circuit breaker, endpoint auth
 
-Different namespace →  Blocked at WASI layer (ECONNREFUSED)
+Different namespace →  Service discovery isolation (no <APP>_SERVICE_URL injected)
+                     Direct port connections blocked at WASI layer (ECONNREFUSED)
+                     Gateway port (9080) is currently open to all namespaces
                      App must use: https://api-b.other-ns.example.com/...
                      Routed through: External Gateway (Pingora, 443/80)
                      Policies: TLS + OIDC + audit + distributed rate limit
@@ -351,80 +359,40 @@ use common::types::AppId;
 /// Transparent network interceptor for East-West traffic.
 /// Lives in the Supervisor and is wired into every instance's WasiCtx.
 pub struct NetworkInterceptor {
-    pub registry: Arc<NamespaceRegistry>,
-    pub rate_limiter: Arc<crate::proxy::RateLimiter>,
-    pub circuit_breaker: Arc<crate::proxy::gateway::circuit_breaker::CircuitBreakerManager>,
+    pub registry: Arc<super::network::NamespaceRegistry>,
     pub source_app: AppId,
 }
 
 impl NetworkInterceptor {
     /// Called by wasmtime-wasi for every outbound TCP connect.
-    /// Returns the **rewritten** destination address, or None to deny.
+    /// Returns the decision: Allow or Deny.
     pub async fn check_connect(
         &self,
-        source_addr: SocketAddr,
+        _source_addr: SocketAddr,
         dest_addr: SocketAddr,
-    ) -> Result<SocketAddr, PolicyDenied> {
-        // 1. Identify the caller from the source port.
-        let caller = self.registry
-            .resolve_source_app(source_addr.port())
-            .await
-            .ok_or_else(|| PolicyDenied::NetworkDisabled { protocol: "tcp" })?;
-
-        // 2. If the destination port is a known internal placeholder (port ≤ 1024 or
-        //    a specific reserved range), resolve the real target from the Host header
-        //    metadata. For simplicity, we use a dedicated internal proxy port.
-        if dest_addr.port() == INTERNAL_PROXY_PORT {
-            return self.route_through_internal_proxy(caller, dest_addr).await;
+    ) -> ConnectDecision {
+        // 1. External connections → allow
+        if !dest_addr.ip().is_loopback() {
+            return ConnectDecision::Allow;
         }
 
-        // 3. Check if the destination port belongs to a known local app.
+        // 2. Loopback to known app port → check namespace match
         if let Some(target_app) = self.registry.resolve_app_by_port(dest_addr.port()).await {
-            // Cross-namespace block
-            if target_app.namespace() != caller.namespace() {
-                return Err(PolicyDenied::DestinationDenied {
-                    ip: dest_addr.ip().to_string(),
-                    reason: format!(
-                        "cross-namespace connection blocked: {} → {}",
-                        caller.namespace(),
-                        target_app.namespace()
-                    ),
-                });
+            if target_app.namespace() == self.source_app.namespace() {
+                // Same namespace → allow
+                return ConnectDecision::Allow;
+            } else {
+                // Cross-namespace → deny
+                return ConnectDecision::Deny(format!(
+                    "cross-namespace connection blocked: {} → {}",
+                    self.source_app.namespace(),
+                    target_app.namespace()
+                ));
             }
-
-            // Rate limiting (app-level, node-local)
-            if !self.rate_limiter.allow(&target_app.0).await {
-                return Err(PolicyDenied::ConnectionLimitExceeded {
-                    current: 0, // placeholder
-                    limit: 0,
-                });
-            }
-
-            // Circuit breaker
-            if self.circuit_breaker.is_circuit_open(&target_app.0) {
-                return Err(PolicyDenied::DestinationDenied {
-                    ip: dest_addr.ip().to_string(),
-                    reason: "circuit breaker open for target app".to_string(),
-                });
-            }
-
-            // Allow direct connection to the target port.
-            return Ok(dest_addr);
         }
 
-        // 4. External connection — apply the external NetworkPolicy from Step 33.
-        // (Delegated to the PolicyEnforcer in StoreState.)
-        Ok(dest_addr)
-    }
-
-    async fn route_through_internal_proxy(
-        &self,
-        _caller: AppId,
-        dest_addr: SocketAddr,
-    ) -> Result<SocketAddr, PolicyDenied> {
-        // If the destination is the internal proxy port, we return the proxy address.
-        // The proxy will read the HTTP Host header and route accordingly.
-        Ok(dest_addr)
+        // 3. Unknown loopback → allow (could be internal gateway)
+        ConnectDecision::Allow
     }
 }
 ```
@@ -471,17 +439,27 @@ if target_app.namespace() != caller.namespace() {
 }
 ```
 
-The Wasm module receives a standard `Connection refused` or `Permission denied` error and
-can handle it gracefully. The app developer then knows to use the external hostname
-(`https://api-b.ns2.example.com/`) for cross-namespace communication.
+**Important limitation:** The `socket_addr_check` only blocks cross-namespace connections to
+**direct app ports**. The internal gateway port (9080) is explicitly exempted from the
+namespace check, so any app can connect to the gateway regardless of namespace. Namespace
+isolation therefore relies primarily on service discovery: the Supervisor only injects
+`<APP>_SERVICE_URL` env vars for same-namespace apps, so well-behaved apps will not attempt
+cross-namespace connections. A determined app that knows the gateway port and target hostname
+could reach apps in other namespaces through the gateway.
+
+The Wasm module receives a standard `Connection refused` or `Permission denied` error (for
+direct port connections) and can handle it gracefully. The app developer then knows to use
+the external hostname (`https://api-b.ns2.example.com/`) for cross-namespace communication.
 
 ---
 
 ## 3. Internal HTTP Proxy (For Endpoint-Level Policies)
 
-The `socket_addr_check` handles connection-level policies (namespace boundary, circuit breaker,
-connection rate limiting). For **HTTP-level** policies — per-path authentication, per-path
-rate limits, request transforms — we need an HTTP proxy.
+The `socket_addr_check` handles connection-level policies (namespace boundary for direct
+app-to-app connections, circuit breaker, connection rate limiting). Note: the internal
+gateway port (9080) is currently open to all namespaces — namespace isolation for gateway
+traffic relies on service discovery only. For **HTTP-level** policies — per-path
+authentication, per-path rate limits, request transforms — we need an HTTP proxy.
 
 This proxy is **optional and transparent**. It only activates when an app's `GatewayRouteConfig`
 has `endpoints` rules. The virtual DNS resolves the app's `.internal` name to the proxy port
@@ -490,22 +468,23 @@ instead of the direct port.
 ### Architecture
 
 ```
-App A calls "http://api-b.internal/users"
+App A calls "http://api-b.production.internal:9080/users"
   │
   ▼
-Virtual DNS resolves api-b.internal → 127.0.0.1:9080 (internal proxy)
+Virtual DNS resolves api-b.production.internal → 127.0.0.1
   │
   ▼
-socket_addr_check allows 127.0.0.1:9080 (it's the internal proxy)
+socket_addr_check allows 127.0.0.1:9080 (gateway port is currently open to all
+  namespaces — namespace isolation relies on service discovery only)
   │
   ▼
-Internal Proxy (Axum on 127.0.0.1:9080)
-  │  1. Reads Host header: "api-b.internal"
-  │  2. Determines source app from source port (port_to_app map)
+Internal Proxy (Axum on 127.0.0.1:9080 — single port)
+  │  1. Reads Host header: "api-b.production.internal:9080"
+  │  2. Resolves target app from Host header via NamespaceRegistry
   │  3. Looks up endpoint rules for "/users"
   │  4. Applies auth (JWT / API key / none)
   │  5. Applies rate limit
-  │  6. Applies request transforms
+  │  6. Applies circuit breaker check
   │  7. Forwards to api-b's real port (e.g., 127.0.0.1:10101)
   │
   ▼
@@ -518,7 +497,7 @@ App B receives the request
 // crates/internal_gateway/src/lib.rs
 
 use axum::{
-    extract::State,
+    extract::{ConnectInfo, State},
     http::{HeaderMap, Request, StatusCode},
     response::Response,
     routing::any,
@@ -530,168 +509,52 @@ use tokio::net::TcpListener;
 use tower::ServiceBuilder;
 use tower_http::trace::TraceLayer;
 
-/// The transparent internal gateway.
-/// Runs on a single loopback port (e.g., 127.0.0.1:9080).
-/// All internal HTTP traffic with endpoint-level policies flows through here.
-pub struct InternalGateway {
-    /// Registry for port→app lookups and namespace-scoped app resolution.
-    registry: Arc<NamespaceRegistry>,
+/// The internal gateway port for East-West traffic on the loopback interface.
+/// Defined in common::INTERNAL_GATEWAY_PORT (9080).
 
-    /// Policy state shared with the external Pingora gateway.
-    rate_limiter: Arc<crate::proxy::RateLimiter>,
-    circuit_breaker: Arc<crate::proxy::gateway::circuit_breaker::CircuitBreakerManager>,
-    gateway_config: Arc<crate::proxy::gateway::Gateway>,
+/// The transparent internal gateway.
+/// Listens on a single loopback port (9080) for East-West traffic between
+/// apps on the same node. Applies policies (rate limiting, circuit breaker,
+/// auth) and forwards requests to the target app.
+///
+/// The internal gateway does not currently enforce namespace boundaries.
+/// The `socket_addr_check` blocks cross-namespace connections to direct app
+/// ports, but the gateway port (9080) is open to all namespaces. Namespace
+/// isolation currently relies on service discovery: the Supervisor only
+/// injects `<APP>_SERVICE_URL` env vars for same-namespace apps.
+pub struct InternalGateway {
+    pub registry: Arc<supervisor::network::NamespaceRegistry>,
+    pub rate_limiter: Arc<proxy::rate_limiter::RateLimiter>,
+    pub circuit_breaker: Arc<proxy::gateway::circuit_breaker::CircuitBreakerManager>,
+    pub gateway_config: Arc<proxy::gateway::Gateway>,
 }
 
 impl InternalGateway {
-    pub async fn run(self, bind: SocketAddr) -> Result<(), std::io::Error> {
-        let state = Arc::new(self);
-        let app = Router::new()
-            .route("/*path", any(proxy_handler))
-            .layer(ServiceBuilder::new().layer(TraceLayer::new_for_http()))
-            .with_state(state);
+    pub fn new(
+        registry: Arc<supervisor::network::NamespaceRegistry>,
+        rate_limiter: Arc<proxy::rate_limiter::RateLimiter>,
+        circuit_breaker: Arc<proxy::gateway::circuit_breaker::CircuitBreakerManager>,
+        gateway_config: Arc<proxy::gateway::Gateway>,
+    ) -> Self { ... }
 
-        let listener = TcpListener::bind(bind).await?;
-        tracing::info!(%bind, "internal gateway listening");
-        axum::serve(listener, app).await
+    pub async fn run(self) -> Result<(), std::io::Error> {
+        // Binds a single TcpListener on 127.0.0.1:9080
+        // Uses axum::serve directly (no per-namespace listeners)
     }
 }
 
 async fn proxy_handler(
     State(gw): State<Arc<InternalGateway>>,
+    ConnectInfo(_peer_addr): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     req: Request<axum::body::Body>,
 ) -> Result<Response<axum::body::Body>, StatusCode> {
-    // 1. Determine source app from the TCP source port.
-    // Axum doesn't expose the source port directly, so we rely on a custom
-    // ConnectInfo extractor or a Unix socket peer credential. For loopback TCP,
-    // we can use a per-app dedicated proxy port, or we inject a trusted header
-    // at the WASI layer (the WASI host adds X-Source-App before the app's bytes).
-    //
-    // Simpler approach: the WASI host, when routing to the internal proxy,
-    // pre-injects the X-Source-App header into the HTTP request buffer.
-    // The app cannot forge it because the WASI host controls the TCP stream.
-    let source_app = headers
-        .get("x-source-app")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| Some(common::types::AppId(v.to_string())))
-        .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    // 2. Determine target app from the Host header.
-    let host = headers
-        .get("host")
-        .and_then(|v| v.to_str().ok())
-        .ok_or(StatusCode::BAD_REQUEST)?;
-
-    let bare_name = host.trim_end_matches(".internal");
-
-    // 3. Same-namespace check (defense in depth).
-    let target_addr = gw.registry
-        .resolve(source_app.namespace(), bare_name)
-        .await
-        .ok_or(StatusCode::BAD_GATEWAY)?;
-
-    // 4. Load endpoint rules for the target app.
-    let route_config = gw.gateway_config
-        .get_route_config(&common::types::AppId(format!("{}/{}", source_app.namespace(), bare_name)))
-        .await;
-
-    // 5. Apply endpoint-level auth (if configured).
-    if let Some(ref cfg) = route_config {
-        if let Some(rule) = match_endpoint_rule(cfg, req.uri().path(), req.method().as_str()) {
-            if let Err(_) = check_endpoint_auth(&headers, rule).await {
-                return Err(StatusCode::UNAUTHORIZED);
-            }
-        }
-    }
-
-    // 6. Rate limiting.
-    let app_id = format!("{}/{}", source_app.namespace(), bare_name);
-    if !gw.rate_limiter.allow(&app_id).await {
-        return Err(StatusCode::TOO_MANY_REQUESTS);
-    }
-
-    // 7. Circuit breaker.
-    if gw.circuit_breaker.is_circuit_open(&app_id) {
-        return Err(StatusCode::SERVICE_UNAVAILABLE);
-    }
-
-    // 8. Forward to the real target.
-    let client = hyper::Client::new();
-    let uri = format!(
-        "http://{}{}",
-        target_addr,
-        req.uri().path_and_query().map(|p| p.as_str()).unwrap_or("")
-    );
-
-    let mut forward_req = Request::builder()
-        .method(req.method())
-        .uri(&uri);
-
-    // Strip internal headers before forwarding.
-    for (k, v) in req.headers() {
-        let name = k.as_str();
-        if name != "x-source-app" && name != "host" {
-            forward_req = forward_req.header(k, v);
-        }
-    }
-    // Inject the real Host header for the target app.
-    forward_req = forward_req.header("host", format!("{}:{}", bare_name, target_addr.port()));
-
-    let forward_req = forward_req
-        .body(req.into_body())
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    match client.request(forward_req).await {
-        Ok(resp) => {
-            gw.circuit_breaker.record_success(&app_id);
-            Ok(resp.map(axum::body::Body::new))
-        }
-        Err(e) => {
-            tracing::warn!(error = %e, "internal proxy upstream error");
-            gw.circuit_breaker.record_failure(&app_id);
-            Err(StatusCode::BAD_GATEWAY)
-        }
-    }
+    // 1. Parse target from Host header (e.g., "api-b.production.internal:9080")
+    // 2. Resolve target to real loopback address via NamespaceRegistry
+    // 3. Apply endpoint policies (auth, rate limit)
+    // 4. Circuit breaker check
+    // 5. Forward to real target, stripping internal headers
 }
-```
-
-### How the X-Source-App Header Is Injected (Trust Model)
-
-The Wasm app **cannot** forge `X-Source-App` because it does not control the TCP connection.
-The WASI host intercepts the application's `write()` syscalls on the internal proxy socket
-and prepends the header to the first HTTP request bytes. This happens inside the Supervisor,
-below the Wasm sandbox. The app sends:
-
-```
-GET /users HTTP/1.1\r\n
-Host: api-b.internal\r\n
-...
-```
-
-The WASI host rewrites the stream to:
-
-```
-GET /users HTTP/1.1\r\n
-Host: api-b.internal\r\n
-X-Source-App: production/api-a:v1\r\n
-...
-```
-
-This is implemented in a custom `AsyncWrite` wrapper around the internal proxy TCP stream.
-
-**Alternative (simpler):** Use a dedicated loopback port per source app for internal proxy
-connections. App A connects to `127.0.0.1:9081`, App B to `127.0.0.1:9082`, etc. The internal
-proxy listens on all of them and knows the source app from the accept port. No header injection
-needed.
-
-For simplicity, the port-per-app approach is recommended:
-
-```rust
-// In Supervisor spawn:
-let internal_proxy_port = INTERNAL_PROXY_BASE_PORT + allocated_host_port;
-// App A's outbound internal calls go to 127.0.0.1:<internal_proxy_port>
-// The internal proxy accepts on that port and knows it belongs to App A.
 ```
 
 ---
@@ -1124,11 +987,32 @@ pub const API_KEYS: TableDefinition<&str, &str> = TableDefinition::new("api_keys
 
 ### Namespace Isolation at the WASI Layer
 
+Namespace isolation is enforced at two levels:
+
+1. **Service discovery isolation (primary boundary):** The Supervisor only injects
+   `<APP>_SERVICE_URL` env vars for apps in the same namespace. Well-behaved apps only
+   learn about same-namespace services and therefore only make same-namespace connections.
+
+2. **Direct port blocking (secondary boundary):** The `NetworkInterceptor` / `socket_addr_check`
+   blocks cross-namespace connections to **direct app ports**. When a Wasm app attempts an
+   outbound TCP connection to a known app port in a different namespace, the interceptor
+   denies it.
+
+**Known limitation:** The internal gateway port (9080) is explicitly exempted from the
+namespace check in `socket_addr_check`. A determined app that knows the gateway port and
+the target app's `.internal` hostname can connect to the gateway and reach apps in other
+namespaces. This is a current limitation — the gateway does not enforce namespace boundaries.
+
 The only way for a Wasm app to communicate with another app is through WASI socket syscalls.
 The Supervisor controls these syscalls. A malicious app cannot:
 - Forge its namespace (it's not exposed to the app)
-- Bypass the internal proxy (all outbound TCP is intercepted)
-- Scan arbitrary ports (socket_addr_check blocks unknown loopback destinations)
+- Bypass the network interceptor (all outbound TCP is intercepted by `socket_addr_check`)
+- Connect to a **direct app port** in another namespace (cross-namespace connections to
+  known app ports are denied at the WASI layer)
+
+However, a malicious app **can**:
+- Connect to the internal gateway port (9080) from any namespace — this port is open to all
+- Reach apps in other namespaces through the gateway if it knows the target hostname
 
 ### Cross-Namespace Data Leakage
 
@@ -1165,9 +1049,9 @@ to redb and replicated via NATS.
 - [ ] The Wasm app uses normal HTTP URLs; no platform-specific headers or env vars required
 
 ### Internal HTTP Proxy (Optional)
-- [ ] A loopback Axum proxy runs on `127.0.0.1:9080` (or port-per-app)
+- [ ] A loopback Axum proxy runs on `127.0.0.1:9080` (single port)
 - [ ] Activated only when an app has endpoint-level gateway rules
-- [ ] Determines source app from the accept port (no header forgery possible)
+- [ ] Namespace isolation relies on service discovery (apps only learn about same-namespace services)
 - [ ] Applies endpoint auth, rate limit, and transforms
 - [ ] Forwards to the real target port after stripping internal metadata
 
@@ -1224,9 +1108,9 @@ to redb and replicated via NATS.
 
 ### Phase 3: Internal HTTP Proxy
 
-- Add `crates/internal_gateway/` (Axum-based, loopback only)
+- Add `crates/internal_gateway/` (Axum-based, single loopback port 9080)
 - Activate per-app when endpoint rules exist
-- Map source identity via accept port (no header injection in app code)
+- Namespace isolation relies on service discovery filtering
 
 ### Phase 4: Per-Endpoint Security + Unified Manifest
 

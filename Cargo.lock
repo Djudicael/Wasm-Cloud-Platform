@@ -3280,6 +3280,7 @@ dependencies = [
  "ebpf-monitor",
  "futures",
  "hex",
+ "internal_gateway",
  "messaging",
  "metrics",
  "proxy",

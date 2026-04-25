@@ -53,6 +53,10 @@ fn route(path: &str) -> (u16, String) {
         "/" => (200, "Echo service running".to_string()),
         "/echo" => (200, "Echo from echo-service!".to_string()),
         "/health" => (200, r#"{"status":"healthy"}"#.to_string()),
+        "/info" => {
+            let port = std::env::var("PORT").unwrap_or_else(|_| "8081".to_string());
+            (200, format!(r#"{{"port":{}}}"#, port))
+        }
         _ => (404, "Not Found".to_string()),
     }
 }

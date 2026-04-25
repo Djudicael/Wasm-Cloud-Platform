@@ -25,7 +25,7 @@ A multi-tenant, HTTP-serving cloud platform built on WebAssembly and WASI. Repla
 - **WASI environment injection**: app config and secrets are injected as environment variables.
 - **Per-node local persistence**: `redb` stores artifacts, configs, secrets, metrics, and routing data locally.
 - **Proxy + supervisor split**: Pingora handles incoming HTTP traffic, while the Supervisor manages instance lifecycle.
-- **Internal mesh gateway**: East-West traffic between services is transparently proxied with namespace isolation.
+- **Internal mesh gateway**: East-West traffic between services is transparently proxied with service-discovery-based namespace isolation and an embedded DNS stub — no external DNS required.
 - **eBPF kernel monitoring**: Sub-millisecond detection of failures, anomalies, and security incidents.
 
 ## Quick Start

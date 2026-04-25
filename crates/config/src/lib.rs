@@ -204,6 +204,8 @@ fn merge_config(base: NodeConfig, overlay: NodeConfig) -> NodeConfig {
             platform_domain: overlay.dns.platform_domain.or(base.dns.platform_domain),
             webhook_url: overlay.dns.webhook_url.or(base.dns.webhook_url),
             webhook_token: overlay.dns.webhook_token.or(base.dns.webhook_token),
+            stub_enabled: overlay.dns.stub_enabled,
+            stub_port: overlay.dns.stub_port,
         },
         health: HealthSection {
             check_interval_secs: overlay.health.check_interval_secs,

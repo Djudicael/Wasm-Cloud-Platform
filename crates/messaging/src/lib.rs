@@ -123,7 +123,7 @@ impl NatsBus {
         .await
         .map_err(PlatformError::messaging_source)?;
 
-        // Create "CONTROL" stream for instance, secrets, config events
+        // Create "CONTROL" stream for instance, secrets, config, and gateway events
         js.get_or_create_stream(StreamConfig {
             name: "CONTROL".to_string(),
             subjects: vec![
@@ -131,6 +131,7 @@ impl NatsBus {
                 "instance.dead.>".to_string(),
                 "secrets.update.>".to_string(),
                 "config.update.>".to_string(),
+                "gateway.config.>".to_string(),
             ],
             max_messages: 10_000,
             ..Default::default()

@@ -236,6 +236,10 @@ pgbouncer_addr = "127.0.0.1:5432"
 level = "info"
 format = "json"
 
+[dns]
+stub_enabled = true
+stub_port = 15353
+
 [gateway]
 [gateway.oidc]
 issuer_url = "https://keycloak.example.com/realms/my-realm"
@@ -306,6 +310,8 @@ The platform node is the daemon that runs on every server. It contains:
 | **NATS Client** | Control plane events, cluster coordination |
 | **eBPF Monitor** | Kernel-level observability (Linux only) |
 | **Admin API** | REST API for operators and monitoring tools |
+| **Embedded DNS Stub** | Resolves `*.internal` hostnames without external DNS |
+| **Internal Gateway** | East-West traffic proxy with endpoint-level policies |
 
 ### wasm-ctl
 

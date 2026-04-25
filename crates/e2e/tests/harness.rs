@@ -215,6 +215,8 @@ impl NodeProcess {
             .arg(nats_url)
             .arg("--proxy-port")
             .arg(proxy_port.to_string())
+            .arg("--proxy-https-port")
+            .arg("0")
             .arg("--admin-port")
             .arg(admin_port.to_string())
             .arg("--artifact-port")
@@ -296,6 +298,8 @@ impl NodeProcess {
             .arg(nats_url)
             .arg("--proxy-port")
             .arg(proxy_port.to_string())
+            .arg("--proxy-https-port")
+            .arg("0")
             .arg("--admin-port")
             .arg(admin_port.to_string())
             .arg("--artifact-port")
@@ -617,6 +621,21 @@ pub async fn deploy_app(
     Ok(())
 }
 
+/// Set a gateway config for an app via NATS
+pub async fn set_gateway_config(
+    bus: &NatsBus,
+    app_id: &str,
+    config: common::types::GatewayRouteConfig,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let event = messaging::events::Event::GatewayConfigUpdate {
+        app_id: common::types::AppId(app_id.to_string()),
+        config,
+    };
+    bus.publish(&event).await?;
+    sleep(Duration::from_millis(500)).await;
+    Ok(())
+}
+
 /// Add a route via NATS
 pub async fn add_route(
     bus: &NatsBus,
@@ -701,4 +720,42 @@ pub async fn wait_for_app_ready(
     }
 
     Err("App did not become ready in time".into())
+}
+
+/// Add a localhost entry to /etc/hosts so *.internal names resolve.
+/// This is needed for East-West traffic tests where Wasm apps connect
+/// to services via .internal hostnames.
+/// Returns true if the entry was added (or already present).
+pub fn ensure_hosts_entry(hostname: &str) -> Result<bool, Box<dyn std::error::Error>> {
+    let entry = format!("127.0.0.1 {}\n", hostname);
+    let hosts_path = std::path::Path::new("/etc/hosts");
+
+    if !hosts_path.exists() {
+        return Err("/etc/hosts not found — cannot resolve .internal names".into());
+    }
+
+    let contents = std::fs::read_to_string(hosts_path)?;
+    if contents.contains(&format!("127.0.0.1 {}", hostname)) {
+        return Ok(false); // already present
+    }
+
+    // Try to append directly first (may fail without root)
+    match std::fs::OpenOptions::new().append(true).open(hosts_path) {
+        Ok(mut file) => {
+            use std::io::Write;
+            file.write_all(entry.as_bytes())?;
+            eprintln!("✓ Added {} to /etc/hosts", hostname);
+            Ok(true)
+        }
+        Err(e) => {
+            eprintln!(
+                "⚠️ Could not write /etc/hosts ({}). Try running with sudo, or add '{}' manually.",
+                e, entry.trim()
+            );
+            // Many test environments (CI, containers) cannot modify /etc/hosts.
+            // The test apps connect to 127.0.0.1 directly for *.internal names,
+            // so this is not fatal. Return Ok so the test can continue.
+            Ok(false)
+        }
+    }
 }

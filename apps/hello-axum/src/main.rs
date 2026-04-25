@@ -17,7 +17,6 @@ fn main() {
             Err(_) => continue,
         };
 
-        // Read the request line (e.g. "GET /health HTTP/1.1")
         let mut reader = BufReader::new(&stream);
         let mut request_line = String::new();
         if reader.read_line(&mut request_line).is_err() {
@@ -35,10 +34,10 @@ fn main() {
             }
         }
 
-        // Parse method and path
-        let path = request_line.split_whitespace().nth(1).unwrap_or("/");
+        // Parse method and full path (including query string)
+        let full_path = request_line.split_whitespace().nth(1).unwrap_or("/");
 
-        let (status, content_type, body) = route(path);
+        let (status, content_type, body) = route(full_path);
 
         let response = format!(
             "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -54,8 +53,25 @@ fn main() {
 }
 
 #[cfg(target_family = "wasm")]
+fn extract_query_param(path: &str, key: &str) -> Option<String> {
+    let query_part = path.split('?').nth(1)?;
+    for pair in query_part.split('&') {
+        let mut kv = pair.splitn(2, '=');
+        let k = kv.next()?;
+        let v = kv.next().unwrap_or("");
+        if k == key {
+            return Some(v.to_string());
+        }
+    }
+    None
+}
+
+#[cfg(target_family = "wasm")]
 fn route(path: &str) -> (u16, &'static str, String) {
-    match path {
+    // Strip query string for exact matches
+    let base_path = path.split('?').next().unwrap_or(path);
+
+    match base_path {
         "/" => (200, "text/plain", "Hello from wasip2!".to_string()),
         "/health" => (
             200,
@@ -63,19 +79,19 @@ fn route(path: &str) -> (u16, &'static str, String) {
             r#"{"status":"healthy"}"#.to_string(),
         ),
         "/call-echo" => {
-            // Make outbound HTTP call to echo-service
-            let echo_host = std::env::var("ECHO_SERVICE_URL")
-                .unwrap_or_else(|_| "http://127.0.0.1:8081".to_string());
+            // Make outbound HTTP call to echo-service.
+            // The Supervisor injects ECHO_SERVICE_SERVICE_URL only for apps
+            // in the same namespace (service discovery isolation).
+            let echo_host = std::env::var("ECHO_SERVICE_SERVICE_URL")
+                .unwrap_or_else(|_| "http://echo-service.internal:9080".to_string());
             let url = format!("{}/echo", echo_host);
 
-            // Debug: print the URL and env var we're connecting to
             eprintln!(
-                "DEBUG: ECHO_SERVICE_URL env var = {:?}",
-                std::env::var("ECHO_SERVICE_URL")
+                "DEBUG: ECHO_SERVICE_SERVICE_URL env var = {:?}",
+                std::env::var("ECHO_SERVICE_SERVICE_URL")
             );
             eprintln!("DEBUG: Calling echo-service at: {}", url);
 
-            // Simple HTTP client using std::net
             let result = make_http_request(&url);
 
             match result {
@@ -84,6 +100,65 @@ fn route(path: &str) -> (u16, &'static str, String) {
                     500,
                     "text/plain",
                     format!("Failed to call echo-service: {}", e),
+                ),
+            }
+        }
+        "/discover" => {
+            // Return whether ECHO_SERVICE_SERVICE_URL was injected by the Supervisor.
+            // Cross-namespace tests use this to verify service discovery isolation:
+            // apps only see services in their own namespace.
+            match std::env::var("ECHO_SERVICE_SERVICE_URL") {
+                Ok(url) => (
+                    200,
+                    "application/json",
+                    format!(r#"{{"echo_service_url":"{}"}}"#, url),
+                ),
+                Err(_) => (
+                    200,
+                    "application/json",
+                    r#"{"echo_service_url":null}"#.to_string(),
+                ),
+            }
+        }
+        "/call-raw" => {
+            // Try to connect to a specific host:port directly, bypassing
+            // service discovery. Used by e2e tests to verify that the
+            // network interceptor (socket_addr_check) blocks cross-namespace
+            // TCP connections to direct app ports (but NOT the gateway port).
+            //
+            // Query params: host (e.g. "127.0.0.1") and port (e.g. "10101")
+            // Returns JSON: {"connected": true} or {"connected": false, "error": "..."}
+            let host = extract_query_param(path, "host").unwrap_or_else(|| "127.0.0.1".to_string());
+            let port_str = extract_query_param(path, "port").unwrap_or_else(|| "80".to_string());
+            let port: u16 = match port_str.parse() {
+                Ok(p) => p,
+                Err(_) => {
+                    return (
+                        400,
+                        "application/json",
+                        format!(
+                            r#"{{"connected":false,"error":"invalid port: {}"}}"#,
+                            port_str
+                        ),
+                    )
+                }
+            };
+
+            match std::net::TcpStream::connect(format!("{}:{}", host, port)) {
+                Ok(_) => (
+                    200,
+                    "application/json",
+                    format!(r#"{{"connected":true,"target":"{}:{}"}}"#, host, port),
+                ),
+                Err(e) => (
+                    200,
+                    "application/json",
+                    format!(
+                        r#"{{"connected":false,"target":"{}:{}","error":"{}"}}"#,
+                        host,
+                        port,
+                        e.to_string().replace('"', "\\\"")
+                    ),
                 ),
             }
         }
@@ -103,6 +178,12 @@ fn make_http_request(url: &str) -> Result<String, String> {
     let mut stream =
         std::net::TcpStream::connect(format!("{}:{}", host, port)).map_err(|e| e.to_string())?;
 
+    // Per the "Blind App" principle, the app never injects identity headers.
+    // The Host (wasmtime runtime) will transparently inject identity metadata
+    // when wasmtime-wasi provides hooks for wrapping TCP output streams.
+    // For now, namespace isolation relies on service discovery filtering.
+    // socket_addr_check blocks cross-namespace connections to direct app ports,
+    // but the gateway port (9080) is open to all namespaces.
     let request = format!(
         "GET {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
         path, host
@@ -129,7 +210,9 @@ fn make_http_request(url: &str) -> Result<String, String> {
 fn reason(status: u16) -> &'static str {
     match status {
         200 => "OK",
+        400 => "Bad Request",
         404 => "Not Found",
+        500 => "Internal Server Error",
         _ => "Unknown",
     }
 }

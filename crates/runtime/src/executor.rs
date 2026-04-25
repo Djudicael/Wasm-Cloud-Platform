@@ -5,11 +5,32 @@ use common::{
     error::PlatformError,
     types::{AppConfig, InstanceId},
 };
+use std::future::Future;
+use std::net::SocketAddr;
+use std::pin::Pin;
 use std::time::Instant;
 use wasmtime::component::{Component, Instance, Linker, ResourceTable};
 use wasmtime::{Engine, Store};
 use wasmtime_wasi::p2::add_to_linker_sync;
 use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
+
+/// Simplified mirror of `wasmtime_wasi::sockets::SocketAddrUse` for the public API.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SocketAddrUse {
+    TcpBind,
+    TcpConnect,
+    UdpBind,
+    UdpConnect,
+    UdpOutgoingDatagram,
+}
+
+/// Async callback for validating outbound socket addresses.
+/// Returns `true` to allow the operation, `false` to deny.
+pub type SocketAddrCheckFn = Box<
+    dyn Fn(SocketAddr, SocketAddrUse) -> Pin<Box<dyn Future<Output = bool> + Send + Sync>>
+        + Send
+        + Sync,
+>;
 
 /// Store state for WASI Preview 2
 pub struct StoreState {
@@ -64,10 +85,16 @@ impl PreparedModule {
     }
 
     /// Instantiate and run the module.
+    ///
+    /// `socket_addr_check` is an optional async callback invoked by wasmtime-wasi
+    /// for every outbound socket operation. It receives the destination address
+    /// and the operation type (connect, bind, etc.). Return `true` to allow,
+    /// `false` to deny (the Wasm module receives a permission-denied error).
     pub fn spawn_instance(
         &self,
         env_vars: Vec<(String, String)>,
         port: u16,
+        socket_addr_check: Option<SocketAddrCheckFn>,
     ) -> Result<(RunningInstance, ()), PlatformError> {
         tracing::info!(app = %self.config.id.0, "spawn_instance called");
         let id = InstanceId::new();
@@ -81,35 +108,36 @@ impl PreparedModule {
         .map_err(|e| PlatformError::runtime(format!("invalid policy config: {e}")))?;
 
         // Build WASI environment (Preview 2)
-        // Use inherit for now - can add custom streams later
         let mut builder = WasiCtxBuilder::new();
         builder.inherit_stdout();
         builder.inherit_stderr();
 
         // Network configuration based on policy.
         //
-        // TODO(step-33): Per-connection CIDR filtering is not possible with
-        // Wasmtime 43.x's WASI Preview 2 API. The builder only exposes coarse
-        // allow_tcp(bool) / allow_udp(bool) / allow_ip_name_lookup(bool) switches.
-        // There is no hook to intercept individual socket connect() calls and
-        // inspect the destination IP before the connection is established.
-        // The PolicyEnforcer still checks CIDRs (for audit/metrics), but the
-        // actual enforcement at the WASI layer is all-or-nothing per protocol.
-        // If Wasmtime adds socket-level interception hooks in a future version,
-        // we can upgrade to true per-destination filtering here.
+        // socket_addr_check provides per-destination validation. It is called
+        // by wasmtime-wasi for every socket bind/connect. It blocks cross-namespace
+        // connections to direct app ports, but the gateway port (9080) is open to
+        // all namespaces. Namespace isolation relies primarily on service discovery.
         builder.inherit_network();
         builder.allow_tcp(policy.network.allow_outbound_tcp || policy.network.allow_inbound);
         builder.allow_udp(policy.network.allow_outbound_udp);
         builder.allow_ip_name_lookup(policy.network.allow_dns);
 
-        // TODO(step-33): PolicyTcpStream wrapper for egress byte-counting is not
-        // feasible with WASI Preview 2's Component Model. Sockets are managed as
-        // opaque resource handles inside the ResourceTable — the host cannot
-        // intercept individual write() calls on a TcpStream to count bytes or
-        // enforce max_egress_bytes per-write. The PolicyEnforcer tracks egress
-        // bytes when record_egress() is called explicitly, but there is no
-        // automatic per-write enforcement. This would require Wasmtime to expose
-        // a writable-stream wrapper or write-hook API.
+        if let Some(check) = socket_addr_check {
+            builder.socket_addr_check(move |addr, use_type| {
+                let use_enum = match use_type {
+                    wasmtime_wasi::sockets::SocketAddrUse::TcpBind => SocketAddrUse::TcpBind,
+                    wasmtime_wasi::sockets::SocketAddrUse::TcpConnect => SocketAddrUse::TcpConnect,
+                    wasmtime_wasi::sockets::SocketAddrUse::UdpBind => SocketAddrUse::UdpBind,
+                    wasmtime_wasi::sockets::SocketAddrUse::UdpConnect => SocketAddrUse::UdpConnect,
+                    wasmtime_wasi::sockets::SocketAddrUse::UdpOutgoingDatagram => {
+                        SocketAddrUse::UdpOutgoingDatagram
+                    }
+                };
+                check(addr, use_enum)
+            });
+            tracing::debug!("socket_addr_check installed for namespace-aware outbound filtering");
+        }
 
         tracing::debug!(
             allow_tcp = %(policy.network.allow_outbound_tcp || policy.network.allow_inbound),

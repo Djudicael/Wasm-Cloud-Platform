@@ -2,6 +2,7 @@ pub mod compiler;
 pub mod custom_pipe;
 pub mod executor;
 pub mod limits;
+pub mod metadata_stream;
 pub mod policy_tracker;
 pub mod policy_wasi;
 pub mod virtual_dns;

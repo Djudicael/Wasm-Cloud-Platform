@@ -4,6 +4,8 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+use crate::types::default_true;
+
 /// Top-level configuration for a wasm-node.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NodeConfig {
@@ -738,6 +740,16 @@ pub struct DnsSection {
     pub webhook_url: Option<String>,
     #[serde(default)]
     pub webhook_token: Option<String>,
+    /// Enable the embedded DNS stub for *.internal resolution.
+    #[serde(default = "default_true")]
+    pub stub_enabled: bool,
+    /// UDP port for the embedded DNS stub (0 = auto-assign).
+    #[serde(default = "default_dns_stub_port")]
+    pub stub_port: u16,
+}
+
+fn default_dns_stub_port() -> u16 {
+    15353
 }
 
 impl Default for DnsSection {
@@ -746,6 +758,8 @@ impl Default for DnsSection {
             platform_domain: None,
             webhook_url: None,
             webhook_token: None,
+            stub_enabled: true,
+            stub_port: 15353,
         }
     }
 }

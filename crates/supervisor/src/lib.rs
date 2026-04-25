@@ -17,6 +17,7 @@ mod tests;
 use crate::{
     instance::{BillingInfo, ManagedInstance},
     network::LocalServiceRegistry,
+    network_interceptor::{ConnectDecision, NetworkInterceptor},
     pool::InstancePool,
     port_alloc::PortAllocator,
 };
@@ -236,41 +237,213 @@ impl Supervisor {
             }
         };
 
+        // Build a qualified AppId that includes the namespace from config.
+        let version = app_id.bare_name().split(':').nth(1).unwrap_or("v1");
+        let qualified_app_id =
+            AppId::new_namespaced(&config.namespace, app_id.bare_app_name(), version);
+
+        tracing::info!(
+            app_id = %app_id.0,
+            config_namespace = %config.namespace,
+            qualified_app_id = %qualified_app_id.0,
+            "[SPAWN] Building qualified AppId"
+        );
+
         // 3. Allocate a host port
         let host_port = self.port_alloc.allocate()?;
         let addr = self.port_alloc.socket_addr(host_port);
 
         // 4. Resolve env vars - note: we pass host_port, not wasm_bind_port
-        // The app MUST bind to the allocated port so the proxy can reach it
         let mut env_vars = (self.env_resolver)(&config, host_port);
 
-        // 4b. Inject service discovery env vars for other running apps
-        // Use 127.0.0.1 for local service discovery (apps bind to 0.0.0.0 but external connections must use loopback)
-        let all_services = self.service_registry.get_all_services().await;
+        // 4b. Inject service discovery env vars for other running apps in the same namespace
+        let target_namespace = qualified_app_id.namespace();
+        let ns_services = self
+            .service_registry
+            .get_namespace_services(target_namespace)
+            .await;
+
         tracing::info!(
-            "Service discovery: found {} services for app {}",
-            all_services.len(),
-            app_id.0
+            target_namespace = %target_namespace,
+            ns_services_count = ns_services.len(),
+            "[SPAWN] Namespace services query"
         );
-        for (service_full_name, addrs) in &all_services {
+
+        for (bare_app_name, addrs) in &ns_services {
             // Skip self (don't inject env vars for own service)
-            if service_full_name == &app_id.0 {
+            if bare_app_name == &app_id.bare_app_name() {
                 continue;
             }
-            // Extract app name without version (e.g., "echo-service:v1" -> "echo-service")
-            let app_name = service_full_name
-                .split(':')
-                .next()
-                .unwrap_or(service_full_name);
             if let Some(addr) = addrs.first() {
-                let key = format!("{}_SERVICE_URL", app_name.to_uppercase().replace('-', "_"));
-                // Use 127.0.0.1 instead of 0.0.0.0 for service discovery
-                let url = format!("http://127.0.0.1:{}", addr.port());
-                tracing::info!("Injecting {}={} into app {}", key, url, app_id.0);
+                let key = format!(
+                    "{}_SERVICE_URL",
+                    bare_app_name.to_uppercase().replace('-', "_")
+                );
+
+                let unqualified = format!("{}:v1", bare_app_name);
+                let qualified =
+                    AppId::new_namespaced(qualified_app_id.namespace(), bare_app_name, "v1").0;
+                let gateway_config = self
+                    .store
+                    .load_gateway_config(&unqualified)
+                    .ok()
+                    .flatten()
+                    .or_else(|| self.store.load_gateway_config(&qualified).ok().flatten());
+                let has_endpoint_rules = gateway_config
+                    .map(|cfg| !cfg.endpoints.is_empty())
+                    .unwrap_or(false);
+
+                let url = if has_endpoint_rules {
+                    // Route through the internal gateway. Namespace isolation
+                    // relies on service discovery: the Supervisor only injects
+                    // service URLs for same-namespace apps. The gateway port
+                    // is open to all namespaces.
+                    format!(
+                        "http://{}.{}.internal:{}",
+                        bare_app_name,
+                        qualified_app_id.namespace(),
+                        common::INTERNAL_GATEWAY_PORT
+                    )
+                } else {
+                    format!("http://127.0.0.1:{}", addr.port())
+                };
+
+                tracing::info!(
+                    key = %key,
+                    url = %url,
+                    app_id = %app_id.0,
+                    has_endpoint_rules,
+                    "[SPAWN] Injecting service discovery env var"
+                );
                 env_vars.retain(|(k, _)| k != &key);
                 env_vars.push((key, url));
             }
         }
+
+        // 4c. Build socket address checker for namespace-aware outbound filtering.
+        // This is called by wasmtime-wasi for every socket connect/bind. It blocks
+        // connections to unknown loopback ports (defense in depth) and allows
+        // connections to known same-namespace apps and the internal gateway.
+        let allowed_ports = {
+            let mut ports = std::collections::HashSet::new();
+            // Allow connections to the internal gateway port
+            ports.insert(common::INTERNAL_GATEWAY_PORT);
+            for addrs in ns_services.values() {
+                for addr in addrs {
+                    ports.insert(addr.port());
+                }
+            }
+            ports.insert(host_port); // own bind port
+            ports
+        };
+
+        let registry = self.service_registry.clone();
+        let source_app = qualified_app_id.clone();
+        let socket_addr_check: runtime::executor::SocketAddrCheckFn = Box::new(
+            move |dest: std::net::SocketAddr, use_type: runtime::executor::SocketAddrUse| {
+                let allowed = allowed_ports.clone();
+                let registry = registry.clone();
+                let source_app = source_app.clone();
+                Box::pin(async move {
+                    tracing::info!(
+                        source_app = %source_app.0,
+                        dest = %dest,
+                        use_type = ?use_type,
+                        "[SOCKET DEBUG] socket_addr_check called"
+                    );
+                    match use_type {
+                        runtime::executor::SocketAddrUse::TcpConnect
+                        | runtime::executor::SocketAddrUse::UdpConnect => {
+                            if !dest.ip().is_loopback() {
+                                tracing::info!(
+                                    dest = %dest,
+                                    "[SOCKET DEBUG] external connection — allowed"
+                                );
+                                return true;
+                            }
+
+                            // Block connections to unknown loopback ports
+                            if !allowed.contains(&dest.port()) {
+                                tracing::warn!(
+                                    dest = %dest,
+                                    "[SOCKET DEBUG] BLOCKED: unknown loopback port"
+                                );
+                                return false;
+                            }
+
+                            // Defense-in-depth cross-namespace check for known app ports.
+                            // Internal gateway port is allowed without namespace check.
+                            // The gateway port (9080) is open to all namespaces —
+                            // namespace isolation relies on service discovery only.
+                            if dest.port() != common::INTERNAL_GATEWAY_PORT {
+                                let interceptor =
+                                    NetworkInterceptor::new(registry, source_app.clone());
+                                match interceptor
+                                    .check_connect(
+                                        std::net::SocketAddr::new(
+                                            std::net::IpAddr::V4(std::net::Ipv4Addr::new(
+                                                127, 0, 0, 1,
+                                            )),
+                                            0,
+                                        ),
+                                        dest,
+                                    )
+                                    .await
+                                {
+                                    ConnectDecision::Allow(_) => {
+                                        tracing::info!(
+                                            dest = %dest,
+                                            "[SOCKET DEBUG] same-namespace connection — allowed"
+                                        );
+                                        true
+                                    }
+                                    ConnectDecision::Deny { reason } => {
+                                        tracing::warn!(
+                                            dest = %dest,
+                                            reason,
+                                            "[SOCKET DEBUG] BLOCKED: cross-namespace"
+                                        );
+                                        false
+                                    }
+                                }
+                            } else {
+                                tracing::info!(
+                                    dest = %dest,
+                                    "[SOCKET DEBUG] internal gateway port — allowed"
+                                );
+                                true
+                            }
+                        }
+                        runtime::executor::SocketAddrUse::TcpBind
+                        | runtime::executor::SocketAddrUse::UdpBind => {
+                            let ok = allowed.contains(&dest.port());
+                            tracing::info!(
+                                dest = %dest,
+                                allowed = ok,
+                                "[SOCKET DEBUG] bind check"
+                            );
+                            ok
+                        }
+                        _ => {
+                            tracing::info!(
+                                use_type = ?use_type,
+                                "[SOCKET DEBUG] other socket use — allowed"
+                            );
+                            true
+                        }
+                    }
+                })
+            },
+        );
+
+        // 4d. INTERNAL_APP_ID is NOT injected into the app's environment.
+        // Per the "Blind App" principle, the app should never know its own
+        // namespace. The socket_addr_check blocks cross-namespace connections
+        // to direct app ports, but the gateway port is open to all namespaces.
+        // Namespace isolation currently relies on service discovery filtering.
+        // When wasmtime-wasi provides hooks for wrapping TCP output streams,
+        // the Host will transparently inject identity metadata (e.g. a signed
+        // JWT) without the app's involvement.
 
         // 5. Spawn the Wasm instance
         let (shutdown_tx, _shutdown_rx) = tokio::sync::oneshot::channel::<()>();
@@ -283,7 +456,7 @@ impl Supervisor {
             // Use the allocated host_port, NOT wasm_bind_port.
             // The app must bind to the allocated port so the proxy can connect.
             let (mut instance, _streams) = prepared_clone
-                .spawn_instance(env_vars, host_port)
+                .spawn_instance(env_vars, host_port, Some(socket_addr_check))
                 .expect("failed to spawn instance");
 
             // Note: WASI stdout/stderr streams are handled via inherit_* in the runtime
@@ -319,8 +492,29 @@ impl Supervisor {
         // 7. Register with the proxy upstream table
         self.upstream_registry.add(app_id, addr).await;
 
-        // 8. Register with local service registry
-        self.service_registry.register(app_id, addr).await;
+        // 8. Register with local service registry (using qualified AppId)
+        self.service_registry
+            .register(&qualified_app_id, addr)
+            .await;
+
+        // 8b. Register source port for network interceptor attribution
+        self.service_registry
+            .bind_source_port(host_port, qualified_app_id.clone())
+            .await;
+
+        // 8c. Build virtual DNS for this instance (available for future WASI DNS hooks)
+        let mut virtual_dns =
+            runtime::virtual_dns::VirtualDns::new(qualified_app_id.namespace().to_string());
+        for (bare_name, _) in &ns_services {
+            if bare_name != qualified_app_id.bare_app_name() {
+                virtual_dns.register_service(bare_name);
+            }
+        }
+        tracing::debug!(
+            app = %app_id.0,
+            records = ?virtual_dns,
+            "virtual DNS configured for instance"
+        );
 
         // Extract billing info before config is moved
         let tenant_id = config
@@ -540,7 +734,6 @@ impl Supervisor {
         let state = instance.state.clone();
         let billing_info = instance.billing_info.clone();
         let wall_clock_start = instance.spawned_at;
-
         // 4. Initiate graceful shutdown (HTTP + channel signal + wait)
         let stats = instance.initiate_shutdown(grace_timeout).await;
 
@@ -566,6 +759,7 @@ impl Supervisor {
         // 6. Release resources
         if let InstanceState::Ready { addr } = &state {
             self.service_registry.deregister(app_id, addr).await;
+            self.service_registry.release_source_port(addr.port()).await;
             self.port_alloc.release(addr.port());
         }
 
@@ -607,6 +801,7 @@ impl Supervisor {
             if let InstanceState::Ready { addr } = &inst.state {
                 self.upstream_registry.remove(app_id, addr).await;
                 self.service_registry.deregister(app_id, addr).await;
+                self.service_registry.release_source_port(addr.port()).await;
                 self.port_alloc.release(addr.port());
             }
             inst.shutdown_tx.send(()).ok();

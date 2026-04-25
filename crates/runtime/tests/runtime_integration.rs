@@ -55,7 +55,7 @@ fn test_compile_real_component() {
 
     // Verify we can spawn an instance
     let (instance, _streams) = prepared
-        .spawn_instance(vec![], 8080)
+        .spawn_instance(vec![], 8080, None)
         .expect("failed to spawn");
 
     // We don't run it here because it's an HTTP server that would block
@@ -92,7 +92,7 @@ fn test_artifact_roundtrip_with_real_component() {
 
     // Verify we can spawn
     let (_instance, _streams) = prepared
-        .spawn_instance(vec![], 8080)
+        .spawn_instance(vec![], 8080, None)
         .expect("failed to spawn");
 }
 
@@ -134,13 +134,13 @@ fn test_multiple_instances_with_real_component() {
 
     // Spawn multiple instances
     let (_inst1, _s1) = prepared
-        .spawn_instance(vec![], 8081)
+        .spawn_instance(vec![], 8081, None)
         .expect("spawn 1 failed");
     let (_inst2, _s2) = prepared
-        .spawn_instance(vec![], 8082)
+        .spawn_instance(vec![], 8082, None)
         .expect("spawn 2 failed");
     let (_inst3, _s3) = prepared
-        .spawn_instance(vec![], 8083)
+        .spawn_instance(vec![], 8083, None)
         .expect("spawn 3 failed");
 
     // All instances created successfully

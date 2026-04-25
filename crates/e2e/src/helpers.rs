@@ -222,6 +222,16 @@ pub fn build_app_config(
     memory_pages: u32,
     max_instances: u32,
 ) -> common::types::AppConfig {
+    build_app_config_with_namespace(app_id, fuel_quota, memory_pages, max_instances, "default")
+}
+
+pub fn build_app_config_with_namespace(
+    app_id: &str,
+    fuel_quota: u64,
+    memory_pages: u32,
+    max_instances: u32,
+    namespace: &str,
+) -> common::types::AppConfig {
     common::types::AppConfig {
         id: common::types::AppId(app_id.to_string()),
         fuel_quota: common::types::FuelQuota(fuel_quota),
@@ -237,7 +247,7 @@ pub fn build_app_config(
         rate_limit: None,
         tenant_id: None,
         policy: None,
-        namespace: "default".to_string(),
+        namespace: namespace.to_string(),
     }
 }
 
@@ -351,6 +361,205 @@ pub async fn remove_route(bus: &NatsBus, host: &str) -> Result<(), String> {
 
     info!(host, "RouteRemove event published");
     Ok(())
+}
+
+/// Set a gateway config for an app via NATS event bus.
+///
+/// Publishes a `GatewayConfigUpdate` event that updates the gateway
+/// route configuration for the given app. The event is persisted to
+/// JetStream so all nodes receive it.
+pub async fn set_gateway_config(
+    bus: &NatsBus,
+    app_id: &str,
+    config: common::types::GatewayRouteConfig,
+) -> Result<(), String> {
+    let event = messaging::events::Event::GatewayConfigUpdate {
+        app_id: common::types::AppId(app_id.to_string()),
+        config,
+    };
+    bus.publish(&event)
+        .await
+        .map_err(|e| format!("gateway config publish failed: {e}"))?;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    info!(app_id, "GatewayConfigUpdate event published");
+    Ok(())
+}
+
+/// Wait for a gateway config to be persisted on a node.
+///
+/// Polls the node's admin API `GET /admin/gateway/{app_id}` until it
+/// returns 200 OK, confirming the node has processed and saved the config.
+pub async fn wait_for_gateway_config(
+    admin_addr: &str,
+    app_id: &str,
+    timeout: Duration,
+) -> Result<(), String> {
+    // URL-encode the app_id so colons (e.g. "echo-service:v1") don't break the path.
+    let encoded: String = app_id
+        .chars()
+        .map(|c| match c {
+            ':' => "%3A".to_string(),
+            '/' => "%2F".to_string(),
+            ' ' => "%20".to_string(),
+            c => c.to_string(),
+        })
+        .collect();
+    let url = format!("http://{admin_addr}/admin/gateway/{encoded}");
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .map_err(|e| format!("failed to build HTTP client: {e}"))?;
+
+    let start = std::time::Instant::now();
+    loop {
+        match client.get(&url).send().await {
+            Ok(resp) if resp.status().is_success() => {
+                info!(app_id, "gateway config confirmed on node");
+                return Ok(());
+            }
+            Ok(resp) => {
+                let status = resp.status();
+                let body = resp.text().await.unwrap_or_default();
+                info!(app_id, url, status = %status, body, "gateway config not yet saved");
+                if start.elapsed() > timeout {
+                    return Err(format!(
+                        "gateway config for {app_id} not saved on node: status {status}, body: {body}"
+                    ));
+                }
+            }
+            Err(e) => {
+                info!(app_id, url, error = %e, "gateway config poll failed");
+                if start.elapsed() > timeout {
+                    return Err(format!(
+                        "gateway config for {app_id} not saved on node: {e}"
+                    ));
+                }
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+}
+
+/// Ensure a hostname resolves to 127.0.0.1 by adding it to /etc/hosts.
+///
+/// Tries multiple privilege-escalation strategies so tests work in
+/// containers (root), WSL (`wsl -u root`), and dev machines (sudo).
+/// Returns `true` if the entry was added or already present.
+/// Returns `false` only if the file doesn't exist (non-Unix).
+pub fn ensure_hosts_entry(hostname: &str) -> Result<bool, String> {
+    let entry = format!("127.0.0.1 {}\n", hostname);
+    let hosts_path = std::path::Path::new("/etc/hosts");
+
+    if !hosts_path.exists() {
+        return Ok(false);
+    }
+
+    let contents = std::fs::read_to_string(hosts_path)
+        .map_err(|e| format!("failed to read /etc/hosts: {e}"))?;
+    if contents.contains(&format!("127.0.0.1 {}", hostname)) {
+        return Ok(false); // already present
+    }
+
+    // Strategy 1: direct write (works when running as root, e.g. CI containers)
+    if let Ok(()) = try_append_hosts(&entry) {
+        info!(hostname, "added to /etc/hosts (direct write)");
+        return Ok(true);
+    }
+
+    // Strategy 2: WSL — escalate via `wsl -u root`
+    if is_wsl() {
+        let cmd = format!("echo '127.0.0.1 {}' >> /etc/hosts", hostname);
+        match std::process::Command::new("wsl")
+            .args(["-u", "root", "sh", "-c", &cmd])
+            .output()
+        {
+            Ok(output) if output.status.success() => {
+                info!(hostname, "added to /etc/hosts via WSL root");
+                return Ok(true);
+            }
+            Ok(output) => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                info!(hostname, stderr = %stderr, "WSL root write failed");
+            }
+            Err(e) => info!(hostname, error = %e, "WSL root command failed"),
+        }
+    }
+
+    // Strategy 3: passwordless sudo (dev machines with NOPASSWD)
+    match std::process::Command::new("sudo")
+        .args(["-n", "tee", "-a", "/etc/hosts"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+    {
+        Ok(mut child) => {
+            if let Some(ref mut stdin) = child.stdin {
+                use std::io::Write;
+                let _ = stdin.write_all(entry.as_bytes());
+            }
+            match child.wait() {
+                Ok(status) if status.success() => {
+                    info!(hostname, "added to /etc/hosts via sudo");
+                    return Ok(true);
+                }
+                Ok(_) => info!(hostname, "sudo tee failed (wrong password or no sudo access)"),
+                Err(e) => info!(hostname, error = %e, "sudo tee command failed"),
+            }
+        }
+        Err(e) => info!(hostname, error = %e, "sudo command spawn failed"),
+    }
+
+    // Strategy 4: pkexec (GUI privilege escalation, Linux desktops)
+    match std::process::Command::new("pkexec")
+        .args(["tee", "-a", "/etc/hosts"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+    {
+        Ok(mut child) => {
+            if let Some(ref mut stdin) = child.stdin {
+                use std::io::Write;
+                let _ = stdin.write_all(entry.as_bytes());
+            }
+            match child.wait() {
+                Ok(status) if status.success() => {
+                    info!(hostname, "added to /etc/hosts via pkexec");
+                    return Ok(true);
+                }
+                Ok(_) => info!(hostname, "pkexec tee failed (cancelled or no polkit)"),
+                Err(e) => info!(hostname, error = %e, "pkexec tee command failed"),
+            }
+        }
+        Err(e) => info!(hostname, error = %e, "pkexec command spawn failed"),
+    }
+
+    // All strategies exhausted — warn the user
+    info!(
+        hostname,
+        "could not modify /etc/hosts — ensure the test runner has root privileges, \
+         or add '127.0.0.1 {}' to /etc/hosts manually before running tests",
+        hostname
+    );
+    Err(format!(
+        "failed to add {} to /etc/hosts (tried direct write, WSL root, sudo, pkexec). \
+         Run with root/sudo or add the entry manually.",
+        hostname
+    ))
+}
+
+fn try_append_hosts(entry: &str) -> Result<(), std::io::Error> {
+    let hosts_path = std::path::Path::new("/etc/hosts");
+    let mut file = std::fs::OpenOptions::new().append(true).open(hosts_path)?;
+    use std::io::Write;
+    file.write_all(entry.as_bytes())
+}
+
+/// Detect if we're running inside WSL (Windows Subsystem for Linux).
+fn is_wsl() -> bool {
+    // WSL sets these env vars; checking both covers WSL1 and WSL2.
+    std::env::var("WSL_DISTRO_NAME").is_ok() || std::env::var("WSLENV").is_ok()
 }
 
 // ── WASM Binary Discovery ────────────────────────────────────────────

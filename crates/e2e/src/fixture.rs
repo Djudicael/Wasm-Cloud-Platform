@@ -54,7 +54,15 @@ static CLUSTER_COUNTER: std::sync::atomic::AtomicU16 = std::sync::atomic::Atomic
 
 /// Allocate a unique port range for a cluster instance.
 fn allocate_port_base() -> u16 {
-    let idx = CLUSTER_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    use std::sync::atomic::Ordering;
+    let idx = CLUSTER_COUNTER.fetch_add(1, Ordering::SeqCst);
+    // Randomize the first allocation using the process ID so that stale
+    // processes from previous test runs don't collide.
+    if idx == 0 {
+        let seed = std::process::id() as u16;
+        CLUSTER_COUNTER.store(2, Ordering::SeqCst);
+        return seed.saturating_mul(2) % 30_000; // keep within ephemeral range
+    }
     idx * 350 // 350 ports per cluster (enough for 3 nodes * 101 WASI ports + admin/proxy/artifact ports)
 }
 
@@ -86,9 +94,9 @@ pub struct NodeProcess {
 impl NodeProcess {
     /// Start a wasm-node process with the given configuration.
     ///
-    /// The process is spawned with `Stdio::piped()` so that output does not
-    /// clutter the test runner's stdout (unless `RUST_LOG=debug` is set, in
-    /// which case the caller may switch to `Stdio::inherit()`).
+    /// The process is spawned with `Stdio::null()` for stdout to prevent
+    /// pipe-buffer backpressure deadlock on high log volume, and
+    /// `Stdio::inherit()` for stderr so panics are visible.
     pub async fn start(
         node_id: &str,
         nats_url: &str,
@@ -138,7 +146,13 @@ port = {admin_port}
 port = {artifact_port}
 
 [logging]
-level = "debug"
+level = "info"
+format = "text"
+output = "/tmp/wasm-node-e2e.log"
+
+[dns]
+stub_enabled = true
+stub_port = 15353
 
 [health]
 check_interval_secs = 2
@@ -200,7 +214,10 @@ check_interval_secs = 2
                 "RUST_LOG",
                 std::env::var("RUST_LOG").unwrap_or_else(|_| "info".into()),
             )
-            .stdout(Stdio::piped())
+            // stdout=null avoids pipe-buffer backpressure deadlock when
+            // RUST_LOG=debug produces high log volume. stderr is inherited
+            // so panics and eprintln! still appear in test output.
+            .stdout(Stdio::null())
             .stderr(Stdio::inherit())
             .spawn()
             .map_err(|e| format!("failed to start wasm-node: {e}"))?;
@@ -341,7 +358,7 @@ check_interval_secs = 2
                 "RUST_LOG",
                 std::env::var("RUST_LOG").unwrap_or_else(|_| "info".into()),
             )
-            .stdout(Stdio::piped())
+            .stdout(Stdio::null())
             .stderr(Stdio::inherit())
             .spawn()
             .map_err(|e| format!("failed to restart wasm-node: {e}"))?;
@@ -659,6 +676,42 @@ impl ClusterFixture {
     pub async fn add_route(&self, host: &str, app_id: &str) -> Result<(), String> {
         let bus = self.connect_bus().await?;
         crate::helpers::add_route(&bus, host, app_id).await
+    }
+
+    /// Deploy an app with a custom configuration.
+    pub async fn deploy_app_with_config(
+        &self,
+        app_id: &str,
+        wasm_path: &std::path::Path,
+        config: common::types::AppConfig,
+    ) -> Result<(), String> {
+        let bus = self.connect_bus().await?;
+
+        let sha256 = crate::helpers::sha256_file(wasm_path)?;
+        let size_bytes = std::fs::metadata(wasm_path)
+            .map_err(|e| format!("failed to read wasm metadata: {e}"))?
+            .len();
+
+        crate::helpers::upload_artifact(self.nodes[0].artifact_port, wasm_path, &sha256).await?;
+
+        let artifact_url = format!(
+            "http://127.0.0.1:{}/artifacts/{}",
+            self.nodes[0].artifact_port, sha256
+        );
+
+        crate::helpers::deploy_app(&bus, app_id, artifact_url, sha256, size_bytes, config)
+            .await
+            .map_err(|e| format!("deploy failed: {e}"))
+    }
+
+    /// Set a gateway config for an app via NATS.
+    pub async fn set_gateway_config(
+        &self,
+        app_id: &str,
+        config: common::types::GatewayRouteConfig,
+    ) -> Result<(), String> {
+        let bus = self.connect_bus().await?;
+        crate::helpers::set_gateway_config(&bus, app_id, config).await
     }
 }
 

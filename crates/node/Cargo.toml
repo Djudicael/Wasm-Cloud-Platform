@@ -44,3 +44,4 @@ billing = { path = "../billing" }
 async-nats = { workspace = true }
 ebpf-monitor = { path = "../ebpf-monitor" }
 config = { path = "../config" }
+internal_gateway = { path = "../internal_gateway" }

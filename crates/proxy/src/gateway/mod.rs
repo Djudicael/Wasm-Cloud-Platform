@@ -74,6 +74,11 @@ impl Gateway {
         self.route_configs.write().await.insert(app_id.to_string(), config);
     }
 
+    /// Remove the gateway config for a route.
+    pub async fn remove_route_config(&self, app_id: &str) {
+        self.route_configs.write().await.remove(app_id);
+    }
+
     /// Authenticate a request using the route-level default auth.
     pub async fn authenticate(
         &self,

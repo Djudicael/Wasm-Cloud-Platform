@@ -8,7 +8,9 @@ use tokio::sync::RwLock;
 /// Replaces LocalServiceRegistry with namespace awareness and source-port attribution.
 #[derive(Clone, Default)]
 pub struct NamespaceRegistry {
-    /// namespace → app_id → list of SocketAddr
+    /// namespace → bare_app_name → list of SocketAddr
+    /// The inner key is the bare app name WITHOUT version (e.g. "echo-service"),
+    /// so service discovery resolves by app name, not specific version.
     instances: Arc<RwLock<HashMap<String, HashMap<String, Vec<SocketAddr>>>>>,
 
     /// Reverse lookup: source_port (TCP ephemeral port allocated to an instance) → AppId.
@@ -22,7 +24,7 @@ impl NamespaceRegistry {
         let mut map = self.instances.write().await;
         map.entry(app_id.namespace().to_string())
             .or_default()
-            .entry(app_id.bare_name().to_string())
+            .entry(app_id.bare_app_name().to_string())
             .or_default()
             .push(addr);
     }
@@ -31,10 +33,11 @@ impl NamespaceRegistry {
     pub async fn deregister(&self, app_id: &AppId, addr: &SocketAddr) {
         let mut map = self.instances.write().await;
         if let Some(ns) = map.get_mut(app_id.namespace()) {
-            if let Some(addrs) = ns.get_mut(app_id.bare_name()) {
+            let key = app_id.bare_app_name();
+            if let Some(addrs) = ns.get_mut(key) {
                 addrs.retain(|a| a != addr);
                 if addrs.is_empty() {
-                    ns.remove(app_id.bare_name());
+                    ns.remove(key);
                 }
             }
             if ns.is_empty() {
@@ -51,13 +54,14 @@ impl NamespaceRegistry {
             .and_then(|addrs| addrs.first().copied())
     }
 
-    /// Resolve an app by its local port (for cross-namespace checks).
+    /// Resolve an app by its destination port (for cross-namespace checks).
+    /// Scans the instances map to find which app is listening on the given port.
     pub async fn resolve_app_by_port(&self, port: u16) -> Option<AppId> {
         let map = self.instances.read().await;
         for (ns, apps) in map.iter() {
-            for (bare_name, addrs) in apps.iter() {
+            for (bare_app_name, addrs) in apps.iter() {
                 if addrs.iter().any(|a| a.port() == port) {
-                    return Some(AppId(format!("{ns}/{bare_name}")));
+                    return Some(AppId::new_namespaced(ns, bare_app_name, "v1"));
                 }
             }
         }
@@ -80,6 +84,7 @@ impl NamespaceRegistry {
     }
 
     /// Get all registered service addresses as a flat map (for compatibility).
+    /// Keys are in format "{namespace}/{bare_app_name}".
     pub async fn get_all_services(&self) -> HashMap<String, Vec<SocketAddr>> {
         let mut result = HashMap::new();
         let map = self.instances.read().await;
@@ -89,6 +94,16 @@ impl NamespaceRegistry {
             }
         }
         result
+    }
+
+    /// Get all services within a specific namespace, keyed by bare app name
+    /// (without namespace prefix or version).
+    /// Used by the Supervisor for service discovery env var injection.
+    pub async fn get_namespace_services(&self, namespace: &str) -> HashMap<String, Vec<SocketAddr>> {
+        let map = self.instances.read().await;
+        map.get(namespace)
+            .cloned()
+            .unwrap_or_default()
     }
 }
 

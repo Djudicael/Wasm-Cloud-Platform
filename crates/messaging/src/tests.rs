@@ -160,4 +160,59 @@ mod test_helpers {
             _ => panic!("Received unexpected event variant from JetStream"),
         }
     }
+
+    #[test]
+    fn test_gateway_config_update_serialization() {
+        use common::protocol::MessageEnvelope;
+        use common::types::{EndpointAuth, EndpointRule, GatewayRouteConfig};
+
+        let gw_config = GatewayRouteConfig {
+            endpoints: vec![EndpointRule {
+                path: "/echo".to_string(),
+                methods: vec!["GET".to_string()],
+                auth: EndpointAuth::None,
+                rate_limit: None,
+            }],
+            ..Default::default()
+        };
+
+        let event = Event::GatewayConfigUpdate {
+            app_id: AppId("echo-service:v1".to_string()),
+            config: gw_config.clone(),
+        };
+
+        let envelope = MessageEnvelope::new("test-node", event.clone());
+        let json = serde_json::to_string(&envelope).unwrap();
+        println!("Serialized GatewayConfigUpdate: {}", json);
+
+        let deserialized: MessageEnvelope<Event> = serde_json::from_str(&json).unwrap();
+        match deserialized.payload {
+            Event::GatewayConfigUpdate { app_id, config } => {
+                assert_eq!(app_id.0, "echo-service:v1");
+                assert_eq!(config, gw_config);
+            }
+            _ => panic!("Expected GatewayConfigUpdate, got {:?}", deserialized.payload),
+        }
+    }
+
+    #[test]
+    fn test_event_discriminants() {
+        use common::types::GatewayRouteConfig;
+        let events: Vec<(&str, Event)> = vec![
+            ("RemoveApp", Event::RemoveApp { app_id: AppId("a".to_string()) }),
+            ("RouteAdd", Event::RouteAdd { route: common::types::Route { host: "".to_string(), app_id: AppId("a".to_string()), path_prefix: "".to_string(), strip_prefix: false, created_at: 0, updated_at: 0 } }),
+            ("RouteRemove", Event::RouteRemove { host: "".to_string() }),
+            ("InstanceReady", Event::InstanceReady { app_id: AppId("a".to_string()), addr: "127.0.0.1:1".parse().unwrap(), node_id: "".to_string() }),
+            ("InstanceDead", Event::InstanceDead { app_id: AppId("a".to_string()), addr: "127.0.0.1:1".parse().unwrap(), node_id: "".to_string() }),
+            ("SecretUpdate", Event::SecretUpdate { app_id: AppId("a".to_string()), key: "".to_string(), encrypted_value: vec![] }),
+            ("GatewayConfigUpdate", Event::GatewayConfigUpdate { app_id: AppId("a".to_string()), config: GatewayRouteConfig::default() }),
+            ("GatewayConfigRemove", Event::GatewayConfigRemove { app_id: AppId("a".to_string()) }),
+            ("NodeLoad", Event::NodeLoad { node_id: "".to_string(), cpu_percent: 0.0, fuel_budget_used_percent: 0.0, active_instances: 0 }),
+            ("NodeJoined", Event::NodeJoined { node_id: "".to_string(), artifact_server_url: "".to_string(), public_key_bytes: vec![], protocol_version: 1, binary_version: "".to_string() }),
+            ("StateSnapshot", Event::StateSnapshot { for_node_id: "".to_string(), configs: vec![], routes: vec![], encrypted_secrets: vec![], artifact_hashes: vec![] }),
+        ];
+        for (name, event) in events {
+            println!("{} -> {:?}", name, std::mem::discriminant(&event));
+        }
+    }
 }

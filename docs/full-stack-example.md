@@ -748,7 +748,7 @@ The `order-service` makes an internal call to `http://payment-service.internal/p
 
 ### 6.2 Verify namespace isolation
 
-Deploy an app in a different namespace and try to reach payment-service:
+Deploy an app in a different namespace and verify it cannot discover payment-service:
 
 ```bash
 # Deploy a "hacker" app in the "staging" namespace
@@ -758,8 +758,14 @@ wasm-ctl deploy \
   --namespace staging \
   --wasm ./some-app.wasm
 
-# From inside this app, trying to connect to payment-service.internal
-# → Connection refused (cross-namespace block)
+# The hacker app will NOT receive PAYMENT_SERVICE_SERVICE_URL
+# because the Supervisor only injects service URLs for same-namespace apps.
+# This is the primary namespace boundary (service discovery isolation).
+#
+# Note: Direct cross-namespace connections to known app ports are also
+# blocked by socket_addr_check, but the internal gateway port (9080)
+# is currently open to all namespaces. Namespace isolation relies on
+# service discovery filtering.
 ```
 
 ### 6.3 Verify API key enforcement on payment-service
@@ -821,11 +827,16 @@ wasm-ctl node health
 tail -f /var/log/wasm-node/node.log | grep order-service
 ```
 
-### "Connection refused" on internal calls
+### "Connection refused" or "Name does not resolve" on internal calls
 
 ```bash
 # Check if both apps are in the same namespace
 wasm-ctl app list --namespace production
+
+# Check DNS resolution for *.internal names
+# The embedded DNS stub requires root to modify /etc/resolv.conf.
+# If the node is not running as root, add the entry manually:
+echo '127.0.0.1 payment-service.internal' | sudo tee -a /etc/hosts
 
 # Check if payment-service is registered in the namespace registry
 # (This is automatic, but verify the app is deployed)
@@ -894,6 +905,6 @@ rm -rf /tmp/nats-jetstream-prod
 | **Database** | PostgreSQL + pgBouncer | Shared transactional database |
 | **Control Plane** | NATS + JetStream | Deploy events, config sync, KV store |
 | **Auth** | Keycloak OIDC | JWT issuance and validation |
-| **Internal Mesh** | Virtual DNS + Network Interceptor | Transparent East-West communication |
+| **Internal Mesh** | Embedded DNS Stub + Internal Gateway | Transparent East-West communication |
 
 This is a production-ready pattern that scales horizontally by adding more platform nodes behind a load balancer, all sharing the same NATS cluster and database.

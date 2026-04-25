@@ -423,7 +423,7 @@ pub struct RouteRateLimit {
     pub distributed: bool,
 }
 
-fn default_true() -> bool {
+pub fn default_true() -> bool {
     true
 }
 

@@ -25,6 +25,8 @@ pub struct EventDispatcher {
     pub bus: messaging::NatsBus,
     pub dns_webhook: Option<DnsWebhookManager>,
     pub node_table: Arc<NodeLoadTable>,
+    /// In-memory gateway cache (also updated when persistent storage changes).
+    pub gateway: Option<Arc<proxy::gateway::Gateway>>,
 }
 
 impl EventDispatcher {
@@ -343,11 +345,19 @@ impl EventDispatcher {
                 if let Err(e) = self.store.save_gateway_config(&app_id.0, &config) {
                     error!(app = %app_id.0, error = %e, "failed to save gateway config");
                 }
+                // Keep the in-memory gateway cache in sync so the internal
+                // proxy can enforce endpoint policies without reloading from disk.
+                if let Some(ref gw) = self.gateway {
+                    gw.set_route_config(&app_id.0, config).await;
+                }
             }
             Event::GatewayConfigRemove { app_id } => {
                 info!(app = %app_id.0, "received gateway config remove");
                 if let Err(e) = self.store.delete_gateway_config(&app_id.0) {
                     error!(app = %app_id.0, error = %e, "failed to delete gateway config");
+                }
+                if let Some(ref gw) = self.gateway {
+                    gw.remove_route_config(&app_id.0).await;
                 }
             }
             // ── Configuration Hot-Reload ──────────────────────────────────
