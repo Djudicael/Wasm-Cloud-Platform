@@ -1,12 +1,12 @@
-# Wasm Cloud Platform — Implementation Master Plan
+# Wasm Cloud Platform
 
-This repository is the implementation blueprint for a Wasm-native cloud platform. It is organized as a sequence of detailed design and implementation documents in the `INFRA_IMPL` folder. Each file represents one buildable layer of the platform and is intended to be implemented in order.
+A multi-tenant, HTTP-serving cloud platform built on WebAssembly and WASI. Replaces container-based architectures with lightweight Wasm isolation, deterministic resource metering, and sub-10ms cold starts.
 
 ## What this project is
 
-- A full technical plan for a multi-tenant, HTTP-serving platform built on WebAssembly and WASI.
-- A replacement architecture for container-based cloud platforms, optimized for low cold start latency, high density, and deterministic resource metering.
-- A documentation-first repo: the code is guided by the implementation layers defined in `INFRA_IMPL`.
+- A production-ready runtime for stateless, HTTP-serving Wasm applications
+- A replacement architecture for container-based cloud platforms, optimized for low cold start latency, high density, and deterministic resource metering
+- A complete platform with built-in API Gateway, service mesh, observability stack, and eBPF kernel monitoring
 
 ## Core platform goals
 
@@ -25,53 +25,62 @@ This repository is the implementation blueprint for a Wasm-native cloud platform
 - **WASI environment injection**: app config and secrets are injected as environment variables.
 - **Per-node local persistence**: `redb` stores artifacts, configs, secrets, metrics, and routing data locally.
 - **Proxy + supervisor split**: Pingora handles incoming HTTP traffic, while the Supervisor manages instance lifecycle.
+- **Internal mesh gateway**: East-West traffic between services is transparently proxied with namespace isolation.
+- **eBPF kernel monitoring**: Sub-millisecond detection of failures, anomalies, and security incidents.
 
-## Documentation index
+## Quick Start
 
-The implementation plan is split into ordered chapters in `INFRA_IMPL`:
+```bash
+# Build the platform
+cargo build --release
 
-- `00_OVERVIEW.md` — Master plan and architecture summary
-- `01_WORKSPACE_SETUP.md` — Cargo workspace and crate structure
-- `02_STORAGE_REDB.md` — Local persistent storage design using `redb`
-- `03_WASM_RUNTIME.md` — Wasmtime integration, AOT compile, fuel and memory limits
-- `04_WASI_NETWORKING.md` — WASI Preview 2 socket model and port allocation
-- `05_ENV_CONFIG.md` — Environment variable and secret injection for Wasm apps
-- `06_SECRETS.md` — Encrypted secret storage and rotation
-- `07_SUPERVISOR_CORE.md` — Supervisor lifecycle, health loop, spawn/prune
-- `08_NATS_MESSAGING.md` — NATS control plane and messaging patterns
-- `09_PROXY_PINGORA.md` — Proxy routing, upstream registry, and health checks
-- `10_DEPLOYMENT_PROTOCOL.md` — Zero-downtime deploy and rollback strategy
-- `11_METRICS_OBSERVABILITY.md` — Prometheus metrics and distributed tracing
-- `12_SCALING.md` — Autoscaling, fuel steering, and request load balancing
-- `13_SECURITY.md` — Sandbox, network policy, and multi-tenant security
-- `14_NODE_ENTRYPOINT.md` — Node startup wiring and CLI integration
-- `15_ROUTE_MANAGEMENT.md` — Routing table sync and host-to-app mapping
-- `16_ARTIFACT_REGISTRY.md` — Artifact distribution and large binary handling
-- `17_WASM_LOGS.md` — Logging capture and streaming
-- `18_ADMIN_CLI.md` — Operator CLI and management commands
-- `19_CLUSTER_BOOTSTRAP.md` — Node join, state sync, and bootstrap processes
-- `20_GRACEFUL_SHUTDOWN.md` — Instance drain and shutdown semantics
-- `21_DATABASE_CONNECTIONS.md` — DB pooling and connection limits
-- `22_STORAGE_SCHEMA_VERSIONING.md` — `redb` schema migration strategy
-- `23_INTEGRATION_TESTING.md` — Test strategy for unit, E2E, and chaos
-- `24_RATE_LIMITING.md` — Proxy rate limiting and DDoS protection
-- `25_PLATFORM_UPGRADES.md` — Rolling platform upgrades and backward compatibility
-- `26_ARTIFACT_GC.md` — Artifact and metrics garbage collection
-- `27_DISASTER_RECOVERY.md` — Failure classification and recovery playbooks
-- `28_BILLING_ACCOUNTING.md` — Tamper-evident fuel billing and accounting
-- `29_DNS_INTEGRATION.md` — DNS routing, custom domains, and TLS integration
-- `39_API_GATEWAY.md` — Built-in API Gateway: auth, CORS, circuit breaker, transforms
+# Start a single node
+./target/release/wasm-node --config config/dev.toml
 
-## How to use this repo
+# Deploy your first app
+wasm-ctl deploy \
+  --app hello-world \
+  --version v1 \
+  --wasm hello-world.wasm \
+  --port 8080
 
-1. Start with `INFRA_IMPL/00_OVERVIEW.md` to understand the architecture and lifecycle.
-2. Follow the files in numeric order to build the platform layer by layer.
-3. Use the completion checklists at the end of each document to verify each feature.
-4. Refer to the architecture diagrams and rationale sections when implementing the runtime and node components.
+# Check node health
+wasm-ctl node health
 
-## What this README is not
+# View metrics
+curl http://localhost:9090/metrics
+```
 
-This repo is not a finished product repository of executable application code. It is a design and implementation plan for a Wasm-native cloud runtime.
+## Documentation
+
+### Getting Started
+
+| Guide | Description |
+|-------|-------------|
+| [`docs/getting-started.md`](docs/getting-started.md) | Build, install, and run your first node |
+| [`docs/deploying-applications.md`](docs/deploying-applications.md) | Deploy apps with manifests, security, and secrets |
+| [`docs/internal-mesh.md`](docs/internal-mesh.md) | East-West communication, namespaces, and service discovery |
+| [`docs/nats-setup.md`](docs/nats-setup.md) | NATS deployment, clustering, security, and monitoring |
+| [`docs/full-stack-example.md`](docs/full-stack-example.md) | End-to-end example: 2 apps + database + auth |
+
+### Observability & Operations
+
+| Guide | Description |
+|-------|-------------|
+| [`docs/observability.md`](docs/observability.md) | Metrics, logging, tracing, health checks, alerting, and SRE playbooks |
+| [`docs/ebpf.md`](docs/ebpf.md) | eBPF kernel monitoring, security incident detection, and automated recovery |
+
+### Gateway Configuration
+
+| Guide | Description |
+|-------|-------------|
+| [`docs/gateway/oidc-setup.md`](docs/gateway/oidc-setup.md) | Configuring OIDC providers (Keycloak, etc.) |
+| [`docs/gateway/cors-examples.md`](docs/gateway/cors-examples.md) | CORS configuration examples |
+| [`docs/gateway/circuit-breaker-tuning.md`](docs/gateway/circuit-breaker-tuning.md) | Tuning circuit breaker thresholds |
+
+### Design Documents
+
+The original implementation design documents are preserved in the `INFRA_IMPL/` folder for reference. These describe the architecture decisions and rationale behind each subsystem.
 
 ## Configuration Management
 
@@ -261,12 +270,43 @@ Incoming Request
 
 See `INFRA_IMPL/39_API_GATEWAY.md` for the full specification.
 
+## Project Structure
+
+```
+.
+├── Cargo.toml                 # Workspace root
+├── config/                    # Example configurations
+│   ├── dev.toml
+│   ├── staging.toml
+│   └── production.toml
+├── crates/                    # Rust workspace crates
+│   ├── common/               # Shared types and constants
+│   ├── ctl/                  # CLI tool (wasm-ctl)
+│   ├── ebpf-monitor/         # eBPF kernel monitoring
+│   ├── internal_gateway/     # East-West service mesh proxy
+│   ├── messaging/            # NATS integration
+│   ├── metrics/              # Prometheus metrics and OpenTelemetry
+│   ├── node/                 # Node entrypoint (wasm-node)
+│   ├── proxy/                # Pingora HTTP proxy + API Gateway
+│   ├── runtime/              # Wasmtime integration, virtual DNS
+│   ├── storage/              # redb persistence layer
+│   └── supervisor/           # Instance lifecycle management
+├── docs/                      # Platform documentation
+│   ├── getting-started.md
+│   ├── deploying-applications.md
+│   ├── internal-mesh.md
+│   ├── nats-setup.md
+│   ├── full-stack-example.md
+│   ├── observability.md
+│   ├── ebpf.md
+│   └── gateway/
+├── INFRA_IMPL/                # Design documents (reference)
+└── README.md                  # This file
+```
+
 ## Notes
 
 - The focus is on **stateless, HTTP-serving applications**.
 - The platform is optimized for **high-density multi-tenancy** and **fast startup**.
 - The NATS bus is the primary control plane; data plane traffic is handled by Pingora and the Supervisor.
-
-## Contact
-
-See the `INFRA_IMPL` folder for the exact design docs and implementation priorities.
+- On Linux 5.8+ with BTF, eBPF provides sub-millisecond failure detection. On other platforms, graceful fallback to userspace polling maintains full functionality.
