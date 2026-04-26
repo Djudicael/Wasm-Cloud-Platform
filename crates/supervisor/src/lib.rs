@@ -2,7 +2,7 @@ pub mod audit;
 pub mod config_validator;
 pub mod db_proxy;
 pub mod deployment;
-pub mod env_resolver;
+
 pub mod instance;
 pub mod instance_manager;
 pub mod network;
@@ -27,7 +27,7 @@ use common::{
 };
 use messaging::events::Event;
 use proxy::{router::HostRouter, upstream::UpstreamRegistry};
-use runtime::{executor::PreparedModule, WasmRuntime};
+use runtime::{executor::ExecutionStats, executor::PreparedModule, limits::IoStats, WasmRuntime};
 use std::{
     collections::HashMap,
     net::SocketAddr,
@@ -74,10 +74,12 @@ pub enum SupervisorCommand {
 #[allow(clippy::type_complexity, clippy::too_many_arguments)]
 pub struct Supervisor {
     store: Store,
+    /// Cached node ID (read from NODE_ID env var at construction time).
+    node_id: String,
     runtime: WasmRuntime,
     port_alloc: Arc<PortAllocator>,
     upstream_registry: Arc<UpstreamRegistry>,
-    pub host_router: Arc<HostRouter>,
+    pub(crate) host_router: Arc<HostRouter>,
     service_registry: Arc<LocalServiceRegistry>,
     env_resolver: Arc<dyn Fn(&AppConfig, u16) -> Vec<(String, String)> + Send + Sync>,
 
@@ -124,6 +126,7 @@ impl Supervisor {
         let (command_tx, command_rx) = mpsc::channel::<SupervisorCommand>(256);
         Arc::new(Self {
             store,
+            node_id: std::env::var("NODE_ID").unwrap_or_else(|_| "node-0".to_string()),
             runtime,
             port_alloc,
             upstream_registry,
@@ -170,8 +173,8 @@ impl Supervisor {
         }
     }
 
-    fn node_id(&self) -> String {
-        std::env::var("NODE_ID").unwrap_or_else(|_| "node-0".to_string())
+    fn node_id(&self) -> &str {
+        &self.node_id
     }
 
     pub fn check_resource_limits(&self, config: &AppConfig) -> Result<(), PlatformError> {
@@ -446,18 +449,59 @@ impl Supervisor {
         // JWT) without the app's involvement.
 
         // 5. Spawn the Wasm instance
+        // NOTE: shutdown_rx is not currently wired into the instance's run loop.
+        // The oneshot channel exists because shutdown_tx is stored in ManagedInstance
+        // and consumed by kill_instance_internal / initiate_shutdown. However, the
+        // Wasm run() call is blocking inside spawn_blocking and does not select on
+        // shutdown_rx, so sending on shutdown_tx alone does not interrupt execution.
+        // Graceful shutdown relies on the HTTP /_platform/shutdown endpoint instead.
+        // To fully wire this, the run loop would need to be restructured to use
+        // tokio::select! or a polling-based approach — a non-trivial refactor since
+        // wasmtime::Store::call_async is not yet supported for blocking WASI _start.
         let (shutdown_tx, _shutdown_rx) = tokio::sync::oneshot::channel::<()>();
         let app_id_clone = app_id.clone();
 
         let prepared_clone = prepared.clone();
         let instance_id = InstanceId(uuid::Uuid::new_v4());
 
+        // Channel to communicate spawn success/failure from the blocking task.
+        // On failure, the task returns a zero-stats ExecutionStats; the outer
+        // code checks spawn_result_rx and returns early, so the stats are unused.
+        let (spawn_result_tx, spawn_result_rx) =
+            tokio::sync::oneshot::channel::<Result<(), PlatformError>>();
+
         let task = tokio::task::spawn_blocking(move || {
             // Use the allocated host_port, NOT wasm_bind_port.
             // The app must bind to the allocated port so the proxy can connect.
-            let (mut instance, _streams) = prepared_clone
-                .spawn_instance(env_vars, host_port, Some(socket_addr_check))
-                .expect("failed to spawn instance");
+            let mut instance =
+                match prepared_clone.spawn_instance(env_vars, host_port, Some(socket_addr_check)) {
+                    Ok(instance) => instance,
+                    Err(e) => {
+                        let _ = spawn_result_tx.send(Err(PlatformError::runtime(format!(
+                            "Failed to spawn instance: {}",
+                            e
+                        ))));
+                        // Return zero-stats on spawn failure — the caller checks
+                        // spawn_result_rx before proceeding and will return early.
+                        return ExecutionStats {
+                            instance_id: InstanceId(uuid::Uuid::nil()),
+                            fuel_limit: 0,
+                            fuel_consumed: 0,
+                            ram_bytes: 0,
+                            wall_clock_ms: 0,
+                            trap: Some("spawn_failed".to_string()),
+                            io_stats: IoStats {
+                                open_fds_peak: 0,
+                                fs_bytes_written: 0,
+                                net_egress_bytes: 0,
+                                outbound_connections: 0,
+                            },
+                        };
+                    }
+                };
+
+            // Signal that spawn succeeded — the caller can now wait for TCP readiness.
+            let _ = spawn_result_tx.send(Ok(()));
 
             // Note: WASI stdout/stderr streams are handled via inherit_* in the runtime
             // The eprintln! output goes to stderr of the wasm-node process
@@ -483,6 +527,23 @@ impl Supervisor {
             stats
         });
 
+        // Check whether spawn_instance succeeded before waiting for TCP readiness.
+        match spawn_result_rx.await {
+            Ok(Ok(())) => { /* spawn succeeded */ }
+            Ok(Err(e)) => {
+                // Spawn failed — release the allocated port and propagate the error.
+                self.port_alloc.release(host_port);
+                return Err(e);
+            }
+            Err(_) => {
+                // Channel dropped without sending — unexpected, treat as spawn failure.
+                self.port_alloc.release(host_port);
+                return Err(PlatformError::runtime(
+                    "Spawn result channel closed unexpectedly",
+                ));
+            }
+        }
+
         // 6. Wait for the TCP port to be ready
         if let Err(e) = crate::instance::wait_for_ready(addr, Duration::from_millis(500)).await {
             self.port_alloc.release(host_port);
@@ -502,19 +563,11 @@ impl Supervisor {
             .bind_source_port(host_port, qualified_app_id.clone())
             .await;
 
-        // 8c. Build virtual DNS for this instance (available for future WASI DNS hooks)
-        let mut virtual_dns =
-            runtime::virtual_dns::VirtualDns::new(qualified_app_id.namespace().to_string());
-        for (bare_name, _) in &ns_services {
-            if bare_name != qualified_app_id.bare_app_name() {
-                virtual_dns.register_service(bare_name);
-            }
-        }
-        tracing::debug!(
-            app = %app_id.0,
-            records = ?virtual_dns,
-            "virtual DNS configured for instance"
-        );
+        // TODO: Wire VirtualDns into the WASI instance so that DNS lookups from
+        // the Wasm module resolve same-namespace services. Currently VirtualDns
+        // is not passed to the instance, so it was being built and immediately
+        // dropped. When wasmtime-wasi supports custom DNS resolvers, construct
+        // VirtualDns here and pass it through the WasiCtxBuilder.
 
         // Extract billing info before config is moved
         let tenant_id = config
@@ -559,7 +612,7 @@ impl Supervisor {
             .send(Event::InstanceReady {
                 app_id: app_id.clone(),
                 addr,
-                node_id: self.node_id(),
+                node_id: self.node_id().to_string(),
             })
             .await;
 
@@ -626,30 +679,72 @@ impl Supervisor {
     }
 
     async fn health_tick(&self) -> Result<(), PlatformError> {
-        let mut pools = self.pools.write().await;
-        for (app_id_str, pool) in pools.iter_mut() {
-            let app_id = AppId(app_id_str.clone());
-            let mut dead_ids = Vec::new();
+        // Phase 1: Under read lock, collect health check data and idle instance IDs
+        let health_checks: Vec<(String, InstanceId, SocketAddr)>;
+        let idle_by_app: Vec<(String, AppId, Vec<InstanceId>)>;
 
-            for inst in &pool.instances {
-                if let InstanceState::Ready { addr } = &inst.state {
-                    let alive = tokio::net::TcpStream::connect(addr).await.is_ok();
-                    if !alive {
-                        warn!(app = app_id_str, %addr, "instance not responding, marking dead");
-                        dead_ids.push(inst.id.clone());
-                    }
-                }
-            }
+        {
+            let pools = self.pools.read().await;
+            health_checks = pools
+                .iter()
+                .flat_map(|(app_id_str, pool)| {
+                    pool.instances.iter().filter_map(|inst| match &inst.state {
+                        InstanceState::Ready { addr } => {
+                            Some((app_id_str.clone(), inst.id.clone(), *addr))
+                        }
+                        _ => None,
+                    })
+                })
+                .collect();
 
-            for id in dead_ids {
-                self.kill_instance_internal(pool, &app_id, &id).await;
-            }
+            idle_by_app = pools
+                .iter()
+                .map(|(app_id_str, pool)| {
+                    (
+                        app_id_str.clone(),
+                        AppId(app_id_str.clone()),
+                        pool.idle_instance_ids(pool.config.idle_timeout_secs),
+                    )
+                })
+                .collect();
+        }
 
-            let idle_ids = pool.idle_instance_ids(pool.config.idle_timeout_secs);
-            for id in idle_ids {
-                self.kill_instance_internal(pool, &app_id, &id).await;
+        // Phase 2: Drop read lock, do TCP health checks
+        let mut dead_by_app: HashMap<String, Vec<InstanceId>> = HashMap::new();
+        for (app_id_str, instance_id, addr) in &health_checks {
+            let alive = tokio::net::TcpStream::connect(addr).await.is_ok();
+            if !alive {
+                warn!(app = app_id_str, %addr, "instance not responding, marking dead");
+                dead_by_app
+                    .entry(app_id_str.clone())
+                    .or_default()
+                    .push(instance_id.clone());
             }
         }
+
+        // Phase 3: Under write lock, remove dead and idle instances
+        {
+            let mut pools = self.pools.write().await;
+            for (app_id_str, app_id, idle_ids) in idle_by_app {
+                let pool = match pools.get_mut(&app_id_str) {
+                    Some(p) => p,
+                    None => continue,
+                };
+
+                // Kill dead instances
+                if let Some(dead_ids) = dead_by_app.remove(&app_id_str) {
+                    for id in dead_ids {
+                        self.kill_instance_internal(pool, &app_id, &id).await;
+                    }
+                }
+
+                // Kill idle instances
+                for id in idle_ids {
+                    self.kill_instance_internal(pool, &app_id, &id).await;
+                }
+            }
+        }
+
         Ok(())
     }
 
@@ -747,7 +842,7 @@ impl Supervisor {
             tenant_id: billing_info.tenant_id,
             app_id: app_id.0.clone(),
             instance_id: id.0.to_string(),
-            node_id: self.node_id(),
+            node_id: self.node_id().to_string(),
             fuel_consumed,
             fuel_quota: billing_info.fuel_quota,
             ram_bytes,
@@ -769,7 +864,7 @@ impl Supervisor {
             .send(Event::InstanceDead {
                 app_id: app_id.clone(),
                 addr,
-                node_id: self.node_id(),
+                node_id: self.node_id().to_string(),
             })
             .await;
 
@@ -805,13 +900,16 @@ impl Supervisor {
                 self.port_alloc.release(addr.port());
             }
             inst.shutdown_tx.send(()).ok();
+            if let Err(e) = tokio::time::timeout(Duration::from_secs(5), inst.task).await {
+                tracing::warn!(instance_id = %id.0, "Instance task did not shut down in time: {}", e);
+            }
 
             let _ = self
                 .event_tx
                 .send(Event::InstanceDead {
                     app_id: app_id.clone(),
                     addr: inst.addr,
-                    node_id: self.node_id(),
+                    node_id: self.node_id().to_string(),
                 })
                 .await;
 
@@ -864,6 +962,12 @@ impl Supervisor {
 
     pub fn upstream(&self) -> &Arc<UpstreamRegistry> {
         &self.upstream_registry
+    }
+
+    /// Get a reference to the host router.
+    /// Public accessor for the `pub(crate)` field.
+    pub fn host_router(&self) -> &Arc<HostRouter> {
+        &self.host_router
     }
 
     pub async fn list_instances(&self, app_id: &AppId) -> Vec<InstanceId> {
@@ -921,8 +1025,8 @@ impl Supervisor {
     /// Kill all instances of an app immediately and record billing.
     pub async fn kill_all_instances(&self, app_id: &AppId) -> Result<(), PlatformError> {
         let instance_ids: Vec<_> = {
-            let mut pools = self.pools.write().await;
-            if let Some(pool) = pools.get_mut(&app_id.0) {
+            let pools = self.pools.read().await;
+            if let Some(pool) = pools.get(&app_id.0) {
                 pool.instances.iter().map(|i| i.id.clone()).collect()
             } else {
                 Vec::new()
@@ -1126,13 +1230,13 @@ impl Supervisor {
 
     /// Gracefully shutdown all instances across all apps.
     /// Used during node shutdown (SIGTERM).
-    pub async fn shutdown_all(&self, _timeout: Duration) {
+    pub async fn shutdown_all(&self, timeout: Duration) {
         tracing::info!("shutting down all instances");
 
         let app_ids = self.list_app_ids().await;
         for app_id in app_ids {
             // Drain app (remove from upstream)
-            if let Err(e) = self.drain_app(&app_id, Duration::from_secs(5)).await {
+            if let Err(e) = self.drain_app(&app_id, timeout).await {
                 tracing::warn!(app = %app_id.0, error = %e, "drain failed");
             }
 
@@ -1150,8 +1254,8 @@ impl Supervisor {
                     .kill_instance_gracefully(
                         &app_id,
                         &instance_id,
-                        Duration::from_secs(2), // drain timeout
-                        Duration::from_secs(5), // grace timeout
+                        timeout / 3,     // drain timeout
+                        timeout * 2 / 3, // grace timeout
                     )
                     .await
                 {

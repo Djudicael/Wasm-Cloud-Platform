@@ -6,15 +6,17 @@ use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
 /// Download the new binary, verify its hash, and write it to disk.
-pub async fn download_and_verify(
+/// Download an artifact and verify its SHA-256 hash, returning the raw bytes.
+///
+/// This is the core download+verify logic shared by both artifact fetching
+/// (for Wasm modules) and binary upgrades.
+pub async fn download_and_verify_bytes(
     artifact_url: &str,
     expected_sha256: &str,
-    install_dir: &Path,
-    binary_name: &str,
-) -> Result<PathBuf, PlatformError> {
-    tracing::info!(url = %artifact_url, "downloading new binary");
+) -> Result<Vec<u8>, PlatformError> {
+    tracing::info!(url = %artifact_url, "downloading artifact");
 
-    // 1. Download the binary
+    // 1. Download
     let response = reqwest::get(artifact_url)
         .await
         .map_err(|e| PlatformError::network(format!("download failed: {}", e)))?;
@@ -31,7 +33,7 @@ pub async fn download_and_verify(
         .await
         .map_err(|e| PlatformError::network(format!("read body failed: {}", e)))?;
 
-    tracing::info!(bytes = bytes.len(), "binary downloaded");
+    tracing::info!(bytes = bytes.len(), "artifact downloaded");
 
     // 2. Verify SHA-256
     let mut hasher = Sha256::new();
@@ -40,12 +42,24 @@ pub async fn download_and_verify(
 
     if actual_hash != expected_sha256 {
         return Err(PlatformError::Security(format!(
-            "SHA-256 mismatch: expected {}, got {}. Aborting upgrade.",
+            "SHA-256 mismatch: expected {}, got {}. Aborting.",
             expected_sha256, actual_hash
         )));
     }
 
-    tracing::info!(sha256 = %actual_hash, "binary hash verified");
+    tracing::info!(sha256 = %actual_hash, "artifact hash verified");
+
+    Ok(bytes.to_vec())
+}
+
+/// Download the new binary, verify its hash, and write it to disk.
+pub async fn download_and_verify(
+    artifact_url: &str,
+    expected_sha256: &str,
+    install_dir: &Path,
+    binary_name: &str,
+) -> Result<PathBuf, PlatformError> {
+    let bytes = download_and_verify_bytes(artifact_url, expected_sha256).await?;
 
     // 3. Ensure install directory exists
     tokio::fs::create_dir_all(install_dir)

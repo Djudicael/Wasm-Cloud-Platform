@@ -8,6 +8,7 @@ use common::{
 use std::future::Future;
 use std::net::SocketAddr;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::time::Instant;
 use wasmtime::component::{Component, Instance, Linker, ResourceTable};
 use wasmtime::{Engine, Store};
@@ -40,6 +41,15 @@ pub struct StoreState {
     pub policy_enforcer: PolicyEnforcer,
 }
 
+impl std::fmt::Debug for StoreState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StoreState")
+            .field("limiter", &self.limiter)
+            .field("policy_enforcer", &self.policy_enforcer)
+            .finish_non_exhaustive()
+    }
+}
+
 impl WasiView for StoreState {
     fn ctx(&mut self) -> WasiCtxView<'_> {
         WasiCtxView {
@@ -63,15 +73,23 @@ pub struct ExecutionStats {
 
 /// A prepared, AOT-compiled module ready for repeated instantiation.
 pub struct PreparedModule {
-    pub engine: Engine,
+    pub engine: Arc<Engine>,
     pub module: Component,
     pub config: AppConfig,
+}
+
+impl std::fmt::Debug for PreparedModule {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PreparedModule")
+            .field("config", &self.config)
+            .finish()
+    }
 }
 
 impl PreparedModule {
     /// Build from a deserialized artifact + app config.
     pub fn from_artifact(
-        engine: Engine,
+        engine: Arc<Engine>,
         artifact_bytes: &[u8],
         config: AppConfig,
     ) -> Result<Self, PlatformError> {
@@ -95,7 +113,7 @@ impl PreparedModule {
         env_vars: Vec<(String, String)>,
         port: u16,
         socket_addr_check: Option<SocketAddrCheckFn>,
-    ) -> Result<(RunningInstance, ()), PlatformError> {
+    ) -> Result<RunningInstance, PlatformError> {
         tracing::info!(app = %self.config.id.0, "spawn_instance called");
         let id = InstanceId::new();
         tracing::info!(instance_id = %id.0, "instance ID created");
@@ -168,7 +186,7 @@ impl PreparedModule {
             policy_enforcer: PolicyEnforcer::new(policy),
         };
 
-        let mut store = Store::new(&self.engine, state);
+        let mut store = Store::new(&*self.engine, state);
 
         // Hook up the resource limiter for memory bounds
         store.limiter(|s| &mut s.limiter);
@@ -177,7 +195,7 @@ impl PreparedModule {
         configure_store(&mut store, self.config.fuel_quota)?;
 
         // Link WASI host functions (Component Model Preview 2)
-        let mut linker = Linker::new(&self.engine);
+        let mut linker = Linker::new(&*self.engine);
         add_to_linker_sync(&mut linker)
             .map_err(|e| PlatformError::runtime(format!("linker error: {e}")))?;
 
@@ -189,27 +207,36 @@ impl PreparedModule {
 
         tracing::debug!("component instantiated");
 
-        Ok((
-            RunningInstance {
-                id,
-                instance,
-                store,
-                config: self.config.clone(),
-                started_at: Instant::now(),
-            },
-            (),
-        ))
+        Ok(RunningInstance {
+            id,
+            instance,
+            store,
+            config: self.config.clone(),
+            started_at: Instant::now(),
+        })
     }
 }
 
 /// An instantiated, running Wasm module.
-#[allow(dead_code)]
 pub struct RunningInstance {
     pub id: InstanceId,
     instance: Instance,
     store: Store<StoreState>,
     config: AppConfig,
     started_at: Instant,
+}
+
+impl Drop for RunningInstance {
+    fn drop(&mut self) {
+        // NOTE: We cannot easily decrement policy counters (outbound_connections_active,
+        // open_fds, etc.) here because the counters live inside StoreState which is owned
+        // by self.store. During Drop, self.store is also being dropped, so accessing its
+        // data is not safe. A proper fix would require the counters to be held in an
+        // Arc separate from the Store, or a pre-drop hook called explicitly before the
+        // instance is dropped. For now, counters are approximate and may over-count
+        // active resources until the Store is fully collected.
+        tracing::debug!(instance_id = %self.id.0, "Dropping RunningInstance");
+    }
 }
 
 impl RunningInstance {
@@ -341,6 +368,6 @@ impl RunningInstance {
     }
 
     fn read_memory_usage(&mut self) -> usize {
-        self.store.data().limiter.current_memory()
+        self.store.data().limiter.current_memory() as usize
     }
 }

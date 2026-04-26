@@ -16,8 +16,8 @@ pub struct DeployArgs {
     app: Option<String>,
 
     /// Version string (e.g. "v2")
-    #[arg(long, default_value = "v1")]
-    version: String,
+    #[arg(long)]
+    version: Option<String>,
 
     /// Namespace (default = "default")
     #[arg(long, default_value = "default")]
@@ -166,20 +166,27 @@ pub async fn run(
     };
 
     // Resolve app name, version, wasm path from manifest or CLI flags
-    let app_name = args.app.clone()
+    let app_name = args
+        .app
+        .clone()
         .or_else(|| manifest.as_ref().map(|m| m.app.name.clone()))
         .ok_or_else(|| anyhow::anyhow!("--app is required when no manifest is provided"))?;
-    let version = if args.version != "v1" {
-        args.version.clone()
-    } else {
-        manifest.as_ref().map(|m| m.app.version.clone()).unwrap_or_else(|| args.version.clone())
-    };
+    let version = args
+        .version
+        .clone()
+        .or_else(|| manifest.as_ref().map(|m| m.app.version.clone()))
+        .unwrap_or_else(|| "v1".to_string());
     let namespace = if args.namespace != "default" {
         args.namespace.clone()
     } else {
-        manifest.as_ref().map(|m| m.app.namespace.clone()).unwrap_or_else(|| args.namespace.clone())
+        manifest
+            .as_ref()
+            .map(|m| m.app.namespace.clone())
+            .unwrap_or_else(|| args.namespace.clone())
     };
-    let wasm_path = args.wasm.clone()
+    let wasm_path = args
+        .wasm
+        .clone()
         .or_else(|| manifest.as_ref().map(|m| m.app.wasm_artifact.clone()))
         .ok_or_else(|| anyhow::anyhow!("--wasm is required when no manifest is provided"))?;
 
@@ -313,11 +320,7 @@ pub async fn run(
         // For now, we publish them as part of the deploy by sending
         // a direct HTTP request to the node's admin API.
         let url = format!("{}/admin/api_keys/{}", node_api, app_id.0);
-        let resp = http
-            .post(&url)
-            .json(&api_keys)
-            .send()
-            .await?;
+        let resp = http.post(&url).json(&api_keys).send().await?;
         if resp.status().is_success() {
             println!("{} API keys stored for {}", "✓".green(), app_id.0.cyan());
         } else {

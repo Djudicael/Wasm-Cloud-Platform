@@ -11,10 +11,11 @@
 ///
 /// # How it works
 ///
-/// When lengths differ, we still perform a comparison (against itself) to burn
-/// the same CPU cycles, then return `false`. When lengths match, we XOR each
-/// corresponding byte and OR the results — the final check is a single branch
-/// on the accumulated result.
+/// We iterate `max(a.len(), b.len())` times, XORing corresponding bytes.
+/// For the shorter array's "missing" bytes, we substitute `0xFF` so that
+/// length differences always produce a non-zero result. The length difference
+/// itself is also ORed into the accumulator. The final check is a single
+/// branch on the accumulated result.
 ///
 /// # Use cases
 ///
@@ -22,22 +23,19 @@
 /// - API key validation
 /// - Any secret comparison where timing leakage is a concern
 pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        // Still do a comparison to avoid leaking length via timing.
-        // Compare a against itself to burn the same CPU cycles.
-        let mut result = 0u8;
-        for byte in a.iter().chain(b.iter()) {
-            result |= byte ^ byte; // always 0, but the loop runs
-        }
-        let _ = &result; // suppress unused-variable warning (result is intentional)
-        false
-    } else {
-        let mut result = 0u8;
-        for (x, y) in a.iter().zip(b.iter()) {
-            result |= x ^ y;
-        }
-        result == 0
+    let mut result: u8 = 0;
+    let max_len = std::cmp::max(a.len(), b.len());
+
+    for i in 0..max_len {
+        let x = a.get(i).copied().unwrap_or(0xFF);
+        let y = b.get(i).copied().unwrap_or(0xFF);
+        result |= x ^ y;
     }
+
+    // Length difference must also factor into the result
+    result |= (a.len() != b.len()) as u8;
+
+    result == 0
 }
 
 #[cfg(test)]

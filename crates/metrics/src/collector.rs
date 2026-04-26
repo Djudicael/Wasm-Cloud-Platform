@@ -8,6 +8,9 @@ use tracing::error;
 
 const CHANNEL_CAPACITY: usize = 10_000;
 
+/// Retention period for metric buckets in minutes (7 days).
+const METRICS_RETENTION_MINUTES: u64 = 60 * 24 * 7;
+
 pub struct MetricsCollector {
     tx: mpsc::Sender<ExecutionSample>,
 }
@@ -47,15 +50,29 @@ async fn aggregation_loop(mut rx: mpsc::Receiver<ExecutionSample>, store: Store)
                 bucket.add(&sample);
             }
             _ = flush_interval.tick() => {
-                let finished: Vec<_> = buckets.drain().collect();
-                for (_, bucket) in finished {
-                    let mb = bucket.finalize();
-                    if let Err(e) = store.write_metric_bucket(&mb) {
-                        error!(error = %e, "failed to write metric bucket");
+                // Only flush buckets for completed minutes, not the current one.
+                // The current minute's bucket may still be accumulating samples.
+                let now_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as u64;
+                let current_minute = floor_to_minute(now_ms);
+
+                let all: Vec<_> = buckets.drain().collect();
+                for (app_id, bucket) in all {
+                    if bucket.minute_ts == current_minute {
+                        // Still in progress — re-insert for next cycle
+                        buckets.insert(app_id, bucket);
+                    } else {
+                        // Completed minute — finalize and persist
+                        let mb = bucket.finalize();
+                        if let Err(e) = store.write_metric_bucket(&mb) {
+                            error!(error = %e, "failed to write metric bucket");
+                        }
                     }
                 }
-                // Prune old metrics (keep 7 days = 60 mins * 24 hrs * 7 days = 10080 mins)
-                store.prune_old_metrics(60 * 24 * 7).ok();
+                // Prune old metrics
+                store.prune_old_metrics(METRICS_RETENTION_MINUTES).ok();
             }
         }
     }

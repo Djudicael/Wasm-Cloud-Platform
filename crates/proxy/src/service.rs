@@ -10,6 +10,10 @@ use pingora_core::Result as PingoraResult;
 use pingora_proxy::{ProxyHttp, Session};
 use std::sync::Arc;
 
+/// Default maximum request body size in bytes (10 MB).
+/// Requests with `Content-Length` exceeding this limit are rejected with 413.
+pub const DEFAULT_MAX_BODY_SIZE_BYTES: usize = 10 * 1024 * 1024;
+
 /// Context passed through the Pingora request pipeline.
 pub struct RequestCtx {
     pub app_id: Option<AppId>,
@@ -50,6 +54,11 @@ pub struct WasmProxy {
             + Send
             + Sync,
     >,
+
+    /// Maximum request body size in bytes. Requests with `Content-Length`
+    /// exceeding this limit are rejected immediately with 413.
+    /// Default: 10 MB (10 * 1024 * 1024 = 10_485_760).
+    pub max_body_size_bytes: usize,
 }
 
 impl WasmProxy {
@@ -74,9 +83,19 @@ impl WasmProxy {
         (self.cold_start)(app_id.clone()).await
     }
 
+    /// Check whether the local node is overloaded and should shed traffic
+    /// to other nodes in the cluster.
+    ///
+    /// TODO: Implement proper overload detection:
+    /// 1. Check `fuel_budget_used_percent` from the node load table against a
+    ///    threshold (e.g., 80%).
+    /// 2. Integrate with eBPF pressure signals (`NodeUnderPressure` events)
+    ///    to detect memory/I/O pressure in real time.
+    /// 3. Consider active instance count relative to a configured per-node limit.
+    /// 4. Factor in OS-level metrics (CPU usage via sysinfo, memory pressure,
+    ///    file descriptor exhaustion) as additional signals.
     async fn node_is_overloaded(&self) -> bool {
-        // Check local fuel consumption (simplified: check CPU via sysinfo)
-        false // placeholder
+        false
     }
 }
 
@@ -114,6 +133,25 @@ impl ProxyHttp for WasmProxy {
         // Health check bypass
         if host.is_empty() || session.req_header().uri.path() == "/_platform/health" {
             return Ok(false); // Continue without routing
+        }
+
+        // Reject oversized request bodies early (before any auth/rate-limit work).
+        if let Some(content_length) = session
+            .req_header()
+            .headers
+            .get("content-length")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.parse::<usize>().ok())
+        {
+            if content_length > self.max_body_size_bytes {
+                tracing::warn!(
+                    content_length,
+                    max = self.max_body_size_bytes,
+                    "request body too large, rejecting"
+                );
+                session.respond_error(413).await?;
+                return Ok(true);
+            }
         }
 
         // Extract or generate trace ID for distributed tracing propagation.
@@ -163,31 +201,38 @@ impl ProxyHttp for WasmProxy {
 
         // 2.5. Find matching endpoint rule (if any)
         let method = session.req_header().method.as_str();
-        let endpoint_rule = ctx.route_config.as_ref()
-            .and_then(|cfg| cfg.endpoints.iter()
-                .find(|e| {
-                    path.starts_with(&e.path) &&
-                    (e.methods.is_empty() || e.methods.iter().any(|m| m.eq_ignore_ascii_case(method)))
-                })
-            );
+        let endpoint_rule = ctx.route_config.as_ref().and_then(|cfg| {
+            cfg.endpoints.iter().find(|e| {
+                path.starts_with(&e.path)
+                    && (e.methods.is_empty()
+                        || e.methods.iter().any(|m| m.eq_ignore_ascii_case(method)))
+            })
+        });
 
         // 3. Authentication (new) — endpoint-level override or route default
         let effective_auth = match endpoint_rule {
             Some(rule) => match &rule.auth {
-                common::types::EndpointAuth::Inherit => {
-                    ctx.route_config.as_ref().map(|c| c.auth.clone()).unwrap_or(crate::gateway::config::AuthPolicy::None)
-                }
+                common::types::EndpointAuth::Inherit => ctx
+                    .route_config
+                    .as_ref()
+                    .map(|c| c.auth.clone())
+                    .unwrap_or(crate::gateway::config::AuthPolicy::None),
                 common::types::EndpointAuth::None => crate::gateway::config::AuthPolicy::None,
-                common::types::EndpointAuth::Authenticated => crate::gateway::config::AuthPolicy::Authenticated,
-                common::types::EndpointAuth::Roles { allowed_roles, client_id } => {
-                    crate::gateway::config::AuthPolicy::Roles {
-                        allowed_roles: allowed_roles.clone(),
-                        client_id: client_id.clone(),
-                    }
+                common::types::EndpointAuth::Authenticated => {
+                    crate::gateway::config::AuthPolicy::Authenticated
                 }
+                common::types::EndpointAuth::Roles {
+                    allowed_roles,
+                    client_id,
+                } => crate::gateway::config::AuthPolicy::Roles {
+                    allowed_roles: allowed_roles.clone(),
+                    client_id: client_id.clone(),
+                },
                 common::types::EndpointAuth::ApiKey => {
                     // API key auth: check X-Api-Key header
-                    let api_key = session.req_header().headers
+                    let api_key = session
+                        .req_header()
+                        .headers
                         .get("x-api-key")
                         .and_then(|v| v.to_str().ok());
                     if let Some(key) = api_key {
@@ -199,7 +244,8 @@ impl ProxyHttp for WasmProxy {
                                 401,
                                 "unauthorized",
                                 "invalid X-Api-Key",
-                            ).await;
+                            )
+                            .await;
                         }
                         crate::gateway::config::AuthPolicy::None
                     } else {
@@ -208,15 +254,24 @@ impl ProxyHttp for WasmProxy {
                             401,
                             "unauthorized",
                             "missing X-Api-Key header",
-                        ).await;
+                        )
+                        .await;
                     }
                 }
             },
-            None => ctx.route_config.as_ref().map(|c| c.auth.clone()).unwrap_or(crate::gateway::config::AuthPolicy::None),
+            None => ctx
+                .route_config
+                .as_ref()
+                .map(|c| c.auth.clone())
+                .unwrap_or(crate::gateway::config::AuthPolicy::None),
         };
 
         if effective_auth != crate::gateway::config::AuthPolicy::None {
-            match self.gateway.authenticate_with_policy(session, &effective_auth).await {
+            match self
+                .gateway
+                .authenticate_with_policy(session, &effective_auth)
+                .await
+            {
                 Ok(identity) => {
                     self.gateway.metrics.auth_success_total.inc();
                     ctx.user_identity = Some(identity);
@@ -239,16 +294,21 @@ impl ProxyHttp for WasmProxy {
         if let Some(ref identity) = ctx.user_identity {
             let authorized = match endpoint_rule {
                 Some(rule) => match &rule.auth {
-                    common::types::EndpointAuth::Roles { allowed_roles, client_id } => {
-                        crate::gateway::authz::authorize_roles(identity, allowed_roles, client_id.as_deref())
-                    }
+                    common::types::EndpointAuth::Roles {
+                        allowed_roles,
+                        client_id,
+                    } => crate::gateway::authz::authorize_roles(
+                        identity,
+                        allowed_roles,
+                        client_id.as_deref(),
+                    ),
                     _ => true, // other auth types already validated
                 },
-                None => {
-                    ctx.route_config.as_ref()
-                        .map(|cfg| crate::gateway::authz::authorize(identity, &cfg.auth))
-                        .unwrap_or(true)
-                }
+                None => ctx
+                    .route_config
+                    .as_ref()
+                    .map(|cfg| crate::gateway::authz::authorize(identity, &cfg.auth))
+                    .unwrap_or(true),
             };
             if !authorized {
                 tracing::warn!(user = %identity.sub, "authorization denied");
@@ -488,7 +548,10 @@ impl ProxyHttp for WasmProxy {
             .unwrap_or(0);
 
         // Update circuit breaker metrics for open circuits
-        self.gateway.metrics.circuits_open.set(self.gateway.circuit_breaker.open_circuit_count());
+        self.gateway
+            .metrics
+            .circuits_open
+            .set(self.gateway.circuit_breaker.open_circuit_count());
 
         tracing::info!(
             app_id = ctx
@@ -547,6 +610,7 @@ mod tests {
             metrics: None,
             gateway: Arc::new(Gateway::new(None)),
             cold_start,
+            max_body_size_bytes: super::DEFAULT_MAX_BODY_SIZE_BYTES,
         };
 
         let app_id = AppId("test-app".to_string());

@@ -6,9 +6,9 @@ use std::sync::Arc;
 use std::time::Instant;
 
 pub struct InstancePool {
-    pub config: AppConfig,
-    pub prepared: Arc<PreparedModule>,
-    pub instances: Vec<ManagedInstance>,
+    pub(crate) config: AppConfig,
+    pub(crate) prepared: Arc<PreparedModule>,
+    pub(crate) instances: Vec<ManagedInstance>,
 }
 
 impl InstancePool {

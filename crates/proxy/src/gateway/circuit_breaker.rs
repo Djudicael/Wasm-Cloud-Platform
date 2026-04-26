@@ -126,6 +126,26 @@ impl CircuitBreakerManager {
             .count() as i64
     }
 
+    /// Prune circuit breaker entries for apps that are no longer active.
+    ///
+    /// Call this periodically (e.g., after receiving a cluster snapshot or
+    /// when apps are removed) to prevent memory leaks from stale entries.
+    /// Returns the number of pruned entries.
+    pub fn prune_removed_apps(&self, active_app_ids: &[String]) -> i64 {
+        let before = self.circuits.len();
+        self.circuits
+            .retain(|app_id, _| active_app_ids.contains(app_id));
+        let pruned = before - self.circuits.len();
+        if pruned > 0 {
+            tracing::info!(
+                pruned,
+                remaining = self.circuits.len(),
+                "pruned circuit breaker entries for removed apps"
+            );
+        }
+        pruned as i64
+    }
+
     /// Set the last state change time for an app (test helper).
     pub fn set_last_state_change(&self, app_id: &str, instant: Instant) {
         let mut circuit = self.circuits.entry(app_id.to_string()).or_insert_with(|| Circuit {

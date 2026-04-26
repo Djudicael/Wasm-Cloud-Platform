@@ -53,18 +53,24 @@ impl EventCallbacks for NodeEbpfCallbacks {
             node_id: node_id.to_string(),
             pressure_level,
         };
-        if let Err(e) = tokio::runtime::Handle::current().block_on(self.bus.publish(&event)) {
-            warn!(error = %e, "Failed to publish NodeUnderPressure event");
-        }
+        let bus = self.bus.clone();
+        tokio::spawn(async move {
+            if let Err(e) = bus.publish(&event).await {
+                tracing::warn!("Failed to publish pressure event: {}", e);
+            }
+        });
     }
 
     fn publish_node_pressure_recovered(&self, node_id: &str) {
         let event = messaging::events::Event::NodePressureRecovered {
             node_id: node_id.to_string(),
         };
-        if let Err(e) = tokio::runtime::Handle::current().block_on(self.bus.publish(&event)) {
-            warn!(error = %e, "Failed to publish NodePressureRecovered event");
-        }
+        let bus = self.bus.clone();
+        tokio::spawn(async move {
+            if let Err(e) = bus.publish(&event).await {
+                tracing::warn!("Failed to publish pressure recovered event: {}", e);
+            }
+        });
     }
 
     fn publish_security_incident(&self, node_id: &str, pid: u32, syscall_nr: u64, category: &str) {
@@ -75,9 +81,12 @@ impl EventCallbacks for NodeEbpfCallbacks {
             syscall_nr,
             category: category.to_string(),
         };
-        if let Err(e) = tokio::runtime::Handle::current().block_on(self.bus.publish(&event)) {
-            warn!(error = %e, "Failed to publish SecurityIncident event");
-        }
+        let bus = self.bus.clone();
+        tokio::spawn(async move {
+            if let Err(e) = bus.publish(&event).await {
+                tracing::warn!("Failed to publish security incident event: {}", e);
+            }
+        });
     }
 
     fn kill_instance(&self, pid: u32, reason: &str) {
@@ -523,7 +532,7 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    let runtime = runtime::WasmRuntime::new();
+    let runtime = runtime::WasmRuntime::new().expect("Failed to create WasmRuntime");
     info!("Wasm runtime initialized (Cranelift AOT)");
 
     let bind_addr: IpAddr = "0.0.0.0".parse().unwrap();
@@ -555,7 +564,14 @@ async fn main() -> anyhow::Result<()> {
 
     recovery::startup_integrity_check(&store, bus.client()).await;
 
-    let (event_tx, _event_rx) = mpsc::channel::<messaging::events::Event>(1000);
+    let (event_tx, event_rx) = mpsc::channel::<messaging::events::Event>(1000);
+    // Wire the event receiver to a publisher task that forwards events to NATS
+    {
+        let bus_for_publisher = bus.clone();
+        tokio::spawn(async move {
+            messaging::publisher::run_publisher(bus_for_publisher, event_rx).await;
+        });
+    }
 
     // Initialize database manager
     let db_config = db_config::DatabaseConfig {
@@ -762,6 +778,9 @@ async fn main() -> anyhow::Result<()> {
         runtime: runtime.clone(),
         node_id: config.node.node_id.clone(),
         artifact_server_url: artifact_server_url.clone(),
+        supervisor_addr: format!("127.0.0.1:{}", config.admin.port)
+            .parse()
+            .unwrap_or_else(|_| "127.0.0.1:9000".parse().unwrap()),
         secret_provider: secret_provider.clone(),
         bootstrap_keypair,
         bus: bus.clone(),
@@ -790,11 +809,18 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    // Subscribe to critical control plane events with durable consumers
-    for _subject in &["instance.ready.>", "instance.dead.>"] {
+    // Subscribe to critical control plane events with durable consumers.
+    // Each subject gets a unique consumer name to avoid conflicts within the same stream.
+    // TODO: Pass subject to subscribe_durable for subject-filtered consumers
+    //       once the messaging API supports it.
+    for subject in &["instance.ready.>", "instance.dead.>"] {
         let d = dispatcher.clone();
         let stream = "CONTROL".to_string();
-        let consumer = format!("node-{}", config.node.node_id);
+        let consumer = format!(
+            "node-{}-{}",
+            config.node.node_id,
+            subject.replace('.', "-").replace('>', "all")
+        );
         bus.subscribe_durable(&stream, &consumer, move |event| {
             let d = d.clone();
             async move { d.handle(event).await }
@@ -802,10 +828,14 @@ async fn main() -> anyhow::Result<()> {
         .await?;
     }
 
-    for _subject in &["secrets.update.>", "config.update.>"] {
+    for subject in &["secrets.update.>", "config.update.>"] {
         let d = dispatcher.clone();
         let stream = "CONTROL".to_string();
-        let consumer = format!("node-{}", config.node.node_id);
+        let consumer = format!(
+            "node-{}-{}",
+            config.node.node_id,
+            subject.replace('.', "-").replace('>', "all")
+        );
         bus.subscribe_durable(&stream, &consumer, move |event| {
             let d = d.clone();
             async move { d.handle(event).await }
@@ -813,10 +843,14 @@ async fn main() -> anyhow::Result<()> {
         .await?;
     }
 
-    for _subject in &["node.load.>", "routes.", "cluster.>"] {
+    for subject in &["node.load.>", "routes.", "cluster.>"] {
         let d = dispatcher.clone();
         let stream = "NODE".to_string();
-        let consumer = format!("node-{}", config.node.node_id);
+        let consumer = format!(
+            "node-{}-{}",
+            config.node.node_id,
+            subject.replace('.', "-").replace('>', "all")
+        );
         bus.subscribe_durable(&stream, &consumer, move |event| {
             let d = d.clone();
             async move { d.handle(event).await }
@@ -1062,6 +1096,7 @@ async fn main() -> anyhow::Result<()> {
         backpressure: backpressure.clone(),
         metrics: Some(rate_limit_metrics),
         gateway,
+        max_body_size_bytes: 10 * 1024 * 1024, // 10 MB
     };
 
     let tls = match (&config.proxy.tls_cert, &config.proxy.tls_key) {
@@ -1495,14 +1530,20 @@ async fn main() -> anyhow::Result<()> {
                     let purged = store.gc_undeployed_apps(0).unwrap_or(0);
                     tracing::info!(apps = purged, "Forced GC: undeployed apps purged");
 
-                    // Get list of apps that were marked undeployed by reading from GC metadata
-                    // For simplicity, we kill instances for all apps that have no active routes
+                    // Only force-kill instances for undeployed apps (apps with no active routes).
+                    // Killing instances for still-deployed apps would cause unnecessary disruption.
                     let app_ids = store.list_apps().unwrap_or_default();
+                    let routes = store.list_routes().unwrap_or_default();
+                    let routed_app_ids: Vec<String> =
+                        routes.iter().map(|r| r.app_id.0.clone()).collect();
                     let mut killed_count = 0;
 
-                    for app_id in app_ids.iter() {
+                    for app_id in &app_ids {
+                        // Skip apps that still have active routes — they are still deployed
+                        if routed_app_ids.contains(&app_id.0) {
+                            continue;
+                        }
                         let app_id_obj = common::types::AppId(app_id.0.clone());
-                        // Try to kill all instances - this is safe to call even if app is still deployed
                         match supervisor.kill_all_instances(&app_id_obj).await {
                             Ok(()) => {
                                 killed_count += 1;
@@ -1510,7 +1551,7 @@ async fn main() -> anyhow::Result<()> {
                             Err(e) => {
                                 tracing::debug!(app = %app_id.0, error = %e, "No instances to kill");
                             }
-}
+                        }
                     }
 
                     (

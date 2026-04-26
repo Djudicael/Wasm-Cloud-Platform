@@ -40,7 +40,7 @@ impl Store {
             if let Some(seq_str) = key_str.strip_prefix("node-") {
                 if let Some(seq) = seq_str
                     .split(':')
-                    .next()
+                    .last()
                     .and_then(|s| s.parse::<u64>().ok())
                 {
                     max_seq = max_seq.max(seq);

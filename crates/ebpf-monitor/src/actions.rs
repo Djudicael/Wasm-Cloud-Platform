@@ -314,7 +314,7 @@ impl ActionDispatcher {
     ///
     /// Returns the previous config for audit logging.
     pub fn update_thresholds(&self, new_config: MonitorConfig) -> MonitorConfig {
-        let mut guard = self.config.write().unwrap();
+        let mut guard = self.config.write().unwrap_or_else(|e| e.into_inner());
         let previous = guard.clone();
         tracing::info!(
             old_fd_soft = previous.fd_soft_limit,
@@ -333,7 +333,10 @@ impl ActionDispatcher {
 
     /// Read the current monitor configuration (for introspection / admin API).
     pub fn current_config(&self) -> MonitorConfig {
-        self.config.read().unwrap().clone()
+        self.config
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     /// Dispatch a monitor event: update metrics and trigger recovery actions.

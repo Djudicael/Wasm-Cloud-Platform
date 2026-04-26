@@ -11,11 +11,14 @@ pub async fn run(node_api: &str, http: &reqwest::Client) -> Result<()> {
                 println!("{}", "Deployed applications:".bold());
                 println!("{}", serde_json::to_string_pretty(&apps)?);
             } else {
-                println!("{} Node API returned status {}", "✗".red(), resp.status());
+                return Err(anyhow::anyhow!(
+                    "Node API returned status {}",
+                    resp.status()
+                ));
             }
         }
         Err(e) => {
-            println!("{} Failed to connect to node API: {}", "✗".red(), e);
+            return Err(anyhow::anyhow!("Failed to connect to node API: {}", e));
         }
     }
     Ok(())
@@ -30,11 +33,14 @@ pub async fn instances(node_api: &str, http: &reqwest::Client) -> Result<()> {
                 println!("{}", "Running instances:".bold());
                 println!("{}", serde_json::to_string_pretty(&data)?);
             } else {
-                println!("{} Node API returned status {}", "✗".red(), resp.status());
+                return Err(anyhow::anyhow!(
+                    "Node API returned status {}",
+                    resp.status()
+                ));
             }
         }
         Err(e) => {
-            println!("{} Failed to connect to node API: {}", "✗".red(), e);
+            return Err(anyhow::anyhow!("Failed to connect to node API: {}", e));
         }
     }
     Ok(())

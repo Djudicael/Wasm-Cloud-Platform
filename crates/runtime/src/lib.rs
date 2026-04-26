@@ -1,8 +1,6 @@
 pub mod compiler;
-pub mod custom_pipe;
 pub mod executor;
 pub mod limits;
-pub mod metadata_stream;
 pub mod policy_tracker;
 pub mod policy_wasi;
 pub mod virtual_dns;
@@ -21,17 +19,14 @@ pub struct WasmRuntime {
     pub engine: Arc<Engine>,
 }
 
-impl Default for WasmRuntime {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl WasmRuntime {
-    pub fn new() -> Self {
-        WasmRuntime {
-            engine: Arc::new(compiler::build_engine()),
-        }
+    /// Create a new WasmRuntime with a Cranelift-based AOT engine.
+    /// Returns an error if the engine fails to initialize.
+    pub fn new() -> Result<Self, PlatformError> {
+        let engine = compiler::build_engine()?;
+        Ok(WasmRuntime {
+            engine: Arc::new(engine),
+        })
     }
 
     /// Compile raw `.wasm` bytes to a serializable artifact.
@@ -46,6 +41,6 @@ impl WasmRuntime {
         artifact_bytes: &[u8],
         config: AppConfig,
     ) -> Result<PreparedModule, PlatformError> {
-        PreparedModule::from_artifact(self.engine.as_ref().clone(), artifact_bytes, config)
+        PreparedModule::from_artifact(self.engine.clone(), artifact_bytes, config)
     }
 }

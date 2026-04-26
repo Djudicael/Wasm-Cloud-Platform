@@ -101,6 +101,10 @@ pub enum ProbeType {
 }
 
 /// Check the node process memory usage.
+///
+/// **Note:** This function performs blocking I/O (reads `/proc/self/status` on Linux)
+/// and should be called via [`tokio::task::spawn_blocking`] in async contexts to avoid
+/// blocking the tokio runtime.
 pub fn check_memory(max_memory_bytes: u64) -> DependencyHealth {
     let usage = get_process_memory_usage();
 

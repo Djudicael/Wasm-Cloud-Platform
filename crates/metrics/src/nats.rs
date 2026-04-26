@@ -89,6 +89,11 @@ pub async fn nats_monitor_loop(client: async_nats::Client, metrics: NatsMetrics)
 
     let js = async_nats::jetstream::new(client.clone());
     let mut was_connected = false;
+    // Track whether we've ever successfully connected at least once.
+    // Only increment reconnect_count on transitions from disconnected →
+    // connected AFTER the first connection, so the initial connect isn't
+    // counted as a "reconnect".
+    let mut ever_connected = false;
 
     loop {
         ticker.tick().await;
@@ -96,10 +101,11 @@ pub async fn nats_monitor_loop(client: async_nats::Client, metrics: NatsMetrics)
         let state = client.connection_state();
         if state == async_nats::connection::State::Connected {
             metrics.connection_healthy.set(1.0);
-            if !was_connected {
+            if !was_connected && ever_connected {
                 metrics.reconnect_count.with_label_values(&[&node_id]).inc();
-                was_connected = true;
             }
+            was_connected = true;
+            ever_connected = true;
         } else {
             metrics.connection_healthy.set(0.0);
             was_connected = false;

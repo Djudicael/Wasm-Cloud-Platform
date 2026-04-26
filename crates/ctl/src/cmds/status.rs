@@ -14,11 +14,14 @@ pub async fn run(node_api: &str, http: &reqwest::Client) -> Result<()> {
             if resp.status().is_success() {
                 println!("  Node API:     {} {}", "✓".green(), "healthy".green());
             } else {
-                println!("  Node API:     {} status {}", "✗".red(), resp.status());
+                return Err(anyhow::anyhow!(
+                    "Node API returned status {}",
+                    resp.status()
+                ));
             }
         }
         Err(e) => {
-            println!("  Node API:     {} unreachable ({})", "✗".red(), e);
+            return Err(anyhow::anyhow!("Node API unreachable: {}", e));
         }
     }
 

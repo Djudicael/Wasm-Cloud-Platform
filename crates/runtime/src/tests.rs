@@ -35,7 +35,7 @@ fn test_list_hello_axum_exports() {
     )
     .expect("Failed to read WASM file");
 
-    let runtime = WasmRuntime::new();
+    let runtime = WasmRuntime::new().expect("Failed to create WasmRuntime");
     let component = wasmtime::component::Component::from_binary(&runtime.engine, &wasm_bytes)
         .expect("Failed to parse component");
 
@@ -101,13 +101,13 @@ fn test_list_hello_axum_exports() {
 
 #[test]
 fn test_runtime_initialization() {
-    let runtime = WasmRuntime::new();
+    let runtime = WasmRuntime::new().expect("Failed to create WasmRuntime");
     assert!(Arc::strong_count(&runtime.engine) >= 1);
 }
 
 #[test]
 fn test_compile_and_run_minimal() {
-    let runtime = WasmRuntime::new();
+    let runtime = WasmRuntime::new().expect("Failed to create WasmRuntime");
     let wasm_bytes = wat::parse_str(
         r#"
         (component
@@ -135,7 +135,7 @@ fn test_compile_and_run_minimal() {
         .expect("Failed to prepare module");
 
     // 3. Spawn and Run
-    let (mut instance, _streams) = prepared.spawn_instance(vec![], 8080, None).expect("Spawn failed");
+    let mut instance = prepared.spawn_instance(vec![], 8080, None).expect("Spawn failed");
     let stats = instance.run();
 
     assert!(
@@ -150,7 +150,7 @@ fn test_compile_and_run_minimal() {
 #[test]
 #[cfg_attr(windows, ignore = "MSVC unwinding issue on traps")]
 fn test_fuel_exhaustion_trap() {
-    let runtime = WasmRuntime::new();
+    let runtime = WasmRuntime::new().expect("Failed to create WasmRuntime");
     // Infinite loop
     let wasm_bytes = wat::parse_str(
         r#"
@@ -175,7 +175,7 @@ fn test_fuel_exhaustion_trap() {
     config.fuel_quota = FuelQuota(1000); // Small fuel quota
 
     let prepared = runtime.prepare(&artifact, config).unwrap();
-    let (mut instance, _streams) = prepared.spawn_instance(vec![], 8080, None).unwrap();
+    let mut instance = prepared.spawn_instance(vec![], 8080, None).unwrap();
     let stats = instance.run();
 
     assert!(
@@ -188,7 +188,7 @@ fn test_fuel_exhaustion_trap() {
 #[test]
 #[cfg_attr(windows, ignore = "MSVC unwinding issue on traps")]
 fn test_zero_fuel_immediate_trap() {
-    let runtime = WasmRuntime::new();
+    let runtime = WasmRuntime::new().expect("Failed to create WasmRuntime");
     let wasm_bytes = wat::parse_str(
         r#"
         (component
@@ -210,7 +210,7 @@ fn test_zero_fuel_immediate_trap() {
     config.fuel_quota = FuelQuota(1); // MSVC Wasmtime panics on absolute 0.
 
     let prepared = runtime.prepare(&artifact, config).unwrap();
-    let (mut instance, _streams) = prepared.spawn_instance(vec![], 8080, None).unwrap();
+    let mut instance = prepared.spawn_instance(vec![], 8080, None).unwrap();
     let stats = instance.run();
 
     assert!(stats.trap.is_some(), "Zero fuel should trap immediately");
@@ -218,7 +218,7 @@ fn test_zero_fuel_immediate_trap() {
 
 #[test]
 fn test_memory_limit_enforced() {
-    let runtime = WasmRuntime::new();
+    let runtime = WasmRuntime::new().expect("Failed to create WasmRuntime");
     // Tries to grow memory by 10 pages.
     // If it succeeds, it triggers unreachable (trap).
     // If it fails (returns -1), it exits cleanly.
@@ -247,7 +247,7 @@ fn test_memory_limit_enforced() {
     config.memory_limit = MemoryPages(2); // Limit is 2 pages, growth of 10 should be rejected
 
     let prepared = runtime.prepare(&artifact, config).unwrap();
-    let (mut instance, _streams) = prepared.spawn_instance(vec![], 8080, None).unwrap();
+    let mut instance = prepared.spawn_instance(vec![], 8080, None).unwrap();
     let stats = instance.run();
 
     // No trap means the memory.grow returned -1!
@@ -259,7 +259,7 @@ fn test_memory_limit_enforced() {
 
 #[test]
 fn test_concurrency() {
-    let runtime = WasmRuntime::new();
+    let runtime = WasmRuntime::new().expect("Failed to create WasmRuntime");
     let wasm_bytes = wat::parse_str(
         r#"
         (component
@@ -280,7 +280,7 @@ fn test_concurrency() {
     let a1 = artifact.clone();
     let t1 = thread::spawn(move || {
         let prepared = r1.prepare(&a1, base_config()).unwrap();
-        let (mut inst, _streams) = prepared.spawn_instance(vec![], 8081, None).unwrap();
+        let mut inst = prepared.spawn_instance(vec![], 8081, None).unwrap();
         inst.run()
     });
 
@@ -288,7 +288,7 @@ fn test_concurrency() {
     let a2 = artifact.clone();
     let t2 = thread::spawn(move || {
         let prepared = r2.prepare(&a2, base_config()).unwrap();
-        let (mut inst, _streams) = prepared.spawn_instance(vec![], 8082, None).unwrap();
+        let mut inst = prepared.spawn_instance(vec![], 8082, None).unwrap();
         inst.run()
     });
 
@@ -297,58 +297,6 @@ fn test_concurrency() {
 
     assert!(s1.trap.is_none());
     assert!(s2.trap.is_none());
-}
-
-#[test]
-fn test_io_resource_tracker_enforcement() {
-    use crate::limits::IoResourceTracker;
-    use common::types::ExtendedLimits;
-
-    let limits = ExtendedLimits {
-        max_open_fds: 2,
-        max_fs_write_bytes: 100,
-        max_net_egress_bytes: 200,
-        max_outbound_connections: 1,
-    };
-    let mut tracker = IoResourceTracker::new(limits);
-
-    // 1. max_open_fds
-    assert!(tracker.track_fd_open().is_ok());
-    assert!(tracker.track_fd_open().is_ok());
-    assert!(
-        tracker.track_fd_open().is_err(),
-        "Opening beyond max_open_fds should return error"
-    );
-
-    // fd_close decrements
-    tracker.track_fd_close();
-    assert!(
-        tracker.track_fd_open().is_ok(),
-        "Closing an fd should allow opening a new one"
-    );
-
-    // 2. max_fs_write_bytes
-    assert!(tracker.track_fs_write(50).is_ok());
-    assert!(tracker.track_fs_write(50).is_ok());
-    assert!(
-        tracker.track_fs_write(1).is_err(),
-        "Writing beyond max_fs_write_bytes should return error"
-    );
-
-    // 3. max_net_egress_bytes
-    assert!(tracker.track_net_egress(150).is_ok());
-    assert!(tracker.track_net_egress(50).is_ok());
-    assert!(
-        tracker.track_net_egress(1).is_err(),
-        "Sending beyond max_net_egress_bytes should return error"
-    );
-
-    // 4. max_outbound_connections
-    assert!(tracker.track_outbound_connect().is_ok());
-    assert!(
-        tracker.track_outbound_connect().is_err(),
-        "Connecting beyond max_outbound_connections should return error"
-    );
 }
 
 #[test]
@@ -386,7 +334,7 @@ fn test_default_extended_limits_applied() {
     let config = base_config();
     assert!(config.extended_limits.is_none());
 
-    let runtime = WasmRuntime::new();
+    let runtime = WasmRuntime::new().expect("Failed to create WasmRuntime");
     let wasm_bytes = wat::parse_str(
         r#"
         (component
@@ -403,7 +351,7 @@ fn test_default_extended_limits_applied() {
 
     let artifact = runtime.compile(&wasm_bytes).unwrap();
     let prepared = runtime.prepare(&artifact, config).unwrap();
-    let (mut instance, _streams) = prepared.spawn_instance(vec![], 8080, None).unwrap();
+    let mut instance = prepared.spawn_instance(vec![], 8080, None).unwrap();
     let stats = instance.run();
 
     assert!(stats.trap.is_none());

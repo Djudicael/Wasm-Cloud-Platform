@@ -13,7 +13,7 @@ pub struct LocalSecretProvider {
     store: Store,
     kek: Arc<SymmetricKey>,
     /// In-memory cache of decrypted DEKs (keyed by app_id).
-    dek_cache: Arc<RwLock<std::collections::HashMap<String, SymmetricKey>>>,
+    dek_cache: Arc<RwLock<std::collections::HashMap<String, Arc<SymmetricKey>>>>,
 }
 
 impl LocalSecretProvider {
@@ -26,30 +26,40 @@ impl LocalSecretProvider {
     }
 
     /// Get or create the DEK for an app.
-    async fn get_or_create_dek(&self, app_id: &AppId) -> Result<SymmetricKey, PlatformError> {
-        // Check in-memory cache first
+    ///
+    /// Uses a double-check locking pattern to avoid TOCTOU races:
+    /// 1. Fast path: read lock to check cache
+    /// 2. Slow path: write lock, re-check cache, then load/create DEK
+    async fn get_or_create_dek(&self, app_id: &AppId) -> Result<Arc<SymmetricKey>, PlatformError> {
+        // Check in-memory cache first (read lock — fast path)
         {
             let cache = self.dek_cache.read().await;
-            if cache.contains_key(&app_id.0) {
-                let dek_bytes = *cache[&app_id.0].as_bytes();
-                return Ok(SymmetricKey::from_bytes(dek_bytes));
+            if let Some(key) = cache.get(&app_id.0) {
+                return Ok(Arc::clone(key));
             }
         }
 
+        // Not in cache — acquire write lock for the full operation
+        let mut cache = self.dek_cache.write().await;
+
+        // Double-check after acquiring write lock (another task may have inserted)
+        if let Some(key) = cache.get(&app_id.0) {
+            return Ok(Arc::clone(key));
+        }
+
         // Load bundle from redb
-        let bundle = self.load_bundle(app_id)?;
-        let dek = match bundle {
+        let dek = match self.load_bundle(app_id)? {
             Some(b) => {
                 // Decrypt the DEK using the KEK
                 let decrypted = decrypt(&self.kek, &EncryptedBlob(b.encrypted_dek))?;
                 let mut key_bytes = [0u8; 32];
                 key_bytes.copy_from_slice(&decrypted[..32]);
-                SymmetricKey::from_bytes(key_bytes)
+                Arc::new(SymmetricKey::from_bytes(key_bytes))
             }
             None => {
                 // First time: generate a new DEK, encrypt it with KEK, store bundle
-                let new_dek = SymmetricKey::generate();
-                let encrypted_dek = encrypt(&self.kek, new_dek.as_bytes())?;
+                let new_dek = Arc::new(SymmetricKey::generate());
+                let encrypted_dek = encrypt(&new_dek, new_dek.as_bytes())?;
                 let bundle = AppSecretBundle {
                     app_id: app_id.0.clone(),
                     encrypted_dek: encrypted_dek.0,
@@ -62,9 +72,8 @@ impl LocalSecretProvider {
             }
         };
 
-        // Cache the DEK
-        let mut cache = self.dek_cache.write().await;
-        cache.insert(app_id.0.clone(), SymmetricKey::from_bytes(*dek.as_bytes()));
+        // Cache the DEK (still holding write lock)
+        cache.insert(app_id.0.clone(), Arc::clone(&dek));
 
         Ok(dek)
     }
@@ -72,7 +81,7 @@ impl LocalSecretProvider {
     fn load_bundle(&self, app_id: &AppId) -> Result<Option<AppSecretBundle>, PlatformError> {
         let tx = self
             .store
-            .db
+            .db()
             .begin_read()
             .map_err(PlatformError::storage_source)?;
         let table = tx
@@ -95,7 +104,7 @@ impl LocalSecretProvider {
         let bytes = bincode::serialize(bundle).map_err(PlatformError::storage_source)?;
         let tx = self
             .store
-            .db
+            .db()
             .begin_write()
             .map_err(PlatformError::storage_source)?;
         {
@@ -108,6 +117,33 @@ impl LocalSecretProvider {
         }
         tx.commit().map_err(PlatformError::storage_source)
     }
+
+    /// Save bundle with optimistic concurrency check.
+    ///
+    /// Reads the current version from disk and compares it to `expected_version`.
+    /// If they differ, another writer modified the bundle concurrently and this
+    /// write is rejected to prevent lost updates.
+    fn save_bundle_with_version(
+        &self,
+        app_id: &AppId,
+        bundle: &AppSecretBundle,
+        expected_version: u64,
+    ) -> Result<(), PlatformError> {
+        let current = self.load_bundle(app_id)?;
+        match current {
+            Some(existing) if existing.version != expected_version => {
+                return Err(PlatformError::storage(format!(
+                    "concurrent modification: expected version {}, found {}",
+                    expected_version, existing.version
+                )));
+            }
+            None => {
+                return Err(PlatformError::storage("Bundle vanished before save"));
+            }
+            _ => {}
+        }
+        self.save_bundle(bundle)
+    }
 }
 
 #[async_trait]
@@ -117,10 +153,9 @@ impl SecretProvider for LocalSecretProvider {
         let bundle = self
             .load_bundle(app_id)?
             .ok_or_else(|| PlatformError::AppNotFound(app_id.0.clone()))?;
-        let encrypted_value = bundle
-            .secrets
-            .get(key)
-            .ok_or_else(|| PlatformError::AppNotFound(format!("secret '{key}' not found")))?;
+        let encrypted_value = bundle.secrets.get(key).ok_or_else(|| {
+            PlatformError::storage(format!("secret '{}' not found for app '{}'", key, app_id.0))
+        })?;
         let plaintext = decrypt(&dek, &EncryptedBlob(encrypted_value.clone()))?;
         String::from_utf8(plaintext).map_err(|e| PlatformError::encryption(e.to_string()))
     }
@@ -132,19 +167,36 @@ impl SecretProvider for LocalSecretProvider {
             .load_bundle(app_id)?
             .ok_or_else(|| PlatformError::storage("Bundle vanished"))?;
 
+        let expected_version = bundle.version;
+
         bundle.secrets.insert(key.to_string(), encrypted_value.0);
         bundle.version += 1;
         bundle.updated_at = now_secs();
-        self.save_bundle(&bundle)
+
+        // Save with version check to prevent lost-update races
+        self.save_bundle_with_version(app_id, &bundle, expected_version)?;
+
+        Ok(())
     }
 
     async fn delete(&self, app_id: &AppId, key: &str) -> Result<(), PlatformError> {
         let mut bundle = self
             .load_bundle(app_id)?
             .ok_or_else(|| PlatformError::AppNotFound(app_id.0.clone()))?;
-        bundle.secrets.remove(key);
+
+        // If the key doesn't exist, there's nothing to delete — don't increment version
+        if bundle.secrets.remove(key).is_none() {
+            return Ok(());
+        }
+
+        let expected_version = bundle.version;
         bundle.version += 1;
-        self.save_bundle(&bundle)
+        bundle.updated_at = now_secs();
+
+        // Save with version check to prevent lost-update races
+        self.save_bundle_with_version(app_id, &bundle, expected_version)?;
+
+        Ok(())
     }
 
     async fn list_keys(&self, app_id: &AppId) -> Result<Vec<String>, PlatformError> {
@@ -158,8 +210,8 @@ impl SecretProvider for LocalSecretProvider {
 fn now_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs()
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -208,6 +260,9 @@ mod tests {
         provider.delete(&app_id, "DB_PASS").await.unwrap();
         let res2 = provider.get(&app_id, "DB_PASS").await;
         assert!(res2.is_err());
+
+        // 6. Delete non-existent key -> OK (no-op)
+        provider.delete(&app_id, "NONEXISTENT").await.unwrap();
     }
 
     #[tokio::test]

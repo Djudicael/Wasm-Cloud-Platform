@@ -22,6 +22,37 @@ pub enum ChainError {
     },
 }
 
+impl std::fmt::Display for ChainError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ChainError::BrokenLink {
+                expected,
+                actual,
+                seq,
+            } => {
+                write!(
+                    f,
+                    "Broken chain link at seq {}: expected hash {}, got {}",
+                    seq, expected, actual
+                )
+            }
+            ChainError::TamperedRecord {
+                seq,
+                expected,
+                actual,
+            } => {
+                write!(
+                    f,
+                    "Tampered record at seq {}: expected hash {}, got {}",
+                    seq, expected, actual
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for ChainError {}
+
 pub fn verify_chain(records: &[BillingRecord]) -> Result<u64, ChainError> {
     let mut expected_prev = String::new();
 

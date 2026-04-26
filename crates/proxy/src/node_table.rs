@@ -55,9 +55,8 @@ impl NodeLoadTable {
                     && n.health_status != common::health::NodeHealthStatus::Unhealthy
             })
             .min_by(|a, b| {
-                a.fuel_used_percent
-                    .partial_cmp(&b.fuel_used_percent)
-                    .unwrap()
+                let cmp = a.fuel_used_percent.partial_cmp(&b.fuel_used_percent);
+                cmp.unwrap_or(std::cmp::Ordering::Equal) // Treat NaN as equal (skip)
             })
             .cloned()
     }

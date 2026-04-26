@@ -46,13 +46,13 @@ pub async fn run_fallback_monitor(
 ) {
     info!(
         node_pid,
-        interval_secs = 5,
+        interval_secs = config.sampling_period_secs,
         "Running eBPF monitor in userspace fallback mode (higher latency)"
     );
 
     metrics.mark_ebpf_fallback();
 
-    let mut interval = time::interval(Duration::from_secs(5));
+    let mut interval = time::interval(Duration::from_secs(config.sampling_period_secs));
     let mut last_fd_count: u32 = 0;
     let mut last_pressure_level: u32 = 0;
     let mut consecutive_fd_increase: u32 = 0;

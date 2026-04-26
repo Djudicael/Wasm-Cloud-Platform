@@ -34,8 +34,7 @@ impl OidcProvider {
             config,
             jwks: Arc::new(RwLock::new(JwksCache {
                 keys: HashMap::new(),
-                fetched_at: std::time::Instant::now()
-                    - std::time::Duration::from_secs(3601), // force initial fetch
+                fetched_at: std::time::Instant::now() - std::time::Duration::from_secs(3601), // force initial fetch
             })),
             http_client: reqwest::Client::new(),
         }
@@ -59,6 +58,10 @@ impl OidcProvider {
 
     /// Fetch the JWKS from the OIDC provider.
     pub async fn refresh_jwks(&self) -> Result<(), GatewayError> {
+        // TODO: Use OIDC discovery endpoint (`{issuer_url}/.well-known/openid-configuration`)
+        // to fetch the JWKS URI dynamically instead of hardcoding the Keycloak-specific
+        // `/protocol/openid-connect/certs` path. This would make the provider compatible
+        // with any standards-compliant OIDC identity provider (Auth0, Okta, etc.).
         let jwks_url = format!(
             "{}/protocol/openid-connect/certs",
             self.config.issuer_url.trim_end_matches('/')
@@ -86,7 +89,9 @@ impl OidcProvider {
                     key_json.get("e").and_then(|v| v.as_str()),
                 ) {
                     if kty == "RSA" {
-                        if let Ok(decoding_key) = jsonwebtoken::DecodingKey::from_rsa_components(n, e) {
+                        if let Ok(decoding_key) =
+                            jsonwebtoken::DecodingKey::from_rsa_components(n, e)
+                        {
                             keys.insert(kid.to_string(), decoding_key);
                         }
                     }
@@ -139,8 +144,9 @@ impl OidcProvider {
         validation.set_issuer(&[&self.config.issuer_url]);
         validation.leeway = self.config.clock_skew_secs;
 
-        let token_data = jsonwebtoken::decode::<serde_json::Value>(token, decoding_key, &validation)
-            .map_err(|e| GatewayError::Auth(format!("JWT validation failed: {e}")))?;
+        let token_data =
+            jsonwebtoken::decode::<serde_json::Value>(token, decoding_key, &validation)
+                .map_err(|e| GatewayError::Auth(format!("JWT validation failed: {e}")))?;
 
         let claims = &token_data.claims;
         let sub = claims
@@ -227,6 +233,21 @@ pub struct UserIdentity {
 
     /// Raw JWT claims for custom extraction.
     pub raw_claims: serde_json::Value,
+}
+
+impl UserIdentity {
+    /// Create an anonymous identity for routes with `AuthPolicy::None`.
+    ///
+    /// This allows downstream code to always work with a `UserIdentity`
+    /// even when no authentication is required, avoiding `Option` checks.
+    pub fn anonymous() -> Self {
+        UserIdentity {
+            sub: "anonymous".to_string(),
+            email: None,
+            roles: vec![],
+            raw_claims: serde_json::json!({}),
+        }
+    }
 }
 
 #[cfg(test)]

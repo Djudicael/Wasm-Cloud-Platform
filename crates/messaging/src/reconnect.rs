@@ -15,7 +15,7 @@ impl NatsHealth {
     pub fn new() -> Self {
         let (degraded_mode_tx, degraded_mode_rx) = watch::channel(false);
         NatsHealth {
-            connected: Arc::new(AtomicBool::new(true)),
+            connected: Arc::new(AtomicBool::new(false)),
             last_connected_at: Arc::new(AtomicU64::new(
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
@@ -149,9 +149,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_nats_health_connected() {
+    fn test_nats_health_initially_disconnected() {
         let health = NatsHealth::new();
-        assert!(health.is_connected());
+        assert!(!health.is_connected());
         assert!(!health.is_degraded());
     }
 

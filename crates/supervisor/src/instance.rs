@@ -10,7 +10,7 @@ use tokio::task::JoinHandle;
 use tokio::time::{sleep, timeout, Duration};
 
 /// Billing info needed for recording fuel consumption on instance exit.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct BillingInfo {
     pub tenant_id: String,
     pub fuel_quota: u64,
@@ -81,13 +81,16 @@ impl ManagedInstance {
     }
 }
 
+/// Shared HTTP client for shutdown requests — avoids creating a new client per attempt.
+static SHUTDOWN_CLIENT: std::sync::LazyLock<reqwest::Client> =
+    std::sync::LazyLock::new(reqwest::Client::new);
+
 /// Send HTTP POST to /_platform/shutdown endpoint.
 /// Returns Ok if endpoint responds (even with error status).
 async fn initiate_http_shutdown(addr: SocketAddr) -> Result<(), String> {
     let url = format!("http://{}/_platform/shutdown", addr);
-    let client = reqwest::Client::new();
 
-    match timeout(Duration::from_secs(2), client.post(&url).send()).await {
+    match timeout(Duration::from_secs(2), SHUTDOWN_CLIENT.post(&url).send()).await {
         Ok(Ok(_)) => Ok(()),
         Ok(Err(e)) => Err(format!("HTTP request failed: {}", e)),
         Err(_) => Err("HTTP shutdown timeout".to_string()),

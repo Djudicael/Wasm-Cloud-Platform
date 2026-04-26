@@ -4,7 +4,7 @@ use runtime::WasmRuntime;
 /// Test that the runtime can be instantiated.
 #[test]
 fn test_runtime_creation() {
-    let _rt = WasmRuntime::new();
+    let _rt = WasmRuntime::new().expect("Failed to create WasmRuntime");
     // Successfully created
 }
 
@@ -45,7 +45,7 @@ fn test_compile_real_component() {
     }
 
     let wasm_bytes = std::fs::read(wasm_path).expect("failed to read wasm file");
-    let rt = WasmRuntime::new();
+    let rt = WasmRuntime::new().expect("Failed to create WasmRuntime");
 
     let artifact = rt.compile(&wasm_bytes).expect("failed to compile");
     assert!(!artifact.is_empty(), "artifact should not be empty");
@@ -54,7 +54,7 @@ fn test_compile_real_component() {
     let prepared = rt.prepare(&artifact, config).expect("failed to prepare");
 
     // Verify we can spawn an instance
-    let (instance, _streams) = prepared
+    let instance = prepared
         .spawn_instance(vec![], 8080, None)
         .expect("failed to spawn");
 
@@ -75,7 +75,7 @@ fn test_artifact_roundtrip_with_real_component() {
     }
 
     let wasm_bytes = std::fs::read(wasm_path).expect("failed to read wasm file");
-    let rt = WasmRuntime::new();
+    let rt = WasmRuntime::new().expect("Failed to create WasmRuntime");
 
     // Compile
     let artifact = rt.compile(&wasm_bytes).expect("failed to compile");
@@ -91,7 +91,7 @@ fn test_artifact_roundtrip_with_real_component() {
         .expect("failed to prepare from artifact");
 
     // Verify we can spawn
-    let (_instance, _streams) = prepared
+    let _instance = prepared
         .spawn_instance(vec![], 8080, None)
         .expect("failed to spawn");
 }
@@ -109,7 +109,7 @@ fn test_multiple_instances_with_real_component() {
     }
 
     let wasm_bytes = std::fs::read(wasm_path).expect("failed to read wasm file");
-    let rt = WasmRuntime::new();
+    let rt = WasmRuntime::new().expect("Failed to create WasmRuntime");
     let artifact = rt.compile(&wasm_bytes).expect("failed to compile");
 
     let config = AppConfig {
@@ -133,13 +133,13 @@ fn test_multiple_instances_with_real_component() {
     let prepared = rt.prepare(&artifact, config).expect("failed to prepare");
 
     // Spawn multiple instances
-    let (_inst1, _s1) = prepared
+    let _inst1 = prepared
         .spawn_instance(vec![], 8081, None)
         .expect("spawn 1 failed");
-    let (_inst2, _s2) = prepared
+    let _inst2 = prepared
         .spawn_instance(vec![], 8082, None)
         .expect("spawn 2 failed");
-    let (_inst3, _s3) = prepared
+    let _inst3 = prepared
         .spawn_instance(vec![], 8083, None)
         .expect("spawn 3 failed");
 

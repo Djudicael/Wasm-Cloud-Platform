@@ -1,6 +1,6 @@
 // crates/runtime/src/limits.rs
 use common::error::PlatformError;
-use common::types::{ExtendedLimits, FuelQuota, MemoryPages};
+use common::types::{FuelQuota, MemoryPages};
 use wasmtime::{ResourceLimiter, Store};
 
 /// Apply resource limits to a Store before creating an Instance.
@@ -17,13 +17,25 @@ pub fn configure_store<T>(store: &mut Store<T>, fuel: FuelQuota) -> Result<(), P
 
 /// Read how much fuel remains after execution.
 pub fn read_fuel_remaining<T>(store: &Store<T>) -> u64 {
-    store.get_fuel().unwrap_or(0)
+    store.get_fuel().unwrap_or_else(|e| {
+        tracing::debug!("Failed to read fuel: {}", e);
+        0
+    })
 }
 
 /// A simple resource limiter that enforces maximum memory pages.
 pub struct MemoryLimiter {
-    max_memory: usize,
-    memory_used: usize,
+    max_memory: u64,
+    memory_used: u64,
+}
+
+impl std::fmt::Debug for MemoryLimiter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MemoryLimiter")
+            .field("max_memory", &self.max_memory)
+            .field("memory_used", &self.memory_used)
+            .finish()
+    }
 }
 
 impl MemoryLimiter {
@@ -34,7 +46,7 @@ impl MemoryLimiter {
         }
     }
 
-    pub fn current_memory(&self) -> usize {
+    pub fn current_memory(&self) -> u64 {
         self.memory_used
     }
 }
@@ -46,6 +58,7 @@ impl ResourceLimiter for MemoryLimiter {
         desired: usize,
         _maximum: Option<usize>,
     ) -> Result<bool, wasmtime::Error> {
+        let desired = desired as u64;
         if desired > self.max_memory {
             return Ok(false); // Refuse memory growth
         }
@@ -63,83 +76,8 @@ impl ResourceLimiter for MemoryLimiter {
     }
 }
 
-pub struct IoResourceTracker {
-    limits: ExtendedLimits,
-    open_fds: u32,
-    fs_bytes_written: u64,
-    net_egress_bytes: u64,
-    outbound_connections: u32,
-}
-
-impl IoResourceTracker {
-    pub fn new(limits: ExtendedLimits) -> Self {
-        IoResourceTracker {
-            limits,
-            open_fds: 0,
-            fs_bytes_written: 0,
-            net_egress_bytes: 0,
-            outbound_connections: 0,
-        }
-    }
-
-    pub fn track_fd_open(&mut self) -> Result<(), PlatformError> {
-        if self.open_fds >= self.limits.max_open_fds {
-            return Err(PlatformError::runtime(format!(
-                "fd limit reached: {} (max {})",
-                self.open_fds, self.limits.max_open_fds
-            )));
-        }
-        self.open_fds += 1;
-        Ok(())
-    }
-
-    pub fn track_fd_close(&mut self) {
-        self.open_fds = self.open_fds.saturating_sub(1);
-    }
-
-    pub fn track_fs_write(&mut self, bytes: u64) -> Result<(), PlatformError> {
-        self.fs_bytes_written += bytes;
-        if self.fs_bytes_written > self.limits.max_fs_write_bytes {
-            return Err(PlatformError::runtime(format!(
-                "fs write limit exceeded: {} bytes (max {})",
-                self.fs_bytes_written, self.limits.max_fs_write_bytes
-            )));
-        }
-        Ok(())
-    }
-
-    pub fn track_net_egress(&mut self, bytes: u64) -> Result<(), PlatformError> {
-        self.net_egress_bytes += bytes;
-        if self.net_egress_bytes > self.limits.max_net_egress_bytes {
-            return Err(PlatformError::runtime(format!(
-                "network egress limit exceeded: {} bytes (max {})",
-                self.net_egress_bytes, self.limits.max_net_egress_bytes
-            )));
-        }
-        Ok(())
-    }
-
-    pub fn track_outbound_connect(&mut self) -> Result<(), PlatformError> {
-        self.outbound_connections += 1;
-        if self.outbound_connections > self.limits.max_outbound_connections {
-            return Err(PlatformError::runtime(format!(
-                "outbound connection limit exceeded: {} (max {})",
-                self.outbound_connections, self.limits.max_outbound_connections
-            )));
-        }
-        Ok(())
-    }
-
-    pub fn stats(&self) -> IoStats {
-        IoStats {
-            open_fds_peak: self.open_fds,
-            fs_bytes_written: self.fs_bytes_written,
-            net_egress_bytes: self.net_egress_bytes,
-            outbound_connections: self.outbound_connections,
-        }
-    }
-}
-
+/// I/O statistics collected during execution.
+/// Populated from `PolicyCounters` after the instance finishes running.
 #[derive(Debug, Clone)]
 pub struct IoStats {
     pub open_fds_peak: u32,

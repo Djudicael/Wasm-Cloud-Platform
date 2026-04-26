@@ -98,11 +98,11 @@ pub struct FuelQuota(pub u64);
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MemoryPages(pub u32);
 impl MemoryPages {
-    pub fn to_bytes(self) -> usize {
-        self.0 as usize * 64 * 1024
+    pub fn to_bytes(self) -> u64 {
+        self.0 as u64 * 65536
     }
 }
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct ExtendedLimits {
     pub max_open_fds: u32,
     pub max_fs_write_bytes: u64,
@@ -254,7 +254,7 @@ impl AppConfig {
         }
     }
 }
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum InstanceState {
     Starting,
     Ready { addr: std::net::SocketAddr },
@@ -263,12 +263,23 @@ pub enum InstanceState {
     Stopped,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DnsConfig {
     pub platform_domain: Option<String>,
     pub dns_webhook_url: Option<String>,
     pub dns_webhook_token: Option<String>,
     pub admin_port: u16,
+}
+
+impl Default for DnsConfig {
+    fn default() -> Self {
+        DnsConfig {
+            platform_domain: None,
+            dns_webhook_url: None,
+            dns_webhook_token: None,
+            admin_port: 9053,
+        }
+    }
 }
 
 impl DnsConfig {

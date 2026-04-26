@@ -5,7 +5,7 @@ use std::net::SocketAddr;
 
 /// Default protocol version for deserialization of old messages without the field.
 fn default_protocol_version() -> u32 {
-    1
+    common::protocol::PROTOCOL_VERSION
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

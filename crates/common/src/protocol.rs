@@ -40,8 +40,8 @@ impl<T: Serialize> MessageEnvelope<T> {
             sender: sender.to_string(),
             timestamp_ms: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_millis() as u64,
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0),
             payload,
         }
     }

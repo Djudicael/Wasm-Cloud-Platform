@@ -7,9 +7,16 @@ use axum::{
 };
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::net::TcpListener;
 use tower::ServiceBuilder;
 use tower_http::trace::TraceLayer;
+
+/// Maximum request body size for the internal gateway (10 MB).
+const MAX_BODY_SIZE: usize = 10 * 1024 * 1024;
+
+/// Default request timeout for forwarded requests (30 seconds).
+const FORWARDING_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// The transparent internal gateway.
 ///
@@ -37,6 +44,9 @@ pub struct InternalGateway {
     pub rate_limiter: Arc<proxy::rate_limiter::RateLimiter>,
     pub circuit_breaker: Arc<proxy::gateway::circuit_breaker::CircuitBreakerManager>,
     pub gateway_config: Arc<proxy::gateway::Gateway>,
+
+    /// Shared HTTP client for forwarding requests (reused across all requests).
+    pub http_client: reqwest::Client,
 }
 
 impl InternalGateway {
@@ -46,11 +56,17 @@ impl InternalGateway {
         circuit_breaker: Arc<proxy::gateway::circuit_breaker::CircuitBreakerManager>,
         gateway_config: Arc<proxy::gateway::Gateway>,
     ) -> Self {
+        let http_client = reqwest::Client::builder()
+            .timeout(FORWARDING_TIMEOUT)
+            .build()
+            .expect("failed to build forwarding HTTP client");
+
         InternalGateway {
             registry,
             rate_limiter,
             circuit_breaker,
             gateway_config,
+            http_client,
         }
     }
 
@@ -89,6 +105,10 @@ impl InternalGateway {
 
 /// Parse a hostname in the format `<app>.<namespace>.internal[:port]`.
 /// Returns (app_name, namespace) if the format matches.
+///
+/// Handles app names that contain dots (e.g., "my.api-service.production.internal")
+/// by taking the last segment before ".internal" as the namespace and everything
+/// before it as the app name.
 fn parse_internal_host(host: &str) -> Option<(&str, &str)> {
     // Strip port number if present (e.g., "echo-service.default.internal:9080")
     let hostname = if host.starts_with('[') {
@@ -108,8 +128,12 @@ fn parse_internal_host(host: &str) -> Option<(&str, &str)> {
 
     let hostname = hostname.trim_end_matches(".internal");
     let parts: Vec<&str> = hostname.split('.').collect();
-    if parts.len() == 2 {
-        Some((parts[0], parts[1]))
+    if parts.len() >= 2 {
+        // Last part is the namespace, everything before is the app name
+        // (handles app names with dots, e.g., "my.api-service.production" → app="my.api-service", ns="production")
+        let namespace = parts[parts.len() - 1];
+        let app_name = &hostname[..hostname.len() - namespace.len() - 1];
+        Some((app_name, namespace))
     } else if parts.len() == 1 {
         // Bare app name without namespace → assume "default"
         Some((parts[0], "default"))
@@ -167,7 +191,10 @@ async fn proxy_handler(
     );
 
     // ── 3. APPLY ENDPOINT POLICIES ──────────────────────────────────────
-    let target_app_id = common::types::AppId(format!("{}/{}", target_namespace, target_app_name));
+    // TODO: Derive the actual version from the registry or route config instead of
+    // hardcoding "v1". The version is needed for a fully-qualified AppId.
+    let target_app_id =
+        common::types::AppId::new_namespaced(target_namespace, target_app_name, "v1");
     let route_config = gw.gateway_config.get_route_config(&target_app_id).await;
 
     let path = req.uri().path();
@@ -223,7 +250,7 @@ async fn proxy_handler(
     let method = req.method().clone();
     let req_headers = req.headers().clone();
 
-    let body_bytes = match axum::body::to_bytes(req.into_body(), usize::MAX).await {
+    let body_bytes = match axum::body::to_bytes(req.into_body(), MAX_BODY_SIZE).await {
         Ok(bytes) => bytes,
         Err(e) => {
             tracing::warn!(error = %e, "[INTERNAL-GW] failed to read request body");
@@ -231,8 +258,7 @@ async fn proxy_handler(
         }
     };
 
-    let client = reqwest::Client::new();
-    let mut forward_req = client.request(method, &uri);
+    let mut forward_req = gw.http_client.request(method, &uri);
 
     // Strip internal-only headers before forwarding to the target app.
     for (k, v) in &req_headers {
@@ -323,6 +349,16 @@ mod tests {
         assert_eq!(
             parse_internal_host("api.production.internal:9082"),
             Some(("api", "production"))
+        );
+
+        // App names with dots
+        assert_eq!(
+            parse_internal_host("my.api-service.production.internal"),
+            Some(("my.api-service", "production"))
+        );
+        assert_eq!(
+            parse_internal_host("a.b.c.staging.internal:9080"),
+            Some(("a.b.c", "staging"))
         );
     }
 

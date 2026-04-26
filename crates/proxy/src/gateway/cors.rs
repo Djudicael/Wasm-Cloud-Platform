@@ -27,13 +27,25 @@ pub async fn handle_cors_preflight(
     }
 
     // Build CORS response headers
-    let mut resp = pingora::http::ResponseHeader::build(200, None)
-        .map_err(|e| pingora_core::Error::because(
+    let mut resp = pingora::http::ResponseHeader::build(200, None).map_err(|e| {
+        pingora_core::Error::because(
             pingora_core::ErrorType::InternalError,
             "CORS response build",
             e,
-        ))?;
-    let _ = resp.insert_header("Access-Control-Allow-Origin", origin);
+        )
+    })?;
+    // Set Access-Control-Allow-Origin based on CORS policy.
+    // When credentials are enabled with wildcard origins, echo the request's
+    // Origin header — browsers reject Access-Control-Allow-Origin: * with
+    // Access-Control-Allow-Credentials: true.
+    if cors.allow_credentials && cors.allowed_origins.contains(&"*".to_string()) {
+        let _ = resp.insert_header("Access-Control-Allow-Origin", origin);
+    } else if cors.allowed_origins.contains(&"*".to_string()) {
+        let _ = resp.insert_header("Access-Control-Allow-Origin", "*");
+    } else {
+        // Echo the specific origin for non-wildcard configurations
+        let _ = resp.insert_header("Access-Control-Allow-Origin", origin);
+    }
     let _ = resp.insert_header(
         "Access-Control-Allow-Methods",
         cors.allowed_methods.join(", "),
@@ -76,7 +88,18 @@ pub fn add_cors_headers(
         return;
     }
 
-    let _ = upstream_response.insert_header("Access-Control-Allow-Origin", origin);
+    // Set Access-Control-Allow-Origin based on CORS policy.
+    // When credentials are enabled with wildcard origins, echo the request's
+    // Origin header — browsers reject Access-Control-Allow-Origin: * with
+    // Access-Control-Allow-Credentials: true.
+    if cors.allow_credentials && cors.allowed_origins.contains(&"*".to_string()) {
+        let _ = upstream_response.insert_header("Access-Control-Allow-Origin", origin);
+    } else if cors.allowed_origins.contains(&"*".to_string()) {
+        let _ = upstream_response.insert_header("Access-Control-Allow-Origin", "*");
+    } else {
+        // Echo the specific origin for non-wildcard configurations
+        let _ = upstream_response.insert_header("Access-Control-Allow-Origin", origin);
+    }
     let _ = upstream_response.insert_header(
         "Access-Control-Allow-Methods",
         cors.allowed_methods.join(", "),
@@ -103,8 +126,7 @@ pub fn is_origin_allowed(origin: &str, cors: &CorsPolicy) -> bool {
         return true;
     }
     cors.allowed_origins.iter().any(|allowed| {
-        allowed == origin
-            || (allowed.starts_with("*.") && origin.ends_with(&allowed[1..]))
+        allowed == origin || (allowed.starts_with("*.") && origin.ends_with(&allowed[1..]))
     })
 }
 

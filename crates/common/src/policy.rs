@@ -311,7 +311,7 @@ impl PolicyProfile {
                     allow_dns: Some(false),
                     allowed_cidrs: None,
                     denied_cidrs: None,
-                    max_outbound_connections: Some(0),
+                    max_outbound_connections: Some(1),
                     max_egress_bytes: Some(0),
                 }),
                 filesystem: Some(FilesystemPolicyConfig {

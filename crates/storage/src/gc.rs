@@ -100,12 +100,14 @@ impl Store {
                 stats.artifacts_deleted += 1;
 
                 // Delete corresponding raw Wasm (if it exists)
-                self.delete_raw_wasm_by_key(&entry.key).ok();
-                stats.raw_wasm_deleted += 1;
+                if self.delete_raw_wasm_by_key(&entry.key).is_ok() {
+                    stats.raw_wasm_deleted += 1;
+                }
 
                 // Delete corresponding config
-                self.delete_config_by_key(&entry.key).ok();
-                stats.configs_deleted += 1;
+                if self.delete_config_by_key(&entry.key).is_ok() {
+                    stats.configs_deleted += 1;
+                }
 
                 info!(
                     app = %app_name,
@@ -121,37 +123,22 @@ impl Store {
     /// Check if a specific artifact version has active instances.
     /// Returns true if ANY instance is currently using this artifact.
     fn has_active_instances(&self, artifact_key: &str) -> Result<bool, PlatformError> {
-        // Read the active instances table to see if any instance is using this artifact
-        // For now, we use a heuristic: check if the artifact was accessed recently
-
         // Parse app_id from key (e.g., "api-users:v3" -> "api-users")
         let app_id_str = artifact_key.split(':').next().unwrap_or("");
 
-        // Check if this app has any config (indicates it's deployed/active)
-        let config_exists = self
-            .load_config(&common::types::AppId(app_id_str.to_string()))?
-            .is_some();
-
-        // If the app has no config, it's safe to delete
-        // If it has config, check if this is the current version
-        if !config_exists {
+        // Check if any config exists for this app (any version)
+        // Configs are stored with versioned keys like "app-name:v1",
+        // so we check if any config starts with the app_name prefix.
+        let apps = self.list_apps()?;
+        let has_config = apps
+            .iter()
+            .any(|app| app.0.starts_with(&format!("{}:", app_id_str)));
+        if !has_config {
             return Ok(false);
         }
 
-        // Get the current artifact hash for this app
-        let current_hash =
-            self.get_artifact_sha256(&common::types::AppId(app_id_str.to_string()))?;
-
-        // If we can't determine the current version, be conservative and protect it
-        if current_hash.is_none() {
-            return Ok(true);
-        }
-
-        // TODO: In a full implementation, we'd track instance → artifact_key mapping
-        // For now, we protect artifacts that have an active config
-        // This is conservative but safe: we only delete when we're sure it's not in use
-
-        Ok(false) // Safe to delete if we got here
+        // If config exists, the app is still deployed — don't delete
+        Ok(true)
     }
 
     fn delete_artifact_by_key(&self, key: &str) -> Result<(), PlatformError> {
@@ -201,8 +188,8 @@ impl Store {
         let cutoff_ts = {
             let now = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_secs();
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
             now - (retain_days as u64 * 86400)
         };
 
@@ -220,7 +207,13 @@ impl Store {
             let stale_keys: Vec<String> = table
                 .iter()
                 .map_err(PlatformError::storage_source)?
-                .filter_map(|e| e.ok())
+                .filter_map(|e| match e {
+                    Ok(v) => Some(v),
+                    Err(err) => {
+                        warn!(error = %err, "GC: error iterating metrics table entry, skipping");
+                        None
+                    }
+                })
                 .filter_map(|(k, _)| {
                     let key = k.value().to_string();
                     // Key format: "app_id:minute_timestamp"
@@ -255,8 +248,8 @@ impl Store {
     pub fn mark_undeployed(&self, app_name: &str) -> Result<(), PlatformError> {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
 
         // Store the undeploy timestamp in a metadata key
         let meta_key = format!("_undeploy:{}", app_name);
@@ -282,8 +275,8 @@ impl Store {
     pub fn gc_undeployed_apps(&self, grace_secs: u64) -> Result<u64, PlatformError> {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
 
         // Find all apps with expired grace periods
         let tx = self
@@ -297,7 +290,13 @@ impl Store {
         let expired_apps: Vec<String> = table
             .iter()
             .map_err(PlatformError::storage_source)?
-            .filter_map(|e| e.ok())
+            .filter_map(|e| match e {
+                Ok(v) => Some(v),
+                Err(err) => {
+                    warn!(error = %err, "GC: error iterating schema_meta table entry, skipping");
+                    None
+                }
+            })
             .filter_map(|(k, v)| {
                 let key = k.value().to_string();
                 if !key.starts_with("_undeploy:") {
@@ -343,7 +342,13 @@ impl Store {
             let keys: Vec<String> = table
                 .iter()
                 .map_err(PlatformError::storage_source)?
-                .filter_map(|e| e.ok())
+                .filter_map(|e| match e {
+                    Ok(v) => Some(v),
+                    Err(err) => {
+                        warn!(error = %err, "GC: error iterating artifacts table entry, skipping");
+                        None
+                    }
+                })
                 .filter_map(|(k, _)| {
                     let key = k.value().to_string();
                     if key.starts_with(&prefix) {
@@ -371,7 +376,13 @@ impl Store {
             let keys: Vec<String> = table
                 .iter()
                 .map_err(PlatformError::storage_source)?
-                .filter_map(|e| e.ok())
+                .filter_map(|e| match e {
+                    Ok(v) => Some(v),
+                    Err(err) => {
+                        warn!(error = %err, "GC: error iterating raw_wasm table entry, skipping");
+                        None
+                    }
+                })
                 .filter_map(|(k, _)| {
                     let key = k.value().to_string();
                     if key.starts_with(&prefix) {
@@ -399,7 +410,13 @@ impl Store {
             let keys: Vec<String> = table
                 .iter()
                 .map_err(PlatformError::storage_source)?
-                .filter_map(|e| e.ok())
+                .filter_map(|e| match e {
+                    Ok(v) => Some(v),
+                    Err(err) => {
+                        warn!(error = %err, "GC: error iterating configs table entry, skipping");
+                        None
+                    }
+                })
                 .filter_map(|(k, _)| {
                     let key = k.value().to_string();
                     if key.starts_with(&prefix) {
@@ -427,7 +444,13 @@ impl Store {
             let keys: Vec<String> = table
                 .iter()
                 .map_err(PlatformError::storage_source)?
-                .filter_map(|e| e.ok())
+                .filter_map(|e| match e {
+                    Ok(v) => Some(v),
+                    Err(err) => {
+                        warn!(error = %err, "GC: error iterating metrics table entry, skipping");
+                        None
+                    }
+                })
                 .filter_map(|(k, _)| {
                     let key = k.value().to_string();
                     if key.starts_with(&prefix) {
@@ -705,9 +728,7 @@ fn get_available_disk_space(_path: &std::path::Path) -> Result<u64, PlatformErro
 
 impl Store {
     pub fn get_db_path(&self) -> std::path::PathBuf {
-        // This would need to be stored in the Store struct
-        // For now, return a placeholder
-        std::path::PathBuf::from("./storage.redb")
+        self.db_path.clone()
     }
 }
 

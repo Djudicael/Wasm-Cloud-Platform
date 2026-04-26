@@ -511,7 +511,7 @@ async fn main() -> anyhow::Result<()> {
         None => messaging::NatsBus::connect(&cli.nats_url).await?,
     };
     let auth_token = resolve_auth_token(cli.auth_token.as_deref());
-    let http = build_http_client(auth_token.as_deref());
+    let http = build_http_client(auth_token.as_deref())?;
 
     match cli.command {
         Commands::Deploy(args) => cmds::deploy::run(args, &bus, &cli.node_api, &http).await?,
@@ -592,7 +592,7 @@ async fn main() -> anyhow::Result<()> {
 }
 
 /// Build an HTTP client with an optional Bearer token in the default headers.
-fn build_http_client(token: Option<&str>) -> reqwest::Client {
+fn build_http_client(token: Option<&str>) -> anyhow::Result<reqwest::Client> {
     let mut headers = reqwest::header::HeaderMap::new();
 
     if let Some(t) = token {
@@ -608,7 +608,7 @@ fn build_http_client(token: Option<&str>) -> reqwest::Client {
     reqwest::Client::builder()
         .default_headers(headers)
         .build()
-        .expect("failed to build HTTP client")
+        .map_err(|e| anyhow::anyhow!("failed to build HTTP client: {}", e))
 }
 
 /// Resolve the auth token from: CLI flag > env var > config file.

@@ -95,6 +95,7 @@ pub struct AuthResult {
 /// Identifies which token was used for the request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TokenType {
+    None,
     ReadToken,
     WriteToken,
 }
@@ -102,6 +103,7 @@ pub enum TokenType {
 impl std::fmt::Display for TokenType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            TokenType::None => write!(f, "none"),
             TokenType::ReadToken => write!(f, "read_token"),
             TokenType::WriteToken => write!(f, "write_token"),
         }
@@ -127,7 +129,7 @@ impl AuthConfig {
             None => {
                 return AuthResult {
                     permission: Permission::None,
-                    token_type: TokenType::ReadToken, // Placeholder
+                    token_type: TokenType::None,
                 };
             }
         };
@@ -154,7 +156,7 @@ impl AuthConfig {
 
         AuthResult {
             permission: Permission::None,
-            token_type: TokenType::ReadToken,
+            token_type: TokenType::None,
         }
     }
 
@@ -532,6 +534,7 @@ mod tests {
 
     #[test]
     fn test_token_type_display() {
+        assert_eq!(format!("{}", TokenType::None), "none");
         assert_eq!(format!("{}", TokenType::ReadToken), "read_token");
         assert_eq!(format!("{}", TokenType::WriteToken), "write_token");
     }

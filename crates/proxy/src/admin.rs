@@ -63,11 +63,12 @@ async fn auth_middleware(
     }
 
     // Extract and validate Bearer token
+    // Use constant-time comparison to prevent timing attacks
     let authorized = headers
         .get("Authorization")
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
-        .map(|token| token == expected_token)
+        .map(|token| common::crypto::constant_time_eq(token.as_bytes(), expected_token.as_bytes()))
         .unwrap_or(false);
 
     if authorized {

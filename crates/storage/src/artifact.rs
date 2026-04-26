@@ -45,7 +45,17 @@ impl Store {
 
     /// Check if an artifact exists without loading the bytes.
     pub fn artifact_exists(&self, id: &AppId) -> Result<bool, PlatformError> {
-        Ok(self.load_artifact(id)?.is_some())
+        let tx = self
+            .db
+            .begin_read()
+            .map_err(PlatformError::storage_source)?;
+        let table = tx
+            .open_table(ARTIFACTS)
+            .map_err(PlatformError::storage_source)?;
+        Ok(table
+            .get(id.0.as_str())
+            .map_err(PlatformError::storage_source)?
+            .is_some())
     }
 
     /// Delete an artifact (e.g. when an app is undeployed).
@@ -84,12 +94,34 @@ impl Store {
         let mut versions: Vec<String> = table
             .iter()
             .map_err(PlatformError::storage_source)?
-            .filter_map(|e| e.ok())
+            .filter_map(|e| match e {
+                Ok(v) => Some(v),
+                Err(err) => {
+                    tracing::warn!(error = %err, "error iterating artifacts table entry, skipping");
+                    None
+                }
+            })
             .filter(|(k, _)| k.value().starts_with(&prefix))
             .map(|(k, _)| k.value().to_string())
             .collect();
 
-        versions.sort(); // Assumes version suffix is lexicographically ordered (v1, v2, v10...)
+        versions.sort_by(|a, b| {
+            let ka = a
+                .rsplit(':')
+                .next()
+                .unwrap_or(a)
+                .trim_start_matches('v')
+                .parse::<u32>()
+                .unwrap_or(0);
+            let kb = b
+                .rsplit(':')
+                .next()
+                .unwrap_or(b)
+                .trim_start_matches('v')
+                .parse::<u32>()
+                .unwrap_or(0);
+            ka.cmp(&kb)
+        });
         let to_delete: Vec<_> = versions
             .into_iter()
             .rev()
@@ -143,7 +175,17 @@ impl Store {
 
     /// Check if raw wasm exists without loading the bytes.
     pub fn raw_wasm_exists(&self, sha256: &str) -> Result<bool, PlatformError> {
-        Ok(self.load_raw_wasm(sha256)?.is_some())
+        let tx = self
+            .db
+            .begin_read()
+            .map_err(PlatformError::storage_source)?;
+        let table = tx
+            .open_table(RAW_WASM)
+            .map_err(PlatformError::storage_source)?;
+        Ok(table
+            .get(sha256)
+            .map_err(PlatformError::storage_source)?
+            .is_some())
     }
 
     /// Delete raw wasm bytes.
@@ -178,7 +220,13 @@ impl Store {
         let sha256s: Vec<String> = raw_table
             .iter()
             .map_err(PlatformError::storage_source)?
-            .filter_map(|e| e.ok())
+            .filter_map(|e| match e {
+                Ok(v) => Some(v),
+                Err(err) => {
+                    tracing::warn!(error = %err, "error iterating raw_wasm table entry, skipping");
+                    None
+                }
+            })
             .map(|(k, _)| k.value().to_string())
             .collect();
         drop(raw_table);

@@ -24,6 +24,14 @@ pub struct NatsBus {
     node_id: String,
 }
 
+impl std::fmt::Debug for NatsBus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NatsBus")
+            .field("node_id", &self.node_id)
+            .finish_non_exhaustive()
+    }
+}
+
 impl NatsBus {
     /// Connect to the NATS server.
     pub async fn connect(url: &str) -> Result<Self, PlatformError> {
@@ -166,6 +174,35 @@ impl NatsBus {
         .await
         .map_err(PlatformError::messaging_source)?;
 
+        // Create "PLATFORM" stream for platform upgrade and hot-reload events
+        js.get_or_create_stream(StreamConfig {
+            name: "PLATFORM".to_string(),
+            subjects: vec![
+                "platform.upgrade.>".to_string(),
+                "platform.upgrade_complete.>".to_string(),
+                "platform.draining.>".to_string(),
+                "config.hot_reload.>".to_string(),
+            ],
+            max_messages: 10_000,
+            ..Default::default()
+        })
+        .await
+        .map_err(PlatformError::messaging_source)?;
+
+        // Create "EBPF" stream for eBPF monitor events (pressure, security incidents)
+        js.get_or_create_stream(StreamConfig {
+            name: "EBPF".to_string(),
+            subjects: vec![
+                "ebpf.pressure.>".to_string(),
+                "ebpf.pressure.recovered.>".to_string(),
+                "ebpf.security.incident.>".to_string(),
+            ],
+            max_messages: 10_000,
+            ..Default::default()
+        })
+        .await
+        .map_err(PlatformError::messaging_source)?;
+
         Ok(())
     }
 
@@ -196,6 +233,12 @@ impl NatsBus {
                 consumer_name,
                 PullConfig {
                     durable_name: Some(consumer_name.to_string()),
+                    // Give the consumer 30 seconds to process and ACK each message
+                    // before it becomes eligible for redelivery.
+                    ack_wait: std::time::Duration::from_secs(30),
+                    // Redeliver up to 3 times before giving up on a message.
+                    // Prevents infinite redelivery loops for poison messages.
+                    max_deliver: 3,
                     ..Default::default()
                 },
             )
@@ -275,7 +318,10 @@ impl NatsBus {
 
         tokio::spawn(async move {
             if let Some(msg) = sub.next().await {
-                if let Ok(event) = serde_json::from_slice::<Event>(&msg.payload) {
+                if let Ok(envelope) = serde_json::from_slice::<MessageEnvelope<Event>>(&msg.payload)
+                {
+                    let _ = tx.send(envelope.payload);
+                } else if let Ok(event) = serde_json::from_slice::<Event>(&msg.payload) {
                     let _ = tx.send(event);
                 }
             }

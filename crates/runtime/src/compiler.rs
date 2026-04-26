@@ -4,7 +4,7 @@ use wasmtime::{Config, Engine};
 
 /// Build a Cranelift-based AOT engine.
 /// Call once per process and share via Arc.
-pub fn build_engine() -> Engine {
+pub fn build_engine() -> Result<Engine, PlatformError> {
     let mut config = Config::new();
 
     // Enable fuel metering for execution limits
@@ -16,7 +16,8 @@ pub fn build_engine() -> Engine {
     // Enable Component Model
     config.wasm_component_model(true);
 
-    Engine::new(&config).expect("Failed to create Wasmtime Engine")
+    Engine::new(&config)
+        .map_err(|e| PlatformError::runtime(format!("Failed to create Wasmtime Engine: {}", e)))
 }
 
 /// Compile raw `.wasm` bytes into a native artifact.

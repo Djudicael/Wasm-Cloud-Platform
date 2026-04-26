@@ -8,7 +8,7 @@ async fn create_test_supervisor() -> Arc<supervisor::Supervisor> {
     let temp_dir = tempfile::tempdir().expect("failed to create temp dir");
     let db_path = temp_dir.path().join("test.redb");
     let store = storage::Store::open(&db_path).expect("failed to create store");
-    let runtime = runtime::WasmRuntime::new();
+    let runtime = runtime::WasmRuntime::new().expect("Failed to create WasmRuntime");
     let port_alloc = Arc::new(supervisor::port_alloc::PortAllocator::new(
         "127.0.0.1".parse().unwrap(),
         15000,

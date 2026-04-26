@@ -17,6 +17,7 @@ pub struct S3Exporter {
     pub access_key: Option<String>,
     pub secret_key: Option<String>,
     pub region: String,
+    client: reqwest::Client,
 }
 
 impl S3Exporter {
@@ -35,6 +36,7 @@ impl S3Exporter {
             access_key,
             secret_key,
             region,
+            client: reqwest::Client::new(),
         }
     }
 
@@ -81,8 +83,7 @@ impl BillingExporter for S3Exporter {
             key
         );
 
-        let client = reqwest::Client::new();
-        let mut request = client.put(&url);
+        let mut request = self.client.put(&url);
 
         if let (Some(key), Some(_secret)) = (&self.access_key, &self.secret_key) {
             let timestamp = chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
@@ -106,7 +107,7 @@ impl BillingExporter for S3Exporter {
             .await
             .map_err(|e| PlatformError::external(format!("S3 export failed: {}", e)))?;
 
-        if response.status().is_success() || response.status().as_u16() == 307 {
+        if response.status().is_success() {
             tracing::info!(key = %key, records = records.len(), "billing batch exported to S3");
             Ok(())
         } else {
@@ -176,24 +177,49 @@ pub fn start_export_loop(store: Store, exporter: Arc<dyn BillingExporter>, inter
         loop {
             tick.tick().await;
 
-            match store.read_unexported_billing_records(10_000) {
-                Ok(records) if records.is_empty() => {}
-                Ok(records) => {
-                    let count = records.len();
-                    let last_seq = records.last().map(|r| r.seq).unwrap_or(0);
-
-                    match exporter.export_batch(&records).await {
-                        Ok(()) => {
-                            store.set_billing_export_watermark(last_seq).ok();
-                            tracing::info!(count, last_seq, "billing export complete");
-                        }
-                        Err(e) => {
-                            tracing::error!(error = %e, "billing export failed — will retry next tick");
-                        }
-                    }
+            // Read unexported records using spawn_blocking to avoid blocking
+            // the async runtime (redb operations are synchronous).
+            let store_clone = store.clone();
+            let records = match tokio::task::spawn_blocking(move || {
+                store_clone.read_unexported_billing_records(10_000)
+            })
+            .await
+            {
+                Ok(Ok(records)) => records,
+                Ok(Err(e)) => {
+                    tracing::error!(error = %e, "failed to read billing records for export");
+                    continue;
                 }
                 Err(e) => {
-                    tracing::error!(error = %e, "failed to read billing records for export");
+                    tracing::error!(error = %e, "spawn_blocking task panicked");
+                    continue;
+                }
+            };
+
+            if records.is_empty() {
+                continue;
+            }
+
+            let count = records.len();
+            let last_seq = records.last().map(|r| r.seq).unwrap_or(0);
+
+            match exporter.export_batch(&records).await {
+                Ok(()) => {
+                    // Persist the export watermark using spawn_blocking
+                    let store_clone = store.clone();
+                    if let Err(e) =
+                        tokio::task::spawn_blocking(move || {
+                            store_clone.set_billing_export_watermark(last_seq)
+                        })
+                        .await
+                    {
+                        tracing::error!(error = %e, "spawn_blocking task panicked while saving watermark");
+                        continue;
+                    }
+                    tracing::info!(count, last_seq, "billing export complete");
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, "billing export failed — will retry next tick");
                 }
             }
         }

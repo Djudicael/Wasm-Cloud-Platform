@@ -6,7 +6,6 @@ use proxy::router::HostRouter;
 use proxy::upstream::UpstreamRegistry;
 use runtime::WasmRuntime;
 use secrets::{encrypt_for_peer, BootstrapKeyPair, SecretProvider};
-use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use storage::Store;
 use supervisor::Supervisor;
@@ -20,6 +19,7 @@ pub struct EventDispatcher {
     pub runtime: WasmRuntime,
     pub node_id: String,
     pub artifact_server_url: String,
+    pub supervisor_addr: std::net::SocketAddr,
     pub secret_provider: Arc<dyn SecretProvider>,
     pub bootstrap_keypair: Option<BootstrapKeyPair>,
     pub bus: messaging::NatsBus,
@@ -114,9 +114,11 @@ impl EventDispatcher {
                 encrypted_value,
             } => {
                 info!(app = %app_id.0, key, "received secret rotation");
-                // Decrypt with cluster key and re-encrypt with node key
-                // (see step 06 for details)
-                // For now, we persist the encrypted value directly to simulate the update.
+                // TODO: Decrypt with cluster key and re-encrypt with node key
+                // For now, store the encrypted value directly (it will be unreadable
+                // without proper decryption). The secret provider should handle
+                // decryption in a future iteration.
+                tracing::warn!("SecretUpdate received but decryption not yet implemented — secret may be unreadable");
                 if let Err(e) = self.store.save_secrets(&app_id, &encrypted_value) {
                     error!(app = %app_id.0, error = %e, "failed to update secret in cache");
                 }
@@ -141,7 +143,7 @@ impl EventDispatcher {
                     .as_secs();
                 let entry = NodeEntry {
                     node_id: node_id.clone(),
-                    supervisor_addr: "127.0.0.1:9000".parse().unwrap(), // TODO: actual addr
+                    supervisor_addr: self.supervisor_addr,
                     fuel_used_percent: fuel_budget_used_percent,
                     active_instances,
                     last_seen: now,
@@ -419,19 +421,9 @@ impl EventDispatcher {
             info!(url = %artifact_url, "fetching artifact via HTTP");
             match fetch_artifact(&artifact_url, &sha256).await {
                 Ok(bytes) => {
-                    // 3. Verify SHA-256 hash before storing or compiling
-                    let computed_hash = hex::encode(sha2::Sha256::digest(&bytes));
-                    if computed_hash != sha256 {
-                        error!(
-                            expected_hash = %sha256,
-                            computed_hash = %computed_hash,
-                            "artifact hash mismatch - possible tampering"
-                        );
-                        return;
-                    }
-                    info!(sha256 = %computed_hash, "artifact hash verified");
+                    // Hash already verified by download_and_verify_bytes
 
-                    // 5. Store raw bytes for future use
+                    // Store raw bytes for future use
                     if let Err(e) = self.store.save_raw_wasm(&sha256, &bytes) {
                         error!(sha256, error = %e, "failed to cache raw wasm");
                     }
@@ -512,9 +504,13 @@ impl EventDispatcher {
             "node joined cluster"
         );
 
-        // Leader election: only the node with lexicographically smallest ID responds
+        // Leader election: only nodes with IDs smaller than the new node respond.
+        // This means multiple existing nodes could respond if they all have smaller IDs.
+        // In practice, the new node should accept the first valid snapshot it receives
+        // and ignore subsequent responses. Ideally, only the smallest existing node
+        // would respond, but without knowing all node IDs, we use this simpler approach.
         if self.node_id > new_node_id {
-            return;
+            return; // A smaller node should respond instead
         }
 
         info!(
@@ -541,8 +537,8 @@ impl EventDispatcher {
             if let Ok(keys) = self.secret_provider.list_keys(&config.id).await {
                 for key in keys {
                     if let Ok(value) = self.secret_provider.get(&config.id, &key).await {
-                        let encrypted = encrypt_for_peer(&peer_public_key, value.as_bytes());
-                        if !encrypted.is_empty() {
+                        if let Ok(encrypted) = encrypt_for_peer(&peer_public_key, value.as_bytes())
+                        {
                             encrypted_secrets.push((config.id.0.clone(), key, encrypted));
                         }
                     }
@@ -660,11 +656,13 @@ impl EventDispatcher {
             let app_id = AppId(app_id_str.clone());
 
             // Decrypt using our bootstrap keypair
-            let plaintext_bytes = keypair.decrypt(&encrypted_value);
-            if plaintext_bytes.is_empty() {
-                error!(app = app_id_str, key, "failed to decrypt secret");
-                continue;
-            }
+            let plaintext_bytes = match keypair.decrypt(&encrypted_value) {
+                Ok(bytes) => bytes,
+                Err(e) => {
+                    error!(app = app_id_str, key, error = %e, "failed to decrypt secret");
+                    continue;
+                }
+            };
 
             match String::from_utf8(plaintext_bytes) {
                 Ok(plaintext) => {
@@ -692,10 +690,25 @@ impl EventDispatcher {
         for (app_id_str, sha256) in artifact_hashes {
             let app_id = AppId(app_id_str.clone());
 
-            // Wait a bit for the artifact to arrive via HTTP push
-            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+            // Wait for the artifact to arrive via HTTP push with a retry loop.
+            // The peer node pushes artifacts asynchronously, so we may need to
+            // wait for the HTTP PUT to complete before we can compile.
+            let artifact = {
+                let mut attempts = 0;
+                loop {
+                    if let Ok(Some(raw)) = self.store.load_raw_wasm(&sha256) {
+                        break Some(raw);
+                    }
+                    if attempts >= 50 {
+                        // 5 seconds total (50 * 100ms)
+                        break None;
+                    }
+                    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                    attempts += 1;
+                }
+            };
 
-            if let Ok(Some(raw)) = self.store.load_raw_wasm(&sha256) {
+            if let Some(raw) = artifact {
                 let runtime = self.runtime.clone();
                 let store = self.store.clone();
                 let app_id_clone = app_id.clone();
@@ -727,16 +740,17 @@ impl EventDispatcher {
         use crate::upgrade::{download_and_verify, handle_upgrade_event, UpgradeAction};
 
         // Collect all node IDs in the cluster for rolling upgrade ordering
-        let cluster_nodes = self
-            .store
-            .list_apps()
-            .ok()
-            .map(|_apps| {
-                // In a real implementation, we'd track node IDs separately
-                // For now, we'll just use the node_id from the event
-                vec![self.node_id.clone()]
-            })
-            .unwrap_or_else(|| vec![self.node_id.clone()]);
+        let cluster_nodes = {
+            // TODO: Maintain a proper node registry from NodeJoined/NodeLoad events
+            // For now, use the node load table which tracks known cluster nodes
+            let nodes = self.node_table.nodes.read().await;
+            let mut ids: Vec<String> = nodes.keys().cloned().collect();
+            // Always include our own node ID in case it's not in the table yet
+            if !ids.contains(&self.node_id) {
+                ids.push(self.node_id.clone());
+            }
+            ids
+        };
 
         match handle_upgrade_event(&event, &self.node_id, &cluster_nodes) {
             Ok(UpgradeAction::NotAnUpgradeEvent) => {
@@ -844,49 +858,29 @@ impl EventDispatcher {
     }
 
     async fn begin_graceful_shutdown(&self, timeout_secs: u64) {
-        info!(timeout_secs, "beginning graceful shutdown");
+        tracing::info!("Beginning graceful shutdown with {}s timeout", timeout_secs);
 
-        // 1. Stop accepting new connections
-        // (This would be done via a shared shutdown signal in the proxy)
+        // 1. Stop accepting new connections via backpressure signal
+        //    TODO: Add backpressure_signal field to EventDispatcher so we can
+        //    call backpressure.set_rejecting() here. For now, the proxy will
+        //    continue accepting connections until the process exits.
 
-        // 2. Stop supervisor from spawning new instances
-        // (Would need a shutdown flag in the supervisor)
+        // 2. Wait for existing requests to drain
+        tokio::time::sleep(tokio::time::Duration::from_secs(timeout_secs)).await;
 
-        // 3. Wait for existing requests to drain
-        let drain_duration = tokio::time::Duration::from_secs(timeout_secs);
-        tokio::time::sleep(drain_duration).await;
+        // 3. Kill all running instances
+        tracing::info!("drain timeout elapsed, stopping all instances");
+        self.supervisor
+            .shutdown_all(tokio::time::Duration::from_secs(timeout_secs))
+            .await;
 
-        // 4. Kill all running instances
-        info!("drain timeout elapsed, stopping all instances");
-        // supervisor.kill_all() would go here
-
-        info!("graceful shutdown complete");
+        tracing::info!("graceful shutdown complete");
     }
 }
 
 /// Fetch an artifact from a URL and verify its SHA-256 hash.
 async fn fetch_artifact(url: &str, expected_sha256: &str) -> Result<Vec<u8>, String> {
-    let resp = reqwest::get(url)
+    crate::upgrade::download_and_verify_bytes(url, expected_sha256)
         .await
-        .map_err(|e| format!("HTTP GET failed: {e}"))?;
-
-    if !resp.status().is_success() {
-        return Err(format!("artifact server returned {}", resp.status()));
-    }
-
-    let bytes = resp
-        .bytes()
-        .await
-        .map_err(|e| format!("failed to read body: {e}"))?
-        .to_vec();
-
-    // Verify integrity
-    let actual = hex::encode(Sha256::digest(&bytes));
-    if actual != expected_sha256 {
-        return Err(format!(
-            "SHA-256 mismatch: expected {expected_sha256}, got {actual}"
-        ));
-    }
-
-    Ok(bytes)
+        .map_err(|e| e.to_string())
 }

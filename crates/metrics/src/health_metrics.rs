@@ -1,5 +1,5 @@
 // crates/metrics/src/health_metrics.rs
-use prometheus::{IntGauge, Registry};
+use prometheus::{IntGauge, IntGaugeVec, Opts, Registry};
 
 /// Prometheus metrics for the health check subsystem.
 pub struct HealthMetrics {
@@ -24,11 +24,11 @@ pub struct HealthMetrics {
     /// Process memory usage in MB.
     pub memory_used_mb: IntGauge,
 
-    /// Per-app healthy instance count.
-    pub app_healthy_instances: IntGauge,
+    /// Per-app healthy instance count (labeled by app_id).
+    pub app_healthy_instances: IntGaugeVec,
 
-    /// Per-app total instance count.
-    pub app_total_instances: IntGauge,
+    /// Per-app total instance count (labeled by app_id).
+    pub app_total_instances: IntGaugeVec,
 }
 
 impl HealthMetrics {
@@ -87,18 +87,24 @@ impl HealthMetrics {
             .register(Box::new(memory_used_mb.clone()))
             .unwrap_or(());
 
-        let app_healthy_instances = IntGauge::new(
-            "wasm_node_app_healthy_instances",
-            "Number of healthy instances per app",
+        let app_healthy_instances = IntGaugeVec::new(
+            Opts::new(
+                "wasm_node_app_healthy_instances",
+                "Number of healthy instances per app",
+            ),
+            &["app"],
         )
         .unwrap();
         registry
             .register(Box::new(app_healthy_instances.clone()))
             .unwrap_or(());
 
-        let app_total_instances = IntGauge::new(
-            "wasm_node_app_total_instances",
-            "Total number of instances per app",
+        let app_total_instances = IntGaugeVec::new(
+            Opts::new(
+                "wasm_node_app_total_instances",
+                "Total number of instances per app",
+            ),
+            &["app"],
         )
         .unwrap();
         registry
@@ -166,12 +172,14 @@ impl HealthMetrics {
             }
         }
 
-        // Per-app metrics (set to the last app's values; for accurate per-app
-        // metrics the caller should use labels — this is a simple approximation).
-        if let Some(last_app) = report.apps.last() {
+        // Per-app metrics: iterate all apps and set gauge values with the app label.
+        for app in &report.apps {
             self.app_healthy_instances
-                .set(last_app.healthy_instances as i64);
-            self.app_total_instances.set(last_app.instances as i64);
+                .with_label_values(&[&app.app_id])
+                .set(app.healthy_instances as i64);
+            self.app_total_instances
+                .with_label_values(&[&app.app_id])
+                .set(app.instances as i64);
         }
     }
 }

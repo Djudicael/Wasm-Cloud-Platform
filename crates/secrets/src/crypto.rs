@@ -10,16 +10,17 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 /// A symmetric key (e.g. DEK or KEK).
 /// - Zeroized on drop to prevent memory scraping.
 /// - Does not implement Debug or Serialize to prevent accidental leakage.
-#[derive(Clone, Zeroize, ZeroizeOnDrop)]
+/// - Does not implement Clone; share via `Arc<SymmetricKey>` if needed.
+#[derive(Zeroize, ZeroizeOnDrop)]
 pub struct SymmetricKey(pub [u8; 32]);
 
 impl SymmetricKey {
-    /// Generate a new random key.
+    /// Generate a new random key using the operating system's CSPRNG.
     pub fn generate() -> Self {
-        let mut bytes = [0u8; 32];
         use rand::RngCore;
-        rand::thread_rng().fill_bytes(&mut bytes);
-        SymmetricKey(bytes)
+        let mut key = [0u8; 32];
+        rand::rngs::OsRng.fill_bytes(&mut key);
+        Self::from_bytes(key)
     }
 
     /// Load from raw bytes (e.g. from env or TPM).
@@ -34,6 +35,14 @@ impl SymmetricKey {
 
 /// Encrypted blob: nonce (12 bytes) || ciphertext.
 pub struct EncryptedBlob(pub Vec<u8>);
+
+impl std::fmt::Debug for EncryptedBlob {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("EncryptedBlob")
+            .field(&format!("[{} bytes]", self.0.len()))
+            .finish()
+    }
+}
 
 /// Encrypt plaintext with AES-256-GCM.
 /// Nonce is prepended to the ciphertext.
@@ -65,7 +74,7 @@ pub fn decrypt(key: &SymmetricKey, blob: &EncryptedBlob) -> Result<Vec<u8>, Plat
 }
 
 /// Per-app encrypted secret bundle stored in redb.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Serialize, Deserialize)]
 pub struct AppSecretBundle {
     pub app_id: String,
     /// The DEK encrypted with the node's KEK.
@@ -76,6 +85,18 @@ pub struct AppSecretBundle {
     pub version: u64,
     /// Unix timestamp of last update.
     pub updated_at: u64,
+}
+
+impl std::fmt::Debug for AppSecretBundle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AppSecretBundle")
+            .field("app_id", &self.app_id)
+            .field("version", &self.version)
+            .field("encrypted_dek", &format!("[{} bytes]", self.encrypted_dek.len()))
+            .field("secrets", &format!("{{{} keys}}", self.secrets.len()))
+            .field("updated_at", &self.updated_at)
+            .finish()
+    }
 }
 
 #[cfg(test)]
@@ -112,5 +133,39 @@ mod tests {
 
         let result = decrypt(&key2, &encrypted);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_app_secret_bundle_debug_redacts_sensitive_fields() {
+        let bundle = AppSecretBundle {
+            app_id: "test-app".to_string(),
+            encrypted_dek: vec![1u8; 48],
+            secrets: {
+                let mut map = HashMap::new();
+                map.insert("DB_PASS".to_string(), vec![2u8; 64]);
+                map.insert("API_KEY".to_string(), vec![3u8; 64]);
+                map
+            },
+            version: 3,
+            updated_at: 1712400000,
+        };
+
+        let debug_str = format!("{:?}", bundle);
+        assert!(debug_str.contains("test-app"));
+        assert!(debug_str.contains("version: 3"));
+        assert!(debug_str.contains("[48 bytes]"));
+        assert!(debug_str.contains("{2 keys}"));
+        // Ensure raw bytes are NOT leaked
+        assert!(!debug_str.contains("[1, 1, 1"));
+        assert!(!debug_str.contains("[2, 2, 2"));
+    }
+
+    #[test]
+    fn test_encrypted_blob_debug_redacts_content() {
+        let blob = EncryptedBlob(vec![0xAA; 100]);
+        let debug_str = format!("{:?}", blob);
+        assert!(debug_str.contains("EncryptedBlob"));
+        assert!(debug_str.contains("[100 bytes]"));
+        assert!(!debug_str.contains("170"));
     }
 }

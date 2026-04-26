@@ -379,9 +379,23 @@ impl LogReloadHandle {
     }
 
     /// Add or update a per-module log level.
+    ///
+    /// Composes the new directive with the existing filter rather than replacing it,
+    /// so previously set levels are preserved.
     pub fn set_module_level(&self, module: &str, level: &str) -> Result<(), String> {
-        let directive = format!(",{}={}", module, level);
-        let new_filter = EnvFilter::new(directive);
+        let directive = format!("{}={}", module, level);
+        let new_filter = self
+            .reload
+            .with_current(|current| {
+                let current_str = current.to_string();
+                let combined = if current_str.is_empty() {
+                    directive.clone()
+                } else {
+                    format!("{},{}", current_str, directive)
+                };
+                EnvFilter::new(combined)
+            })
+            .map_err(|e| e.to_string())?;
         self.reload.reload(new_filter).map_err(|e| e.to_string())
     }
 }
@@ -603,6 +617,7 @@ pub enum AuditOutput {
 pub struct AuditLogger {
     node_id: String,
     tx: tokio::sync::mpsc::Sender<AuditLogRecord>,
+    dropped_count: std::sync::Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl AuditLogger {
@@ -639,6 +654,7 @@ impl AuditLogger {
         AuditLogger {
             node_id: "unknown".to_string(),
             tx,
+            dropped_count: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
     }
 
@@ -661,7 +677,13 @@ impl AuditLogger {
             source_ip: None,
             details: serde_json::Map::new(),
         };
-        let _ = self.tx.try_send(record);
+        if self.tx.try_send(record).is_err() {
+            use std::sync::atomic::Ordering;
+            let dropped = self.dropped_count.fetch_add(1, Ordering::Relaxed) + 1;
+            if dropped == 1 || dropped % 1000 == 0 {
+                tracing::warn!("audit log record dropped ({} total dropped)", dropped);
+            }
+        }
     }
 
     /// Record an audit event with full details.
@@ -687,7 +709,13 @@ impl AuditLogger {
             source_ip: source_ip.map(|s| s.to_string()),
             details,
         };
-        let _ = self.tx.try_send(record);
+        if self.tx.try_send(record).is_err() {
+            use std::sync::atomic::Ordering;
+            let dropped = self.dropped_count.fetch_add(1, Ordering::Relaxed) + 1;
+            if dropped == 1 || dropped % 1000 == 0 {
+                tracing::warn!("audit log record dropped ({} total dropped)", dropped);
+            }
+        }
     }
 }
 
@@ -764,11 +792,15 @@ impl Default for LogRotationConfig {
 }
 
 /// A file writer that rotates when the file exceeds the configured size.
+struct RotatingFileState {
+    current_size: u64,
+    current_file: Option<std::fs::File>,
+}
+
 pub struct RotatingFileWriter {
     path: std::path::PathBuf,
     config: LogRotationConfig,
-    current_size: u64,
-    current_file: Option<std::fs::File>,
+    state: std::sync::Mutex<RotatingFileState>,
 }
 
 impl RotatingFileWriter {
@@ -783,31 +815,37 @@ impl RotatingFileWriter {
         Ok(RotatingFileWriter {
             path,
             config,
-            current_size,
-            current_file: Some(file),
+            state: std::sync::Mutex::new(RotatingFileState {
+                current_size,
+                current_file: Some(file),
+            }),
         })
     }
 
     /// Write a line to the current log file, rotating if necessary.
-    pub fn write_line(&mut self, line: &str) -> std::io::Result<()> {
-        if self.current_size > self.config.max_file_size_bytes {
-            self.rotate()?;
+    pub fn write_line(&self, line: &str) -> std::io::Result<()> {
+        let mut state = self.state.lock().unwrap();
+        if state.current_size > self.config.max_file_size_bytes {
+            self.rotate_with_state(&mut state)?;
         }
 
-        if let Some(ref mut file) = self.current_file {
+        if let Some(ref mut file) = state.current_file {
             let bytes = line.as_bytes();
             file.write_all(bytes)?;
             file.write_all(b"\n")?;
-            self.current_size += bytes.len() as u64 + 1;
+            state.current_size += bytes.len() as u64 + 1;
         }
 
         Ok(())
     }
 
     /// Rotate the current log file.
-    fn rotate(&mut self) -> std::io::Result<()> {
+    fn rotate_with_state(
+        &self,
+        state: &mut std::sync::MutexGuard<'_, RotatingFileState>,
+    ) -> std::io::Result<()> {
         // Close the current file
-        self.current_file = None;
+        state.current_file = None;
 
         // Remove the oldest rotated file if we've hit the limit
         let oldest = format!("{}.{}", self.path.display(), self.config.max_files);
@@ -835,8 +873,8 @@ impl RotatingFileWriter {
             .append(true)
             .open(&self.path)?;
 
-        self.current_file = Some(file);
-        self.current_size = 0;
+        state.current_file = Some(file);
+        state.current_size = 0;
 
         Ok(())
     }
@@ -844,15 +882,31 @@ impl RotatingFileWriter {
     /// Compress a rotated log file with gzip.
     fn compress_file(&self, path: &str) {
         let gz_path = format!("{}.gz", path);
-        if let Ok(mut input) = std::fs::File::open(path) {
-            if let Ok(mut output) = std::fs::File::create(&gz_path) {
-                let mut encoder =
-                    flate2::write::GzEncoder::new(&mut output, flate2::Compression::fast());
-                if std::io::copy(&mut input, &mut encoder).is_ok() {
-                    let _ = encoder.finish();
-                    let _ = std::fs::remove_file(path);
-                }
+        let mut input = match std::fs::File::open(path) {
+            Ok(f) => f,
+            Err(e) => {
+                tracing::warn!("failed to open log file for compression '{}': {}", path, e);
+                return;
             }
+        };
+        let mut output = match std::fs::File::create(&gz_path) {
+            Ok(f) => f,
+            Err(e) => {
+                tracing::warn!("failed to create compressed file '{}': {}", gz_path, e);
+                return;
+            }
+        };
+        let mut encoder =
+            flate2::write::GzEncoder::new(&mut output, flate2::Compression::fast());
+        if let Err(e) = std::io::copy(&mut input, &mut encoder) {
+            tracing::warn!("failed to compress log file '{}': {}", path, e);
+            return;
+        }
+        if let Err(e) = encoder.finish() {
+            tracing::warn!("failed to finish gzip encoding for '{}': {}", gz_path, e);
+        }
+        if let Err(e) = std::fs::remove_file(path) {
+            tracing::warn!("failed to remove uncompressed log file '{}': {}", path, e);
         }
     }
 }

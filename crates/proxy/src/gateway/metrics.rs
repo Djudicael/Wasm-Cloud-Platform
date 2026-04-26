@@ -31,11 +31,7 @@ pub struct GatewayMetrics {
 }
 
 impl GatewayMetrics {
-    pub fn new() -> Self {
-        // Use the global Prometheus default registry for simplicity.
-        // In production, share the registry from the metrics crate.
-        let registry = Registry::new();
-
+    pub fn new(registry: &Registry) -> Self {
         let auth_success_total = IntCounter::with_opts(Opts::new(
             "wasm_gateway_auth_success_total",
             "Requests that passed authentication",
@@ -115,7 +111,8 @@ impl GatewayMetrics {
 
 impl Default for GatewayMetrics {
     fn default() -> Self {
-        Self::new()
+        let registry = Registry::new();
+        Self::new(&registry)
     }
 }
 
@@ -125,7 +122,8 @@ mod tests {
 
     #[test]
     fn test_metrics_creation() {
-        let metrics = GatewayMetrics::new();
+        let registry = Registry::new();
+        let metrics = GatewayMetrics::new(&registry);
         metrics.auth_success_total.inc();
         metrics.auth_failure_total.inc_by(2);
         metrics.authz_denied_total.inc();

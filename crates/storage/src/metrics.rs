@@ -44,8 +44,8 @@ impl Store {
     ) -> Result<Vec<MetricBucket>, PlatformError> {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
         let cutoff = (now / 60 - last_n_minutes) * 60;
         let prefix = format!("{app_id}:");
 
@@ -65,7 +65,7 @@ impl Store {
                     .value()
                     .split(':')
                     .next_back()
-                    .unwrap()
+                    .unwrap_or("")
                     .parse()
                     .unwrap_or(0);
                 if ts >= cutoff {
@@ -82,8 +82,8 @@ impl Store {
     pub fn prune_old_metrics(&self, retention_minutes: u64) -> Result<u64, PlatformError> {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
         let cutoff = (now / 60).saturating_sub(retention_minutes) * 60;
 
         let tx = self
@@ -98,7 +98,13 @@ impl Store {
             let stale_keys: Vec<String> = table
                 .iter()
                 .map_err(PlatformError::storage_source)?
-                .filter_map(|e| e.ok())
+                .filter_map(|e| match e {
+                    Ok(v) => Some(v),
+                    Err(err) => {
+                        tracing::warn!(error = %err, "error iterating metrics table entry, skipping");
+                        None
+                    }
+                })
                 .filter(|(k, _)| {
                     k.value()
                         .split(':')

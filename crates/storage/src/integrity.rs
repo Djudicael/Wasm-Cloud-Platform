@@ -3,7 +3,7 @@ use crate::tables::{
 };
 use crate::Store;
 use common::error::PlatformError;
-use redb::{ReadableDatabase, ReadableTable};
+use redb::{ReadableDatabase, ReadableTable, ReadableTableMetadata};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -242,7 +242,13 @@ impl Store {
             let keys: Vec<String> = table
                 .iter()
                 .map_err(PlatformError::storage_source)?
-                .filter_map(|e| e.ok())
+                .filter_map(|e| match e {
+                    Ok(v) => Some(v),
+                    Err(err) => {
+                        tracing::warn!(error = %err, "error iterating routes table entry, skipping");
+                        None
+                    }
+                })
                 .map(|(k, _)| k.value().to_string())
                 .collect();
             for key in keys {
@@ -267,7 +273,13 @@ impl Store {
             let keys: Vec<String> = table
                 .iter()
                 .map_err(PlatformError::storage_source)?
-                .filter_map(|e| e.ok())
+                .filter_map(|e| match e {
+                    Ok(v) => Some(v),
+                    Err(err) => {
+                        tracing::warn!(error = %err, "error iterating metrics table entry, skipping");
+                        None
+                    }
+                })
                 .map(|(k, _)| k.value().to_string())
                 .collect();
             for key in keys {
@@ -281,7 +293,14 @@ impl Store {
     }
 
     pub fn count_artifacts(&self) -> Result<u64, PlatformError> {
-        self.check_table_readable("artifacts")
+        let tx = self
+            .db
+            .begin_read()
+            .map_err(PlatformError::storage_source)?;
+        let table = tx
+            .open_table(ARTIFACTS)
+            .map_err(PlatformError::storage_source)?;
+        table.len().map_err(PlatformError::storage_source)
     }
 
     pub fn db_path(&self) -> std::path::PathBuf {

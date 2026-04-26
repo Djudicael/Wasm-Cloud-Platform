@@ -37,11 +37,17 @@ const CURRENT_SCHEMA_VERSION: u32 = 6;
 
 #[derive(Clone)]
 pub struct Store {
-    pub db: Arc<Database>,
+    pub(crate) db: Arc<Database>,
     db_path: std::path::PathBuf,
 }
 
 impl Store {
+    /// Get a reference to the underlying database.
+    /// This is exposed for crates that need direct redb access (e.g., secrets).
+    pub fn db(&self) -> &Arc<Database> {
+        &self.db
+    }
+
     /// Write a health probe key to verify that redb is writable.
     /// This writes a small record and immediately deletes it.
     pub fn write_health_probe(&self) -> Result<(), PlatformError> {
@@ -199,10 +205,10 @@ impl Store {
         }
 
         if current > CURRENT_SCHEMA_VERSION {
-            panic!(
+            return Err(redb::Error::Corrupted(format!(
                 "Database schema version {current} is NEWER than the binary supports ({CURRENT_SCHEMA_VERSION}). \
                  Downgrade is not supported. Use a newer binary or restore from backup."
-            );
+            )));
         }
 
         // Apply migrations in order
@@ -254,7 +260,11 @@ impl Store {
                 // v5 → v6: Ensure API_KEYS table exists
                 self.migrate_v5_to_v6()?;
             }
-            n => panic!("Unknown migration target: {n}"),
+            n => {
+                return Err(redb::Error::Corrupted(format!(
+                    "Unknown migration target: {n}"
+                )))
+            }
         }
         Ok(())
     }
@@ -272,7 +282,13 @@ impl Store {
         // Read all existing records
         let records: Vec<(String, String)> = table
             .iter()?
-            .filter_map(|e: Result<_, _>| e.ok())
+            .filter_map(|e: Result<_, _>| match e {
+                Ok(v) => Some(v),
+                Err(err) => {
+                    tracing::warn!(error = %err, "error iterating configs table entry during v1→v2 migration, skipping");
+                    None
+                }
+            })
             .map(|(k, v)| (k.value().to_string(), v.value().to_string()))
             .collect();
         drop(table);
@@ -290,7 +306,8 @@ impl Store {
                     if val.get("db_max_connections").is_none() {
                         val["db_max_connections"] = serde_json::json!(10);
                     }
-                    let new_json = serde_json::to_string(&val).expect("re-serialize failed");
+                    let new_json = serde_json::to_string(&val)
+                        .map_err(|e| redb::Error::Corrupted(format!("re-serialize failed: {e}")))?;
                     table.insert(key.as_str(), new_json.as_str())?;
                 }
             }
@@ -343,7 +360,13 @@ impl Store {
         // Read all existing records
         let records: Vec<(String, String)> = table
             .iter()?
-            .filter_map(|e: Result<_, _>| e.ok())
+            .filter_map(|e: Result<_, _>| match e {
+                Ok(v) => Some(v),
+                Err(err) => {
+                    tracing::warn!(error = %err, "error iterating configs table entry during v2→v3 migration, skipping");
+                    None
+                }
+            })
             .map(|(k, v)| (k.value().to_string(), v.value().to_string()))
             .collect();
         drop(table);
@@ -365,7 +388,8 @@ impl Store {
                             "per_ip_limit": 100
                         });
                     }
-                    let new_json = serde_json::to_string(&val).expect("re-serialize failed");
+                    let new_json = serde_json::to_string(&val)
+                        .map_err(|e| redb::Error::Corrupted(format!("re-serialize failed: {e}")))?;
                     table.insert(key.as_str(), new_json.as_str())?;
                 }
             }
@@ -528,19 +552,20 @@ impl Store {
         app_id: &str,
         config: &common::types::GatewayRouteConfig,
     ) -> Result<(), PlatformError> {
-        let json = serde_json::to_string(config)
-            .map_err(|e| PlatformError::storage_with_msg("failed to serialize gateway config", e))?;
+        let json = serde_json::to_string(config).map_err(|e| {
+            PlatformError::storage_with_msg("failed to serialize gateway config", e)
+        })?;
         let tx = self
             .db
             .begin_write()
             .map_err(|e| PlatformError::storage_with_msg("failed to begin write transaction", e))?;
         {
-            let mut table = tx
-                .open_table(tables::GATEWAY_CONFIGS)
-                .map_err(|e| PlatformError::storage_with_msg("failed to open GATEWAY_CONFIGS table", e))?;
-            table
-                .insert(app_id, json.as_str())
-                .map_err(|e| PlatformError::storage_with_msg("failed to write gateway config", e))?;
+            let mut table = tx.open_table(tables::GATEWAY_CONFIGS).map_err(|e| {
+                PlatformError::storage_with_msg("failed to open GATEWAY_CONFIGS table", e)
+            })?;
+            table.insert(app_id, json.as_str()).map_err(|e| {
+                PlatformError::storage_with_msg("failed to write gateway config", e)
+            })?;
         }
         tx.commit()
             .map_err(|e| PlatformError::storage_with_msg("failed to commit gateway config", e))?;
@@ -556,20 +581,17 @@ impl Store {
             .db
             .begin_read()
             .map_err(|e| PlatformError::storage_with_msg("failed to begin read transaction", e))?;
-        let table = tx
-            .open_table(tables::GATEWAY_CONFIGS)
-            .map_err(|e| PlatformError::storage_with_msg("failed to open GATEWAY_CONFIGS table", e))?;
+        let table = tx.open_table(tables::GATEWAY_CONFIGS).map_err(|e| {
+            PlatformError::storage_with_msg("failed to open GATEWAY_CONFIGS table", e)
+        })?;
         match table
             .get(app_id)
             .map_err(|e| PlatformError::storage_with_msg("failed to read gateway config", e))?
         {
             Some(v) => {
-                let config: common::types::GatewayRouteConfig =
-                    serde_json::from_str(v.value()).map_err(|e| {
-                        PlatformError::storage_with_msg(
-                            "failed to deserialize gateway config",
-                            e,
-                        )
+                let config: common::types::GatewayRouteConfig = serde_json::from_str(v.value())
+                    .map_err(|e| {
+                        PlatformError::storage_with_msg("failed to deserialize gateway config", e)
                     })?;
                 Ok(Some(config))
             }
@@ -584,15 +606,16 @@ impl Store {
             .begin_write()
             .map_err(|e| PlatformError::storage_with_msg("failed to begin write transaction", e))?;
         {
-            let mut table = tx
-                .open_table(tables::GATEWAY_CONFIGS)
-                .map_err(|e| PlatformError::storage_with_msg("failed to open GATEWAY_CONFIGS table", e))?;
-            table
-                .remove(app_id)
-                .map_err(|e| PlatformError::storage_with_msg("failed to delete gateway config", e))?;
+            let mut table = tx.open_table(tables::GATEWAY_CONFIGS).map_err(|e| {
+                PlatformError::storage_with_msg("failed to open GATEWAY_CONFIGS table", e)
+            })?;
+            table.remove(app_id).map_err(|e| {
+                PlatformError::storage_with_msg("failed to delete gateway config", e)
+            })?;
         }
-        tx.commit()
-            .map_err(|e| PlatformError::storage_with_msg("failed to commit gateway config deletion", e))?;
+        tx.commit().map_err(|e| {
+            PlatformError::storage_with_msg("failed to commit gateway config deletion", e)
+        })?;
         Ok(())
     }
 
@@ -605,15 +628,20 @@ impl Store {
             .db
             .begin_read()
             .map_err(|e| PlatformError::storage_with_msg("failed to begin read transaction", e))?;
-        let table = tx
-            .open_table(tables::GATEWAY_CONFIGS)
-            .map_err(|e| PlatformError::storage_with_msg("failed to open GATEWAY_CONFIGS table", e))?;
+        let table = tx.open_table(tables::GATEWAY_CONFIGS).map_err(|e| {
+            PlatformError::storage_with_msg("failed to open GATEWAY_CONFIGS table", e)
+        })?;
         let mut configs = Vec::new();
-        for entry in table.iter().map_err(|e| PlatformError::storage_with_msg("failed to iterate gateway configs", e))? {
-            let (k, v) = entry.map_err(|e| PlatformError::storage_with_msg("failed to read gateway config entry", e))?;
+        for entry in table
+            .iter()
+            .map_err(|e| PlatformError::storage_with_msg("failed to iterate gateway configs", e))?
+        {
+            let (k, v) = entry.map_err(|e| {
+                PlatformError::storage_with_msg("failed to read gateway config entry", e)
+            })?;
             let app_id = k.value().to_string();
-            let config: common::types::GatewayRouteConfig =
-                serde_json::from_str(v.value()).map_err(|e| {
+            let config: common::types::GatewayRouteConfig = serde_json::from_str(v.value())
+                .map_err(|e| {
                     PlatformError::storage_with_msg("failed to deserialize gateway config", e)
                 })?;
             configs.push((app_id, config));
@@ -665,8 +693,8 @@ impl Store {
             .map_err(|e| PlatformError::storage_with_msg("failed to read api keys", e))?
         {
             Some(v) => {
-                let keys: Vec<common::types::ApiKeyRecord> =
-                    serde_json::from_str(v.value()).map_err(|e| {
+                let keys: Vec<common::types::ApiKeyRecord> = serde_json::from_str(v.value())
+                    .map_err(|e| {
                         PlatformError::storage_with_msg("failed to deserialize api keys", e)
                     })?;
                 Ok(keys)
@@ -689,8 +717,9 @@ impl Store {
                 .remove(app_id)
                 .map_err(|e| PlatformError::storage_with_msg("failed to delete api keys", e))?;
         }
-        tx.commit()
-            .map_err(|e| PlatformError::storage_with_msg("failed to commit api keys deletion", e))?;
+        tx.commit().map_err(|e| {
+            PlatformError::storage_with_msg("failed to commit api keys deletion", e)
+        })?;
         Ok(())
     }
 }

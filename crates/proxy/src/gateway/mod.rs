@@ -11,6 +11,7 @@ pub mod transform;
 
 use config::GatewayRouteConfig;
 use oidc::OidcProvider;
+use prometheus::Registry;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -35,17 +36,22 @@ pub struct Gateway {
 
     /// Gateway metrics.
     pub metrics: Arc<metrics::GatewayMetrics>,
+
+    /// Shared Prometheus registry for all gateway metrics.
+    pub registry: Arc<Registry>,
 }
 
 impl Gateway {
     pub fn new(oidc: Option<Arc<OidcProvider>>) -> Self {
+        let registry = Arc::new(Registry::new());
         Gateway {
             oidc,
             circuit_breaker: Arc::new(circuit_breaker::CircuitBreakerManager::new()),
             distributed_limiters: Arc::new(RwLock::new(HashMap::new())),
             route_configs: Arc::new(RwLock::new(HashMap::new())),
             api_key_validators: Arc::new(RwLock::new(HashMap::new())),
-            metrics: Arc::new(metrics::GatewayMetrics::new()),
+            metrics: Arc::new(metrics::GatewayMetrics::new(&registry)),
+            registry,
         }
     }
 
@@ -93,9 +99,9 @@ impl Gateway {
         session: &pingora_proxy::Session,
         policy: &config::AuthPolicy,
     ) -> Result<oidc::UserIdentity, GatewayError> {
-        // For None policy, skip auth
+        // For None policy, return an anonymous identity instead of an error
         if *policy == config::AuthPolicy::None {
-            return Err(GatewayError::Auth("auth not required".to_string()));
+            return Ok(oidc::UserIdentity::anonymous());
         }
 
         let provider = self

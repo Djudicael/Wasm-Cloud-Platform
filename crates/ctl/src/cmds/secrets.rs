@@ -62,9 +62,8 @@ pub async fn run(args: SecretsArgs, bus: &NatsBus) -> Result<()> {
             );
         }
         SecretsCmd::Delete { app, key } => {
-            println!(
-                "{} Secret delete for {}/{} — not yet implemented (add Event::SecretDelete)",
-                "⚠".yellow(),
+            anyhow::bail!(
+                "Secret delete for {}/{} — not yet implemented (add Event::SecretDelete)",
                 app,
                 key
             );

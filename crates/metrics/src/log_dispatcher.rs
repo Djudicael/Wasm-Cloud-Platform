@@ -64,20 +64,31 @@ async fn flush_batch(sinks: &[LogSink], batch: &mut Vec<WasmLogRecord>) {
                 for record in batch.iter() {
                     // Pretty-print or forward as JSON line
                     if let Ok(line) = serde_json::to_string(record) {
-                        println!("{}", line);
+                        tracing::info!(target: "wasm_log", "{}", line);
                     }
                 }
             }
             LogSink::Http { endpoint, client } => {
                 if let Ok(payload) = serde_json::to_vec(batch) {
-                    if let Err(e) = client
+                    match client
                         .post(endpoint)
                         .body(payload)
                         .header("content-type", "application/json")
                         .send()
                         .await
                     {
-                        tracing::warn!(error = %e, "log HTTP export failed");
+                        Ok(resp) => {
+                            let status = resp.status();
+                            if !status.is_success() {
+                                tracing::warn!(
+                                    status = %status,
+                                    "log HTTP export returned non-success status"
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(error = %e, "log HTTP export failed");
+                        }
                     }
                 }
             }

@@ -93,11 +93,17 @@ impl UpstreamRegistry {
     }
 
     /// Remove an upstream instance address for the given app.
+    /// If the address list becomes empty, the entry is removed from the map entirely.
     pub async fn remove(&self, app_id: &AppId, addr: &SocketAddr) {
         let mut map = self.inner.write().await;
         if let Some(entry) = map.get_mut(&app_id.0) {
             entry.1.retain(|a| a != addr);
             tracing::info!(app = %app_id.0, %addr, "upstream removed");
+            // Remove the app entry entirely if no addresses remain
+            if entry.1.is_empty() {
+                map.remove(&app_id.0);
+                tracing::info!(app = %app_id.0, "app removed from upstream registry (no instances left)");
+            }
         }
     }
 

@@ -158,8 +158,7 @@ async fn test_secret_encryption_decryption() {
 
     let mut encrypted_secrets = Vec::new();
     for (key, value) in &secrets {
-        let encrypted = secrets::encrypt_for_peer(&receiver_pubkey, value.as_bytes());
-        assert!(!encrypted.is_empty());
+        let encrypted = secrets::encrypt_for_peer(&receiver_pubkey, value.as_bytes()).unwrap();
         assert_ne!(&encrypted[..], value.as_bytes());
         encrypted_secrets.push((key.to_string(), encrypted));
     }
@@ -177,8 +176,7 @@ async fn test_secret_encryption_decryption() {
 
     // Decrypt secrets
     for ((key, encrypted), (_orig_key, orig_value)) in encrypted_secrets.iter().zip(&secrets) {
-        let decrypted = receiver.decrypt(encrypted);
-        assert!(!decrypted.is_empty(), "Decryption failed for {}", key);
+        let decrypted = receiver.decrypt(encrypted).unwrap();
 
         let decrypted_str = String::from_utf8(decrypted).unwrap();
         assert_eq!(&decrypted_str, orig_value, "Secret mismatch for {}", key);
@@ -224,7 +222,7 @@ async fn test_snapshot_event_structure() {
     let encrypted_secrets = vec![(
         "app1:v1".to_string(),
         "DB_URL".to_string(),
-        secrets::encrypt_for_peer(&receiver.public_bytes(), b"postgres://db"),
+        secrets::encrypt_for_peer(&receiver.public_bytes(), b"postgres://db").unwrap(),
     )];
 
     let artifact_hashes = vec![
@@ -362,7 +360,7 @@ async fn test_two_node_bootstrap_simulation() {
         .get(&app_config.id, "API_KEY")
         .await
         .unwrap();
-    let encrypted_secret = secrets::encrypt_for_peer(&pubkey1, secret_value.as_bytes());
+    let encrypted_secret = secrets::encrypt_for_peer(&pubkey1, secret_value.as_bytes()).unwrap();
     let encrypted_secrets = vec![(
         app_config.id.0.clone(),
         "API_KEY".to_string(),
@@ -408,8 +406,7 @@ async fn test_two_node_bootstrap_simulation() {
         let secret_provider1 = secrets::LocalSecretProvider::new(store1.clone(), kek1);
 
         for (app_id_str, key, encrypted_value) in encrypted_secrets {
-            let plaintext_bytes = keypair1.decrypt(&encrypted_value);
-            assert!(!plaintext_bytes.is_empty(), "Failed to decrypt secret");
+            let plaintext_bytes = keypair1.decrypt(&encrypted_value).unwrap();
 
             let plaintext = String::from_utf8(plaintext_bytes).unwrap();
             assert_eq!(plaintext, "sk_test_node0_secret");
@@ -479,7 +476,7 @@ async fn test_on_wire_encryption_verification() {
     let receiver_pubkey = receiver.public_bytes();
 
     let plaintext_secret = "my_super_secret_password_12345";
-    let encrypted = secrets::encrypt_for_peer(&receiver_pubkey, plaintext_secret.as_bytes());
+    let encrypted = secrets::encrypt_for_peer(&receiver_pubkey, plaintext_secret.as_bytes()).unwrap();
 
     // Verify the encrypted blob does NOT contain the plaintext anywhere
     let encrypted_str = String::from_utf8_lossy(&encrypted);
@@ -496,7 +493,7 @@ async fn test_on_wire_encryption_verification() {
     assert!(encrypted.len() >= 32 + 12, "Encrypted blob too short");
 
     // Verify we can decrypt it back
-    let decrypted = receiver.decrypt(&encrypted);
+    let decrypted = receiver.decrypt(&encrypted).unwrap();
     let decrypted_str = String::from_utf8(decrypted).unwrap();
     assert_eq!(decrypted_str, plaintext_secret);
 

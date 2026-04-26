@@ -11,6 +11,8 @@ const CHANNEL_CAPACITY: usize = 50_000;
 
 pub struct BillingCollector {
     tx: mpsc::Sender<BillingInput>,
+    dropped_count: std::sync::atomic::AtomicU64,
+    shutdown_tx: Option<tokio::sync::oneshot::Sender<()>>,
 }
 
 pub struct BillingInput {
@@ -29,8 +31,13 @@ pub struct BillingInput {
 impl BillingCollector {
     pub fn start(store: Store, node_id: String) -> Self {
         let (tx, rx) = mpsc::channel::<BillingInput>(CHANNEL_CAPACITY);
-        tokio::spawn(billing_writer_loop(rx, store, node_id));
-        BillingCollector { tx }
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        tokio::spawn(billing_writer_loop(rx, store, node_id, shutdown_rx));
+        BillingCollector {
+            tx,
+            dropped_count: std::sync::atomic::AtomicU64::new(0),
+            shutdown_tx: Some(shutdown_tx),
+        }
     }
 
     pub fn tx(&self) -> mpsc::Sender<BillingInput> {
@@ -39,7 +46,20 @@ impl BillingCollector {
 
     pub fn record(&self, input: BillingInput) {
         if self.tx.try_send(input).is_err() {
-            warn!("billing channel full, dropping record — this should be investigated");
+            let dropped = self
+                .dropped_count
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if dropped % 1000 == 0 {
+                warn!(total_dropped = dropped + 1, "billing channel full, dropping records");
+            }
+        }
+    }
+
+    /// Signal the billing writer loop to shut down gracefully.
+    /// Any records still buffered will be flushed before the loop exits.
+    pub fn shutdown(&mut self) {
+        if let Some(tx) = self.shutdown_tx.take() {
+            let _ = tx.send(());
         }
     }
 }
@@ -50,14 +70,36 @@ const BATCH_SIZE: usize = 64;
 /// Maximum time to wait before flushing a partial batch.
 const BATCH_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
 
-async fn billing_writer_loop(mut rx: mpsc::Receiver<BillingInput>, store: Store, node_id: String) {
-    let mut seq = store.get_billing_sequence().unwrap_or(0);
-    let mut prev_hash = store.get_last_billing_hash().unwrap_or_default();
+/// Key used to persist the billing cursor (seq, prev_hash) for crash recovery.
+const BILLING_CURSOR_KEY: &str = "billing_cursor";
+
+async fn billing_writer_loop(
+    mut rx: mpsc::Receiver<BillingInput>,
+    store: Store,
+    node_id: String,
+    mut shutdown_rx: tokio::sync::oneshot::Receiver<()>,
+) {
+    // Load seq and prev_hash from the persisted cursor for crash recovery.
+    // Falls back to querying the store if no cursor is saved yet.
+    let (mut seq, mut prev_hash) = if let Ok(Some(data)) = store.load_meta(BILLING_CURSOR_KEY) {
+        serde_json::from_str::<(u64, String)>(&data)
+            .unwrap_or_else(|_| {
+                (
+                    store.get_billing_sequence().unwrap_or(0),
+                    store.get_last_billing_hash().unwrap_or_default(),
+                )
+            })
+    } else {
+        (
+            store.get_billing_sequence().unwrap_or(0),
+            store.get_last_billing_hash().unwrap_or_default(),
+        )
+    };
+
     let mut batch: Vec<BillingRecord> = Vec::with_capacity(BATCH_SIZE);
     let mut deadline = tokio::time::Instant::now() + BATCH_TIMEOUT;
 
     loop {
-        let _remaining = BATCH_SIZE - batch.len();
         let deadline_hit = tokio::time::Instant::now() >= deadline;
 
         // Flush conditions: batch full, timeout elapsed, or channel closed
@@ -68,50 +110,63 @@ async fn billing_writer_loop(mut rx: mpsc::Receiver<BillingInput>, store: Store,
 
         // Try to receive with a timeout so we can flush partial batches
         let timeout = deadline.saturating_duration_since(tokio::time::Instant::now());
-        match tokio::time::timeout(timeout, rx.recv()).await {
-            Ok(Some(input)) => {
-                seq += 1;
-                let timestamp_ms = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_millis() as u64;
 
-                let mut record = BillingRecord {
-                    seq,
-                    prev_hash: prev_hash.clone(),
-                    tenant_id: input.tenant_id,
-                    app_id: input.app_id,
-                    instance_id: input.instance_id,
-                    node_id: node_id.clone(),
-                    timestamp_ms,
-                    fuel_consumed: input.fuel_consumed,
-                    fuel_quota: input.fuel_quota,
-                    ram_bytes: input.ram_bytes,
-                    wall_clock_ms: input.wall_clock_ms,
-                    status_code: input.status_code,
-                    is_trap: input.is_trap,
-                    record_hash: String::new(),
-                };
+        tokio::select! {
+            result = tokio::time::timeout(timeout, rx.recv()) => {
+                match result {
+                    Ok(Some(input)) => {
+                        seq += 1;
+                        let timestamp_ms = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_millis() as u64)
+                            .unwrap_or(0);
 
-                record.record_hash = record.compute_hash();
-                prev_hash = record.record_hash.clone();
-                batch.push(record);
+                        let mut record = BillingRecord {
+                            seq,
+                            prev_hash: prev_hash.clone(),
+                            tenant_id: input.tenant_id,
+                            app_id: input.app_id,
+                            instance_id: input.instance_id,
+                            node_id: node_id.clone(),
+                            timestamp_ms,
+                            fuel_consumed: input.fuel_consumed,
+                            fuel_quota: input.fuel_quota,
+                            ram_bytes: input.ram_bytes,
+                            wall_clock_ms: input.wall_clock_ms,
+                            status_code: input.status_code,
+                            is_trap: input.is_trap,
+                            record_hash: String::new(),
+                        };
 
-                // Flush immediately if batch is full
-                if batch.len() >= BATCH_SIZE {
-                    flush_batch(&store, &mut batch, &mut seq, &mut prev_hash);
-                    deadline = tokio::time::Instant::now() + BATCH_TIMEOUT;
+                        record.record_hash = record.compute_hash();
+                        prev_hash = record.record_hash.clone();
+                        batch.push(record);
+
+                        // Flush immediately if batch is full
+                        if batch.len() >= BATCH_SIZE {
+                            flush_batch(&store, &mut batch, &mut seq, &mut prev_hash);
+                            deadline = tokio::time::Instant::now() + BATCH_TIMEOUT;
+                        }
+                    }
+                    Ok(None) => {
+                        // Channel closed — flush any remaining records and exit
+                        if !batch.is_empty() {
+                            flush_batch(&store, &mut batch, &mut seq, &mut prev_hash);
+                        }
+                        break;
+                    }
+                    Err(_) => {
+                        // Timeout elapsed — will flush at the top of the loop
+                    }
                 }
             }
-            Ok(None) => {
-                // Channel closed — flush any remaining records and exit
+            _ = &mut shutdown_rx => {
+                // Shutdown signal received — flush any remaining records and exit
                 if !batch.is_empty() {
                     flush_batch(&store, &mut batch, &mut seq, &mut prev_hash);
                 }
+                tracing::info!("billing writer loop shut down gracefully");
                 break;
-            }
-            Err(_) => {
-                // Timeout elapsed — will flush at the top of the loop
             }
         }
     }
@@ -123,11 +178,14 @@ async fn billing_writer_loop(mut rx: mpsc::Receiver<BillingInput>, store: Store,
 /// individual transactions because redb's MVCC commit overhead is amortised.
 /// The hash chain (`prev_hash` → `record_hash`) is already computed per-record
 /// before buffering, so batch order preserves chain integrity.
+///
+/// After flushing, the current `seq` and `prev_hash` are persisted to the
+/// store's meta table so they can be recovered after a crash.
 fn flush_batch(
     store: &Store,
     batch: &mut Vec<BillingRecord>,
-    _seq: &mut u64,
-    _prev_hash: &mut String,
+    seq: &mut u64,
+    prev_hash: &mut String,
 ) {
     if batch.is_empty() {
         return;
@@ -144,6 +202,13 @@ fn flush_batch(
         if let Err(e) = store.write_billing_record(&record) {
             errors += 1;
             error!(seq = record.seq, error = %e, "failed to write billing record");
+        }
+    }
+
+    // Persist seq and prev_hash for crash recovery
+    if let Ok(data) = serde_json::to_string(&(*seq, prev_hash.clone())) {
+        if let Err(e) = store.save_meta(BILLING_CURSOR_KEY, &data) {
+            tracing::warn!(error = %e, "failed to persist billing cursor");
         }
     }
 
@@ -165,7 +230,7 @@ fn flush_batch(
 }
 
 pub fn verify_node_billing_chain(store: &Store, node_id: &str) -> Result<u64, String> {
-    let records = store
+    let mut records = store
         .get_billing_records_for_node(node_id)
         .map_err(|e| e.to_string())?;
 
@@ -173,12 +238,19 @@ pub fn verify_node_billing_chain(store: &Store, node_id: &str) -> Result<u64, St
         return Ok(0);
     }
 
-    let mut sorted_records = records.clone();
-    sorted_records.sort_by_key(|r| r.seq);
+    // Sort in-place instead of cloning
+    records.sort_by_key(|r| r.seq);
 
-    verify_chain(&sorted_records).map_err(|e| format!("{:?}", e))
+    verify_chain(&records).map_err(|e| format!("{}", e))
 }
 
+/// Generate a billing report for a specific tenant within a time range.
+///
+/// **Note**: This currently loads ALL billing records from the store and then
+/// filters in-memory. For deployments with large billing histories, this is
+/// O(n) in total records (not just the tenant's). When a storage API like
+/// `read_billing_records_for_tenant` becomes available, this should be updated
+/// to use it for better performance.
 pub fn generate_tenant_billing_report(
     store: &Store,
     tenant_id: &str,
