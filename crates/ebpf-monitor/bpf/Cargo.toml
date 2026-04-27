@@ -30,3 +30,7 @@ path = "src/disk_monitor.rs"
 [[bin]]
 name = "syscall_counter"
 path = "src/syscall_counter.rs"
+
+[[bin]]
+name = "namespace_enforcer"
+path = "src/namespace_enforcer.rs"

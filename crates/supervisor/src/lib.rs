@@ -38,6 +38,18 @@ use storage::Store;
 use tokio::sync::{mpsc, RwLock};
 use tracing::{error, info, warn};
 
+/// Get the OS Thread ID (TID) of the current thread.
+/// This is used for eBPF namespace enforcement registration.
+#[cfg(target_os = "linux")]
+fn gettid() -> u32 {
+    unsafe { libc::syscall(libc::SYS_gettid) as u32 }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn gettid() -> u32 {
+    0
+}
+
 // ── Supervisor Command Interface ──────────────────────────────────────────────
 
 /// Commands that external subsystems (eBPF monitor, admin API) can send
@@ -108,6 +120,10 @@ pub struct Supervisor {
     /// API, the sender side is updated and this receiver picks up the new
     /// value on the next loop iteration.
     health_interval_rx: Option<tokio::sync::watch::Receiver<u64>>,
+
+    /// eBPF namespace map for TID registration and identity resolution.
+    /// Shared with the internal gateway.
+    namespace_map: Option<Arc<ebpf_monitor::NamespaceMap>>,
 }
 
 impl Supervisor {
@@ -140,7 +156,14 @@ impl Supervisor {
             command_rx: std::sync::Mutex::new(Some(command_rx)),
             command_tx,
             health_interval_rx: None,
+            namespace_map: None,
         })
+    }
+
+    /// Set the eBPF namespace map for TID registration and identity resolution.
+    /// Called by the node after initializing the eBPF monitor.
+    pub fn set_namespace_map(&mut self, namespace_map: Arc<ebpf_monitor::NamespaceMap>) {
+        self.namespace_map = Some(namespace_map);
     }
 
     /// Set the watch receiver for the health-check interval.
@@ -470,13 +493,43 @@ impl Supervisor {
         let (spawn_result_tx, spawn_result_rx) =
             tokio::sync::oneshot::channel::<Result<(), PlatformError>>();
 
+        // Clone namespace_map for the blocking task
+        let namespace_map_for_spawn = self.namespace_map.clone();
+        let qualified_app_id_for_spawn = qualified_app_id.clone();
+        let (tid_tx, tid_rx) = tokio::sync::oneshot::channel::<u32>();
+
         let task = tokio::task::spawn_blocking(move || {
+            // Get the OS Thread ID for this blocking task
+            let tid = gettid();
+
+            // Register TID with identity map before running the instance
+            if let Some(ref ns_map) = namespace_map_for_spawn {
+                let identity = ebpf_monitor::common::TidIdentity::new(
+                    qualified_app_id_for_spawn.namespace(),
+                    &qualified_app_id_for_spawn.0,
+                );
+                if let Err(e) = ns_map.register_tid(tid, identity) {
+                    tracing::warn!(
+                        tid,
+                        error = %e,
+                        "Failed to register TID — gateway will not attribute this instance"
+                    );
+                }
+            }
+
+            // Send TID back to async context
+            let _ = tid_tx.send(tid);
+
             // Use the allocated host_port, NOT wasm_bind_port.
             // The app must bind to the allocated port so the proxy can connect.
             let mut instance =
                 match prepared_clone.spawn_instance(env_vars, host_port, Some(socket_addr_check)) {
                     Ok(instance) => instance,
                     Err(e) => {
+                        // Deregister TID on spawn failure
+                        if let Some(ref ns_map) = namespace_map_for_spawn {
+                            let _ = ns_map.deregister_tid(tid);
+                        }
                         let _ = spawn_result_tx.send(Err(PlatformError::runtime(format!(
                             "Failed to spawn instance: {}",
                             e
@@ -508,6 +561,12 @@ impl Supervisor {
 
             // The run() call blocks until the Wasm module exits or is killed
             let stats = instance.run();
+
+            // Deregister TID on exit
+            if let Some(ref ns_map) = namespace_map_for_spawn {
+                let _ = ns_map.deregister_tid(tid);
+            }
+
             if let Some(ref trap) = stats.trap {
                 tracing::error!(
                     app = %app_id_clone.0,
@@ -577,6 +636,9 @@ impl Supervisor {
         let fuel_quota = config.fuel_quota.0;
         let ram_bytes = config.memory_limit.to_bytes() as u64;
 
+        // Receive the TID from the blocking task (may fail if task panicked early)
+        let instance_tid = tid_rx.await.ok();
+
         let managed = ManagedInstance {
             id: instance_id.clone(),
             app_id: app_id.clone(),
@@ -592,6 +654,7 @@ impl Supervisor {
                 fuel_quota,
                 ram_bytes,
             },
+            tid: instance_tid,
         };
 
         {
@@ -679,6 +742,14 @@ impl Supervisor {
     }
 
     async fn health_tick(&self) -> Result<(), PlatformError> {
+        // ── Stale TID cleanup ──
+        if let Some(ref ns_map) = self.namespace_map {
+            let removed = ns_map.cleanup_stale_tids();
+            if removed > 0 {
+                tracing::info!(removed, "Cleaned up stale TIDs from namespace map");
+            }
+        }
+
         // Phase 1: Under read lock, collect health check data and idle instance IDs
         let health_checks: Vec<(String, InstanceId, SocketAddr)>;
         let idle_by_app: Vec<(String, AppId, Vec<InstanceId>)>;
@@ -902,6 +973,13 @@ impl Supervisor {
             inst.shutdown_tx.send(()).ok();
             if let Err(e) = tokio::time::timeout(Duration::from_secs(5), inst.task).await {
                 tracing::warn!(instance_id = %id.0, "Instance task did not shut down in time: {}", e);
+            }
+
+            // Deregister TID from eBPF map on kill
+            if let Some(tid) = inst.tid {
+                if let Some(ref ns_map) = self.namespace_map {
+                    let _ = ns_map.deregister_tid(tid);
+                }
             }
 
             let _ = self

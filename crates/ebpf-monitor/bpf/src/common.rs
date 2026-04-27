@@ -31,6 +31,16 @@ pub enum EventType {
     SyscallAnomaly = 9,
     /// FD count for a PID exceeded soft limit.
     FdLimitApproaching = 10,
+
+    // ── Namespace enforcement events ──
+    /// A monitored TID established a TCP connection to the gateway.
+    TidConnection = 11,
+    /// A monitored TID closed a TCP connection to the gateway.
+    TidDisconnection = 12,
+    /// Namespace audit event (gateway request, connection, etc.).
+    NamespaceAudit = 13,
+    /// A forged namespace header was detected in send buffer.
+    NamespaceForgedHeader = 14,
 }
 
 /// Header for every event sent through the ring buffer.
@@ -151,4 +161,96 @@ pub struct MonitorConfigMap {
     pub syscall_rate_limit: u64,
     /// Sampling period for periodic counters (nanoseconds).
     pub sampling_period_ns: u64,
+}
+
+// ── Namespace Enforcement Types ───────────────────────────────────────────────
+
+/// Identity stored per TID in the MONITORED_TIDS eBPF map.
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct TidIdentity {
+    /// Namespace name (null-terminated UTF-8, max 63 chars + null).
+    pub namespace: [u8; 64],
+    /// App ID (null-terminated UTF-8, max 63 chars + null).
+    pub app_id: [u8; 64],
+    /// Monotonic timestamp when this TID was registered.
+    pub registered_at_ns: u64,
+    /// Flags — see `TidFlags`.
+    pub flags: u32,
+    /// Padding to ensure 8-byte alignment.
+    pub _padding: u32,
+}
+
+/// Flags for TidIdentity.
+#[repr(u32)]
+#[derive(Copy, Clone)]
+pub enum TidFlags {
+    /// TID is actively monitored.
+    Enabled = 1,
+    /// Only audit, do not enforce (for canary/testing).
+    AuditOnly = 2,
+}
+
+/// Namespace enforcement configuration (singleton in NS_ENFORCE_CONFIG map).
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct NsEnforceConfig {
+    /// Port the internal gateway listens on (usually 9080).
+    pub gateway_port: u16,
+    /// Padding to align flags to 4 bytes.
+    pub _padding1: u16,
+    /// Enforcement flags — see `NsEnforceFlags`.
+    pub flags: u32,
+    /// PID of the wasm-node process (to filter relevant TIDs).
+    pub node_pid: u32,
+    /// Reserved for future use.
+    pub _reserved: u32,
+}
+
+/// Flags for NsEnforceConfig.
+#[repr(u32)]
+#[derive(Copy, Clone)]
+pub enum NsEnforceFlags {
+    /// Enable audit logging.
+    EnableAudit = 1,
+    /// Enable forged header detection.
+    EnableForgedHeaderDetect = 2,
+    /// Enable SK_MSG enforcement (Linux 5.8+).
+    EnableSkMsg = 4,
+}
+
+/// Audit event emitted by eBPF for namespace enforcement.
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct NamespaceAuditEvent {
+    /// Event header (type, timestamp, pid, tid).
+    pub header: EventHeader,
+    /// Audit type — see `NamespaceAuditType`.
+    pub audit_type: u32,
+    /// Source namespace (null-terminated).
+    pub source_namespace: [u8; 64],
+    /// Source app ID (null-terminated).
+    pub source_app_id: [u8; 64],
+    /// Destination port (gateway port).
+    pub dest_port: u16,
+    /// Source port of the TCP connection.
+    pub source_port: u16,
+    /// Padding.
+    pub _padding: u32,
+}
+
+/// Types of namespace audit events.
+#[repr(u32)]
+#[derive(Copy, Clone)]
+pub enum NamespaceAuditType {
+    /// A request arrived at the gateway from this TID.
+    GatewayRequest = 1,
+    /// TCP connection established to gateway.
+    ConnectionEstablished = 2,
+    /// TCP connection to gateway closed.
+    ConnectionClosed = 3,
+    /// Forged X-Namespace header detected in send buffer.
+    ForgedHeader = 4,
+    /// Unregistered TID connected to gateway.
+    UnregisteredTid = 5,
 }

@@ -68,6 +68,9 @@ pub mod config;
 pub mod consumer;
 pub mod fallback;
 pub mod metrics;
+pub mod namespace_map;
+
+pub use namespace_map::{CallerIdentity, NamespaceMap};
 
 // Shared data structures between eBPF programs and userspace.
 // Always available — the type definitions don't depend on aya.
@@ -154,6 +157,10 @@ pub struct MonitorHandle {
     metrics: Arc<EbpfMetrics>,
     /// Shared dispatcher reference (for admin API status queries).
     dispatcher: Arc<ActionDispatcher>,
+    /// Namespace identity map for eBPF namespace enforcement.
+    /// Provides resolve_identity() for the gateway and register_tid()
+    /// for the Supervisor.
+    pub namespace_map: Arc<NamespaceMap>,
 }
 
 impl MonitorHandle {
@@ -297,6 +304,8 @@ pub async fn init(
                     // When the consumer stops sending, the dispatcher loop will exit.
                     drop(action_tx);
 
+                    let namespace_map = Arc::new(NamespaceMap::from_ebpf(&mut loaded.ebpf));
+
                     return MonitorHandle {
                         shutdown_tx,
                         ebpf_active: true,
@@ -304,6 +313,7 @@ pub async fn init(
                         _fallback_handle: None,
                         metrics: metrics.clone(),
                         dispatcher: dispatcher.clone(),
+                        namespace_map,
                     };
                 }
                 Err(reason) => {
@@ -345,6 +355,8 @@ pub async fn init(
         .await;
     });
 
+    let namespace_map = Arc::new(NamespaceMap::new_fallback());
+
     MonitorHandle {
         shutdown_tx,
         ebpf_active: false,
@@ -352,6 +364,7 @@ pub async fn init(
         _fallback_handle: Some(fallback_handle),
         metrics,
         dispatcher,
+        namespace_map,
     }
 }
 

@@ -18,10 +18,12 @@ storage = { path = "../storage" }
 secrets = { path = "../secrets" }
 metrics = { path = "../metrics" }
 billing = { version = "0.1.0", path = "../billing" }
+ebpf-monitor = { path = "../ebpf-monitor" }
 messaging = { version = "0.1.0", path = "../messaging" }
 proxy = { version = "0.1.0", path = "../proxy" }
 uuid.workspace = true
 reqwest = "0.13.2"
+libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3.10"

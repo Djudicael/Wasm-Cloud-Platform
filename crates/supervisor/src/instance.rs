@@ -35,6 +35,11 @@ pub struct ManagedInstance {
 
     /// Billing info for this instance.
     pub billing_info: BillingInfo,
+
+    /// OS Thread ID for eBPF namespace enforcement.
+    /// Set from inside the spawn_blocking closure via gettid().
+    /// None if TID registration failed or eBPF is not active.
+    pub tid: Option<u32>,
 }
 
 impl ManagedInstance {

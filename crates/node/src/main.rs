@@ -131,6 +131,30 @@ impl EventCallbacks for NodeEbpfCallbacks {
             "eBPF: remove from upstream requested — process exit detected, health loop will handle"
         );
     }
+
+    fn kill_instance_by_tid(&self, tid: u32, reason: &str) {
+        // eBPF namespace enforcement detected a forged header or other
+        // security incident from a specific TID. Request the supervisor
+        // to kill the largest instance as the best recovery action.
+        // (The supervisor doesn't have a per-TID kill command yet, so
+        // we fall back to KillLargestInstance as the most aggressive
+        // recovery action available.)
+        warn!(
+            tid,
+            reason, "eBPF: namespace security incident — kill instance by TID requested"
+        );
+        if let Err(e) = self
+            .supervisor_tx
+            .try_send(SupervisorCommand::KillLargestInstance {
+                reason: format!("{} (tid={})", reason, tid),
+            })
+        {
+            warn!(
+                error = %e,
+                "Failed to send KillLargestInstance command for TID security incident"
+            );
+        }
+    }
 }
 
 pub mod db_config;
@@ -958,6 +982,11 @@ async fn main() -> anyhow::Result<()> {
         info!("eBPF monitor running in userspace fallback mode (5s polling interval)");
     }
 
+    // Wire namespace_map from eBPF monitor to supervisor for TID registration
+    if let Some(sup) = Arc::get_mut(&mut supervisor) {
+        sup.set_namespace_map(_ebpf_handle.namespace_map.clone());
+    }
+
     // Read initial rate-limit defaults from hot config (may have persisted overrides)
     let initial_hot = hot_config_handle.read().await;
     let default_rate_config = proxy::rate_limiter::RateLimitConfig {
@@ -1079,7 +1108,9 @@ async fn main() -> anyhow::Result<()> {
         rate_limiter.clone(),
         gateway.circuit_breaker.clone(),
         gateway.clone(),
-    );
+    )
+    .with_namespace_map(_ebpf_handle.namespace_map.clone())
+    .with_ebpf_active(_ebpf_handle.is_ebpf_active());
     tokio::spawn(async move {
         if let Err(e) = internal_gw.run().await {
             tracing::error!(error = %e, "internal gateway exited");

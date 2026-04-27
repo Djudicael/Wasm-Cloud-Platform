@@ -35,6 +35,16 @@ pub enum EventType {
     SyscallAnomaly = 9,
     /// FD count for a PID exceeded soft limit.
     FdLimitApproaching = 10,
+
+    // ── Namespace enforcement events ──
+    /// A monitored TID established a TCP connection to the gateway.
+    TidConnection = 11,
+    /// A monitored TID closed a TCP connection to the gateway.
+    TidDisconnection = 12,
+    /// Namespace audit event (gateway request, connection, etc.).
+    NamespaceAudit = 13,
+    /// A forged namespace header was detected in send buffer.
+    NamespaceForgedHeader = 14,
 }
 
 impl EventType {
@@ -51,6 +61,10 @@ impl EventType {
             8 => Some(EventType::DiskSlowIo),
             9 => Some(EventType::SyscallAnomaly),
             10 => Some(EventType::FdLimitApproaching),
+            11 => Some(EventType::TidConnection),
+            12 => Some(EventType::TidDisconnection),
+            13 => Some(EventType::NamespaceAudit),
+            14 => Some(EventType::NamespaceForgedHeader),
             _ => None,
         }
     }
@@ -188,6 +202,157 @@ pub struct MonitorConfigMap {
     pub sampling_period_ns: u64,
 }
 
+// ── Namespace Enforcement Types ───────────────────────────────────────────────
+
+/// Identity stored per TID in the MONITORED_TIDS eBPF map.
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct TidIdentity {
+    /// Namespace name (null-terminated UTF-8, max 63 chars + null).
+    pub namespace: [u8; 64],
+    /// App ID (null-terminated UTF-8, max 63 chars + null).
+    pub app_id: [u8; 64],
+    /// Monotonic timestamp when this TID was registered.
+    pub registered_at_ns: u64,
+    /// Flags — see `TidFlags`.
+    pub flags: u32,
+    /// Padding to ensure 8-byte alignment.
+    pub _padding: u32,
+}
+
+impl TidIdentity {
+    /// Create a new TidIdentity with the given namespace and app_id.
+    /// Strings are truncated to 63 bytes and null-terminated.
+    pub fn new(namespace: &str, app_id: &str) -> Self {
+        let mut t = TidIdentity {
+            namespace: [0u8; 64],
+            app_id: [0u8; 64],
+            registered_at_ns: 0,
+            flags: TidFlags::Enabled as u32,
+            _padding: 0,
+        };
+        t.set_namespace(namespace);
+        t.set_app_id(app_id);
+        t
+    }
+
+    /// Set the namespace field (truncated to 63 bytes + null).
+    pub fn set_namespace(&mut self, s: &str) {
+        let bytes = s.as_bytes();
+        let len = bytes.len().min(63);
+        self.namespace[..len].copy_from_slice(&bytes[..len]);
+        self.namespace[len] = 0;
+    }
+
+    /// Set the app_id field (truncated to 63 bytes + null).
+    pub fn set_app_id(&mut self, s: &str) {
+        let bytes = s.as_bytes();
+        let len = bytes.len().min(63);
+        self.app_id[..len].copy_from_slice(&bytes[..len]);
+        self.app_id[len] = 0;
+    }
+
+    /// Read namespace as a string (up to first null byte).
+    pub fn namespace_str(&self) -> &str {
+        let end = self.namespace.iter().position(|&b| b == 0).unwrap_or(64);
+        std::str::from_utf8(&self.namespace[..end]).unwrap_or("<invalid>")
+    }
+
+    /// Read app_id as a string (up to first null byte).
+    pub fn app_id_str(&self) -> &str {
+        let end = self.app_id.iter().position(|&b| b == 0).unwrap_or(64);
+        std::str::from_utf8(&self.app_id[..end]).unwrap_or("<invalid>")
+    }
+}
+
+/// Flags for TidIdentity.
+#[repr(u32)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum TidFlags {
+    /// TID is actively monitored.
+    Enabled = 1,
+    /// Only audit, do not enforce (for canary/testing).
+    AuditOnly = 2,
+}
+
+/// Namespace enforcement configuration (singleton in NS_ENFORCE_CONFIG map).
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct NsEnforceConfig {
+    /// Port the internal gateway listens on (usually 9080).
+    pub gateway_port: u16,
+    /// Padding to align flags to 4 bytes.
+    pub _padding1: u16,
+    /// Enforcement flags — see `NsEnforceFlags`.
+    pub flags: u32,
+    /// PID of the wasm-node process (to filter relevant TIDs).
+    pub node_pid: u32,
+    /// Reserved for future use.
+    pub _reserved: u32,
+}
+
+/// Flags for NsEnforceConfig.
+#[repr(u32)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum NsEnforceFlags {
+    /// Enable audit logging.
+    EnableAudit = 1,
+    /// Enable forged header detection.
+    EnableForgedHeaderDetect = 2,
+    /// Enable SK_MSG enforcement (Linux 5.8+).
+    EnableSkMsg = 4,
+}
+
+/// Audit event emitted by eBPF for namespace enforcement.
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct NamespaceAuditEvent {
+    /// Event header (type, timestamp, pid, tid).
+    pub header: EventHeader,
+    /// Audit type — see `NamespaceAuditType`.
+    pub audit_type: u32,
+    /// Source namespace (null-terminated).
+    pub source_namespace: [u8; 64],
+    /// Source app ID (null-terminated).
+    pub source_app_id: [u8; 64],
+    /// Destination port (gateway port).
+    pub dest_port: u16,
+    /// Source port of the TCP connection.
+    pub source_port: u16,
+    /// Padding.
+    pub _padding: u32,
+}
+
+/// Types of namespace audit events.
+#[repr(u32)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum NamespaceAuditType {
+    /// A request arrived at the gateway from this TID.
+    GatewayRequest = 1,
+    /// TCP connection established to gateway.
+    ConnectionEstablished = 2,
+    /// TCP connection to gateway closed.
+    ConnectionClosed = 3,
+    /// Forged X-Namespace header detected in send buffer.
+    ForgedHeader = 4,
+    /// Unregistered TID connected to gateway.
+    UnregisteredTid = 5,
+}
+
+impl NamespaceAuditType {
+    /// Convert from raw u32 value, returns None if unknown.
+    pub fn from_u32(val: u32) -> Option<Self> {
+        match val {
+            1 => Some(NamespaceAuditType::GatewayRequest),
+            2 => Some(NamespaceAuditType::ConnectionEstablished),
+            3 => Some(NamespaceAuditType::ConnectionClosed),
+            4 => Some(NamespaceAuditType::ForgedHeader),
+            5 => Some(NamespaceAuditType::UnregisteredTid),
+            _ => None,
+        }
+    }
+}
+
 // ── Pod implementations for aya map/ring-buffer operations ────────────────────
 //
 // All `#[repr(C)]` structs shared between eBPF programs and userspace must
@@ -211,6 +376,13 @@ unsafe impl Pod for DiskIoEvent {}
 unsafe impl Pod for SyscallEvent {}
 #[cfg(feature = "ebpf")]
 unsafe impl Pod for MonitorConfigMap {}
+
+#[cfg(feature = "ebpf")]
+unsafe impl Pod for TidIdentity {}
+#[cfg(feature = "ebpf")]
+unsafe impl Pod for NsEnforceConfig {}
+#[cfg(feature = "ebpf")]
+unsafe impl Pod for NamespaceAuditEvent {}
 
 // ── Helper: read a Pod struct from a raw byte slice ───────────────────────────
 
@@ -243,7 +415,7 @@ mod tests {
 
     #[test]
     fn test_event_type_roundtrip() {
-        for i in 1..=10u32 {
+        for i in 1..=14u32 {
             let et = EventType::from_u32(i);
             assert!(et.is_some(), "EventType {} should be valid", i);
             assert_eq!(et.unwrap() as u32, i);
@@ -367,5 +539,74 @@ mod tests {
         assert_eq!(config.node_pid, 1);
         assert_eq!(config.fd_soft_limit, 8192);
         assert_eq!(config.sampling_period_ns, 10_000_000_000);
+    }
+
+    #[test]
+    fn test_tid_identity_roundtrip() {
+        let mut identity = TidIdentity::new("production", "payments:v1");
+        identity.flags = TidFlags::AuditOnly as u32;
+        identity.registered_at_ns = 1_234_567_890;
+
+        assert_eq!(identity.namespace_str(), "production");
+        assert_eq!(identity.app_id_str(), "payments:v1");
+        assert_eq!(identity.flags, TidFlags::AuditOnly as u32);
+        assert_eq!(identity.registered_at_ns, 1_234_567_890);
+    }
+
+    #[test]
+    fn test_tid_identity_truncation() {
+        let long_ns = "a".repeat(100);
+        let long_app = "b".repeat(100);
+        let identity = TidIdentity::new(&long_ns, &long_app);
+        assert!(identity.namespace_str().len() <= 63);
+        assert!(identity.app_id_str().len() <= 63);
+    }
+
+    #[test]
+    fn test_ns_enforce_config_layout() {
+        let config = NsEnforceConfig {
+            gateway_port: 9080,
+            _padding1: 0,
+            flags: NsEnforceFlags::EnableAudit as u32
+                | NsEnforceFlags::EnableForgedHeaderDetect as u32,
+            node_pid: 42,
+            _reserved: 0,
+        };
+        assert_eq!(config.gateway_port, 9080);
+        assert_eq!(config.node_pid, 42);
+    }
+
+    #[test]
+    fn test_namespace_audit_event_layout() {
+        let event = NamespaceAuditEvent {
+            header: EventHeader {
+                event_type: EventType::NamespaceAudit as u32,
+                timestamp_ns: 1234,
+                pid: 1,
+                tid: 2,
+            },
+            audit_type: NamespaceAuditType::GatewayRequest as u32,
+            source_namespace: [0u8; 64],
+            source_app_id: [0u8; 64],
+            dest_port: 9080,
+            source_port: 54321,
+            _padding: 0,
+        };
+        assert_eq!(event.header.event_type, EventType::NamespaceAudit as u32);
+        assert_eq!(event.dest_port, 9080);
+        assert_eq!(event.source_port, 54321);
+    }
+
+    #[test]
+    fn test_tid_flags_values() {
+        assert_eq!(TidFlags::Enabled as u32, 1);
+        assert_eq!(TidFlags::AuditOnly as u32, 2);
+    }
+
+    #[test]
+    fn test_ns_enforce_flags_values() {
+        assert_eq!(NsEnforceFlags::EnableAudit as u32, 1);
+        assert_eq!(NsEnforceFlags::EnableForgedHeaderDetect as u32, 2);
+        assert_eq!(NsEnforceFlags::EnableSkMsg as u32, 4);
     }
 }

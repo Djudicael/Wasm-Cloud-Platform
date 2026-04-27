@@ -25,8 +25,8 @@ use tracing::{error, info};
 
 use crate::actions::{ActionDispatcher, MonitorEvent};
 use crate::common::{
-    DiskIoEvent, EventHeader, EventType, FdEvent, MemPressureEvent, ProcessEvent, SyscallCategory,
-    SyscallEvent, TcpEvent,
+    DiskIoEvent, EventHeader, EventType, FdEvent, MemPressureEvent, NamespaceAuditEvent,
+    NamespaceAuditType, ProcessEvent, SyscallCategory, SyscallEvent, TcpEvent,
 };
 
 // ── Event Parsing (no aya dependency) ──────────────────────────────────────────
@@ -212,7 +212,76 @@ pub fn parse_event(bytes: &[u8]) -> Result<MonitorEvent, ParseError> {
                 count_in_window: event.count_in_window,
             })
         }
+
+        EventType::TidConnection | EventType::TidDisconnection => {
+            let expected = std::mem::size_of::<TcpEvent>();
+            if bytes.len() < expected {
+                return Err(ParseError::SizeMismatch {
+                    event_type: header.event_type,
+                    expected,
+                    actual: bytes.len(),
+                });
+            }
+            let event = unsafe { std::ptr::read_unaligned(bytes.as_ptr() as *const TcpEvent) };
+            if event_type == EventType::TidConnection {
+                // Look up the TID identity from the MONITORED_TIDS map context
+                // (the eBPF program already validated the TID is registered)
+                Ok(MonitorEvent::TidConnection {
+                    tid: event.header.tid,
+                    namespace: String::new(), // Will be filled by consumer loop
+                    app_id: String::new(),    // Will be filled by consumer loop
+                    source_port: event.src_port,
+                })
+            } else {
+                Ok(MonitorEvent::TidDisconnection {
+                    tid: event.header.tid,
+                    source_port: event.src_port,
+                })
+            }
+        }
+
+        EventType::NamespaceAudit | EventType::NamespaceForgedHeader => {
+            let expected = std::mem::size_of::<NamespaceAuditEvent>();
+            if bytes.len() < expected {
+                return Err(ParseError::SizeMismatch {
+                    event_type: header.event_type,
+                    expected,
+                    actual: bytes.len(),
+                });
+            }
+            let event =
+                unsafe { std::ptr::read_unaligned(bytes.as_ptr() as *const NamespaceAuditEvent) };
+            let ns = read_cstr(&event.source_namespace);
+            let app = read_cstr(&event.source_app_id);
+            match NamespaceAuditType::from_u32(event.audit_type) {
+                Some(NamespaceAuditType::ForgedHeader) | None
+                    if event_type == EventType::NamespaceForgedHeader =>
+                {
+                    Ok(MonitorEvent::NamespaceForgedHeader {
+                        tid: event.header.tid,
+                        namespace: ns,
+                        app_id: app,
+                    })
+                }
+                Some(NamespaceAuditType::UnregisteredTid) => {
+                    Ok(MonitorEvent::UnregisteredTidConnection {
+                        tid: event.header.tid,
+                    })
+                }
+                _ => Ok(MonitorEvent::NamespaceAudit {
+                    tid: event.header.tid,
+                    namespace: ns,
+                    app_id: app,
+                }),
+            }
+        }
     }
+}
+
+/// Read a null-terminated C string from a fixed-size byte array.
+fn read_cstr(bytes: &[u8]) -> String {
+    let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+    String::from_utf8_lossy(&bytes[..end]).into_owned()
 }
 
 // ── Ring Buffer Consumer (ebpf feature) ──────────────────────────────────────

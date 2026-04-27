@@ -2781,6 +2781,7 @@ version = "0.1.0"
 dependencies = [
  "axum 0.8.8",
  "common",
+ "ebpf-monitor",
  "http 1.4.0",
  "proxy",
  "reqwest 0.13.2",
@@ -5489,6 +5490,8 @@ dependencies = [
  "billing",
  "chrono",
  "common",
+ "ebpf-monitor",
+ "libc",
  "messaging",
  "metrics",
  "proxy",

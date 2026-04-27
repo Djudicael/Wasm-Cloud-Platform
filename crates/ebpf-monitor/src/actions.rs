@@ -56,6 +56,23 @@ pub enum RecoveryAction {
 
     /// Log a warning (no automated action, but emit metric).
     WarnOnly { message: String },
+
+    /// Namespace security incident — forged header or unregistered TID access.
+    NamespaceSecurityIncident {
+        tid: u32,
+        namespace: String,
+        app_id: String,
+        incident_type: NamespaceIncidentType,
+    },
+}
+
+/// Types of namespace security incidents.
+#[derive(Debug, Clone)]
+pub enum NamespaceIncidentType {
+    /// App sent a forged X-Namespace header.
+    ForgedHeader,
+    /// Unregistered TID attempted to access the gateway.
+    UnregisteredTidAccess,
 }
 
 // ── Monitor Events ────────────────────────────────────────────────────────────
@@ -147,6 +164,34 @@ pub enum MonitorEvent {
         syscall_category: SyscallCategory,
         count_in_window: u64,
     },
+
+    /// A monitored TID established a TCP connection to the gateway.
+    TidConnection {
+        tid: u32,
+        namespace: String,
+        app_id: String,
+        source_port: u16,
+    },
+
+    /// A monitored TID closed a TCP connection to the gateway.
+    TidDisconnection { tid: u32, source_port: u16 },
+
+    /// Namespace audit event (for logging/metrics).
+    NamespaceAudit {
+        tid: u32,
+        namespace: String,
+        app_id: String,
+    },
+
+    /// A forged namespace header was detected in the send buffer.
+    NamespaceForgedHeader {
+        tid: u32,
+        namespace: String,
+        app_id: String,
+    },
+
+    /// An unregistered TID connected to the gateway.
+    UnregisteredTidConnection { tid: u32 },
 }
 
 impl MonitorEvent {
@@ -163,6 +208,11 @@ impl MonitorEvent {
             MonitorEvent::MemPressure { .. } => EventType::MemPressure,
             MonitorEvent::DiskSlowIo { .. } => EventType::DiskSlowIo,
             MonitorEvent::SyscallAnomaly { .. } => EventType::SyscallAnomaly,
+            MonitorEvent::TidConnection { .. } => EventType::TidConnection,
+            MonitorEvent::TidDisconnection { .. } => EventType::TidDisconnection,
+            MonitorEvent::NamespaceAudit { .. } => EventType::NamespaceAudit,
+            MonitorEvent::NamespaceForgedHeader { .. } => EventType::NamespaceForgedHeader,
+            MonitorEvent::UnregisteredTidConnection { .. } => EventType::TidConnection,
         }
     }
 }
@@ -202,6 +252,9 @@ pub trait EventCallbacks: Send + Sync {
 
     /// Remove a dead instance from the upstream routing table.
     fn remove_from_upstream(&self, pid: u32);
+
+    /// Request the supervisor to kill a specific instance by TID.
+    fn kill_instance_by_tid(&self, tid: u32, reason: &str);
 }
 
 /// A no-op implementation of `EventCallbacks` for testing and as a safe default.
@@ -224,6 +277,7 @@ impl EventCallbacks for NoopCallbacks {
     fn kill_instance(&self, _pid: u32, _reason: &str) {}
     fn prune_idle_instances(&self) {}
     fn remove_from_upstream(&self, _pid: u32) {}
+    fn kill_instance_by_tid(&self, _tid: u32, _reason: &str) {}
 }
 
 // ── Action Dispatcher ─────────────────────────────────────────────────────────
@@ -664,6 +718,62 @@ impl ActionDispatcher {
                     }
                 }
             }
+
+            MonitorEvent::TidConnection {
+                tid,
+                namespace,
+                app_id,
+                source_port,
+            } => {
+                tracing::debug!(
+                    tid,
+                    namespace = %namespace,
+                    app_id = %app_id,
+                    source_port,
+                    "TID connected to gateway"
+                );
+            }
+
+            MonitorEvent::TidDisconnection { tid, source_port } => {
+                tracing::debug!(tid, source_port, "TID disconnected from gateway");
+            }
+
+            MonitorEvent::NamespaceAudit {
+                tid,
+                namespace,
+                app_id,
+            } => {
+                tracing::info!(
+                    tid,
+                    namespace = %namespace,
+                    app_id = %app_id,
+                    "Namespace audit event"
+                );
+            }
+
+            MonitorEvent::NamespaceForgedHeader {
+                tid,
+                namespace,
+                app_id,
+            } => {
+                error!(
+                    tid,
+                    namespace = %namespace,
+                    app_id = %app_id,
+                    "SECURITY: Forged namespace header detected"
+                );
+                self.metrics.security_violations.inc();
+                self.callbacks
+                    .kill_instance_by_tid(tid, "Forged namespace header detected by eBPF audit");
+            }
+
+            MonitorEvent::UnregisteredTidConnection { tid } => {
+                warn!(
+                    tid,
+                    "Unregistered TID connected to gateway — possible bypass attempt"
+                );
+                self.metrics.security_violations.inc();
+            }
         }
     }
 
@@ -801,6 +911,12 @@ mod tests {
         }
         fn remove_from_upstream(&self, pid: u32) {
             self.removed_from_upstream.lock().unwrap().push(pid);
+        }
+        fn kill_instance_by_tid(&self, tid: u32, reason: &str) {
+            self.killed_instances
+                .lock()
+                .unwrap()
+                .push((tid, reason.to_string()));
         }
     }
 

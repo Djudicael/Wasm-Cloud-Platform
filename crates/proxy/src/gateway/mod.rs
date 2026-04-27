@@ -26,7 +26,8 @@ pub struct Gateway {
     pub circuit_breaker: Arc<circuit_breaker::CircuitBreakerManager>,
 
     /// Per-app distributed rate limiters.
-    pub distributed_limiters: Arc<RwLock<HashMap<String, Arc<distributed_limiter::DistributedRateLimiter>>>>,
+    pub distributed_limiters:
+        Arc<RwLock<HashMap<String, Arc<distributed_limiter::DistributedRateLimiter>>>>,
 
     /// Per-route gateway configurations.
     pub route_configs: Arc<RwLock<HashMap<String, GatewayRouteConfig>>>,
@@ -39,6 +40,10 @@ pub struct Gateway {
 
     /// Shared Prometheus registry for all gateway metrics.
     pub registry: Arc<Registry>,
+
+    /// Cross-namespace allowlist: (source_ns, target_ns) → allowed.
+    /// Default: deny all cross-namespace calls.
+    pub cross_namespace_allowlist: Option<HashMap<(String, String), bool>>,
 }
 
 impl Gateway {
@@ -52,12 +57,41 @@ impl Gateway {
             api_key_validators: Arc::new(RwLock::new(HashMap::new())),
             metrics: Arc::new(metrics::GatewayMetrics::new(&registry)),
             registry,
+            cross_namespace_allowlist: None,
         }
+    }
+
+    /// Check if cross-namespace access is allowed.
+    /// Default: deny all cross-namespace calls.
+    pub fn is_cross_namespace_allowed(&self, source_ns: &str, target_ns: &str) -> bool {
+        // Same namespace is always allowed
+        if source_ns == target_ns {
+            return true;
+        }
+        // Check allowlist if configured
+        if let Some(ref allowlist) = self.cross_namespace_allowlist {
+            if allowlist
+                .get(&(source_ns.to_string(), target_ns.to_string()))
+                .copied()
+                == Some(true)
+            {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Set the cross-namespace allowlist.
+    pub fn set_cross_namespace_allowlist(&mut self, allowlist: HashMap<(String, String), bool>) {
+        self.cross_namespace_allowlist = Some(allowlist);
     }
 
     /// Set the API key validator for an app.
     pub async fn set_api_key_validator(&self, app_id: &str, validator: api_key::ApiKeyValidator) {
-        self.api_key_validators.write().await.insert(app_id.to_string(), validator);
+        self.api_key_validators
+            .write()
+            .await
+            .insert(app_id.to_string(), validator);
     }
 
     /// Validate an API key for an app and path.
@@ -71,13 +105,19 @@ impl Gateway {
     }
 
     /// Get the gateway config for a route (by app_id).
-    pub async fn get_route_config(&self, app_id: &common::types::AppId) -> Option<GatewayRouteConfig> {
+    pub async fn get_route_config(
+        &self,
+        app_id: &common::types::AppId,
+    ) -> Option<GatewayRouteConfig> {
         self.route_configs.read().await.get(&app_id.0).cloned()
     }
 
     /// Set the gateway config for a route.
     pub async fn set_route_config(&self, app_id: &str, config: GatewayRouteConfig) {
-        self.route_configs.write().await.insert(app_id.to_string(), config);
+        self.route_configs
+            .write()
+            .await
+            .insert(app_id.to_string(), config);
     }
 
     /// Remove the gateway config for a route.
@@ -90,7 +130,8 @@ impl Gateway {
         &self,
         session: &pingora_proxy::Session,
     ) -> Result<oidc::UserIdentity, GatewayError> {
-        self.authenticate_with_policy(session, &config::AuthPolicy::Authenticated).await
+        self.authenticate_with_policy(session, &config::AuthPolicy::Authenticated)
+            .await
     }
 
     /// Authenticate a request with a specific auth policy.
@@ -115,7 +156,9 @@ impl Gateway {
             .get("Authorization")
             .and_then(|v| v.to_str().ok())
             .and_then(|v| v.strip_prefix("Bearer "))
-            .ok_or(GatewayError::Auth("missing Authorization header".to_string()))?;
+            .ok_or(GatewayError::Auth(
+                "missing Authorization header".to_string(),
+            ))?;
 
         provider.validate_token(token).await
     }
