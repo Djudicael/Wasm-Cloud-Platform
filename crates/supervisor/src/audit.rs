@@ -27,6 +27,9 @@ pub enum AuditEventType {
     AdminApiCall,
     AuthFailure,
     TokenRotated,
+    InternalGatewayRequest,
+    CrossNamespaceDenied,
+    NamespaceSecurityIncident,
 }
 
 pub fn write_audit_event(path: &str, event: &AuditEvent) {

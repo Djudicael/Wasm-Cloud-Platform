@@ -6,10 +6,10 @@
 //! - Validation and environment variable support
 
 use common::config::{
-    AdminSection, AuthSection, BillingSection, DatabaseSection, DnsSection, EbpfSection, GcSection,
-    GatewayCircuitBreakerSection, GatewayRateLimitSection, GatewaySection, HealthSection,
-    LoggingSection, NatsSection, NodeConfig, NodeSection, ProxySection, RateLimitSection,
-    RuntimeSection, StorageSection,
+    AdminSection, AuthSection, BillingSection, DatabaseSection, DnsSection, EbpfSection,
+    GatewayCircuitBreakerSection, GatewayRateLimitSection, GatewaySection, GcSection,
+    HealthSection, LoggingSection, NatsSection, NodeConfig, NodeSection, ProxySection,
+    RateLimitSection, RuntimeSection, StorageSection,
 };
 use common::error::PlatformError;
 use serde::{Deserialize, Serialize};
@@ -199,6 +199,9 @@ fn merge_config(base: NodeConfig, overlay: NodeConfig) -> NodeConfig {
             tcp_conn_limit_per_pid: overlay.ebpf.tcp_conn_limit_per_pid,
             syscall_rate_limit: overlay.ebpf.syscall_rate_limit,
             sampling_period_secs: overlay.ebpf.sampling_period_secs,
+            enable_namespace_enforcer: overlay.ebpf.enable_namespace_enforcer,
+            gateway_port: overlay.ebpf.gateway_port,
+            enable_forged_header_detect: overlay.ebpf.enable_forged_header_detect,
         },
         dns: DnsSection {
             platform_domain: overlay.dns.platform_domain.or(base.dns.platform_domain),
@@ -232,8 +235,14 @@ fn merge_config(base: NodeConfig, overlay: NodeConfig) -> NodeConfig {
                 sync_interval_ms: overlay.gateway.rate_limit.sync_interval_ms,
             },
             circuit_breaker: GatewayCircuitBreakerSection {
-                default_failure_threshold: overlay.gateway.circuit_breaker.default_failure_threshold,
-                default_reset_timeout_secs: overlay.gateway.circuit_breaker.default_reset_timeout_secs,
+                default_failure_threshold: overlay
+                    .gateway
+                    .circuit_breaker
+                    .default_failure_threshold,
+                default_reset_timeout_secs: overlay
+                    .gateway
+                    .circuit_breaker
+                    .default_reset_timeout_secs,
             },
         },
     }

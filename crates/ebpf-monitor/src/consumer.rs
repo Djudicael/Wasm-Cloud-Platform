@@ -21,7 +21,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use tracing::{error, info};
+use tracing::info;
 
 use crate::actions::{ActionDispatcher, MonitorEvent};
 use crate::common::{

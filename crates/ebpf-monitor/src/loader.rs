@@ -32,7 +32,7 @@ use aya::{
 use std::path::Path;
 use tracing::{info, warn};
 
-use crate::common::MonitorConfigMap;
+use crate::common::{MonitorConfigMap, NsEnforceConfig, NsEnforceFlags};
 use crate::config::MonitorConfig;
 
 /// Loaded eBPF programs, maps, and attachment links.
@@ -41,8 +41,10 @@ use crate::config::MonitorConfig;
 /// The `links` vector holds the attachment links, which can be detached
 /// at runtime to stop monitoring.
 pub struct LoadedEbpf {
-    /// The loaded eBPF object (programs + maps).
+    /// The loaded main eBPF object (programs + maps).
     pub ebpf: Bpf,
+    /// Optional namespace enforcer eBPF object (separate ELF).
+    pub ns_ebpf: Option<Bpf>,
     /// Attachment links for each loaded program.
     /// Links can be detached to stop a specific monitor.
     pub links: Vec<String>,
@@ -172,6 +174,41 @@ pub async fn load_and_attach(config: &MonitorConfig, node_pid: u32) -> Result<Op
         }
     }
 
+    let mut ns_ebpf = None;
+    if config.enable_namespace_enforcer {
+        match load_namespace_enforcer_object() {
+            Ok(mut ns_bpf) => match attach_namespace_enforcer(&mut ns_bpf) {
+                Ok(()) => {
+                    info!("Namespace enforcer attached (tracepoints: sock/inet_sock_set_state, syscalls/sys_enter_sendto)");
+                    links.push("namespace_enforcer".to_string());
+                    if let Err(e) = write_ns_enforce_config(&mut ns_bpf, config, node_pid) {
+                        warn!(error = %e, "Failed to write NS_ENFORCE_CONFIG map — namespace enforcer may not enforce");
+                    }
+                    ns_ebpf = Some(ns_bpf);
+                }
+                Err(e) => {
+                    warn!(error = %e, "Failed to attach namespace enforcer — skipping");
+                }
+            },
+            Err(e) => {
+                warn!(error = %e, "Failed to load namespace enforcer eBPF object — skipping");
+            }
+        }
+    }
+
+    // Attempt to set MONITORED_TIDS map as read-only for eBPF programs.
+    // This prevents a compromised eBPF program from modifying the identity map.
+    // Requires Linux 5.2+ and aya support for BPF_F_RDONLY_PROG.
+    if let Some(ref mut ns_bpf) = ns_ebpf {
+        if let Some(map) = ns_bpf.map_mut("MONITORED_TIDS") {
+            // Note: aya 0.12 does not expose set_flags directly on MapRefMut.
+            // In production, use a build.rs with libbpf or patch aya to support:
+            //   map.set_flags(libc::BPF_F_RDONLY_PROG);
+            let _ = map;
+            tracing::info!("MONITORED_TIDS map loaded — consider applying BPF_F_RDONLY_PROG for defense in depth");
+        }
+    }
+
     if links.is_empty() {
         warn!("No eBPF programs attached — falling back to userspace monitoring");
         return Ok(None);
@@ -182,7 +219,11 @@ pub async fn load_and_attach(config: &MonitorConfig, node_pid: u32) -> Result<Op
         "eBPF programs loaded and attached successfully"
     );
 
-    Ok(Some(LoadedEbpf { ebpf, links }))
+    Ok(Some(LoadedEbpf {
+        ebpf,
+        ns_ebpf,
+        links,
+    }))
 }
 
 // ── eBPF Object Loading ──────────────────────────────────────────────────────
@@ -233,6 +274,37 @@ fn load_ebpf_object() -> Result<Bpf> {
          \tcargo build --manifest-path crates/ebpf-monitor/bpf/Cargo.toml \
          --target bpfel-unknown-none --release\n\
          Or install them at /opt/wasm-node/ebpf/ebpf-monitor.o"
+    ))
+}
+
+/// Load the namespace enforcer eBPF object file.
+///
+/// Tries multiple strategies similar to `load_ebpf_object` but for the
+/// `namespace_enforcer` ELF binary.
+fn load_namespace_enforcer_object() -> Result<Bpf> {
+    let dev_paths = [
+        "./ebpf-monitor-bpf/target/bpfel-unknown-none/release/namespace_enforcer",
+        "../ebpf-monitor-bpf/target/bpfel-unknown-none/release/namespace_enforcer",
+        "/opt/wasm-node/ebpf/namespace_enforcer.o",
+    ];
+
+    for path_str in &dev_paths {
+        let path = Path::new(path_str);
+        if path.exists() {
+            info!(path = %path.display(), "Loading namespace enforcer eBPF object from file");
+            let bytes = std::fs::read(path)
+                .context("failed to read namespace enforcer eBPF object file")?;
+            let bpf =
+                Bpf::load(&bytes).context("failed to parse namespace enforcer eBPF object")?;
+            return Ok(bpf);
+        }
+    }
+
+    Err(anyhow!(
+        "Namespace enforcer eBPF object not found. Compile BPF programs first:\n\
+         \tcargo build --manifest-path crates/ebpf-monitor/bpf/Cargo.toml \
+         --target bpfel-unknown-none --release\n\
+         Or install them at /opt/wasm-node/ebpf/namespace_enforcer.o"
     ))
 }
 
@@ -314,6 +386,54 @@ fn attach_disk_monitor(ebpf: &mut Bpf) -> Result<()> {
 /// Attach the syscall anomaly counter (raw_syscalls/sys_enter tracepoint).
 fn attach_syscall_counter(ebpf: &mut Bpf) -> Result<()> {
     attach_tracepoint(ebpf, "sys_enter", "raw_syscalls", "sys_enter")
+}
+
+/// Attach the namespace enforcer programs.
+///
+/// Attaches `ns_inet_sock_set_state` to the `sock:inet_sock_set_state` tracepoint
+/// and `ns_audit_sendto` to the `syscalls:sys_enter_sendto` tracepoint.
+fn attach_namespace_enforcer(ebpf: &mut Bpf) -> Result<()> {
+    attach_tracepoint(
+        ebpf,
+        "ns_inet_sock_set_state",
+        "sock",
+        "inet_sock_set_state",
+    )?;
+    attach_tracepoint(ebpf, "ns_audit_sendto", "syscalls", "sys_enter_sendto")?;
+    Ok(())
+}
+
+/// Write the NS_ENFORCE_CONFIG singleton array map.
+fn write_ns_enforce_config(ebpf: &mut Bpf, config: &MonitorConfig, node_pid: u32) -> Result<()> {
+    let config_map: Array<_, NsEnforceConfig> = ebpf
+        .map_mut("NS_ENFORCE_CONFIG")
+        .ok_or_else(|| anyhow!("NS_ENFORCE_CONFIG map not found in eBPF object"))?
+        .try_into()
+        .context("NS_ENFORCE_CONFIG map has wrong type")?;
+
+    let mut flags = NsEnforceFlags::EnableAudit as u32;
+    if config.enable_forged_header_detect {
+        flags |= NsEnforceFlags::EnableForgedHeaderDetect as u32;
+    }
+
+    let ns_config = NsEnforceConfig {
+        gateway_port: config.gateway_port,
+        _padding1: 0,
+        flags,
+        node_pid,
+        _reserved: 0,
+    };
+
+    config_map
+        .set(0, ns_config, 0)
+        .context("failed to write NS_ENFORCE_CONFIG map")?;
+
+    info!(
+        gateway_port = config.gateway_port,
+        flags, node_pid, "Namespace enforcer config map written"
+    );
+
+    Ok(())
 }
 
 /// Attach a tracepoint program.

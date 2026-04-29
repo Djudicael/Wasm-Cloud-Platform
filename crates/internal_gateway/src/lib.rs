@@ -5,9 +5,11 @@ use axum::{
     routing::any,
     Router,
 };
+use futures::future::BoxFuture;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
+use supervisor::audit::{write_audit_event, AuditEvent, AuditEventType};
 use tokio::net::TcpListener;
 use tower::ServiceBuilder;
 use tower_http::trace::TraceLayer;
@@ -23,6 +25,7 @@ const FORWARDING_TIMEOUT: Duration = Duration::from_secs(30);
 struct CallerIdentity {
     namespace: String,
     app_id: String,
+    #[allow(dead_code)]
     tid: u32,
 }
 
@@ -65,6 +68,11 @@ pub struct InternalGateway {
 
     /// Whether to allow anonymous (unidentified) internal requests.
     pub allow_anonymous_internal: bool,
+
+    /// Callback to trigger a cold-start when the target app has no running instances.
+    pub cold_start: Option<
+        Arc<dyn Fn(common::types::AppId) -> BoxFuture<'static, Option<SocketAddr>> + Send + Sync>,
+    >,
 }
 
 impl InternalGateway {
@@ -88,6 +96,7 @@ impl InternalGateway {
             namespace_map: None,
             ebpf_active: false,
             allow_anonymous_internal: false,
+            cold_start: None,
         }
     }
 
@@ -106,6 +115,16 @@ impl InternalGateway {
     /// Set whether to allow anonymous internal requests.
     pub fn with_allow_anonymous(mut self, allow: bool) -> Self {
         self.allow_anonymous_internal = allow;
+        self
+    }
+
+    pub fn with_cold_start(
+        mut self,
+        cold_start: Arc<
+            dyn Fn(common::types::AppId) -> BoxFuture<'static, Option<SocketAddr>> + Send + Sync,
+        >,
+    ) -> Self {
+        self.cold_start = Some(cold_start);
         self
     }
 
@@ -187,8 +206,10 @@ async fn proxy_handler(
     mut headers: HeaderMap,
     req: Request<axum::body::Body>,
 ) -> Result<Response<axum::body::Body>, StatusCode> {
+    let start_time = std::time::Instant::now();
     let method = req.method().clone();
     let path = req.uri().path().to_string();
+    let req_method_str = method.as_str().to_string();
 
     // ── 0. STRIP all internal identity headers ──────────────────────────
     // Prevent header reflection attacks. The gateway resolves identity
@@ -282,6 +303,7 @@ async fn proxy_handler(
             if !gw
                 .gateway_config
                 .is_cross_namespace_allowed(&caller.namespace, &target_namespace)
+                .await
             {
                 tracing::warn!(
                     caller_ns = %caller.namespace,
@@ -312,19 +334,56 @@ async fn proxy_handler(
         );
     }
 
+    // ── 3b. RATE LIMITING per source app ────────────────────────────────
+    if let Some(ref caller) = caller_identity {
+        let source_ip = peer_addr.ip();
+        if let Err(e) = gw.rate_limiter.check_request(&caller.app_id, source_ip) {
+            tracing::warn!(
+                caller_app = %caller.app_id,
+                error = %e,
+                "[INTERNAL-GW] rate limit exceeded"
+            );
+            return Err(StatusCode::TOO_MANY_REQUESTS);
+        }
+    }
+
     // ── 4. RESOLVE target to real loopback address ──────────────────────
-    let target_addr = gw
+    let target_app_id =
+        common::types::AppId::new_namespaced(&target_namespace, target_app_name, "v1");
+
+    let target_addr = match gw
         .registry
         .resolve(&target_namespace, target_app_name)
         .await
-        .ok_or_else(|| {
-            tracing::warn!(
-                target_ns = %target_namespace,
-                target_app = %target_app_name,
-                "[INTERNAL-GW] target app not found in namespace registry"
-            );
-            StatusCode::BAD_GATEWAY
-        })?;
+    {
+        Some(addr) => addr,
+        None => {
+            // Target not running — try cold start
+            if let Some(ref cold_start) = gw.cold_start {
+                tracing::info!(
+                    target_ns = %target_namespace,
+                    target_app = %target_app_name,
+                    "[INTERNAL-GW] target not found, attempting cold start"
+                );
+                match cold_start(target_app_id.clone()).await {
+                    Some(addr) => {
+                        tracing::info!(%addr, "[INTERNAL-GW] cold start succeeded");
+                        addr
+                    }
+                    None => {
+                        tracing::warn!(
+                            target_ns = %target_namespace,
+                            target_app = %target_app_name,
+                            "[INTERNAL-GW] cold start failed"
+                        );
+                        return Err(StatusCode::BAD_GATEWAY);
+                    }
+                }
+            } else {
+                return Err(StatusCode::BAD_GATEWAY);
+            }
+        }
+    };
 
     tracing::info!(
         target_addr = %target_addr,
@@ -332,19 +391,16 @@ async fn proxy_handler(
     );
 
     // ── 5. APPLY ENDPOINT POLICIES ──────────────────────────────────────
-    // TODO: Derive the actual version from the registry or route config instead of
-    // hardcoding "v1". The version is needed for a fully-qualified AppId.
-    let target_app_id =
-        common::types::AppId::new_namespaced(target_namespace, target_app_name, "v1");
     let route_config = gw.gateway_config.get_route_config(&target_app_id).await;
 
-    let path = req.uri().path();
-    let method = req.method().as_str();
+    let req_path = req.uri().path();
     if let Some(ref cfg) = route_config {
         if let Some(rule) = cfg.endpoints.iter().find(|e| {
-            path.starts_with(&e.path)
+            req_path.starts_with(&e.path)
                 && (e.methods.is_empty()
-                    || e.methods.iter().any(|m| m.eq_ignore_ascii_case(method)))
+                    || e.methods
+                        .iter()
+                        .any(|m| m.eq_ignore_ascii_case(req_method_str.as_str())))
         }) {
             match &rule.auth {
                 common::types::EndpointAuth::None | common::types::EndpointAuth::Inherit => {}
@@ -359,7 +415,7 @@ async fn proxy_handler(
                     if let Some(key) = api_key {
                         if !gw
                             .gateway_config
-                            .validate_api_key(&target_app_id.0, key, path)
+                            .validate_api_key(&target_app_id.0, key, req_path)
                             .await
                         {
                             return Err(StatusCode::UNAUTHORIZED);
@@ -388,7 +444,6 @@ async fn proxy_handler(
         req.uri().path_and_query().map(|p| p.as_str()).unwrap_or("")
     );
 
-    let method = req.method().clone();
     let req_headers = req.headers().clone();
 
     let body_bytes = match axum::body::to_bytes(req.into_body(), MAX_BODY_SIZE).await {
@@ -399,7 +454,7 @@ async fn proxy_handler(
         }
     };
 
-    let mut forward_req = gw.http_client.request(method, &uri);
+    let mut forward_req = gw.http_client.request(method.clone(), &uri);
 
     // Strip internal-only headers before forwarding to the target app.
     for (k, v) in &req_headers {
@@ -412,30 +467,81 @@ async fn proxy_handler(
     let real_host = format!("{}:{}", target_app_name, target_addr.port());
     forward_req = forward_req.header("host", &real_host);
 
-    match forward_req.body(body_bytes).send().await {
-        Ok(resp) => {
-            gw.circuit_breaker.record_success(&target_app_id.0);
-            let mut builder = Response::builder().status(resp.status());
-            for (k, v) in resp.headers() {
-                builder = builder.header(k, v);
-            }
-            let resp_bytes = match resp.bytes().await {
-                Ok(b) => b,
-                Err(e) => {
-                    tracing::warn!(error = %e, "[INTERNAL-GW] failed to read response body");
-                    return Err(StatusCode::BAD_GATEWAY);
+    let result: Result<Response<axum::body::Body>, StatusCode> =
+        match forward_req.body(body_bytes).send().await {
+            Ok(resp) => {
+                if let Some(ref caller) = caller_identity {
+                    gw.rate_limiter
+                        .record_success(&caller.app_id, peer_addr.ip());
                 }
-            };
-            builder
-                .body(axum::body::Body::from(resp_bytes))
-                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+                gw.circuit_breaker.record_success(&target_app_id.0);
+                let mut builder = Response::builder().status(resp.status());
+                for (k, v) in resp.headers() {
+                    builder = builder.header(k, v);
+                }
+                let resp_bytes = match resp.bytes().await {
+                    Ok(b) => b,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "[INTERNAL-GW] failed to read response body");
+                        return Err(StatusCode::BAD_GATEWAY);
+                    }
+                };
+                builder
+                    .body(axum::body::Body::from(resp_bytes))
+                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "[INTERNAL-GW] upstream error");
+                gw.circuit_breaker.record_failure(&target_app_id.0);
+                Err(StatusCode::BAD_GATEWAY)
+            }
+        };
+
+    // ── AUDIT LOGGING ───────────────────────────────────────────────────
+    let latency_ms = start_time.elapsed().as_millis() as u64;
+    let audit_path = std::env::var("WASM_NODE_AUDIT_LOG")
+        .unwrap_or_else(|_| "/var/log/wasm-node/audit.jsonl".to_string());
+
+    let event_type = if result.is_err() {
+        if let Some(ref caller) = caller_identity {
+            if caller.namespace != target_namespace {
+                AuditEventType::CrossNamespaceDenied
+            } else {
+                AuditEventType::InternalGatewayRequest
+            }
+        } else {
+            AuditEventType::InternalGatewayRequest
         }
-        Err(e) => {
-            tracing::warn!(error = %e, "[INTERNAL-GW] upstream error");
-            gw.circuit_breaker.record_failure(&target_app_id.0);
-            Err(StatusCode::BAD_GATEWAY)
-        }
-    }
+    } else {
+        AuditEventType::InternalGatewayRequest
+    };
+
+    let event = AuditEvent {
+        timestamp: chrono::Utc::now().timestamp_millis() as u64,
+        node_id: std::env::var("NODE_ID").unwrap_or_else(|_| "unknown".to_string()),
+        event_type,
+        actor: caller_identity
+            .as_ref()
+            .map(|c| c.app_id.clone())
+            .unwrap_or_else(|| "anonymous".to_string()),
+        app_id: format!("{}/{}", target_namespace, target_app_name),
+        details: serde_json::json!({
+            "caller_namespace": caller_identity.as_ref().map(|c| &c.namespace),
+            "caller_app_id": caller_identity.as_ref().map(|c| &c.app_id),
+            "caller_tid": caller_identity.as_ref().map(|c| c.tid),
+            "target_namespace": target_namespace,
+            "target_app": target_app_name,
+            "path": path,
+            "method": req_method_str,
+            "latency_ms": latency_ms,
+            "source_port": peer_addr.port(),
+            "allowed": result.is_ok(),
+            "status_code": result.as_ref().map(|r| r.status().as_u16()).unwrap_or(0),
+        }),
+    };
+    write_audit_event(&audit_path, &event);
+
+    result
 }
 
 #[cfg(test)]

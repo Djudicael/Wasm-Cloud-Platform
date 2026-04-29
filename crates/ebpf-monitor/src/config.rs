@@ -43,6 +43,13 @@ pub struct MonitorConfig {
     pub enable_mem_pressure: bool,
     pub enable_disk_monitor: bool,
     pub enable_syscall_counter: bool,
+
+    /// Enable namespace enforcer eBPF program.
+    pub enable_namespace_enforcer: bool,
+    /// Port the internal gateway listens on (for namespace enforcement).
+    pub gateway_port: u16,
+    /// Enable forged header detection in namespace enforcer.
+    pub enable_forged_header_detect: bool,
 }
 
 impl Default for MonitorConfig {
@@ -63,6 +70,9 @@ impl Default for MonitorConfig {
             enable_mem_pressure: true,
             enable_disk_monitor: true,
             enable_syscall_counter: true,
+            enable_namespace_enforcer: true,
+            gateway_port: common::INTERNAL_GATEWAY_PORT,
+            enable_forged_header_detect: true,
         }
     }
 }
@@ -93,6 +103,9 @@ impl MonitorConfig {
             enable_mem_pressure: true,
             enable_disk_monitor: true,
             enable_syscall_counter: true,
+            enable_namespace_enforcer: section.enable_namespace_enforcer,
+            gateway_port: section.gateway_port,
+            enable_forged_header_detect: section.enable_forged_header_detect,
         }
     }
 
@@ -192,6 +205,9 @@ impl MonitorConfig {
         if self.enable_syscall_counter {
             count += 1;
         }
+        if self.enable_namespace_enforcer {
+            count += 1;
+        }
         count
     }
 }
@@ -284,6 +300,9 @@ mod tests {
             enable_mem_pressure: true,
             enable_disk_monitor: true,
             enable_syscall_counter: true,
+            enable_namespace_enforcer: true,
+            gateway_port: common::INTERNAL_GATEWAY_PORT,
+            enable_forged_header_detect: true,
         };
         assert!(config.validate().is_ok());
     }
@@ -320,6 +339,9 @@ mod tests {
         assert!(config.enable_mem_pressure);
         assert!(config.enable_disk_monitor);
         assert!(config.enable_syscall_counter);
+        assert!(config.enable_namespace_enforcer);
+        assert_eq!(config.gateway_port, common::INTERNAL_GATEWAY_PORT);
+        assert!(config.enable_forged_header_detect);
     }
 
     #[test]
@@ -342,7 +364,7 @@ mod tests {
     #[test]
     fn test_enabled_program_count_all() {
         let config = MonitorConfig::default();
-        assert_eq!(config.enabled_program_count(), 6);
+        assert_eq!(config.enabled_program_count(), 7);
     }
 
     #[test]
@@ -354,6 +376,7 @@ mod tests {
             enable_mem_pressure: false,
             enable_disk_monitor: false,
             enable_syscall_counter: true,
+            enable_namespace_enforcer: false,
             ..MonitorConfig::default()
         };
         assert_eq!(config.enabled_program_count(), 3);
@@ -368,6 +391,7 @@ mod tests {
             enable_mem_pressure: false,
             enable_disk_monitor: false,
             enable_syscall_counter: false,
+            enable_namespace_enforcer: false,
             ..MonitorConfig::default()
         };
         assert_eq!(config.enabled_program_count(), 0);

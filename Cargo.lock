@@ -2780,8 +2780,10 @@ name = "internal_gateway"
 version = "0.1.0"
 dependencies = [
  "axum 0.8.8",
+ "chrono",
  "common",
  "ebpf-monitor",
+ "futures",
  "http 1.4.0",
  "proxy",
  "reqwest 0.13.2",

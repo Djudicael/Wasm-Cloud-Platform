@@ -43,7 +43,7 @@ pub struct Gateway {
 
     /// Cross-namespace allowlist: (source_ns, target_ns) → allowed.
     /// Default: deny all cross-namespace calls.
-    pub cross_namespace_allowlist: Option<HashMap<(String, String), bool>>,
+    pub cross_namespace_allowlist: Arc<RwLock<Option<HashMap<(String, String), bool>>>>,
 }
 
 impl Gateway {
@@ -57,20 +57,21 @@ impl Gateway {
             api_key_validators: Arc::new(RwLock::new(HashMap::new())),
             metrics: Arc::new(metrics::GatewayMetrics::new(&registry)),
             registry,
-            cross_namespace_allowlist: None,
+            cross_namespace_allowlist: Arc::new(RwLock::new(None)),
         }
     }
 
     /// Check if cross-namespace access is allowed.
     /// Default: deny all cross-namespace calls.
-    pub fn is_cross_namespace_allowed(&self, source_ns: &str, target_ns: &str) -> bool {
+    pub async fn is_cross_namespace_allowed(&self, source_ns: &str, target_ns: &str) -> bool {
         // Same namespace is always allowed
         if source_ns == target_ns {
             return true;
         }
         // Check allowlist if configured
-        if let Some(ref allowlist) = self.cross_namespace_allowlist {
-            if allowlist
+        let allowlist = self.cross_namespace_allowlist.read().await;
+        if let Some(ref map) = *allowlist {
+            if map
                 .get(&(source_ns.to_string(), target_ns.to_string()))
                 .copied()
                 == Some(true)
@@ -82,8 +83,36 @@ impl Gateway {
     }
 
     /// Set the cross-namespace allowlist.
-    pub fn set_cross_namespace_allowlist(&mut self, allowlist: HashMap<(String, String), bool>) {
-        self.cross_namespace_allowlist = Some(allowlist);
+    pub async fn set_cross_namespace_allowlist(&self, allowlist: HashMap<(String, String), bool>) {
+        *self.cross_namespace_allowlist.write().await = Some(allowlist);
+    }
+
+    /// Add a cross-namespace allowlist rule.
+    pub async fn add_cross_namespace_rule(&self, source_ns: &str, target_ns: &str) {
+        let mut allowlist = self.cross_namespace_allowlist.write().await;
+        if allowlist.is_none() {
+            *allowlist = Some(HashMap::new());
+        }
+        if let Some(ref mut map) = *allowlist {
+            map.insert((source_ns.to_string(), target_ns.to_string()), true);
+        }
+    }
+
+    /// Remove a cross-namespace allowlist rule.
+    pub async fn remove_cross_namespace_rule(&self, source_ns: &str, target_ns: &str) {
+        let mut allowlist = self.cross_namespace_allowlist.write().await;
+        if let Some(ref mut map) = *allowlist {
+            map.remove(&(source_ns.to_string(), target_ns.to_string()));
+        }
+    }
+
+    /// List all cross-namespace allowlist rules.
+    pub async fn list_cross_namespace_rules(&self) -> Vec<(String, String)> {
+        let allowlist = self.cross_namespace_allowlist.read().await;
+        match *allowlist {
+            Some(ref map) => map.keys().cloned().collect(),
+            None => Vec::new(),
+        }
     }
 
     /// Set the API key validator for an app.

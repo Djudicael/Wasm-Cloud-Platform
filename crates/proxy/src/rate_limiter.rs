@@ -1,8 +1,46 @@
 // crates/proxy/src/rate_limiter.rs
 use dashmap::DashMap;
 use std::net::IpAddr;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+/// Per-app success tracking for adaptive rate limiting and metrics.
+struct SuccessCounter {
+    total: AtomicU64,
+    last_minute: AtomicU64,
+    last_reset: std::sync::Mutex<Instant>,
+}
+
+impl SuccessCounter {
+    fn new() -> Self {
+        SuccessCounter {
+            total: AtomicU64::new(0),
+            last_minute: AtomicU64::new(0),
+            last_reset: std::sync::Mutex::new(Instant::now()),
+        }
+    }
+
+    fn record(&self) {
+        self.total.fetch_add(1, Ordering::Relaxed);
+
+        // Reset per-minute counter if a minute has passed
+        let mut last_reset = self.last_reset.lock().unwrap();
+        if last_reset.elapsed() >= Duration::from_secs(60) {
+            self.last_minute.store(0, Ordering::Relaxed);
+            *last_reset = Instant::now();
+        }
+        self.last_minute.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn total(&self) -> u64 {
+        self.total.load(Ordering::Relaxed)
+    }
+
+    fn last_minute(&self) -> u64 {
+        self.last_minute.load(Ordering::Relaxed)
+    }
+}
 
 /// Per-app rate limit configuration.
 #[derive(Debug, Clone)]
@@ -81,6 +119,8 @@ pub struct RateLimiter {
     /// Behind an `RwLock` so it can be updated at runtime via hot-reload
     /// without disrupting ongoing requests.
     default_config: std::sync::RwLock<RateLimitConfig>,
+    /// Per-app success counters for metrics and adaptive limiting.
+    success_counters: DashMap<String, SuccessCounter>,
 }
 
 impl RateLimiter {
@@ -90,6 +130,7 @@ impl RateLimiter {
             ip_buckets: DashMap::new(),
             configs: DashMap::new(),
             default_config: std::sync::RwLock::new(default_config),
+            success_counters: DashMap::new(),
         }
     }
 
@@ -171,6 +212,28 @@ impl RateLimiter {
         Ok(())
     }
 
+    /// Record a successful request for metrics and adaptive rate limiting.
+    pub fn record_success(&self, app_id: &str, _source_ip: IpAddr) {
+        let counter = self
+            .success_counters
+            .entry(app_id.to_string())
+            .or_insert_with(SuccessCounter::new);
+        counter.record();
+
+        tracing::debug!(
+            app_id,
+            total = counter.total(),
+            "Rate limiter recorded success"
+        );
+    }
+
+    /// Get success statistics for an app.
+    pub fn get_success_stats(&self, app_id: &str) -> Option<(u64, u64)> {
+        self.success_counters
+            .get(app_id)
+            .map(|c| (c.total(), c.last_minute()))
+    }
+
     /// Start a background task that prunes stale IP buckets.
     pub fn start_prune_loop(self: Arc<Self>) {
         let limiter = self.clone();
@@ -224,6 +287,19 @@ impl std::error::Error for RateLimitDenied {}
 mod tests {
     use super::*;
     use std::net::{IpAddr, Ipv4Addr};
+
+    #[tokio::test]
+    async fn test_record_success_tracks_counts() {
+        let limiter = RateLimiter::new(RateLimitConfig::default());
+        let ip = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1));
+
+        limiter.record_success("test-app", ip);
+        limiter.record_success("test-app", ip);
+        limiter.record_success("test-app", ip);
+
+        let (total, _last_minute) = limiter.get_success_stats("test-app").unwrap();
+        assert_eq!(total, 3);
+    }
 
     #[tokio::test]
     async fn test_app_rate_limit() {

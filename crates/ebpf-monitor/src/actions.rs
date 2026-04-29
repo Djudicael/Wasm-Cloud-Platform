@@ -18,6 +18,7 @@ use tracing::{error, info, warn};
 
 use crate::common::{EventType, SyscallCategory};
 use crate::metrics::EbpfMetrics;
+use crate::namespace_map::NamespaceMap;
 
 // ── Recovery Actions ──────────────────────────────────────────────────────────
 
@@ -312,6 +313,8 @@ pub struct ActionDispatcher {
     /// Updated via [`update_thresholds`] when the operator changes eBPF
     /// parameters through the admin API.
     config: std::sync::RwLock<MonitorConfig>,
+    /// Namespace identity map for updating port→TID bindings from eBPF events.
+    namespace_map: std::sync::RwLock<Option<Arc<NamespaceMap>>>,
 }
 
 impl ActionDispatcher {
@@ -329,7 +332,13 @@ impl ActionDispatcher {
             degraded_mode: std::sync::atomic::AtomicBool::new(false),
             last_pressure_level: std::sync::atomic::AtomicU32::new(0),
             config: std::sync::RwLock::new(MonitorConfig::default()),
+            namespace_map: std::sync::RwLock::new(None),
         }
+    }
+
+    /// Set the namespace map for updating port→TID bindings.
+    pub fn set_namespace_map(&self, ns_map: Arc<NamespaceMap>) {
+        *self.namespace_map.write().unwrap() = Some(ns_map);
     }
 
     /// Create a dispatcher with no-op callbacks (for testing).
@@ -356,6 +365,7 @@ impl ActionDispatcher {
             degraded_mode: std::sync::atomic::AtomicBool::new(false),
             last_pressure_level: std::sync::atomic::AtomicU32::new(0),
             config: std::sync::RwLock::new(config),
+            namespace_map: std::sync::RwLock::new(None),
         }
     }
 
@@ -721,21 +731,24 @@ impl ActionDispatcher {
 
             MonitorEvent::TidConnection {
                 tid,
-                namespace,
-                app_id,
+                namespace: _,
+                app_id: _,
                 source_port,
             } => {
-                tracing::debug!(
-                    tid,
-                    namespace = %namespace,
-                    app_id = %app_id,
-                    source_port,
-                    "TID connected to gateway"
-                );
+                tracing::debug!(tid, source_port, "TID connected to gateway");
+                if let Some(ref ns_map) = *self.namespace_map.read().unwrap() {
+                    ns_map.bind_port(source_port, tid);
+                }
             }
 
-            MonitorEvent::TidDisconnection { tid, source_port } => {
-                tracing::debug!(tid, source_port, "TID disconnected from gateway");
+            MonitorEvent::TidDisconnection {
+                tid: _,
+                source_port,
+            } => {
+                tracing::debug!(source_port, "TID disconnected from gateway");
+                if let Some(ref ns_map) = *self.namespace_map.read().unwrap() {
+                    ns_map.unbind_port(source_port);
+                }
             }
 
             MonitorEvent::NamespaceAudit {

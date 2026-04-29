@@ -8,6 +8,7 @@
 use crate::common::{TidFlags, TidIdentity};
 use std::collections::HashMap;
 use std::sync::RwLock;
+use std::time::{Duration, Instant};
 use tracing::{info, warn};
 
 /// Identity of a caller, returned by `resolve_identity()`.
@@ -16,6 +17,12 @@ pub struct CallerIdentity {
     pub namespace: String,
     pub app_id: String,
     pub tid: u32,
+}
+
+/// Tracks when a port→TID binding was created.
+struct PortBinding {
+    tid: u32,
+    created_at: Instant,
 }
 
 /// Handle to the MONITORED_TIDS eBPF map + in-process identity tables.
@@ -34,19 +41,55 @@ pub struct NamespaceMap {
     inner: Option<aya::maps::HashMap<aya::maps::MapData, u32, TidIdentity>>,
     /// TID → TidIdentity. Always maintained. Primary identity store.
     tid_to_identity: RwLock<HashMap<u32, TidIdentity>>,
-    /// Source port → TID. Populated by the consumer when eBPF events arrive.
-    port_to_tid: RwLock<HashMap<u16, u32>>,
+    /// Source port → PortBinding. Populated by the consumer when eBPF events arrive.
+    port_to_tid: RwLock<HashMap<u16, PortBinding>>,
+    /// TTL for port→TID bindings. Bindings older than this are considered stale.
+    port_ttl: Duration,
 }
 
 impl NamespaceMap {
     /// Create from a loaded eBPF object.
+    ///
+    /// The `MONITORED_TIDS` map is expected in the namespace enforcer eBPF
+    /// object (`ns_ebpf`). If not available, falls back to the main eBPF
+    /// object or in-process maps.
+    // TODO: When aya supports BPF_F_RDONLY_PROG, load the MONITORED_TIDS map
+    // with read-only program access to prevent eBPF programs from mutating
+    // the identity table. This is defense-in-depth — the eBPF programs
+    // should never need to write to this map.
     #[cfg(feature = "ebpf")]
-    pub fn from_ebpf(ebpf: &mut aya::Bpf) -> Self {
-        let inner = match ebpf.map_mut("MONITORED_TIDS") {
+    pub fn from_ebpf(ebpf: &mut aya::Bpf, ns_ebpf: Option<&mut aya::Bpf>) -> Self {
+        // Try the namespace enforcer object first (where MONITORED_TIDS lives)
+        let inner = if let Some(ns) = ns_ebpf {
+            match ns.map_mut("MONITORED_TIDS") {
+                Some(map) => {
+                    match aya::maps::HashMap::<aya::maps::MapData, u32, TidIdentity>::try_from(map)
+                    {
+                        Ok(hash_map) => {
+                            info!("MONITORED_TIDS eBPF map opened from namespace enforcer");
+                            Some(hash_map)
+                        }
+                        Err(e) => {
+                            warn!(error = %e, "MONITORED_TIDS map wrong type — trying main eBPF object");
+                            None
+                        }
+                    }
+                }
+                None => {
+                    warn!("MONITORED_TIDS map not found in namespace enforcer — trying main eBPF object");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        // Fall back to the main eBPF object
+        let inner = inner.or_else(|| match ebpf.map_mut("MONITORED_TIDS") {
             Some(map) => {
                 match aya::maps::HashMap::<aya::maps::MapData, u32, TidIdentity>::try_from(map) {
                     Ok(hash_map) => {
-                        info!("MONITORED_TIDS eBPF map opened");
+                        info!("MONITORED_TIDS eBPF map opened from main object");
                         Some(hash_map)
                     }
                     Err(e) => {
@@ -59,12 +102,13 @@ impl NamespaceMap {
                 warn!("MONITORED_TIDS map not found — using fallback");
                 None
             }
-        };
+        });
 
         NamespaceMap {
             inner,
             tid_to_identity: RwLock::new(HashMap::new()),
             port_to_tid: RwLock::new(HashMap::new()),
+            port_ttl: Duration::from_secs(300),
         }
     }
 
@@ -75,6 +119,7 @@ impl NamespaceMap {
             inner: None,
             tid_to_identity: RwLock::new(HashMap::new()),
             port_to_tid: RwLock::new(HashMap::new()),
+            port_ttl: Duration::from_secs(300),
         }
     }
 
@@ -129,7 +174,7 @@ impl NamespaceMap {
 
         // Remove any port→TID mappings for this TID
         let mut port_map = self.port_to_tid.write().unwrap();
-        port_map.retain(|_, &mut t| t != tid);
+        port_map.retain(|_, binding| binding.tid != tid);
 
         info!(tid, "TID deregistered");
         Ok(())
@@ -141,7 +186,13 @@ impl NamespaceMap {
     /// or when the Supervisor detects that a TID has established a
     /// TCP connection to the gateway from a specific source port.
     pub fn bind_port(&self, source_port: u16, tid: u32) {
-        self.port_to_tid.write().unwrap().insert(source_port, tid);
+        self.port_to_tid.write().unwrap().insert(
+            source_port,
+            PortBinding {
+                tid,
+                created_at: Instant::now(),
+            },
+        );
         tracing::debug!(source_port, tid, "Port bound to TID");
     }
 
@@ -159,8 +210,21 @@ impl NamespaceMap {
     /// Returns `None` if the source port is not bound or the TID is not
     /// registered (unregistered connection — deny by default).
     pub fn resolve_identity(&self, source_port: u16) -> Option<CallerIdentity> {
-        let port_map = self.port_to_tid.read().unwrap();
-        let tid = port_map.get(&source_port).copied()?;
+        let mut port_map = self.port_to_tid.write().unwrap();
+        let binding = port_map.get(&source_port)?;
+
+        // Check TTL
+        if binding.created_at.elapsed() > self.port_ttl {
+            tracing::warn!(
+                source_port,
+                tid = binding.tid,
+                "Port binding expired — removing"
+            );
+            port_map.remove(&source_port);
+            return None;
+        }
+
+        let tid = binding.tid;
         drop(port_map);
 
         let tid_map = self.tid_to_identity.read().unwrap();
@@ -176,6 +240,30 @@ impl NamespaceMap {
     /// Look up a TID's identity directly (for admin/debug API).
     pub fn lookup_tid(&self, tid: u32) -> Option<TidIdentity> {
         self.tid_to_identity.read().unwrap().get(&tid).copied()
+    }
+
+    /// Remove port bindings that have exceeded their TTL.
+    /// Returns the number of bindings removed.
+    pub fn cleanup_expired_bindings(&self) -> usize {
+        let mut port_map = self.port_to_tid.write().unwrap();
+        let before = port_map.len();
+        port_map.retain(|port, binding| {
+            let alive = binding.created_at.elapsed() <= self.port_ttl;
+            if !alive {
+                tracing::debug!(port, tid = binding.tid, "Expired port binding cleaned up");
+            }
+            alive
+        });
+        let removed = before - port_map.len();
+        if removed > 0 {
+            tracing::info!(removed, "Cleaned up expired port→TID bindings");
+        }
+        removed
+    }
+
+    /// Set the TTL for port→TID bindings.
+    pub fn set_port_ttl(&mut self, ttl: Duration) {
+        self.port_ttl = ttl;
     }
 
     /// Cleanup stale TIDs whose threads no longer exist.
@@ -320,10 +408,33 @@ mod tests {
         let identity = TidIdentity::new("test", "app:v1");
         map.register_tid(999_999, identity).unwrap();
 
-        let removed = map.cleanup_stale_tids();
+        let _removed = map.cleanup_stale_tids();
         // On Linux, this TID likely doesn't exist so it should be removed.
         // On non-Linux, is_tid_alive returns true, so nothing is removed.
         #[cfg(target_os = "linux")]
-        assert!(removed >= 1 || map.lookup_tid(999_999).is_none());
+        assert!(_removed >= 1 || map.lookup_tid(999_999).is_none());
+    }
+
+    #[test]
+    fn test_port_binding_expires() {
+        let mut map = NamespaceMap::new_fallback();
+        map.set_port_ttl(Duration::from_millis(10));
+
+        let identity = TidIdentity::new("default", "app:v1");
+        map.register_tid(12350, identity).unwrap();
+        map.bind_port(54326, 12350);
+
+        // Should resolve immediately
+        assert!(map.resolve_identity(54326).is_some());
+
+        // Wait for TTL to expire
+        std::thread::sleep(Duration::from_millis(20));
+
+        // Should now return None and remove the binding
+        assert!(map.resolve_identity(54326).is_none());
+
+        // Cleanup should find nothing (already removed by resolve_identity)
+        let removed = map.cleanup_expired_bindings();
+        assert_eq!(removed, 0);
     }
 }

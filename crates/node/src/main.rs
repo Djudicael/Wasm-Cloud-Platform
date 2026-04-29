@@ -1,6 +1,6 @@
 use clap::Parser;
 use messaging::reconnect::{NatsHealth, NatsHealthWatcher};
-use std::net::{IpAddr, SocketAddr};
+use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -1110,7 +1110,8 @@ async fn main() -> anyhow::Result<()> {
         gateway.clone(),
     )
     .with_namespace_map(_ebpf_handle.namespace_map.clone())
-    .with_ebpf_active(_ebpf_handle.is_ebpf_active());
+    .with_ebpf_active(_ebpf_handle.is_ebpf_active())
+    .with_cold_start(cold_start.clone());
     tokio::spawn(async move {
         if let Err(e) = internal_gw.run().await {
             tracing::error!(error = %e, "internal gateway exited");
@@ -1126,7 +1127,7 @@ async fn main() -> anyhow::Result<()> {
         cold_start,
         backpressure: backpressure.clone(),
         metrics: Some(rate_limit_metrics),
-        gateway,
+        gateway: gateway.clone(),
         max_body_size_bytes: 10 * 1024 * 1024, // 10 MB
     };
 
@@ -1852,6 +1853,63 @@ async fn main() -> anyhow::Result<()> {
                 }
             }),
         )
+        .route(
+            "/admin/cross-namespace-allowlist",
+            axum::routing::get({
+                let gateway = gateway.clone();
+                move || {
+                    let gateway = gateway.clone();
+                    async move {
+                        let rules = gateway.list_cross_namespace_rules().await;
+                        axum::Json(serde_json::json!({
+                            "rules": rules.iter().map(|(s, t)| serde_json::json!({"source": s, "target": t})).collect::<Vec<_>>(),
+                            "count": rules.len(),
+                        }))
+                    }
+                }
+            }),
+        )
+        .route(
+            "/admin/cross-namespace-allowlist",
+            axum::routing::post({
+                let gateway = gateway.clone();
+                move |axum::Json(body): axum::Json<serde_json::Value>| {
+                    let gateway = gateway.clone();
+                    async move {
+                        let source = body.get("source").and_then(|v| v.as_str()).unwrap_or("");
+                        let target = body.get("target").and_then(|v| v.as_str()).unwrap_or("");
+                        if source.is_empty() || target.is_empty() {
+                            return (
+                                axum::http::StatusCode::BAD_REQUEST,
+                                axum::Json(serde_json::json!({"error": "source and target required"})),
+                            );
+                        }
+                        gateway.add_cross_namespace_rule(source, target).await;
+                        (
+                            axum::http::StatusCode::OK,
+                            axum::Json(serde_json::json!({"status": "added"})),
+                        )
+                    }
+                }
+            }),
+        )
+        .route(
+            "/admin/cross-namespace-allowlist/{source}/{target}",
+            axum::routing::delete({
+                let gateway = gateway.clone();
+                move |
+                    axum::extract::Path((source, target)): axum::extract::Path<(String, String)>| {
+                    let gateway = gateway.clone();
+                    async move {
+                        gateway.remove_cross_namespace_rule(&source, &target).await;
+                        (
+                            axum::http::StatusCode::OK,
+                            axum::Json(serde_json::json!({"status": "removed"})),
+                        )
+                    }
+                }
+            }),
+        )
         // ── App Management Endpoints ────────────────────────────────────
         .route(
             "/admin/apps",
@@ -2398,6 +2456,9 @@ async fn main() -> anyhow::Result<()> {
                         tcp_conn_limit_per_pid: hot.ebpf.tcp_conn_limit_per_pid,
                         syscall_rate_limit: hot.ebpf.syscall_rate_limit,
                         sampling_period_secs: hot.ebpf.sampling_period_secs,
+                        enable_namespace_enforcer: hot.ebpf.enable_namespace_enforcer,
+                        gateway_port: hot.ebpf.gateway_port,
+                        enable_forged_header_detect: hot.ebpf.enable_forged_header_detect,
                     });
                 sync_ebpf_dispatcher.update_thresholds(new_ebpf_config);
 

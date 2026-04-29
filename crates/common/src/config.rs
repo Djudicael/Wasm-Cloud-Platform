@@ -678,6 +678,12 @@ pub struct EbpfSection {
     pub syscall_rate_limit: u64,
     #[serde(default = "default_sampling")]
     pub sampling_period_secs: u64,
+    #[serde(default = "default_enable_namespace_enforcer")]
+    pub enable_namespace_enforcer: bool,
+    #[serde(default = "default_gateway_port")]
+    pub gateway_port: u16,
+    #[serde(default = "default_enable_forged_header_detect")]
+    pub enable_forged_header_detect: bool,
 }
 
 fn default_ebpf_enabled() -> bool {
@@ -716,6 +722,18 @@ fn default_sampling() -> u64 {
     10
 }
 
+fn default_enable_namespace_enforcer() -> bool {
+    true
+}
+
+fn default_gateway_port() -> u16 {
+    crate::INTERNAL_GATEWAY_PORT
+}
+
+fn default_enable_forged_header_detect() -> bool {
+    true
+}
+
 impl Default for EbpfSection {
     fn default() -> Self {
         EbpfSection {
@@ -728,6 +746,9 @@ impl Default for EbpfSection {
             tcp_conn_limit_per_pid: default_tcp_limit(),
             syscall_rate_limit: default_syscall_rate(),
             sampling_period_secs: default_sampling(),
+            enable_namespace_enforcer: default_enable_namespace_enforcer(),
+            gateway_port: default_gateway_port(),
+            enable_forged_header_detect: default_enable_forged_header_detect(),
         }
     }
 }

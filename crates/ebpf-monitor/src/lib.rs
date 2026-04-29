@@ -274,7 +274,7 @@ pub async fn init(
     {
         if config.enabled {
             match try_init_ebpf(&config, &metrics, &dispatcher, node_pid).await {
-                Ok((consumer_handle, action_tx)) => {
+                Ok((consumer_handle, action_tx, mut loaded)) => {
                     info!("eBPF monitor initialized with kernel-level monitoring");
 
                     // Spawn a watchdog that monitors the consumer task.
@@ -300,11 +300,18 @@ pub async fn init(
                         .await;
                     });
 
+                    let namespace_map = Arc::new(NamespaceMap::from_ebpf(
+                        &mut loaded.ebpf,
+                        loaded.ns_ebpf.as_mut(),
+                    ));
+
+                    // Wire the namespace map into the dispatcher so that
+                    // TidConnection / TidDisconnection events update port→TID bindings.
+                    dispatcher.set_namespace_map(namespace_map.clone());
+
                     // Drop the action_tx sender — the dispatcher loop owns the receiver.
                     // When the consumer stops sending, the dispatcher loop will exit.
                     drop(action_tx);
-
-                    let namespace_map = Arc::new(NamespaceMap::from_ebpf(&mut loaded.ebpf));
 
                     return MonitorHandle {
                         shutdown_tx,
@@ -380,6 +387,7 @@ async fn try_init_ebpf(
     (
         tokio::task::JoinHandle<()>,
         tokio::sync::mpsc::Sender<MonitorEvent>,
+        loader::LoadedEbpf,
     ),
     &'static str,
 > {
@@ -429,7 +437,7 @@ async fn try_init_ebpf(
         "eBPF programs loaded and ring buffer consumer started"
     );
 
-    Ok((consumer_handle, action_tx))
+    Ok((consumer_handle, action_tx, loaded))
 }
 
 // ── Convenience: Create a dispatcher with the NoopCallbacks ────────────────────
@@ -544,13 +552,13 @@ mod tests {
     #[test]
     fn test_config_enabled_program_count() {
         let config = MonitorConfig::default();
-        assert_eq!(config.enabled_program_count(), 6);
+        assert_eq!(config.enabled_program_count(), 7);
 
         let config = MonitorConfig {
             enable_syscall_counter: false,
             ..MonitorConfig::default()
         };
-        assert_eq!(config.enabled_program_count(), 5);
+        assert_eq!(config.enabled_program_count(), 6);
     }
 
     #[tokio::test]
