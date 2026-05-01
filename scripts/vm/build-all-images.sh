@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+# Build all VM images for the testbed.
+#
+# This is a convenience script that runs all the individual build scripts
+# in the correct order.
+#
+# Usage:
+#   ./scripts/vm/build-all-images.sh
+#
+# Output:
+#   ./assets/vmlinux-6.1
+#   ./assets/wasm-node-rootfs.ext4
+#   ./assets/nats-rootfs.ext4
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+
+cd "$PROJECT_ROOT"
+
+echo "========================================"
+echo "  Building all VM Testbed Images"
+echo "========================================"
+echo ""
+
+# Create assets directory
+mkdir -p ./assets
+
+# Build kernel
+echo "[1/3] Building kernel..."
+if [[ ! -f "./assets/vmlinux-6.1" ]]; then
+    "$SCRIPT_DIR/build-kernel.sh"
+else
+    echo "       Kernel already exists, skipping."
+    echo "       To rebuild: rm ./assets/vmlinux-6.1 && $SCRIPT_DIR/build-kernel.sh"
+fi
+
+# Build NATS rootfs
+echo ""
+echo "[2/3] Building NATS rootfs..."
+if [[ ! -f "./assets/nats-rootfs.ext4" ]]; then
+    "$SCRIPT_DIR/build-nats-rootfs.sh"
+else
+    echo "       NATS rootfs already exists, skipping."
+    echo "       To rebuild: rm ./assets/nats-rootfs.ext4 && $SCRIPT_DIR/build-nats-rootfs.sh"
+fi
+
+# Build wasm-node rootfs
+echo ""
+echo "[3/3] Building wasm-node rootfs..."
+if [[ ! -f "./assets/wasm-node-rootfs.ext4" ]]; then
+    "$SCRIPT_DIR/build-node-rootfs.sh"
+else
+    echo "       wasm-node rootfs already exists, skipping."
+    echo "       To rebuild: rm ./assets/wasm-node-rootfs.ext4 && $SCRIPT_DIR/build-node-rootfs.sh"
+fi
+
+echo ""
+echo "========================================"
+echo "  All images built successfully!"
+echo "========================================"
+echo ""
+echo "Assets in ./assets/:"
+ls -lh ./assets/
+echo ""
+echo "Next steps:"
+echo "  1. Install Firecracker (if not done): $SCRIPT_DIR/install-firecracker.sh"
+echo "  2. Run tests: sudo cargo test -p vm-testbed --test single_node_deploy -- --nocapture"
+echo "  3. Or use the CLI: cargo run --bin vm-testbed-cli -- spawn-cluster --nodes 3"

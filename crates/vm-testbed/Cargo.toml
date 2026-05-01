@@ -1,0 +1,40 @@
+[package]
+name = "vm-testbed"
+version = "0.1.0"
+edition = "2021"
+description = "MicroVM-based testbed for pre-production validation of the Wasm Cloud Platform using Firecracker"
+
+[features]
+default = []
+# Enable tests that require a real Firecracker installation and KVM
+firecracker = []
+# Enable chaos tests that require network manipulation capabilities
+chaos = ["firecracker"]
+
+[dependencies]
+tokio = { workspace = true, features = ["full", "process", "fs", "io-util"] }
+reqwest = { workspace = true, features = ["json"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+anyhow = { workspace = true }
+tempfile = "3"
+uuid = { workspace = true, features = ["v4"] }
+chrono = { workspace = true }
+thiserror = { workspace = true }
+clap = { workspace = true, features = ["derive", "env"] }
+which = "6"
+
+# Re-use existing E2E test infrastructure
+e2e = { path = "../e2e" }
+common = { path = "../common" }
+messaging = { path = "../messaging" }
+
+[dev-dependencies]
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+assert_cmd = "2"
+
+[[bin]]
+name = "vm-testbed-cli"
+path = "src/cli.rs"
