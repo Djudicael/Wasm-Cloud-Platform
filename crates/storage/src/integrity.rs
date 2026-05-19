@@ -2,7 +2,7 @@ use crate::tables::{
     ARTIFACTS, ARTIFACT_HASHES, CONFIGS, METRICS, RAW_WASM, ROUTES, SCHEMA_META, SECRETS,
 };
 use crate::Store;
-use common::error::PlatformError;
+use common::{error::PlatformError, protocol::MessageEnvelope};
 use redb::{ReadableDatabase, ReadableTable, ReadableTableMetadata};
 use serde::{Deserialize, Serialize};
 
@@ -23,6 +23,60 @@ pub enum RecoveryAction {
 }
 
 const CRITICAL_TABLES: &[&str] = &["artifacts", "configs"];
+const ROUTE_REPLAY_BATCH_SIZE: usize = 256;
+const ROUTE_REPLAY_EXPIRES_MS: u64 = 250;
+
+#[derive(Debug)]
+enum ReplayRouteEvent {
+    Add(common::types::Route),
+    Remove(String),
+}
+
+fn decode_replay_route_event(payload: &[u8]) -> Result<ReplayRouteEvent, PlatformError> {
+    let event_value = if let Ok(envelope) =
+        serde_json::from_slice::<MessageEnvelope<serde_json::Value>>(payload)
+    {
+        if !envelope.is_compatible() {
+            return Err(PlatformError::messaging(format!(
+                "incompatible protocol version {} during routes replay",
+                envelope.protocol_version
+            )));
+        }
+        envelope.payload
+    } else {
+        serde_json::from_slice::<serde_json::Value>(payload)
+            .map_err(PlatformError::messaging_source)?
+    };
+
+    let event_type = event_value
+        .get("type")
+        .and_then(|t| t.as_str())
+        .ok_or_else(|| PlatformError::messaging("route replay payload missing event type"))?;
+
+    match event_type {
+        "route_add" => {
+            let route_obj = event_value.get("route").cloned().ok_or_else(|| {
+                PlatformError::messaging("route_add replay payload missing route")
+            })?;
+            let route = serde_json::from_value::<common::types::Route>(route_obj)
+                .map_err(PlatformError::messaging_source)?;
+            Ok(ReplayRouteEvent::Add(route))
+        }
+        "route_remove" => {
+            let host = event_value
+                .get("host")
+                .and_then(|h| h.as_str())
+                .ok_or_else(|| {
+                    PlatformError::messaging("route_remove replay payload missing host")
+                })?
+                .to_string();
+            Ok(ReplayRouteEvent::Remove(host))
+        }
+        other => Err(PlatformError::messaging(format!(
+            "unexpected event type during routes replay: {other}"
+        ))),
+    }
+}
 
 impl Store {
     pub fn integrity_check(&self) -> IntegrityReport {
@@ -147,7 +201,11 @@ impl Store {
         nats_client: &async_nats::Client,
         store: Store,
     ) -> Result<(), PlatformError> {
+        use async_nats::jetstream::consumer::{
+            pull::Config as PullConfig, AckPolicy, DeliverPolicy,
+        };
         use futures::StreamExt;
+        use std::time::Duration;
 
         let js = async_nats::jetstream::new(nats_client.clone());
         let stream = match js.get_stream("DEPLOY").await {
@@ -158,72 +216,59 @@ impl Store {
             }
         };
 
-        let consumer = match stream.get_consumer("recovery-routes-replay").await {
-            Ok(c) => c,
-            Err(_) => {
-                tracing::info!("creating temporary consumer for routes replay");
-                let config = async_nats::jetstream::consumer::pull::Config {
-                    durable_name: Some("recovery-routes-replay".to_string()),
-                    ..Default::default()
-                };
-                stream.create_consumer(config).await.map_err(|e| {
-                    PlatformError::messaging(format!("failed to create consumer: {e}"))
-                })?
-            }
-        };
-
-        let mut messages = consumer
-            .messages()
+        tracing::info!("creating ephemeral consumer for routes replay");
+        let consumer = stream
+            .create_consumer(PullConfig {
+                // Ephemeral consumer so each rebuild replays full route history.
+                durable_name: None,
+                deliver_policy: DeliverPolicy::All,
+                ack_policy: AckPolicy::Explicit,
+                filter_subject: "routes.>".to_string(),
+                inactive_threshold: Duration::from_secs(30),
+                ..Default::default()
+            })
             .await
-            .map_err(|e| PlatformError::messaging(format!("failed to get messages: {e}")))?;
+            .map_err(|e| {
+                PlatformError::messaging(format!("failed to create replay consumer: {e}"))
+            })?;
 
         let mut processed = 0u64;
-        while let Some(msg) = messages.next().await {
-            let msg = match msg {
-                Ok(m) => m,
-                Err(e) => {
-                    tracing::warn!(error = %e, "error receiving message during replay");
-                    continue;
-                }
-            };
+        loop {
+            let mut messages = consumer
+                .fetch()
+                .max_messages(ROUTE_REPLAY_BATCH_SIZE)
+                .expires(Duration::from_millis(ROUTE_REPLAY_EXPIRES_MS))
+                .messages()
+                .await
+                .map_err(|e| {
+                    PlatformError::messaging(format!("failed to fetch replay batch: {e}"))
+                })?;
 
-            let event: serde_json::Value = match serde_json::from_slice(&msg.payload) {
-                Ok(e) => e,
-                Err(_) => {
-                    let _ = msg.ack().await;
-                    continue;
-                }
-            };
+            let mut batch_count = 0usize;
+            while let Some(msg) = messages.next().await {
+                let msg = msg.map_err(|e| {
+                    PlatformError::messaging(format!("error receiving route replay message: {e}"))
+                })?;
+                batch_count += 1;
 
-            if let Some(event_type) = event.get("type").and_then(|t| t.as_str()) {
-                match event_type {
-                    "route_add" => {
-                        if let Some(route_obj) = event.get("route") {
-                            if let Ok(route) =
-                                serde_json::from_value::<common::types::Route>(route_obj.clone())
-                            {
-                                if let Err(e) = store.save_route(&route) {
-                                    tracing::warn!(
-                                        error = %e,
-                                        host = %route.host,
-                                        "failed to restore route during replay"
-                                    );
-                                } else {
-                                    processed += 1;
-                                }
-                            }
-                        }
+                match decode_replay_route_event(&msg.payload)? {
+                    ReplayRouteEvent::Add(route) => {
+                        store.save_route(&route)?;
                     }
-                    "route_remove" => {
-                        if let Some(host) = event.get("host").and_then(|h| h.as_str()) {
-                            let _ = store.delete_route(host);
-                        }
+                    ReplayRouteEvent::Remove(host) => {
+                        store.delete_route(&host)?;
                     }
-                    _ => {}
                 }
+
+                msg.ack().await.map_err(|e| {
+                    PlatformError::messaging(format!("failed to ack replayed route message: {e}"))
+                })?;
+                processed += 1;
             }
 
-            let _ = msg.ack().await;
+            if batch_count == 0 {
+                break;
+            }
         }
 
         tracing::info!(routes_processed = processed, "routes replay complete");
@@ -305,5 +350,56 @@ impl Store {
 
     pub fn db_path(&self) -> std::path::PathBuf {
         self.db_path.clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{decode_replay_route_event, ReplayRouteEvent};
+    use common::{
+        protocol::MessageEnvelope,
+        types::{AppId, Route},
+    };
+
+    fn sample_route() -> Route {
+        Route {
+            host: "example.com".to_string(),
+            app_id: AppId("app:v1".to_string()),
+            path_prefix: "/".to_string(),
+            strip_prefix: false,
+            created_at: 1,
+            updated_at: 1,
+        }
+    }
+
+    #[test]
+    fn test_decode_replay_route_event_from_envelope() {
+        let payload = serde_json::to_vec(&MessageEnvelope::new(
+            "node-0",
+            serde_json::json!({
+                "type": "route_add",
+                "route": sample_route(),
+            }),
+        ))
+        .unwrap();
+
+        match decode_replay_route_event(&payload).unwrap() {
+            ReplayRouteEvent::Add(route) => assert_eq!(route.host, "example.com"),
+            ReplayRouteEvent::Remove(_) => panic!("expected route_add"),
+        }
+    }
+
+    #[test]
+    fn test_decode_replay_route_event_from_legacy_bare_event() {
+        let payload = serde_json::to_vec(&serde_json::json!({
+            "type": "route_remove",
+            "host": "example.com",
+        }))
+        .unwrap();
+
+        match decode_replay_route_event(&payload).unwrap() {
+            ReplayRouteEvent::Remove(host) => assert_eq!(host, "example.com"),
+            ReplayRouteEvent::Add(_) => panic!("expected route_remove"),
+        }
     }
 }
