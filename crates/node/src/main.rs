@@ -1,5 +1,6 @@
 use clap::Parser;
 use messaging::reconnect::{NatsHealth, NatsHealthWatcher};
+use reqwest::Url;
 use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -65,6 +66,57 @@ fn migrate_legacy_kek_to_file(
         "migrated legacy KEK from plaintext redb storage into key file and removed DB copy"
     );
     Ok(kek)
+}
+
+fn is_loopback_host(host: &str) -> bool {
+    let trimmed = host.trim().trim_start_matches('[').trim_end_matches(']');
+    trimmed.eq_ignore_ascii_case("localhost")
+        || trimmed
+            .parse::<IpAddr>()
+            .map(|ip| ip.is_loopback())
+            .unwrap_or(false)
+}
+
+fn normalize_artifact_base_url(raw: &str) -> anyhow::Result<String> {
+    let url = Url::parse(raw.trim())
+        .map_err(|e| anyhow::anyhow!("invalid advertised artifact URL '{}': {e}", raw.trim()))?;
+    let mut normalized = url.to_string();
+    while normalized.ends_with('/') {
+        normalized.pop();
+    }
+    Ok(normalized)
+}
+
+fn advertised_host_base_url(host: &str, port: u16) -> anyhow::Result<String> {
+    let trimmed = host.trim();
+    if trimmed.is_empty() {
+        anyhow::bail!("admin.advertised_host must not be empty");
+    }
+
+    let host_for_url = match trimmed.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V6(_)) => format!("[{trimmed}]"),
+        _ => trimmed.to_string(),
+    };
+
+    normalize_artifact_base_url(&format!("http://{host_for_url}:{port}"))
+}
+
+fn build_artifact_server_url(admin: &common::config::AdminSection) -> anyhow::Result<String> {
+    if let Some(url) = admin.advertised_artifact_url.as_deref() {
+        return normalize_artifact_base_url(url);
+    }
+    if let Some(host) = admin.advertised_host.as_deref() {
+        return advertised_host_base_url(host, admin.artifact_port);
+    }
+    Ok(format!("http://127.0.0.1:{}", admin.artifact_port))
+}
+
+fn artifact_server_url_is_loopback(url: &str) -> bool {
+    Url::parse(url)
+        .ok()
+        .and_then(|parsed| parsed.host_str().map(ToOwned::to_owned))
+        .map(|host| is_loopback_host(&host))
+        .unwrap_or(false)
 }
 
 fn load_kek_from_config(
@@ -317,6 +369,12 @@ struct Args {
     #[arg(long, default_value = "9091")]
     artifact_port: u16,
 
+    #[arg(long, env = "WASM_NODE_ADMIN_ADVERTISED_HOST")]
+    admin_advertised_host: Option<String>,
+
+    #[arg(long, env = "WASM_NODE_ADMIN_ADVERTISED_ARTIFACT_URL")]
+    admin_advertised_artifact_url: Option<String>,
+
     #[arg(long)]
     otlp_endpoint: Option<String>,
 
@@ -505,6 +563,8 @@ async fn main() -> anyhow::Result<()> {
         tls_key: args.tls_key.clone(),
         admin_port: Some(args.admin_port),
         artifact_port: Some(args.artifact_port),
+        admin_advertised_host: args.admin_advertised_host.clone(),
+        admin_advertised_artifact_url: args.admin_advertised_artifact_url.clone(),
         port_start: Some(args.port_start),
         port_end: Some(args.port_end),
         key_source: Some(args.key_source.clone()),
@@ -820,9 +880,12 @@ async fn main() -> anyhow::Result<()> {
         None
     };
 
-    // Use localhost for artifact server URL
-    // TODO: In production, this should be the node's publicly accessible IP
-    let artifact_server_url = format!("http://127.0.0.1:{}", config.admin.artifact_port);
+    let artifact_server_url = build_artifact_server_url(&config.admin)?;
+    if config.admin.advertised_artifact_url.is_some() || config.admin.advertised_host.is_some() {
+        info!(artifact_server_url = %artifact_server_url, "using configured advertised artifact endpoint");
+    } else {
+        info!(artifact_server_url = %artifact_server_url, "using local-only default advertised artifact endpoint");
+    }
 
     // ── Gateway Setup (early, so EventDispatcher can reference it) ────
     let oidc_provider = config.gateway.oidc.as_ref().map(|oidc_cfg| {
@@ -922,6 +985,12 @@ async fn main() -> anyhow::Result<()> {
     // If this is a fresh node, request state snapshot from cluster
     if is_fresh {
         info!("fresh node detected — requesting state snapshot from cluster");
+        if artifact_server_url_is_loopback(&artifact_server_url) {
+            warn!(
+                artifact_server_url = %artifact_server_url,
+                "fresh node is advertising a loopback artifact endpoint; this only works for same-host/local-only setups. Configure admin.advertised_host or admin.advertised_artifact_url for routable multi-node exchange"
+            );
+        }
 
         let public_key_bytes = dispatcher
             .bootstrap_keypair
@@ -2602,12 +2671,45 @@ async fn main() -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{load_kek_from_config, load_kek_from_env_spec};
-    use common::config::RuntimeSection;
+    use super::{
+        artifact_server_url_is_loopback, build_artifact_server_url, load_kek_from_config,
+        load_kek_from_env_spec,
+    };
+    use common::config::{AdminSection, RuntimeSection};
     use storage::Store;
     use tempfile::{NamedTempFile, TempDir};
 
     static ENV_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn test_build_artifact_server_url_defaults_to_loopback() {
+        let admin = AdminSection::default();
+        let url = build_artifact_server_url(&admin).unwrap();
+        assert_eq!(url, "http://127.0.0.1:9091");
+        assert!(artifact_server_url_is_loopback(&url));
+    }
+
+    #[test]
+    fn test_build_artifact_server_url_from_advertised_host() {
+        let admin = AdminSection {
+            advertised_host: Some("node-1.internal".to_string()),
+            ..AdminSection::default()
+        };
+        let url = build_artifact_server_url(&admin).unwrap();
+        assert_eq!(url, "http://node-1.internal:9091");
+        assert!(!artifact_server_url_is_loopback(&url));
+    }
+
+    #[test]
+    fn test_build_artifact_server_url_from_explicit_url() {
+        let admin = AdminSection {
+            advertised_artifact_url: Some("https://artifacts.node-1.internal/base/".to_string()),
+            ..AdminSection::default()
+        };
+        let url = build_artifact_server_url(&admin).unwrap();
+        assert_eq!(url, "https://artifacts.node-1.internal/base");
+        assert!(!artifact_server_url_is_loopback(&url));
+    }
 
     #[test]
     fn test_load_kek_from_env_spec_hex() {

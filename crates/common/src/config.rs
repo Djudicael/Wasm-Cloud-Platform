@@ -160,6 +160,15 @@ pub struct AdminSection {
     pub port: u16,
     #[serde(default = "default_artifact_port")]
     pub artifact_port: u16,
+    /// Optional routable host name or IP used when advertising the artifact endpoint
+    /// to peer nodes. The local listener may still bind to loopback.
+    #[serde(default)]
+    pub advertised_host: Option<String>,
+    /// Optional fully-qualified artifact base URL advertised to peer nodes.
+    /// Example: "https://node-1.internal:9443".
+    /// When set, this takes precedence over `advertised_host`.
+    #[serde(default)]
+    pub advertised_artifact_url: Option<String>,
     /// Legacy single admin token (deprecated in favor of [auth] section).
     /// When set and [auth] is not configured, this token is used as the write token.
     #[serde(default)]
@@ -179,6 +188,8 @@ impl Default for AdminSection {
         AdminSection {
             port: default_admin_port(),
             artifact_port: default_artifact_port(),
+            advertised_host: None,
+            advertised_artifact_url: None,
             auth_token: None,
         }
     }

@@ -82,7 +82,8 @@ pub enum Event {
     // ── Cluster Bootstrap ──────────────────────────────────────────
     NodeJoined {
         node_id: String,
-        /// The node's artifact server URL so other nodes can push artifacts to it.
+        /// The node's advertised artifact base URL for peer exchange.
+        /// This may differ from the local listener bind address.
         artifact_server_url: String,
         /// A one-time public key for encrypting the secret transfer.
         /// (Ephemeral X25519 key, used only for this bootstrap session.)

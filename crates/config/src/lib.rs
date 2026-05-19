@@ -13,9 +13,11 @@ use common::config::{
 };
 use common::error::PlatformError;
 use serde::{Deserialize, Serialize};
+use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock as StdRwLock};
 use storage::Store;
+use url::Url;
 
 // -----------------------------------------------------------------------------
 // Configuration Loader
@@ -35,6 +37,8 @@ pub struct CliOverrides {
     pub tls_key: Option<String>,
     pub admin_port: Option<u16>,
     pub artifact_port: Option<u16>,
+    pub admin_advertised_host: Option<String>,
+    pub admin_advertised_artifact_url: Option<String>,
     pub port_start: Option<u16>,
     pub port_end: Option<u16>,
     pub key_source: Option<String>,
@@ -134,6 +138,11 @@ fn merge_config(base: NodeConfig, overlay: NodeConfig) -> NodeConfig {
         admin: AdminSection {
             port: overlay.admin.port,
             artifact_port: overlay.admin.artifact_port,
+            advertised_host: overlay.admin.advertised_host.or(base.admin.advertised_host),
+            advertised_artifact_url: overlay
+                .admin
+                .advertised_artifact_url
+                .or(base.admin.advertised_artifact_url),
             auth_token: overlay.admin.auth_token.or(base.admin.auth_token),
         },
         auth: AuthSection {
@@ -297,6 +306,12 @@ fn apply_env_overrides(mut config: NodeConfig) -> NodeConfig {
     if let Ok(v) = std::env::var("WASM_NODE_ADMIN_AUTH_TOKEN") {
         config.admin.auth_token = Some(v);
     }
+    if let Ok(v) = std::env::var("WASM_NODE_ADMIN_ADVERTISED_HOST") {
+        config.admin.advertised_host = Some(v);
+    }
+    if let Ok(v) = std::env::var("WASM_NODE_ADMIN_ADVERTISED_ARTIFACT_URL") {
+        config.admin.advertised_artifact_url = Some(v);
+    }
     // Logging
     if let Ok(v) = std::env::var("WASM_NODE_LOGGING_LEVEL") {
         config.logging.level = v;
@@ -388,6 +403,12 @@ fn apply_cli_overrides(mut config: NodeConfig, cli: &CliOverrides) -> NodeConfig
     if let Some(v) = cli.artifact_port {
         config.admin.artifact_port = v;
     }
+    if let Some(v) = &cli.admin_advertised_host {
+        config.admin.advertised_host = Some(v.clone());
+    }
+    if let Some(v) = &cli.admin_advertised_artifact_url {
+        config.admin.advertised_artifact_url = Some(v.clone());
+    }
     if let Some(v) = cli.port_start {
         config.runtime.port_start = v;
     }
@@ -464,6 +485,79 @@ fn apply_cli_overrides(mut config: NodeConfig, cli: &CliOverrides) -> NodeConfig
     config
 }
 
+fn is_loopback_host(host: &str) -> bool {
+    let trimmed = host.trim().trim_start_matches('[').trim_end_matches(']');
+    trimmed.eq_ignore_ascii_case("localhost")
+        || trimmed
+            .parse::<IpAddr>()
+            .map(|ip| ip.is_loopback())
+            .unwrap_or(false)
+}
+
+fn validate_admin_advertisement(config: &NodeConfig, errors: &mut Vec<String>) {
+    if let Some(host) = config.admin.advertised_host.as_deref() {
+        let host = host.trim();
+        let host_without_brackets = host.trim_start_matches('[').trim_end_matches(']');
+        if host.is_empty() {
+            errors.push("admin.advertised_host must not be empty".to_string());
+        } else {
+            if host.contains("://") {
+                errors.push(
+                    "admin.advertised_host must be a host/IP only; use admin.advertised_artifact_url for a full URL"
+                        .to_string(),
+                );
+            }
+            if host.contains('/') {
+                errors.push("admin.advertised_host must not contain a path".to_string());
+            }
+            if host.contains(':') && host_without_brackets.parse::<IpAddr>().is_err() {
+                errors.push(
+                    "admin.advertised_host must not include a port; use artifact_port or admin.advertised_artifact_url"
+                        .to_string(),
+                );
+            }
+            if is_loopback_host(host) {
+                errors.push(
+                    "admin.advertised_host must not be loopback; leave it unset for local-only mode or set a routable host"
+                        .to_string(),
+                );
+            }
+        }
+    }
+
+    if let Some(raw_url) = config.admin.advertised_artifact_url.as_deref() {
+        let raw_url = raw_url.trim();
+        match Url::parse(raw_url) {
+            Ok(url) => {
+                if !matches!(url.scheme(), "http" | "https") {
+                    errors.push("admin.advertised_artifact_url must use http or https".to_string());
+                }
+                if url.host_str().is_none() {
+                    errors.push("admin.advertised_artifact_url must include a host".to_string());
+                }
+                if let Some(host) = url.host_str() {
+                    if is_loopback_host(host) {
+                        errors.push(
+                            "admin.advertised_artifact_url must not use a loopback host; leave it unset for local-only mode or set a routable URL"
+                                .to_string(),
+                        );
+                    }
+                }
+                if url.query().is_some() || url.fragment().is_some() {
+                    errors.push(
+                        "admin.advertised_artifact_url must not include a query string or fragment"
+                            .to_string(),
+                    );
+                }
+            }
+            Err(e) => errors.push(format!(
+                "admin.advertised_artifact_url is not a valid URL: {}",
+                e
+            )),
+        }
+    }
+}
+
 /// Validate the final merged configuration.
 fn validate_config(config: &NodeConfig) -> Result<(), PlatformError> {
     let mut errors = Vec::new();
@@ -528,6 +622,8 @@ fn validate_config(config: &NodeConfig) -> Result<(), PlatformError> {
     if config.proxy.https_port > 0 && config.proxy.tls_cert.is_none() {
         errors.push("https_port requires tls_cert and tls_key".to_string());
     }
+
+    validate_admin_advertisement(config, &mut errors);
 
     // Auth configuration
     let auth_config: common::auth::AuthConfig = config.auth.clone().into();
@@ -939,6 +1035,8 @@ level = "debug"
         // All other fields should be defaults
         assert_eq!(config.proxy.http_port, 8080);
         assert_eq!(config.admin.port, 9090);
+        assert!(config.admin.advertised_host.is_none());
+        assert!(config.admin.advertised_artifact_url.is_none());
     }
 
     /// Full TOML file with all sections parses correctly.
@@ -964,6 +1062,8 @@ tls_key = "/etc/wasm-node/tls/server.key"
 [admin]
 port = 9090
 artifact_port = 9091
+advertised_host = "node-1.internal"
+advertised_artifact_url = "https://artifacts.node-1.internal"
 auth_token = "secret-token"
 
 [runtime]
@@ -1031,6 +1131,14 @@ default_memory_pages = 4096
             config.proxy.tls_cert,
             Some("/etc/wasm-node/tls/server.crt".to_string())
         );
+        assert_eq!(
+            config.admin.advertised_host.as_deref(),
+            Some("node-1.internal")
+        );
+        assert_eq!(
+            config.admin.advertised_artifact_url.as_deref(),
+            Some("https://artifacts.node-1.internal")
+        );
         assert_eq!(config.admin.auth_token, Some("secret-token".to_string()));
         assert_eq!(config.runtime.key_source, "file");
         assert_eq!(config.database.enable_db_proxy, true);
@@ -1061,12 +1169,18 @@ default_memory_pages = 4096
         // Simulate env override by manually applying
         std::env::set_var("WASM_NODE_NODE_ID", "from-env");
         std::env::set_var("WASM_NODE_NATS_URL", "nats://env:4222");
+        std::env::set_var("WASM_NODE_ADMIN_ADVERTISED_HOST", "node-env.internal");
         let config = apply_env_overrides(config);
         std::env::remove_var("WASM_NODE_NODE_ID");
         std::env::remove_var("WASM_NODE_NATS_URL");
+        std::env::remove_var("WASM_NODE_ADMIN_ADVERTISED_HOST");
 
         assert_eq!(config.node.node_id, "from-env");
         assert_eq!(config.nats.url, "nats://env:4222");
+        assert_eq!(
+            config.admin.advertised_host.as_deref(),
+            Some("node-env.internal")
+        );
     }
 
     /// CLI flag overrides environment variable.
@@ -1079,12 +1193,17 @@ default_memory_pages = 4096
         let cli = CliOverrides {
             node_id: Some("from-cli".to_string()),
             http_port: Some(9090),
+            admin_advertised_artifact_url: Some("https://cli-artifacts.internal".to_string()),
             ..Default::default()
         };
         let config = apply_cli_overrides(config, &cli);
 
         assert_eq!(config.node.node_id, "from-cli");
         assert_eq!(config.proxy.http_port, 9090);
+        assert_eq!(
+            config.admin.advertised_artifact_url.as_deref(),
+            Some("https://cli-artifacts.internal")
+        );
     }
 
     /// port_start > port_end is rejected.
@@ -1145,6 +1264,35 @@ default_memory_pages = 4096
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
         assert!(msg.contains("https_port requires tls_cert and tls_key"));
+    }
+
+    #[test]
+    fn test_validation_rejects_loopback_advertised_host() {
+        let mut config = NodeConfig::default();
+        config.admin.advertised_host = Some("127.0.0.1".to_string());
+        let result = validate_config(&config);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("admin.advertised_host must not be loopback"));
+    }
+
+    #[test]
+    fn test_validation_rejects_loopback_advertised_artifact_url() {
+        let mut config = NodeConfig::default();
+        config.admin.advertised_artifact_url = Some("http://127.0.0.1:9091".to_string());
+        let result = validate_config(&config);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("admin.advertised_artifact_url must not use a loopback host"));
+    }
+
+    #[test]
+    fn test_validation_accepts_routable_advertised_artifact_config() {
+        let mut config = NodeConfig::default();
+        config.admin.advertised_host = Some("node-1.internal".to_string());
+        config.admin.advertised_artifact_url =
+            Some("https://artifacts.node-1.internal/base".to_string());
+        assert!(validate_config(&config).is_ok());
     }
 
     /// eBPF fd_soft_limit >= fd_hard_limit is rejected.
