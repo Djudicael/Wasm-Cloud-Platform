@@ -35,22 +35,23 @@ pub fn record_tcp_disconnect(store: &mut impl AsContextMut<Data = StoreState>) {
     state.policy_enforcer.record_outbound_disconnect();
 }
 
-/// Check egress policy before sending data.
+/// Atomically check and record egress policy before sending data.
+///
+/// This replaces the older split check/record pattern to avoid TOCTOU races.
 pub fn check_egress_policy(
     store: &mut impl AsContextMut<Data = StoreState>,
     bytes: u64,
 ) -> Result<(), PolicyDenied> {
     let mut ctx = store.as_context_mut();
     let state = ctx.data_mut();
-    state.policy_enforcer.check_egress(bytes)
+    state.policy_enforcer.check_and_record_egress(bytes)
 }
 
-/// Record egress bytes after a successful send.
-pub fn record_egress(store: &mut impl AsContextMut<Data = StoreState>, bytes: u64) {
-    let mut ctx = store.as_context_mut();
-    let state = ctx.data_mut();
-    state.policy_enforcer.record_egress(bytes);
-}
+/// Backward-compatible no-op.
+///
+/// Egress bytes are now recorded atomically in `check_egress_policy`, so a
+/// separate record step would double-count usage.
+pub fn record_egress(_store: &mut impl AsContextMut<Data = StoreState>, _bytes: u64) {}
 
 /// Check DNS policy before a name lookup.
 pub fn check_dns_policy(
@@ -94,19 +95,112 @@ pub fn record_fd_close(store: &mut impl AsContextMut<Data = StoreState>) {
     state.policy_enforcer.record_fd_close();
 }
 
-/// Check filesystem write policy.
+/// Atomically check and record filesystem write policy.
+///
+/// This replaces the older split check/record pattern to avoid TOCTOU races.
 pub fn check_fs_write_policy(
     store: &mut impl AsContextMut<Data = StoreState>,
     bytes: u64,
 ) -> Result<(), PolicyDenied> {
     let mut ctx = store.as_context_mut();
     let state = ctx.data_mut();
-    state.policy_enforcer.check_fs_write(bytes)
+    state.policy_enforcer.check_and_record_fs_write(bytes)
 }
 
-/// Record filesystem write bytes.
-pub fn record_fs_write(store: &mut impl AsContextMut<Data = StoreState>, bytes: u64) {
-    let mut ctx = store.as_context_mut();
-    let state = ctx.data_mut();
-    state.policy_enforcer.record_fs_write(bytes);
+/// Backward-compatible no-op.
+///
+/// Filesystem write bytes are now recorded atomically in `check_fs_write_policy`,
+/// so a separate record step would double-count usage.
+pub fn record_fs_write(_store: &mut impl AsContextMut<Data = StoreState>, _bytes: u64) {}
+
+#[cfg(test)]
+mod tests {
+    use super::{check_egress_policy, check_fs_write_policy, record_egress, record_fs_write};
+    use crate::{executor::StoreState, limits::MemoryLimiter, policy_tracker::PolicyEnforcer};
+    use common::{
+        policy::{FilesystemPolicy, InstancePolicy, NetworkPolicy},
+        types::MemoryPages,
+    };
+    use std::sync::atomic::Ordering;
+    use wasmtime::component::ResourceTable;
+    use wasmtime_wasi::WasiCtxBuilder;
+
+    fn test_store(policy: InstancePolicy) -> wasmtime::Store<StoreState> {
+        let engine = wasmtime::Engine::default();
+        let state = StoreState {
+            ctx: WasiCtxBuilder::new().build(),
+            table: ResourceTable::new(),
+            limiter: MemoryLimiter::new(MemoryPages(1)),
+            policy_enforcer: PolicyEnforcer::new(policy),
+        };
+        wasmtime::Store::new(&engine, state)
+    }
+
+    #[test]
+    fn test_check_egress_policy_records_atomically_and_record_is_noop() {
+        let policy = InstancePolicy {
+            network: NetworkPolicy {
+                max_egress_bytes: 1024,
+                ..NetworkPolicy::default()
+            },
+            filesystem: FilesystemPolicy::default(),
+        };
+        let mut store = test_store(policy);
+
+        check_egress_policy(&mut store, 100).expect("egress check should succeed");
+        assert_eq!(
+            store
+                .data()
+                .policy_enforcer
+                .counters
+                .egress_bytes
+                .load(Ordering::Relaxed),
+            100
+        );
+
+        record_egress(&mut store, 100);
+        assert_eq!(
+            store
+                .data()
+                .policy_enforcer
+                .counters
+                .egress_bytes
+                .load(Ordering::Relaxed),
+            100
+        );
+    }
+
+    #[test]
+    fn test_check_fs_write_policy_records_atomically_and_record_is_noop() {
+        let policy = InstancePolicy {
+            network: NetworkPolicy::default(),
+            filesystem: FilesystemPolicy {
+                max_fs_write_bytes: 1024,
+                ..FilesystemPolicy::default()
+            },
+        };
+        let mut store = test_store(policy);
+
+        check_fs_write_policy(&mut store, 128).expect("fs write check should succeed");
+        assert_eq!(
+            store
+                .data()
+                .policy_enforcer
+                .counters
+                .fs_write_bytes
+                .load(Ordering::Relaxed),
+            128
+        );
+
+        record_fs_write(&mut store, 128);
+        assert_eq!(
+            store
+                .data()
+                .policy_enforcer
+                .counters
+                .fs_write_bytes
+                .load(Ordering::Relaxed),
+            128
+        );
+    }
 }
