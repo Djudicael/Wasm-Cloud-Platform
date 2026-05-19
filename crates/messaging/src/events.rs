@@ -52,7 +52,11 @@ pub enum Event {
     SecretUpdate {
         app_id: AppId,
         key: String,
-        /// Encrypted value (encrypted with the cluster key, not the node key).
+        /// Secret payload for rotation.
+        ///
+        /// Intended long-term format: ciphertext encrypted with the cluster key.
+        /// Current development compatibility path may still send UTF-8 plaintext
+        /// bytes, which the receiver normalizes through the `SecretProvider`.
         encrypted_value: Vec<u8>,
     },
     ConfigUpdate {

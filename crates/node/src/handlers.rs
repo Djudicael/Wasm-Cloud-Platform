@@ -11,6 +11,24 @@ use storage::Store;
 use supervisor::Supervisor;
 use tracing::{error, info, warn};
 
+async fn apply_secret_update<S: SecretProvider + ?Sized>(
+    secret_provider: &S,
+    app_id: &AppId,
+    key: &str,
+    secret_bytes: &[u8],
+) -> Result<(), PlatformError> {
+    // Current control-plane behavior sends UTF-8 plaintext bytes in SecretUpdate.
+    // Normalize those bytes through the SecretProvider so secrets are stored in the
+    // provider's canonical bundle format instead of raw bytes being written to redb.
+    //
+    // When cluster-key encryption is implemented, this function is the correct place
+    // to decrypt the incoming payload first and then call `secret_provider.set(...)`.
+    let plaintext = String::from_utf8(secret_bytes.to_vec()).map_err(|e| {
+        PlatformError::encryption_with_msg("secret update payload is not valid UTF-8 plaintext", e)
+    })?;
+    secret_provider.set(app_id, key, &plaintext).await
+}
+
 pub struct EventDispatcher {
     pub supervisor: Arc<Supervisor>,
     pub upstream: Arc<UpstreamRegistry>,
@@ -119,12 +137,13 @@ impl EventDispatcher {
                 encrypted_value,
             } => {
                 info!(app = %app_id.0, key, "received secret rotation");
-                // TODO: Decrypt with cluster key and re-encrypt with node key
-                // For now, store the encrypted value directly (it will be unreadable
-                // without proper decryption). The secret provider should handle
-                // decryption in a future iteration.
-                tracing::warn!("SecretUpdate received but decryption not yet implemented — secret may be unreadable");
-                self.store.save_secrets(&app_id, &encrypted_value)?;
+                apply_secret_update(
+                    self.secret_provider.as_ref(),
+                    &app_id,
+                    &key,
+                    &encrypted_value,
+                )
+                .await?;
                 Ok(())
             }
             Event::ConfigUpdate { app_id, config } => {
@@ -832,4 +851,45 @@ async fn fetch_artifact(url: &str, expected_sha256: &str) -> Result<Vec<u8>, Str
     crate::upgrade::download_and_verify_bytes(url, expected_sha256)
         .await
         .map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::apply_secret_update;
+    use common::types::AppId;
+    use secrets::{crypto::SymmetricKey, LocalSecretProvider, SecretProvider};
+    use storage::Store;
+    use tempfile::NamedTempFile;
+
+    #[tokio::test]
+    async fn test_apply_secret_update_uses_secret_provider_bundle_format() {
+        let temp = NamedTempFile::new().unwrap();
+        let store = Store::open(temp.path()).unwrap();
+        let provider = LocalSecretProvider::new(store.clone(), SymmetricKey::generate());
+        let app_id = AppId("secret-app:v1".to_string());
+
+        apply_secret_update(&provider, &app_id, "API_KEY", b"super-secret-value")
+            .await
+            .unwrap();
+
+        let plaintext = provider.get(&app_id, "API_KEY").await.unwrap();
+        assert_eq!(plaintext, "super-secret-value");
+
+        let raw = store.load_secrets(&app_id).unwrap().unwrap();
+        assert_ne!(raw, b"super-secret-value");
+    }
+
+    #[tokio::test]
+    async fn test_apply_secret_update_rejects_non_utf8_plaintext_payload() {
+        let temp = NamedTempFile::new().unwrap();
+        let store = Store::open(temp.path()).unwrap();
+        let provider = LocalSecretProvider::new(store.clone(), SymmetricKey::generate());
+        let app_id = AppId("secret-app:v1".to_string());
+
+        let err = apply_secret_update(&provider, &app_id, "API_KEY", &[0xff, 0xfe, 0xfd])
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("valid UTF-8 plaintext"));
+        assert!(store.load_secrets(&app_id).unwrap().is_none());
+    }
 }

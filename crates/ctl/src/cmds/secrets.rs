@@ -43,8 +43,12 @@ pub async fn run(args: SecretsArgs, bus: &NatsBus) -> Result<()> {
                 }
             };
             // NOTE: In production, encrypt `plaintext` with a cluster public key
-            // before putting it in the NATS message. For now, send plaintext
-            // (fine for development, not for production — see step 13 security).
+            // before putting it in the NATS message.
+            //
+            // Current development compatibility path still sends UTF-8 plaintext
+            // bytes. The node normalizes this through the SecretProvider so the
+            // secret is stored in the provider's canonical encrypted bundle format.
+            // This is acceptable for development, not for production — see step 13 security.
             let (name, version) = app
                 .split_once(':')
                 .ok_or_else(|| anyhow::anyhow!("app must be <name>:<version>"))?;
