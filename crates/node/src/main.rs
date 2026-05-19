@@ -2792,11 +2792,62 @@ mod tests {
     use super::{
         admin_tls_is_configured, admin_tls_material, artifact_server_url_is_loopback,
         bind_socket_address, build_artifact_server_url, load_kek_from_config,
-        load_kek_from_env_spec,
+        load_kek_from_env_spec, serve_admin_app,
     };
     use common::config::{AdminSection, NodeConfig, ProxySection, RuntimeSection};
     use storage::Store;
     use tempfile::{NamedTempFile, TempDir};
+
+    const TEST_ADMIN_TLS_CERT_PEM: &str = r#"-----BEGIN CERTIFICATE-----
+MIIDJTCCAg2gAwIBAgIUAt2GkIIjTn/cu46520UjbQSS8FowDQYJKoZIhvcNAQEL
+BQAwFDESMBAGA1UEAwwJbG9jYWxob3N0MB4XDTI2MDUxOTIxNTg0MFoXDTI2MDUy
+MDIxNTg0MFowFDESMBAGA1UEAwwJbG9jYWxob3N0MIIBIjANBgkqhkiG9w0BAQEF
+AAOCAQ8AMIIBCgKCAQEA8lREjhEhJuV4ZePiYZZkXBpyqx+PypsyReF4J/PuXS2r
+CCQtH557/sq7StoHWp0r1Qt7gzxyXd9A1UeVxjzj+GcUjiDdYcx/CcPdt+eUWm1v
+IeIO6OZAiyADv89P1hK6L713gA9wbiNkmiGL+02u8/B6VAuCsZvgjfmT1R23K45V
+/ofTkKEB7+HKrp8HBiKv0zENL8/+W2dRFFaPWIKNhTx1S71BE7dHhcr5t2zBYiyM
+zwKEIvfz35Cby8DJLhKwLB9lAGeOn9b2VgqtUQIphp0FlwxdbK5MWJWd3Ogc0tb4
+szvzNso5osiFrtCfgv7RroWMx0Mjzzd6RhGoF2SeqwIDAQABo28wbTAdBgNVHQ4E
+FgQUOOyJajcQI9xXHGfGO3tYSWOtGoswHwYDVR0jBBgwFoAUOOyJajcQI9xXHGfG
+O3tYSWOtGoswDwYDVR0TAQH/BAUwAwEB/zAaBgNVHREEEzARhwR/AAABgglsb2Nh
+bGhvc3QwDQYJKoZIhvcNAQELBQADggEBAKwa3TXl7GWPoAOUErZwcExLzRBQuVji
+mg11BI93QXSBtaD09GMeqx6D3y4j16gZLd5wZHBD6Whff5nm38WI1jyrKFwnNWI6
+Nw205MZhbXmKxiROfLEFYIR2MwUTl5Ma6xR0szhEHYYSgLYlbS8Bobs5Z1wO0+Oy
+khANpI5vxX9Ih85WYicQ1wL45L3iKx+E6HRBJBHJ71/d8s942lpGzyPyrX0j1orc
+kbG/g6epb8tsUaLWYET9e8JkFaOxiZYy1DT2e1H//a2li5yox30JEgDDhmrRtlo/
+cuA1MNK5uKiOJs4TZH38Cx7B2vlun/ZHEqCHwqb++CbSAhz7RBj+U10=
+-----END CERTIFICATE-----
+"#;
+
+    const TEST_ADMIN_TLS_KEY_PEM: &str = r#"-----BEGIN PRIVATE KEY-----
+MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQDyVESOESEm5Xhl
+4+JhlmRcGnKrH4/KmzJF4Xgn8+5dLasIJC0fnnv+yrtK2gdanSvVC3uDPHJd30DV
+R5XGPOP4ZxSOIN1hzH8Jw92355RabW8h4g7o5kCLIAO/z0/WErovvXeAD3BuI2Sa
+IYv7Ta7z8HpUC4Kxm+CN+ZPVHbcrjlX+h9OQoQHv4cqunwcGIq/TMQ0vz/5bZ1EU
+Vo9Ygo2FPHVLvUETt0eFyvm3bMFiLIzPAoQi9/PfkJvLwMkuErAsH2UAZ46f1vZW
+Cq1RAimGnQWXDF1srkxYlZ3c6BzS1vizO/M2yjmiyIWu0J+C/tGuhYzHQyPPN3pG
+EagXZJ6rAgMBAAECggEAIlhYKQx7duBSCprcRHmEutsSwnckMZKCcw4MMhlsAK/O
+zEYYUSFssIV6OxcgsLKS+kx40nZYPT69mRzeuOx7YQL3ElfNGKXboX4tp/l9+L0G
+4bYA5/huUGmWrnJK/evEkKyZScCmbi28/e1gQhtV/wPnyo6hFNwjXOvxDGT8R4NL
+yanKMN+Dl0RqVPdA4tsucPBrVwOqSEjPVIn8NML8HbwbNyVrquV7Isc/4EP6zgjw
+1QQBlCiHhAhkY9eGpthaQ85o7BVkGEHqUgdN8ysN56+hXorVxBpistTsTc/8mEy5
+r8sMEOE4qx0OP2CPHqGyE0FSAmIGNNCJSKWi8L30uQKBgQD5YrnnV0k4v9dOV3D9
+7MkHItnzMqBehlQAhMHyZ2S9HiLO24yoKlFvVEubwA/0gazVHzKaKdZIgeX662Av
+suN2m681JLQqbM5ewRNyRde58r63krWuMNgAupEIb2x6piQN6PQtSY79zXAb1UyO
+7scafaUjV61OZs/oM3EwuU7xOQKBgQD4waEyAP0nFIHkDkPTmaUHrKMbYfZp0/hw
+iSZubQoASKqw6xEPFZn9LEqqjslR1KQS+EnFq7zDkAztPc+yrOsJN8iYoaKL9zna
+7bx1HYVwrGWLfKZ+GCCwGTnQX8NrJ7AQoX9ajRrHhFLgpy5dMXVA5o+0wR+bwTaM
++5MDnWUjAwKBgEfMOKF168q+0InpespgRXAchIsT5D/ShJSxo/TZ95LK/lJ3uwMf
+S9q1dh8dKHrIaq3hEXx41wyA+WlIIqUY54vaPpMaQhSExtVY2PRpTzZlwKqxPkUs
+IsPy8pZvHdghxPeMPeBb8SL45nHc8vGjpQbnbYfDUk3kI69CQDA66ZNhAoGAf7tN
+flOrqgmJuQTqJxlZ+FrZVhIzaZwCkiaaqVEsNYEaxMWveMNq0umPXYz8Kxy5M1Ry
+7SGGSBULzjZTFDheZ9lRE67LvHsyJgy1HJ4QCw87BSj4hP72qfYKDclemwNCEQgc
+UO7rtU9pDxpJYGkpAC5j1Djmdh/8VuBHWS/U4ukCgYEA6KDtUgXS2ztjuXzXEQjF
+PBbvIkQLj/6muZ4ZgXThPwign1/5ih97ZBikWmmYB+zPme1gCj7otOMC9E6gxLmq
+nWSPzrabXM5Z5hatTBeVxCQBoFL/hUTvOEqHXQuWtpqwHZ5PnTdsVk31sFJA0Vl3
+uoKQp7o8ET+CcFRg9vEG/uA=
+-----END PRIVATE KEY-----
+"#;
 
     static ENV_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -2833,6 +2884,61 @@ mod tests {
         let material = admin_tls_material(&config).expect("admin TLS material should exist");
         assert_eq!(material.0, "/tmp/admin.crt");
         assert_eq!(material.1, "/tmp/admin.key");
+    }
+
+    #[tokio::test]
+    async fn test_serve_admin_app_tls_accepts_https_requests() {
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
+        let temp_dir = TempDir::new().unwrap();
+        let cert_path = temp_dir.path().join("admin.crt");
+        let key_path = temp_dir.path().join("admin.key");
+        std::fs::write(&cert_path, TEST_ADMIN_TLS_CERT_PEM).unwrap();
+        std::fs::write(&key_path, TEST_ADMIN_TLS_KEY_PEM).unwrap();
+
+        let probe_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = probe_listener.local_addr().unwrap().port();
+        drop(probe_listener);
+
+        let admin_app = axum::Router::new().route(
+            "/ping",
+            axum::routing::get(|| async { axum::Json(serde_json::json!({ "ok": true })) }),
+        );
+
+        let handle = tokio::spawn(serve_admin_app(
+            format!("127.0.0.1:{port}"),
+            admin_app,
+            Some(cert_path.to_string_lossy().to_string()),
+            Some(key_path.to_string_lossy().to_string()),
+        ));
+
+        let client = reqwest::Client::builder()
+            .danger_accept_invalid_certs(true)
+            .build()
+            .unwrap();
+
+        let mut response = None;
+        for _ in 0..20 {
+            match client
+                .get(format!("https://127.0.0.1:{port}/ping"))
+                .send()
+                .await
+            {
+                Ok(resp) => {
+                    response = Some(resp);
+                    break;
+                }
+                Err(_) => tokio::time::sleep(std::time::Duration::from_millis(100)).await,
+            }
+        }
+
+        let response = response.expect("admin HTTPS listener did not respond in time");
+        assert!(response.status().is_success());
+        let body: serde_json::Value = response.json().await.unwrap();
+        assert_eq!(body["ok"], true);
+
+        handle.abort();
+        let _ = handle.await;
     }
 
     #[test]

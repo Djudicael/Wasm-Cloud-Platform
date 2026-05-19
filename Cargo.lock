@@ -3323,6 +3323,7 @@ dependencies = [
  "proxy",
  "reqwest 0.13.2",
  "runtime",
+ "rustls",
  "secrets",
  "serde",
  "serde_json",
