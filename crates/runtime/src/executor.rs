@@ -3,10 +3,12 @@ use crate::limits::{configure_store, read_fuel_remaining, IoStats, MemoryLimiter
 use crate::policy_tracker::PolicyEnforcer;
 use common::{
     error::PlatformError,
+    policy::InstancePolicy,
     types::{AppConfig, InstanceId},
 };
+use std::collections::HashSet;
 use std::future::Future;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Instant;
@@ -32,6 +34,109 @@ pub type SocketAddrCheckFn = Box<
         + Send
         + Sync,
 >;
+
+/// Snapshot of the instance network policy used by the WASI socket address checker.
+#[derive(Debug, Clone)]
+pub(crate) struct SocketPolicyCheck {
+    allow_inbound: bool,
+    allow_outbound_tcp: bool,
+    allow_outbound_udp: bool,
+    allowed_bind_ports: Arc<HashSet<u16>>,
+    allowed_cidrs: Arc<Vec<ipnet::IpNet>>,
+    denied_cidrs: Arc<Vec<ipnet::IpNet>>,
+}
+
+impl SocketPolicyCheck {
+    pub(crate) fn from_instance_policy(policy: &InstancePolicy) -> Self {
+        SocketPolicyCheck {
+            allow_inbound: policy.network.allow_inbound,
+            allow_outbound_tcp: policy.network.allow_outbound_tcp,
+            allow_outbound_udp: policy.network.allow_outbound_udp,
+            allowed_bind_ports: Arc::new(
+                policy.network.allowed_bind_ports.iter().copied().collect(),
+            ),
+            allowed_cidrs: Arc::new(Self::parse_cidrs(&policy.network.allowed_cidrs)),
+            denied_cidrs: Arc::new(Self::parse_cidrs(&policy.network.denied_cidrs)),
+        }
+    }
+
+    fn parse_cidrs(cidrs: &[String]) -> Vec<ipnet::IpNet> {
+        cidrs
+            .iter()
+            .filter_map(|cidr| match cidr.parse::<ipnet::IpNet>() {
+                Ok(net) => Some(net),
+                Err(err) => {
+                    tracing::warn!(cidr, error = %err, "ignoring invalid CIDR in socket policy snapshot");
+                    None
+                }
+            })
+            .collect()
+    }
+
+    fn outbound_ip_allowed(&self, ip: IpAddr) -> Result<(), &'static str> {
+        if self.denied_cidrs.iter().any(|cidr| cidr.contains(&ip)) {
+            return Err("destination in denied_cidrs");
+        }
+
+        if !self.allowed_cidrs.is_empty()
+            && !self.allowed_cidrs.iter().any(|cidr| cidr.contains(&ip))
+        {
+            return Err("destination not in allowed_cidrs");
+        }
+
+        Ok(())
+    }
+
+    pub(crate) fn check(
+        &self,
+        addr: SocketAddr,
+        use_type: SocketAddrUse,
+    ) -> Result<(), &'static str> {
+        match use_type {
+            SocketAddrUse::TcpBind => {
+                if !self.allow_inbound {
+                    return Err("inbound tcp bind disabled");
+                }
+                if !self.allowed_bind_ports.contains(&addr.port()) {
+                    return Err("bind port not allowed");
+                }
+                Ok(())
+            }
+            SocketAddrUse::TcpConnect => {
+                if !self.allow_outbound_tcp {
+                    return Err("outbound tcp disabled");
+                }
+                self.outbound_ip_allowed(addr.ip())
+            }
+            SocketAddrUse::UdpBind
+            | SocketAddrUse::UdpConnect
+            | SocketAddrUse::UdpOutgoingDatagram => {
+                if !self.allow_outbound_udp {
+                    return Err("outbound udp disabled");
+                }
+                self.outbound_ip_allowed(addr.ip())
+            }
+        }
+    }
+}
+
+pub(crate) fn compose_socket_addr_check(
+    policy_check: SocketPolicyCheck,
+    extra_check: Option<SocketAddrCheckFn>,
+) -> SocketAddrCheckFn {
+    Box::new(move |addr, use_type| {
+        if let Err(reason) = policy_check.check(addr, use_type) {
+            tracing::warn!(dest = %addr, use_type = ?use_type, reason, "socket operation denied by runtime policy");
+            return Box::pin(async { false });
+        }
+
+        if let Some(check) = extra_check.as_ref() {
+            check(addr, use_type)
+        } else {
+            Box::pin(async { true })
+        }
+    })
+}
 
 /// Store state for WASI Preview 2
 pub struct StoreState {
@@ -132,35 +237,39 @@ impl PreparedModule {
 
         // Network configuration based on policy.
         //
-        // socket_addr_check provides per-destination validation. It is called
-        // by wasmtime-wasi for every socket bind/connect. It blocks cross-namespace
-        // connections to direct app ports, but the gateway port (9080) is open to
-        // all namespaces. Namespace isolation relies primarily on service discovery.
+        // Wasmtime exposes coarse protocol-level toggles (`allow_tcp`, `allow_udp`) and a
+        // per-operation `socket_addr_check` hook. We enable TCP if the instance is allowed
+        // to either bind/listen or initiate outbound TCP, then use the policy-aware socket
+        // checker to keep inbound bind permission separate from outbound connect permission.
         builder.inherit_network();
-        builder.allow_tcp(policy.network.allow_outbound_tcp || policy.network.allow_inbound);
+        let allow_any_tcp = policy.network.allow_outbound_tcp || policy.network.allow_inbound;
+        builder.allow_tcp(allow_any_tcp);
         builder.allow_udp(policy.network.allow_outbound_udp);
         builder.allow_ip_name_lookup(policy.network.allow_dns);
 
-        if let Some(check) = socket_addr_check {
-            builder.socket_addr_check(move |addr, use_type| {
-                let use_enum = match use_type {
-                    wasmtime_wasi::sockets::SocketAddrUse::TcpBind => SocketAddrUse::TcpBind,
-                    wasmtime_wasi::sockets::SocketAddrUse::TcpConnect => SocketAddrUse::TcpConnect,
-                    wasmtime_wasi::sockets::SocketAddrUse::UdpBind => SocketAddrUse::UdpBind,
-                    wasmtime_wasi::sockets::SocketAddrUse::UdpConnect => SocketAddrUse::UdpConnect,
-                    wasmtime_wasi::sockets::SocketAddrUse::UdpOutgoingDatagram => {
-                        SocketAddrUse::UdpOutgoingDatagram
-                    }
-                };
-                check(addr, use_enum)
-            });
-            tracing::debug!("socket_addr_check installed for namespace-aware outbound filtering");
-        }
+        let policy_socket_check = SocketPolicyCheck::from_instance_policy(&policy);
+        let combined_socket_check =
+            compose_socket_addr_check(policy_socket_check, socket_addr_check);
+        builder.socket_addr_check(move |addr, use_type| {
+            let use_enum = match use_type {
+                wasmtime_wasi::sockets::SocketAddrUse::TcpBind => SocketAddrUse::TcpBind,
+                wasmtime_wasi::sockets::SocketAddrUse::TcpConnect => SocketAddrUse::TcpConnect,
+                wasmtime_wasi::sockets::SocketAddrUse::UdpBind => SocketAddrUse::UdpBind,
+                wasmtime_wasi::sockets::SocketAddrUse::UdpConnect => SocketAddrUse::UdpConnect,
+                wasmtime_wasi::sockets::SocketAddrUse::UdpOutgoingDatagram => {
+                    SocketAddrUse::UdpOutgoingDatagram
+                }
+            };
+            combined_socket_check(addr, use_enum)
+        });
+        tracing::debug!("policy-aware socket_addr_check installed");
 
         tracing::debug!(
-            allow_tcp = %(policy.network.allow_outbound_tcp || policy.network.allow_inbound),
+            allow_tcp = %allow_any_tcp,
             allow_udp = %policy.network.allow_outbound_udp,
             allow_ip_name_lookup = %policy.network.allow_dns,
+            allow_inbound = %policy.network.allow_inbound,
+            allow_outbound_tcp = %policy.network.allow_outbound_tcp,
             "WASI config built from policy"
         );
 

@@ -1,5 +1,11 @@
-use crate::WasmRuntime;
-use common::types::{AppConfig, AppId, FuelQuota, MemoryPages};
+use crate::{
+    executor::{compose_socket_addr_check, SocketAddrUse, SocketPolicyCheck},
+    WasmRuntime,
+};
+use common::{
+    policy::{FilesystemPolicy, InstancePolicy, NetworkPolicy, PolicyProfile},
+    types::{AppConfig, AppId, FuelQuota, MemoryPages},
+};
 use std::sync::Arc;
 use std::thread;
 
@@ -9,6 +15,16 @@ fn base_config() -> AppConfig {
     config.memory_limit = MemoryPages(5); // 5 pages = 320 KB
     config.wasm_bind_port = 8080;
     config
+}
+
+fn base_instance_policy() -> InstancePolicy {
+    InstancePolicy {
+        network: NetworkPolicy {
+            allowed_bind_ports: vec![8080],
+            ..NetworkPolicy::default()
+        },
+        filesystem: FilesystemPolicy::default(),
+    }
 }
 
 #[test]
@@ -103,6 +119,112 @@ fn test_list_hello_axum_exports() {
 fn test_runtime_initialization() {
     let runtime = WasmRuntime::new().expect("Failed to create WasmRuntime");
     assert!(Arc::strong_count(&runtime.engine) >= 1);
+}
+
+#[test]
+fn test_socket_policy_check_separates_bind_from_outbound_tcp() {
+    let mut policy = base_instance_policy();
+    policy.network.allow_outbound_tcp = false;
+    policy.network.allow_inbound = true;
+
+    let check = SocketPolicyCheck::from_instance_policy(&policy);
+
+    assert!(check
+        .check("127.0.0.1:8080".parse().unwrap(), SocketAddrUse::TcpBind)
+        .is_ok());
+    assert_eq!(
+        check.check(
+            "93.184.216.34:443".parse().unwrap(),
+            SocketAddrUse::TcpConnect
+        ),
+        Err("outbound tcp disabled")
+    );
+}
+
+#[test]
+fn test_socket_policy_check_applies_cidr_filters() {
+    let mut policy = base_instance_policy();
+    policy.network.allow_outbound_tcp = true;
+    policy.network.allowed_cidrs = vec!["93.184.216.0/24".to_string()];
+    policy.network.denied_cidrs = vec!["93.184.216.34/32".to_string()];
+
+    let check = SocketPolicyCheck::from_instance_policy(&policy);
+
+    assert!(check
+        .check(
+            "93.184.216.35:443".parse().unwrap(),
+            SocketAddrUse::TcpConnect
+        )
+        .is_ok());
+    assert_eq!(
+        check.check(
+            "93.184.216.34:443".parse().unwrap(),
+            SocketAddrUse::TcpConnect
+        ),
+        Err("destination in denied_cidrs")
+    );
+    assert_eq!(
+        check.check("10.0.0.1:443".parse().unwrap(), SocketAddrUse::TcpConnect),
+        Err("destination not in allowed_cidrs")
+    );
+}
+
+#[tokio::test]
+async fn test_composed_socket_addr_check_denies_policy_before_extra_allow() {
+    let mut policy = base_instance_policy();
+    policy.network.allow_outbound_tcp = false;
+    policy.network.allow_inbound = true;
+
+    let composed = compose_socket_addr_check(
+        SocketPolicyCheck::from_instance_policy(&policy),
+        Some(Box::new(|_, _| Box::pin(async { true }))),
+    );
+
+    assert!(
+        !(composed)(
+            "93.184.216.34:443".parse().unwrap(),
+            SocketAddrUse::TcpConnect,
+        )
+        .await
+    );
+    assert!((composed)("127.0.0.1:8080".parse().unwrap(), SocketAddrUse::TcpBind).await);
+}
+
+#[test]
+fn test_static_site_profile_denies_outbound_tcp() {
+    let policy = PolicyProfile::StaticSite.to_config().resolve(8080).unwrap();
+    let check = SocketPolicyCheck::from_instance_policy(&policy);
+
+    assert!(check
+        .check("127.0.0.1:8080".parse().unwrap(), SocketAddrUse::TcpBind)
+        .is_ok());
+    assert_eq!(
+        check.check(
+            "93.184.216.34:443".parse().unwrap(),
+            SocketAddrUse::TcpConnect
+        ),
+        Err("outbound tcp disabled")
+    );
+}
+
+#[test]
+fn test_background_worker_profile_denies_tcp_bind() {
+    let policy = PolicyProfile::BackgroundWorker
+        .to_config()
+        .resolve(8080)
+        .unwrap();
+    let check = SocketPolicyCheck::from_instance_policy(&policy);
+
+    assert_eq!(
+        check.check("127.0.0.1:8080".parse().unwrap(), SocketAddrUse::TcpBind),
+        Err("inbound tcp bind disabled")
+    );
+    assert!(check
+        .check(
+            "93.184.216.34:443".parse().unwrap(),
+            SocketAddrUse::TcpConnect
+        )
+        .is_ok());
 }
 
 #[test]

@@ -1,27 +1,40 @@
 // crates/storage/src/artifact_server.rs
 use axum::{
     body::Bytes,
-    extract::{Path, State},
+    extract::{ConnectInfo, Path, State},
     http::StatusCode,
     routing::{get, put},
     Router,
 };
 use sha2::{Digest, Sha256};
+use std::net::SocketAddr;
 
 use crate::Store;
 
 const MAX_ARTIFACT_SIZE: usize = 104_857_600; // 100 MB
+
+fn ensure_loopback_peer(peer_addr: SocketAddr) -> Result<(), StatusCode> {
+    if peer_addr.ip().is_loopback() {
+        Ok(())
+    } else {
+        tracing::warn!(peer = %peer_addr, "rejected non-loopback artifact request");
+        Err(StatusCode::FORBIDDEN)
+    }
+}
 
 #[derive(Clone)]
 struct ArtifactServerState {
     store: Store,
 }
 
-/// GET /artifacts/:sha256 — serve raw .wasm bytes
+/// GET /artifacts/:sha256 — serve raw .wasm bytes (loopback only)
 async fn get_artifact(
     Path(sha256): Path<String>,
     State(s): State<ArtifactServerState>,
+    ConnectInfo(peer_addr): ConnectInfo<SocketAddr>,
 ) -> Result<Bytes, StatusCode> {
+    ensure_loopback_peer(peer_addr)?;
+
     // We use sha256 as the lookup key for raw .wasm (pre-compilation)
     // This is separate from the compiled artifact stored under AppId
     match s.store.load_raw_wasm(&sha256) {
@@ -40,12 +53,17 @@ async fn get_artifact(
     }
 }
 
-/// PUT /artifacts/:sha256 — store raw .wasm bytes (localhost only)
+/// PUT /artifacts/:sha256 — store raw .wasm bytes (loopback only)
 async fn put_artifact(
     Path(sha256): Path<String>,
     State(s): State<ArtifactServerState>,
+    ConnectInfo(peer_addr): ConnectInfo<SocketAddr>,
     body: Bytes,
 ) -> StatusCode {
+    if let Err(code) = ensure_loopback_peer(peer_addr) {
+        return code;
+    }
+
     // Check size limit
     if body.len() > MAX_ARTIFACT_SIZE {
         tracing::warn!(
@@ -103,7 +121,12 @@ mod tests {
         let addr = listener.local_addr().unwrap();
 
         tokio::spawn(async move {
-            axum::serve(listener, app).await.unwrap();
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .await
+            .unwrap();
         });
 
         // Give server time to start
@@ -142,7 +165,12 @@ mod tests {
         let addr = listener.local_addr().unwrap();
 
         tokio::spawn(async move {
-            axum::serve(listener, app).await.unwrap();
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .await
+            .unwrap();
         });
 
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
@@ -172,17 +200,32 @@ mod tests {
         let addr = listener.local_addr().unwrap();
 
         tokio::spawn(async move {
-            axum::serve(listener, app).await.unwrap();
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .await
+            .unwrap();
         });
 
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
         let client = reqwest::Client::new();
-        let unknown_sha256 = "1111111111111111111111111111111111111111111111111111111111111111";
-
-        // GET unknown artifact should return 404
-        let get_url = format!("http://{}/artifacts/{}", addr, unknown_sha256);
-        let resp = client.get(&get_url).send().await.unwrap();
+        let missing_sha256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let url = format!("http://{}/artifacts/{}", addr, missing_sha256);
+        let resp = client.get(&url).send().await.unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[test]
+    fn test_ensure_loopback_peer() {
+        let loopback: SocketAddr = "127.0.0.1:8080".parse().unwrap();
+        let remote: SocketAddr = "10.0.0.5:8080".parse().unwrap();
+
+        assert!(ensure_loopback_peer(loopback).is_ok());
+        assert_eq!(
+            ensure_loopback_peer(remote).unwrap_err(),
+            StatusCode::FORBIDDEN
+        );
     }
 }

@@ -178,6 +178,13 @@ fn display_network_policy(policy: &serde_json::Value) {
         .unwrap_or_else(|| "unlimited (default)".to_string());
     println!("  max_egress_bytes: {}", max_egress);
 
+    let inbound = policy
+        .get("allow_inbound")
+        .and_then(|v| v.as_bool())
+        .map(|b| if b { "allowed".green() } else { "denied".red() })
+        .unwrap_or_else(|| "allowed (default)".green());
+    println!("  inbound_tcp_bind: {}", inbound);
+
     let bind_ports = policy
         .get("allowed_bind_ports")
         .and_then(|v| v.as_array())
@@ -201,6 +208,7 @@ fn display_network_policy_defaults() {
         denied_cidrs: None,
         max_outbound_connections: None,
         max_egress_bytes: None,
+        allow_inbound: None,
     };
     println!("  outbound_tcp: {}", "allowed".green());
     println!("  outbound_udp: {}", "denied".red());
@@ -209,6 +217,7 @@ fn display_network_policy_defaults() {
     println!("  denied_cidrs: {}", "(none)".yellow());
     println!("  max_outbound_connections: 100");
     println!("  max_egress_bytes: unlimited");
+    println!("  inbound_tcp_bind: {}", "allowed".green());
     let _ = defaults; // suppress unused warning
 }
 

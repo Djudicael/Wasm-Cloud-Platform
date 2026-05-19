@@ -133,6 +133,7 @@ pub struct NetworkPolicyConfig {
     pub denied_cidrs: Option<Vec<String>>,
     pub max_outbound_connections: Option<u32>,
     pub max_egress_bytes: Option<u64>,
+    pub allow_inbound: Option<bool>,
 }
 
 /// Operator-facing filesystem policy config.
@@ -189,7 +190,7 @@ impl PolicyConfig {
                         .unwrap_or(net_default.max_outbound_connections),
                     max_egress_bytes: cfg.max_egress_bytes.unwrap_or(net_default.max_egress_bytes),
                     allowed_bind_ports: vec![assigned_port],
-                    allow_inbound: true,
+                    allow_inbound: cfg.allow_inbound.unwrap_or(net_default.allow_inbound),
                 }
             }
             None => NetworkPolicy {
@@ -275,6 +276,7 @@ impl PolicyProfile {
                     denied_cidrs: None,
                     max_outbound_connections: Some(100),
                     max_egress_bytes: Some(0),
+                    allow_inbound: Some(true),
                 }),
                 filesystem: Some(FilesystemPolicyConfig {
                     max_open_fds: Some(64),
@@ -294,6 +296,7 @@ impl PolicyProfile {
                     denied_cidrs: None,
                     max_outbound_connections: Some(50),
                     max_egress_bytes: Some(0),
+                    allow_inbound: Some(false),
                 }),
                 filesystem: Some(FilesystemPolicyConfig {
                     max_open_fds: Some(32),
@@ -313,6 +316,7 @@ impl PolicyProfile {
                     denied_cidrs: None,
                     max_outbound_connections: Some(1),
                     max_egress_bytes: Some(0),
+                    allow_inbound: Some(true),
                 }),
                 filesystem: Some(FilesystemPolicyConfig {
                     max_open_fds: Some(32),
@@ -336,6 +340,7 @@ impl PolicyProfile {
                     denied_cidrs: None,
                     max_outbound_connections: Some(200),
                     max_egress_bytes: Some(0),
+                    allow_inbound: Some(true),
                 }),
                 filesystem: Some(FilesystemPolicyConfig {
                     max_open_fds: Some(128),
@@ -355,6 +360,7 @@ impl PolicyProfile {
                     denied_cidrs: None,
                     max_outbound_connections: None,
                     max_egress_bytes: Some(0),
+                    allow_inbound: Some(true),
                 }),
                 filesystem: Some(FilesystemPolicyConfig {
                     max_open_fds: None,
@@ -412,6 +418,7 @@ mod tests {
                 denied_cidrs: None,
                 max_outbound_connections: Some(0),
                 max_egress_bytes: None,
+                allow_inbound: None,
             }),
             filesystem: None,
         };
@@ -451,6 +458,7 @@ mod tests {
                 denied_cidrs: None,
                 max_outbound_connections: None,
                 max_egress_bytes: None,
+                allow_inbound: None,
             }),
             filesystem: None,
         };
@@ -492,6 +500,7 @@ mod tests {
         assert!(instance_policy.network.allow_outbound_tcp);
         assert!(!instance_policy.network.allow_outbound_udp);
         assert!(instance_policy.network.allow_dns);
+        assert!(instance_policy.network.allow_inbound);
         assert_eq!(instance_policy.filesystem.max_open_fds, 64);
     }
 
@@ -506,6 +515,7 @@ mod tests {
                 denied_cidrs: Some(vec!["10.1.0.0/16".to_string()]),
                 max_outbound_connections: Some(50),
                 max_egress_bytes: Some(1024 * 1024),
+                allow_inbound: Some(false),
             }),
             filesystem: Some(FilesystemPolicyConfig {
                 max_open_fds: Some(128),
@@ -521,6 +531,7 @@ mod tests {
         assert!(!instance_policy.network.allow_outbound_tcp);
         assert!(instance_policy.network.allow_outbound_udp);
         assert!(!instance_policy.network.allow_dns);
+        assert!(!instance_policy.network.allow_inbound);
         assert_eq!(
             instance_policy.network.allowed_cidrs,
             vec!["10.0.0.0/8".to_string()]
@@ -558,6 +569,7 @@ mod tests {
         assert_eq!(network.allow_dns, Some(true));
         assert_eq!(network.max_outbound_connections, Some(100));
         assert_eq!(network.max_egress_bytes, Some(0));
+        assert_eq!(network.allow_inbound, Some(true));
         let filesystem = config.filesystem.unwrap();
         assert_eq!(filesystem.max_open_fds, Some(64));
         assert_eq!(filesystem.max_fs_write_bytes, Some(0));
@@ -576,6 +588,7 @@ mod tests {
         assert_eq!(network.allow_outbound_udp, Some(false));
         assert_eq!(network.allow_dns, Some(true));
         assert_eq!(network.max_outbound_connections, Some(50));
+        assert_eq!(network.allow_inbound, Some(false));
         let filesystem = config.filesystem.unwrap();
         assert_eq!(filesystem.max_open_fds, Some(32));
         assert_eq!(filesystem.max_fs_write_bytes, Some(10 * 1024 * 1024));
@@ -589,7 +602,8 @@ mod tests {
         assert_eq!(network.allow_outbound_tcp, Some(false));
         assert_eq!(network.allow_outbound_udp, Some(false));
         assert_eq!(network.allow_dns, Some(false));
-        assert_eq!(network.max_outbound_connections, Some(0));
+        assert_eq!(network.max_outbound_connections, Some(1));
+        assert_eq!(network.allow_inbound, Some(true));
         let filesystem = config.filesystem.unwrap();
         assert_eq!(filesystem.max_fs_read_bytes, Some(100 * 1024 * 1024));
         assert_eq!(filesystem.allowed_paths, Some(vec!["/static".to_string()]));
@@ -603,6 +617,7 @@ mod tests {
         assert_eq!(network.allow_outbound_tcp, Some(true));
         assert_eq!(network.allow_outbound_udp, Some(false));
         assert_eq!(network.allow_dns, Some(true));
+        assert_eq!(network.allow_inbound, Some(true));
         assert_eq!(
             network.allowed_cidrs,
             Some(vec![
@@ -623,6 +638,7 @@ mod tests {
         assert_eq!(network.allow_outbound_udp, Some(true));
         assert_eq!(network.allow_dns, Some(true));
         assert_eq!(network.max_egress_bytes, Some(0));
+        assert_eq!(network.allow_inbound, Some(true));
         let filesystem = config.filesystem.unwrap();
         assert_eq!(filesystem.max_fs_write_bytes, Some(0));
         assert_eq!(filesystem.max_fs_read_bytes, Some(0));

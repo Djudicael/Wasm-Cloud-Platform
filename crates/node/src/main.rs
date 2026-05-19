@@ -6,6 +6,122 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
+fn symm_key_from_exact_32(
+    bytes: &[u8],
+    source: &str,
+) -> anyhow::Result<secrets::crypto::SymmetricKey> {
+    if bytes.len() != 32 {
+        anyhow::bail!(
+            "{source} must contain exactly 32 bytes, found {} bytes",
+            bytes.len()
+        );
+    }
+    let mut key = [0u8; 32];
+    key.copy_from_slice(bytes);
+    Ok(secrets::crypto::SymmetricKey::from_bytes(key))
+}
+
+fn load_kek_from_env_spec(spec: &str) -> anyhow::Result<secrets::crypto::SymmetricKey> {
+    let var_name = spec
+        .strip_prefix("env:")
+        .ok_or_else(|| anyhow::anyhow!("invalid env key source: {spec}"))?;
+    let raw = std::env::var(var_name)
+        .map_err(|_| anyhow::anyhow!("environment variable {var_name} is not set"))?;
+    let trimmed = raw.trim();
+
+    // Accept either raw 32-byte strings or 64-char hex for operator convenience.
+    if trimmed.len() == 64 {
+        let decoded = hex::decode(trimmed)
+            .map_err(|e| anyhow::anyhow!("failed to decode hex KEK from {var_name}: {e}"))?;
+        return symm_key_from_exact_32(&decoded, &format!("environment variable {var_name}"));
+    }
+
+    symm_key_from_exact_32(raw.as_bytes(), &format!("environment variable {var_name}"))
+}
+
+fn migrate_legacy_kek_to_file(
+    store: &storage::Store,
+    key_file: &str,
+    legacy_kek: &[u8],
+) -> anyhow::Result<secrets::crypto::SymmetricKey> {
+    let kek = symm_key_from_exact_32(legacy_kek, "legacy persisted KEK")?;
+
+    let path = std::path::Path::new(key_file);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(path, legacy_kek)?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let perms = std::fs::Permissions::from_mode(0o600);
+        std::fs::set_permissions(path, perms)?;
+    }
+
+    store.delete_kek()?;
+    tracing::warn!(
+        path = %key_file,
+        "migrated legacy KEK from plaintext redb storage into key file and removed DB copy"
+    );
+    Ok(kek)
+}
+
+fn load_kek_from_config(
+    store: &storage::Store,
+    runtime: &common::config::RuntimeSection,
+) -> anyhow::Result<secrets::crypto::SymmetricKey> {
+    match runtime.key_source.as_str() {
+        "file" => {
+            let key_file = runtime
+                .key_file
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("runtime.key_source=file requires runtime.key_file"))?;
+
+            match std::fs::read(key_file) {
+                Ok(bytes) => {
+                    tracing::info!(path = %key_file, "loaded KEK from key file");
+                    symm_key_from_exact_32(&bytes, &format!("key file {key_file}"))
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    if let Some(legacy_kek) = store.load_kek()? {
+                        migrate_legacy_kek_to_file(store, key_file, &legacy_kek)
+                    } else {
+                        Err(anyhow::anyhow!(
+                            "key file {} not found and no legacy KEK exists to migrate",
+                            key_file
+                        ))
+                    }
+                }
+                Err(e) => Err(anyhow::anyhow!("failed to read key file {}: {}", key_file, e)),
+            }
+        }
+        spec if spec.starts_with("env:") => {
+            if let Ok(Some(_legacy_kek)) = store.load_kek() {
+                tracing::warn!(
+                    "legacy plaintext KEK exists in redb, but env-based key sources cannot be auto-migrated; configure runtime.key_source=file temporarily if you need to preserve old secrets"
+                );
+            }
+            load_kek_from_env_spec(spec)
+        }
+        "generate" => {
+            if let Ok(Some(_legacy_kek)) = store.load_kek() {
+                anyhow::bail!(
+                    "legacy plaintext KEK detected in redb; key_source=generate no longer reuses persisted KEKs. Configure runtime.key_source=file and runtime.key_file to migrate existing secrets safely"
+                );
+            }
+            tracing::warn!(
+                "key_source=generate: using ephemeral KEK; secrets created on this node will not survive restart"
+            );
+            Ok(secrets::crypto::SymmetricKey::generate())
+        }
+        other => anyhow::bail!(
+            "unsupported runtime.key_source '{}'; supported values are 'generate', 'file', or 'env:VAR_NAME'",
+            other
+        ),
+    }
+}
+
 use ebpf_monitor::{ActionDispatcher, EbpfMetrics, EventCallbacks, MonitorConfig};
 use supervisor::SupervisorCommand;
 
@@ -681,72 +797,17 @@ async fn main() -> anyhow::Result<()> {
     host_router.load_routes_from_store(&store).await;
     info!("routes loaded from local storage");
 
-    // Initialize secret provider with KEK
+    // Initialize secret provider with KEK.
     //
-    // KEK loading priority:
-    //   1. If --key-file is provided, load the raw 32-byte key from that file
-    //   2. Otherwise, try to load the KEK previously persisted in redb
-    //   3. If neither source has a KEK, generate a fresh one and persist it
+    // Hardened key-source behavior:
+    //   - `file`: load the raw 32-byte KEK from `runtime.key_file`
+    //   - `env:VAR_NAME`: load the KEK from an environment variable
+    //   - `generate`: create an ephemeral KEK for this process only
     //
-    // This ensures secrets survive restarts: the same KEK is reused across
-    // restarts unless the operator explicitly provides a different key file.
-    let kek = if let Some(key_file) = &config.runtime.key_file {
-        match std::fs::read(key_file) {
-            Ok(bytes) if bytes.len() == 32 => {
-                let mut key = [0u8; 32];
-                key.copy_from_slice(&bytes);
-                tracing::info!(path = %key_file, "loaded KEK from key file");
-                secrets::crypto::SymmetricKey::from_bytes(key)
-            }
-            Ok(bytes) => {
-                tracing::error!(
-                    path = %key_file,
-                    len = bytes.len(),
-                    "key file must be exactly 32 bytes, generating new KEK instead"
-                );
-                let kek = secrets::crypto::SymmetricKey::generate();
-                if let Err(e) = store.save_kek(kek.as_bytes()) {
-                    tracing::warn!(error = %e, "failed to persist KEK");
-                }
-                kek
-            }
-            Err(e) => {
-                tracing::error!(path = %key_file, error = %e, "failed to read key file, generating new KEK instead");
-                let kek = secrets::crypto::SymmetricKey::generate();
-                if let Err(e) = store.save_kek(kek.as_bytes()) {
-                    tracing::warn!(error = %e, "failed to persist KEK");
-                }
-                kek
-            }
-        }
-    } else if let Ok(Some(kek_bytes)) = store.load_kek() {
-        // KEK was persisted on a previous run — reuse it so existing secrets remain readable
-        if kek_bytes.len() == 32 {
-            let mut key = [0u8; 32];
-            key.copy_from_slice(&kek_bytes);
-            tracing::info!("loaded KEK from storage (secrets from previous runs are readable)");
-            secrets::crypto::SymmetricKey::from_bytes(key)
-        } else {
-            tracing::warn!(
-                len = kek_bytes.len(),
-                "stored KEK has unexpected length, generating new KEK (existing secrets will be unreadable)"
-            );
-            let kek = secrets::crypto::SymmetricKey::generate();
-            if let Err(e) = store.save_kek(kek.as_bytes()) {
-                tracing::warn!(error = %e, "failed to persist KEK");
-            }
-            kek
-        }
-    } else {
-        // First run: generate a fresh KEK and persist it for future restarts
-        let kek = secrets::crypto::SymmetricKey::generate();
-        if let Err(e) = store.save_kek(kek.as_bytes()) {
-            tracing::warn!(error = %e, "failed to persist KEK — secrets will be lost on restart");
-        } else {
-            tracing::info!("generated and persisted new KEK");
-        }
-        kek
-    };
+    // Plaintext KEK persistence in redb is no longer used for normal operation.
+    // A legacy persisted KEK can be migrated into `runtime.key_file` when
+    // `key_source=file` is configured and the file does not yet exist.
+    let kek = load_kek_from_config(&store, &config.runtime)?;
     let secret_provider = Arc::new(secrets::LocalSecretProvider::new(store.clone(), kek));
 
     // Check if this is a fresh node (no apps in storage)
@@ -1295,22 +1356,10 @@ async fn main() -> anyhow::Result<()> {
         anyhow::bail!("Invalid auth configuration: {}", e);
     }
 
-    // Check TLS requirement (warn for now — admin TLS not yet implemented)
-    if effective_auth_config.enabled && effective_auth_config.require_tls {
-        tracing::warn!(
-            "Admin API authentication is enabled with require_tls=true, \
-             but admin API TLS is not yet implemented. \
-             Bearer tokens will be sent over plaintext HTTP. \
-             Set auth.require_tls = false to suppress this warning, \
-             or ensure the admin port is only accessible on a secure network."
-        );
-    } else if effective_auth_config.enabled && !effective_auth_config.require_tls {
-        tracing::warn!(
-            "Admin API authentication is enabled but TLS is NOT required. \
-             Bearer tokens will be sent over plaintext HTTP. \
-             Set auth.require_tls = true in production."
-        );
-    }
+    // Admin TLS is not yet implemented for the admin API listener. Enforce the
+    // documented fail-closed behavior when auth requires TLS.
+    proxy::auth_middleware::check_admin_tls_requirement(&effective_auth_config, false)
+        .map_err(anyhow::Error::msg)?;
 
     // Check config file permissions (warn if world-readable)
     if let Some(ref config_path) = args.config {
@@ -2481,23 +2530,28 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
-    let admin_addr = format!("0.0.0.0:{}", config.admin.port);
+    let admin_addr = format!("127.0.0.1:{}", config.admin.port);
     tokio::spawn(async move {
         let listener = tokio::net::TcpListener::bind(&admin_addr)
             .await
             .expect("admin API bind failed");
-        info!(addr = %admin_addr, "admin API listening");
+        info!(addr = %admin_addr, "admin API listening (loopback only)");
         axum::serve(listener, admin_app).await.unwrap();
     });
 
     let artifact_app = storage::artifact_server::artifact_router(store.clone());
-    let artifact_addr = format!("0.0.0.0:{}", config.admin.artifact_port);
+    let artifact_addr = format!("127.0.0.1:{}", config.admin.artifact_port);
     tokio::spawn(async move {
         let listener = tokio::net::TcpListener::bind(&artifact_addr)
             .await
             .expect("artifact server bind failed");
-        info!(addr = %artifact_addr, "artifact server listening");
-        axum::serve(listener, artifact_app).await.unwrap();
+        info!(addr = %artifact_addr, "artifact server listening (loopback only)");
+        axum::serve(
+            listener,
+            artifact_app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .unwrap();
     });
 
     // Signal that startup is complete — all probes are now active
@@ -2544,6 +2598,81 @@ async fn main() -> anyhow::Result<()> {
 
     info!("All instances stopped — exiting");
     std::process::exit(0);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{load_kek_from_config, load_kek_from_env_spec};
+    use common::config::RuntimeSection;
+    use storage::Store;
+    use tempfile::{NamedTempFile, TempDir};
+
+    static ENV_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn test_load_kek_from_env_spec_hex() {
+        let _guard = ENV_TEST_LOCK.lock().unwrap();
+        let var_name = "WASM_NODE_TEST_KEK_HEX";
+        let value = "11".repeat(32);
+        std::env::set_var(var_name, &value);
+
+        let key = load_kek_from_env_spec(&format!("env:{var_name}")).unwrap();
+        assert_eq!(key.as_bytes(), &[0x11; 32]);
+
+        std::env::remove_var(var_name);
+    }
+
+    #[test]
+    fn test_load_kek_from_env_spec_raw_32_bytes() {
+        let _guard = ENV_TEST_LOCK.lock().unwrap();
+        let var_name = "WASM_NODE_TEST_KEK_RAW";
+        let value = "A".repeat(32);
+        std::env::set_var(var_name, &value);
+
+        let key = load_kek_from_env_spec(&format!("env:{var_name}")).unwrap();
+        assert_eq!(key.as_bytes(), value.as_bytes());
+
+        std::env::remove_var(var_name);
+    }
+
+    #[test]
+    fn test_file_key_source_migrates_legacy_persisted_kek() {
+        let temp_db = NamedTempFile::new().unwrap();
+        let store = Store::open(temp_db.path()).unwrap();
+        let legacy = [0x22u8; 32];
+        store.save_kek(&legacy).unwrap();
+
+        let temp_dir = TempDir::new().unwrap();
+        let key_path = temp_dir.path().join("master.key");
+        let runtime = RuntimeSection {
+            key_source: "file".to_string(),
+            key_file: Some(key_path.to_string_lossy().to_string()),
+            ..Default::default()
+        };
+
+        let key = load_kek_from_config(&store, &runtime).unwrap();
+        assert_eq!(key.as_bytes(), &legacy);
+        assert_eq!(std::fs::read(&key_path).unwrap(), legacy);
+        assert!(store.load_kek().unwrap().is_none());
+    }
+
+    #[test]
+    fn test_generate_key_source_rejects_legacy_persisted_kek() {
+        let temp_db = NamedTempFile::new().unwrap();
+        let store = Store::open(temp_db.path()).unwrap();
+        store.save_kek(&[0x33u8; 32]).unwrap();
+
+        let runtime = RuntimeSection {
+            key_source: "generate".to_string(),
+            ..Default::default()
+        };
+
+        let err = match load_kek_from_config(&store, &runtime) {
+            Ok(_) => panic!("expected legacy plaintext KEK rejection"),
+            Err(err) => err,
+        };
+        assert!(err.to_string().contains("legacy plaintext KEK detected"));
+    }
 }
 
 /// Create the admin auth middleware closure.
