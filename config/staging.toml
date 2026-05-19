@@ -13,6 +13,10 @@ node_id = "staging-node-0"
 [storage]
 # Path to the redb database file.
 db_path = "/var/lib/wasm-node/state.redb"
+# Defaults are non-destructive: quarantine unreadable/corrupted DB files
+# instead of silently deleting them.
+# open_failure_mode = "quarantine_and_fail"
+# integrity_failure_mode = "quarantine_and_exit"
 
 [nats]
 # NATS server URL (staging cluster).

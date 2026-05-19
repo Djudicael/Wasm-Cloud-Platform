@@ -84,10 +84,45 @@ impl Default for NodeSection {
     }
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum StorageOpenFailureMode {
+    /// Preserve the unreadable DB by moving it aside, then fail startup.
+    QuarantineAndFail,
+    /// Preserve the unreadable DB by moving it aside, then create a fresh DB.
+    QuarantineAndRecreate,
+}
+
+impl Default for StorageOpenFailureMode {
+    fn default() -> Self {
+        StorageOpenFailureMode::QuarantineAndFail
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum StorageIntegrityFailureMode {
+    /// Preserve the corrupted DB by moving it aside, then exit and require an operator restart.
+    QuarantineAndExit,
+    /// Delete the corrupted DB on exit. This is destructive and should only be used
+    /// when the operator explicitly opts into disposable local state.
+    DeleteAndExit,
+}
+
+impl Default for StorageIntegrityFailureMode {
+    fn default() -> Self {
+        StorageIntegrityFailureMode::QuarantineAndExit
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StorageSection {
     #[serde(default = "default_db_path")]
     pub db_path: PathBuf,
+    #[serde(default)]
+    pub open_failure_mode: StorageOpenFailureMode,
+    #[serde(default)]
+    pub integrity_failure_mode: StorageIntegrityFailureMode,
 }
 
 fn default_db_path() -> PathBuf {
@@ -98,6 +133,8 @@ impl Default for StorageSection {
     fn default() -> Self {
         StorageSection {
             db_path: default_db_path(),
+            open_failure_mode: StorageOpenFailureMode::default(),
+            integrity_failure_mode: StorageIntegrityFailureMode::default(),
         }
     }
 }

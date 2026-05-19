@@ -656,28 +656,62 @@ async fn main() -> anyhow::Result<()> {
             s
         }
         Err(e) => {
-            tracing::warn!(
+            tracing::error!(
                 error = %e,
                 path = %config.storage.db_path.display(),
-                "failed to open redb — database may be corrupted, deleting and recreating"
+                mode = ?config.storage.open_failure_mode,
+                "failed to open redb"
             );
-            if config.storage.db_path.exists() {
-                if let Err(remove_err) = std::fs::remove_file(&config.storage.db_path) {
+
+            if !config.storage.db_path.exists() {
+                return Err(anyhow::anyhow!(
+                    "failed to open redb at {}: {}",
+                    config.storage.db_path.display(),
+                    e
+                ));
+            }
+
+            let quarantined_path = recovery::quarantine_db_file(&config.storage.db_path, "open_failure")
+                .map_err(|quarantine_err| {
+                    anyhow::anyhow!(
+                        "failed to open redb at {}: {}. also failed to quarantine the unreadable DB: {}",
+                        config.storage.db_path.display(),
+                        e,
+                        quarantine_err
+                    )
+                })?;
+
+            match config.storage.open_failure_mode {
+                common::config::StorageOpenFailureMode::QuarantineAndFail => {
                     return Err(anyhow::anyhow!(
-                        "failed to open redb and could not delete corrupted file: {e} (delete error: {remove_err})"
+                        "failed to open redb at {}: {}. unreadable database quarantined to {}. refusing automatic local state recreation by default; set storage.open_failure_mode = \"quarantine_and_recreate\" only if you intentionally want a fresh local DB bootstrap",
+                        config.storage.db_path.display(),
+                        e,
+                        quarantined_path.display()
                     ));
+                }
+                common::config::StorageOpenFailureMode::QuarantineAndRecreate => {
+                    tracing::warn!(
+                        original_path = %config.storage.db_path.display(),
+                        quarantined_path = %quarantined_path.display(),
+                        "quarantined unreadable redb and recreating a fresh local database due to explicit recovery mode"
+                    );
+                    let s = storage::Store::open(&config.storage.db_path).map_err(|e2| {
+                        anyhow::anyhow!(
+                            "failed to open a fresh redb at {} after quarantining {}: {}",
+                            config.storage.db_path.display(),
+                            quarantined_path.display(),
+                            e2
+                        )
+                    })?;
+                    info!(
+                        path = %config.storage.db_path.display(),
+                        quarantined_path = %quarantined_path.display(),
+                        "storage recreated after quarantining unreadable DB"
+                    );
+                    s
                 }
             }
-            let s = match storage::Store::open(&config.storage.db_path) {
-                Ok(s) => s,
-                Err(e2) => {
-                    return Err(anyhow::anyhow!(
-                        "failed to open redb even after deleting corrupted file: {e2}"
-                    ));
-                }
-            };
-            info!(path = %config.storage.db_path.display(), "storage recreated after corruption");
-            s
         }
     };
 
@@ -762,7 +796,7 @@ async fn main() -> anyhow::Result<()> {
     let _nats_watcher_handle =
         NatsHealthWatcher::new((*nats_health).clone(), Duration::from_secs(5)).start();
 
-    recovery::startup_integrity_check(&store, bus.client()).await;
+    recovery::startup_integrity_check(&store, bus.client(), &config.storage).await;
 
     let (event_tx, event_rx) = mpsc::channel::<messaging::events::Event>(1000);
     // Wire the event receiver to a publisher task that forwards events to NATS
@@ -1621,22 +1655,23 @@ async fn main() -> anyhow::Result<()> {
             axum::routing::post(move || {
                 let db_path = db_path_clone.clone();
                 async move {
-                    tracing::warn!("Admin rebuild requested — draining and restarting");
-                    match std::fs::remove_file(&db_path) {
-                        Ok(_) => (
+                    tracing::warn!("Admin rebuild requested — quarantining local state for rebuild");
+                    match recovery::quarantine_db_file(&db_path, "admin_rebuild") {
+                        Ok(quarantined_path) => (
                             axum::http::StatusCode::OK,
                             axum::Json(serde_json::json!({
-                                "status": "rebuild_initiated",
-                                "message": "Node will restart and rebuild from cluster state"
+                                "status": "rebuild_prepared",
+                                "message": "Local state quarantined. Restart the node to rebuild from cluster state.",
+                                "quarantined_path": quarantined_path.display().to_string()
                             })),
                         ),
                         Err(e) => {
-                            tracing::error!(error = %e, "failed to delete database for rebuild");
+                            tracing::error!(error = %e, "failed to quarantine database for rebuild");
                             (
                                 axum::http::StatusCode::INTERNAL_SERVER_ERROR,
                                 axum::Json(serde_json::json!({
                                     "status": "error",
-                                    "message": format!("failed to delete database: {e}")
+                                    "message": format!("failed to quarantine database: {e}")
                                 })),
                             )
                         }

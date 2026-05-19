@@ -9,7 +9,8 @@ use common::config::{
     AdminSection, AuthSection, BillingSection, DatabaseSection, DnsSection, EbpfSection,
     GatewayCircuitBreakerSection, GatewayRateLimitSection, GatewaySection, GcSection,
     HealthSection, LoggingSection, NatsSection, NodeConfig, NodeSection, ProxySection,
-    RateLimitSection, RuntimeSection, StorageSection,
+    RateLimitSection, RuntimeSection, StorageIntegrityFailureMode, StorageOpenFailureMode,
+    StorageSection,
 };
 use common::error::PlatformError;
 use serde::{Deserialize, Serialize};
@@ -124,6 +125,8 @@ fn merge_config(base: NodeConfig, overlay: NodeConfig) -> NodeConfig {
         },
         storage: StorageSection {
             db_path: overlay.storage.db_path,
+            open_failure_mode: overlay.storage.open_failure_mode,
+            integrity_failure_mode: overlay.storage.integrity_failure_mode,
         },
         nats: NatsSection {
             url: overlay.nats.url,
@@ -272,6 +275,35 @@ fn apply_env_overrides(mut config: NodeConfig) -> NodeConfig {
     // Storage
     if let Ok(v) = std::env::var("WASM_NODE_STORAGE_DB_PATH") {
         config.storage.db_path = PathBuf::from(v);
+    }
+    if let Ok(v) = std::env::var("WASM_NODE_STORAGE_OPEN_FAILURE_MODE") {
+        match v.trim() {
+            "quarantine_and_fail" => {
+                config.storage.open_failure_mode = StorageOpenFailureMode::QuarantineAndFail
+            }
+            "quarantine_and_recreate" => {
+                config.storage.open_failure_mode = StorageOpenFailureMode::QuarantineAndRecreate
+            }
+            other => tracing::warn!(
+                value = other,
+                "ignoring invalid WASM_NODE_STORAGE_OPEN_FAILURE_MODE"
+            ),
+        }
+    }
+    if let Ok(v) = std::env::var("WASM_NODE_STORAGE_INTEGRITY_FAILURE_MODE") {
+        match v.trim() {
+            "quarantine_and_exit" => {
+                config.storage.integrity_failure_mode =
+                    StorageIntegrityFailureMode::QuarantineAndExit
+            }
+            "delete_and_exit" => {
+                config.storage.integrity_failure_mode = StorageIntegrityFailureMode::DeleteAndExit
+            }
+            other => tracing::warn!(
+                value = other,
+                "ignoring invalid WASM_NODE_STORAGE_INTEGRITY_FAILURE_MODE"
+            ),
+        }
     }
     // NATS
     if let Ok(v) = std::env::var("WASM_NODE_NATS_URL") {
@@ -1048,6 +1080,8 @@ node_id = "prod-node-1"
 
 [storage]
 db_path = "/var/lib/wasm-node/state.redb"
+open_failure_mode = "quarantine_and_recreate"
+integrity_failure_mode = "delete_and_exit"
 
 [nats]
 url = "nats://nats.prod:4222"
@@ -1125,6 +1159,14 @@ default_memory_pages = 4096
 "#;
         let config: NodeConfig = toml::from_str(toml_str).expect("failed to parse full TOML");
         assert_eq!(config.node.node_id, "prod-node-1");
+        assert_eq!(
+            config.storage.open_failure_mode,
+            StorageOpenFailureMode::QuarantineAndRecreate
+        );
+        assert_eq!(
+            config.storage.integrity_failure_mode,
+            StorageIntegrityFailureMode::DeleteAndExit
+        );
         assert_eq!(config.proxy.http_port, 80);
         assert_eq!(config.proxy.https_port, 443);
         assert_eq!(
@@ -1170,16 +1212,25 @@ default_memory_pages = 4096
         std::env::set_var("WASM_NODE_NODE_ID", "from-env");
         std::env::set_var("WASM_NODE_NATS_URL", "nats://env:4222");
         std::env::set_var("WASM_NODE_ADMIN_ADVERTISED_HOST", "node-env.internal");
+        std::env::set_var(
+            "WASM_NODE_STORAGE_OPEN_FAILURE_MODE",
+            "quarantine_and_recreate",
+        );
         let config = apply_env_overrides(config);
         std::env::remove_var("WASM_NODE_NODE_ID");
         std::env::remove_var("WASM_NODE_NATS_URL");
         std::env::remove_var("WASM_NODE_ADMIN_ADVERTISED_HOST");
+        std::env::remove_var("WASM_NODE_STORAGE_OPEN_FAILURE_MODE");
 
         assert_eq!(config.node.node_id, "from-env");
         assert_eq!(config.nats.url, "nats://env:4222");
         assert_eq!(
             config.admin.advertised_host.as_deref(),
             Some("node-env.internal")
+        );
+        assert_eq!(
+            config.storage.open_failure_mode,
+            StorageOpenFailureMode::QuarantineAndRecreate
         );
     }
 

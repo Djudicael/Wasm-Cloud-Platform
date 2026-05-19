@@ -20,6 +20,11 @@ node_id = "prod-node-0"
 # Path to the redb database file. Ensure the directory exists and
 # the wasm-node process has read/write permissions.
 db_path = "/var/lib/wasm-node/state.redb"
+# On unreadable DB open, quarantine and fail by default. Set to
+# "quarantine_and_recreate" only if you intentionally want a fresh local DB.
+# open_failure_mode = "quarantine_and_fail"
+# On critical integrity failure, quarantine and exit by default.
+# integrity_failure_mode = "quarantine_and_exit"
 
 [nats]
 # NATS server URL (production cluster).
