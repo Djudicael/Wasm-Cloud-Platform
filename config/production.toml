@@ -53,8 +53,19 @@ artifact_port = 9091
 # hostname or URL instead of relying on loopback defaults.
 # advertised_host = "node-1.internal"
 # advertised_artifact_url = "https://artifacts.node-1.internal"
-# Bearer token for admin API authentication — REQUIRED in production.
-auth_token = "CHANGE-ME-USE-A-STRONG-RANDOM-TOKEN"
+
+[auth]
+# Use the structured auth config instead of legacy admin.auth_token.
+enabled = true
+# Read-only token for metrics/health/inspection.
+read_token = "CHANGE-ME-USE-A-STRONG-RANDOM-READ-TOKEN"
+# Read-write token for operators and automation.
+write_token = "CHANGE-ME-USE-A-STRONG-RANDOM-WRITE-TOKEN"
+# Admin TLS listener is not implemented yet. Keep the admin API loopback-only
+# or place it behind a TLS-terminating proxy if remote access is required.
+require_tls = false
+rate_limit_per_second = 10
+rate_limit_burst = 20
 
 [runtime]
 # Port range for Wasm instance binding.

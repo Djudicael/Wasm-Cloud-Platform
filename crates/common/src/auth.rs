@@ -266,6 +266,10 @@ impl AuthConfig {
     ///
     /// This provides backward compatibility: if the operator only set
     /// `admin.auth_token`, it is treated as the write token with auth enabled.
+    ///
+    /// This path intentionally preserves legacy local-only behavior by leaving
+    /// `require_tls = false`. Production guidance should use the structured
+    /// `[auth]` section instead of relying on `admin.auth_token`.
     pub fn from_legacy_token(token: &str) -> Self {
         AuthConfig {
             enabled: true,
