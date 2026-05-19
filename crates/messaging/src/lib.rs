@@ -189,13 +189,15 @@ impl NatsBus {
         .await
         .map_err(PlatformError::messaging_source)?;
 
-        // Create "EBPF" stream for eBPF monitor events (pressure, security incidents)
+        // Create "EBPF" stream for eBPF monitor events (pressure, security incidents).
+        // Use single-token wildcards here instead of `>` so JetStream subjects do not
+        // overlap: `ebpf.pressure.*` must not match `ebpf.pressure.recovered.*`.
         js.get_or_create_stream(StreamConfig {
             name: "EBPF".to_string(),
             subjects: vec![
-                "ebpf.pressure.>".to_string(),
-                "ebpf.pressure.recovered.>".to_string(),
-                "ebpf.security.incident.>".to_string(),
+                "ebpf.pressure.*".to_string(),
+                "ebpf.pressure.recovered.*".to_string(),
+                "ebpf.security.incident.*".to_string(),
             ],
             max_messages: 10_000,
             ..Default::default()
