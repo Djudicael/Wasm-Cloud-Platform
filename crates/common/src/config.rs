@@ -197,6 +197,12 @@ pub struct AdminSection {
     pub port: u16,
     #[serde(default = "default_artifact_port")]
     pub artifact_port: u16,
+    /// Local bind host/address for the admin API listener.
+    #[serde(default = "default_admin_bind_address")]
+    pub bind_address: String,
+    /// Local bind host/address for the artifact server listener.
+    #[serde(default = "default_admin_bind_address")]
+    pub artifact_bind_address: String,
     /// Optional routable host name or IP used when advertising the artifact endpoint
     /// to peer nodes. The local listener may still bind to loopback.
     #[serde(default)]
@@ -220,11 +226,17 @@ fn default_artifact_port() -> u16 {
     9091
 }
 
+fn default_admin_bind_address() -> String {
+    "127.0.0.1".to_string()
+}
+
 impl Default for AdminSection {
     fn default() -> Self {
         AdminSection {
             port: default_admin_port(),
             artifact_port: default_artifact_port(),
+            bind_address: default_admin_bind_address(),
+            artifact_bind_address: default_admin_bind_address(),
             advertised_host: None,
             advertised_artifact_url: None,
             auth_token: None,

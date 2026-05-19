@@ -87,18 +87,33 @@ fn normalize_artifact_base_url(raw: &str) -> anyhow::Result<String> {
     Ok(normalized)
 }
 
+fn host_for_socket_address(host: &str) -> String {
+    let trimmed = host.trim();
+    match trimmed.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V6(_)) => format!("[{trimmed}]"),
+        _ => trimmed.to_string(),
+    }
+}
+
+fn bind_socket_address(host: &str, port: u16) -> anyhow::Result<String> {
+    let trimmed = host.trim();
+    if trimmed.is_empty() {
+        anyhow::bail!("bind host must not be empty");
+    }
+    Ok(format!("{}:{}", host_for_socket_address(trimmed), port))
+}
+
 fn advertised_host_base_url(host: &str, port: u16) -> anyhow::Result<String> {
     let trimmed = host.trim();
     if trimmed.is_empty() {
         anyhow::bail!("admin.advertised_host must not be empty");
     }
 
-    let host_for_url = match trimmed.parse::<std::net::IpAddr>() {
-        Ok(std::net::IpAddr::V6(_)) => format!("[{trimmed}]"),
-        _ => trimmed.to_string(),
-    };
-
-    normalize_artifact_base_url(&format!("http://{host_for_url}:{port}"))
+    normalize_artifact_base_url(&format!(
+        "http://{}:{}",
+        host_for_socket_address(trimmed),
+        port
+    ))
 }
 
 fn build_artifact_server_url(admin: &common::config::AdminSection) -> anyhow::Result<String> {
@@ -366,8 +381,14 @@ struct Args {
     #[arg(long, default_value = "9090")]
     admin_port: u16,
 
+    #[arg(long, env = "WASM_NODE_ADMIN_BIND_ADDRESS")]
+    admin_bind_address: Option<String>,
+
     #[arg(long, default_value = "9091")]
     artifact_port: u16,
+
+    #[arg(long, env = "WASM_NODE_ADMIN_ARTIFACT_BIND_ADDRESS")]
+    artifact_bind_address: Option<String>,
 
     #[arg(long, env = "WASM_NODE_ADMIN_ADVERTISED_HOST")]
     admin_advertised_host: Option<String>,
@@ -563,6 +584,8 @@ async fn main() -> anyhow::Result<()> {
         tls_key: args.tls_key.clone(),
         admin_port: Some(args.admin_port),
         artifact_port: Some(args.artifact_port),
+        admin_bind_address: args.admin_bind_address.clone(),
+        artifact_bind_address: args.artifact_bind_address.clone(),
         admin_advertised_host: args.admin_advertised_host.clone(),
         admin_advertised_artifact_url: args.admin_advertised_artifact_url.clone(),
         port_start: Some(args.port_start),
@@ -2634,22 +2657,25 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
-    let admin_addr = format!("127.0.0.1:{}", config.admin.port);
+    let admin_addr = bind_socket_address(&config.admin.bind_address, config.admin.port)?;
     tokio::spawn(async move {
         let listener = tokio::net::TcpListener::bind(&admin_addr)
             .await
             .expect("admin API bind failed");
-        info!(addr = %admin_addr, "admin API listening (loopback only)");
+        info!(addr = %admin_addr, "admin API listening");
         axum::serve(listener, admin_app).await.unwrap();
     });
 
     let artifact_app = storage::artifact_server::artifact_router(store.clone());
-    let artifact_addr = format!("127.0.0.1:{}", config.admin.artifact_port);
+    let artifact_addr = bind_socket_address(
+        &config.admin.artifact_bind_address,
+        config.admin.artifact_port,
+    )?;
     tokio::spawn(async move {
         let listener = tokio::net::TcpListener::bind(&artifact_addr)
             .await
             .expect("artifact server bind failed");
-        info!(addr = %artifact_addr, "artifact server listening (loopback only)");
+        info!(addr = %artifact_addr, "artifact server listening");
         axum::serve(
             listener,
             artifact_app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
@@ -2707,14 +2733,20 @@ async fn main() -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        artifact_server_url_is_loopback, build_artifact_server_url, load_kek_from_config,
-        load_kek_from_env_spec,
+        artifact_server_url_is_loopback, bind_socket_address, build_artifact_server_url,
+        load_kek_from_config, load_kek_from_env_spec,
     };
     use common::config::{AdminSection, RuntimeSection};
     use storage::Store;
     use tempfile::{NamedTempFile, TempDir};
 
     static ENV_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn test_bind_socket_address_formats_ipv6() {
+        let addr = bind_socket_address("::1", 9090).unwrap();
+        assert_eq!(addr, "[::1]:9090");
+    }
 
     #[test]
     fn test_build_artifact_server_url_defaults_to_loopback() {
