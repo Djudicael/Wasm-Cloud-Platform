@@ -563,11 +563,20 @@ mod tests {
     #[test]
     fn test_policy_counters_new() {
         let counters = PolicyCounters::new();
-        assert_eq!(counters.outbound_connections_active.load(Ordering::Relaxed), 0);
-        assert_eq!(counters.outbound_connections_total.load(Ordering::Relaxed), 0);
+        assert_eq!(
+            counters.outbound_connections_active.load(Ordering::Relaxed),
+            0
+        );
+        assert_eq!(
+            counters.outbound_connections_total.load(Ordering::Relaxed),
+            0
+        );
         assert_eq!(counters.egress_bytes.load(Ordering::Relaxed), 0);
         assert_eq!(counters.dns_lookups_total.load(Ordering::Relaxed), 0);
-        assert_eq!(counters.inbound_connections_active.load(Ordering::Relaxed), 0);
+        assert_eq!(
+            counters.inbound_connections_active.load(Ordering::Relaxed),
+            0
+        );
         assert_eq!(counters.open_fds.load(Ordering::Relaxed), 0);
         assert_eq!(counters.fd_open_total.load(Ordering::Relaxed), 0);
         assert_eq!(counters.fs_write_bytes.load(Ordering::Relaxed), 0);
@@ -787,7 +796,10 @@ mod tests {
         };
         let enforcer = PolicyEnforcer::new(policy);
         assert!(enforcer.check_and_record_egress(1_000_000).is_ok());
-        assert_eq!(enforcer.counters.egress_bytes.load(Ordering::Relaxed), 1_000_000);
+        assert_eq!(
+            enforcer.counters.egress_bytes.load(Ordering::Relaxed),
+            1_000_000
+        );
     }
 
     #[test]
@@ -826,7 +838,10 @@ mod tests {
     #[test]
     fn test_record_egress() {
         let enforcer = PolicyEnforcer::new(make_policy());
-        enforcer.counters.egress_bytes.fetch_add(42, Ordering::Relaxed);
+        enforcer
+            .counters
+            .egress_bytes
+            .fetch_add(42, Ordering::Relaxed);
         assert_eq!(enforcer.counters.egress_bytes.load(Ordering::Relaxed), 42);
     }
 
@@ -939,10 +954,16 @@ mod tests {
         let enforcer = PolicyEnforcer::new(policy);
 
         assert!(enforcer.check_and_record_fs_write(500).is_ok());
-        assert_eq!(enforcer.counters.fs_write_bytes.load(Ordering::Relaxed), 500);
+        assert_eq!(
+            enforcer.counters.fs_write_bytes.load(Ordering::Relaxed),
+            500
+        );
 
         assert!(enforcer.check_and_record_fs_write(500).is_ok());
-        assert_eq!(enforcer.counters.fs_write_bytes.load(Ordering::Relaxed), 1000);
+        assert_eq!(
+            enforcer.counters.fs_write_bytes.load(Ordering::Relaxed),
+            1000
+        );
 
         let result = enforcer.check_and_record_fs_write(1);
         assert!(result.is_err());
@@ -1018,7 +1039,10 @@ mod tests {
 
     #[test]
     fn test_ip_in_cidrs() {
-        let cidrs: Vec<ipnet::IpNet> = vec!["10.0.0.0/8".parse().unwrap(), "192.168.0.0/16".parse().unwrap()];
+        let cidrs: Vec<ipnet::IpNet> = vec![
+            "10.0.0.0/8".parse().unwrap(),
+            "192.168.0.0/16".parse().unwrap(),
+        ];
         let ip_in: IpAddr = "10.1.2.3".parse().unwrap();
         let ip_in2: IpAddr = "192.168.1.1".parse().unwrap();
         let ip_out: IpAddr = "93.184.216.34".parse().unwrap();
@@ -1030,7 +1054,11 @@ mod tests {
 
     #[test]
     fn test_parse_cidrs_invalid_skipped() {
-        let cidrs = vec!["10.0.0.0/8".to_string(), "not-a-cidr".to_string(), "192.168.0.0/16".to_string()];
+        let cidrs = vec![
+            "10.0.0.0/8".to_string(),
+            "not-a-cidr".to_string(),
+            "192.168.0.0/16".to_string(),
+        ];
         let parsed = PolicyEnforcer::parse_cidrs(&cidrs);
         assert_eq!(parsed.len(), 2);
     }

@@ -35,7 +35,9 @@ async fn test_single_node_deploy() {
     tracing_subscriber::fmt::init();
 
     // 1. Start NATS container on host (re-use existing E2E infrastructure)
-    let nats_container = start_nats_container().await.expect("Failed to start NATS container");
+    let nats_container = start_nats_container()
+        .await
+        .expect("Failed to start NATS container");
     let nats_url = format!("nats://{}:4222", nats_container.host);
 
     // 2. Spawn wasm-node microVM
@@ -60,7 +62,9 @@ async fn test_single_node_deploy() {
         })),
     };
 
-    let mut vm = MicroVm::spawn(vm_config).await.expect("Failed to spawn microVM");
+    let mut vm = MicroVm::spawn(vm_config)
+        .await
+        .expect("Failed to spawn microVM");
 
     // 3. Wait for node to be healthy
     vm.wait_for_health(Duration::from_secs(60))
@@ -74,7 +78,9 @@ async fn test_single_node_deploy() {
     let sha256 = compute_sha256(&wasm_path).expect("Failed to compute SHA-256");
 
     // Upload via artifact server
-    let artifact_url = upload_artifact(&vm, &wasm_path).await.expect("Failed to upload artifact");
+    let artifact_url = upload_artifact(&vm, &wasm_path)
+        .await
+        .expect("Failed to upload artifact");
 
     // 5. Deploy the app via NATS
     deploy_app(&nats_url, "hello-axum:v1", &artifact_url, &sha256)
@@ -103,12 +109,7 @@ async fn test_single_node_deploy() {
         .await
         .expect("Failed to send request");
 
-    assert_eq!(
-        resp.status(),
-        200,
-        "Expected 200 OK, got {}",
-        resp.status()
-    );
+    assert_eq!(resp.status(), 200, "Expected 200 OK, got {}", resp.status());
 
     let body = resp.text().await.expect("Failed to read body");
     println!("✅ Response body: {}", body);
@@ -149,12 +150,16 @@ struct NatsContainer {
 fn find_kernel() -> std::path::PathBuf {
     if let Ok(p) = std::env::var("VM_KERNEL_PATH") {
         let path = std::path::PathBuf::from(p);
-        if path.exists() { return path; }
+        if path.exists() {
+            return path;
+        }
     }
     let candidates = ["./assets/vmlinux-6.1", "/opt/vm-testbed/vmlinux-6.1"];
     for c in &candidates {
         let p = std::path::PathBuf::from(c);
-        if p.exists() { return p; }
+        if p.exists() {
+            return p;
+        }
     }
     panic!("Kernel not found. Set VM_KERNEL_PATH or run ./scripts/vm/build-kernel.sh")
 }
@@ -162,12 +167,19 @@ fn find_kernel() -> std::path::PathBuf {
 fn find_node_rootfs() -> std::path::PathBuf {
     if let Ok(p) = std::env::var("VM_NODE_ROOTFS") {
         let path = std::path::PathBuf::from(p);
-        if path.exists() { return path; }
+        if path.exists() {
+            return path;
+        }
     }
-    let candidates = ["./assets/wasm-node-rootfs.ext4", "/opt/vm-testbed/wasm-node-rootfs.ext4"];
+    let candidates = [
+        "./assets/wasm-node-rootfs.ext4",
+        "/opt/vm-testbed/wasm-node-rootfs.ext4",
+    ];
     for c in &candidates {
         let p = std::path::PathBuf::from(c);
-        if p.exists() { return p; }
+        if p.exists() {
+            return p;
+        }
     }
     panic!("Rootfs not found. Set VM_NODE_ROOTFS or run ./scripts/vm/build-node-rootfs.sh")
 }
@@ -180,15 +192,19 @@ fn build_test_wasm() -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
     ];
     for c in &candidates {
         let p = std::path::PathBuf::from(c);
-        if p.exists() { return Ok(p); }
+        if p.exists() {
+            return Ok(p);
+        }
     }
 
     // Build it
     let status = std::process::Command::new("cargo")
         .args([
             "build",
-            "--manifest-path", "apps/hello-axum/Cargo.toml",
-            "--target", "wasm32-wasip2",
+            "--manifest-path",
+            "apps/hello-axum/Cargo.toml",
+            "--target",
+            "wasm32-wasip2",
             "--release",
         ])
         .env("RUSTFLAGS", "--cfg tokio_unstable")
@@ -198,11 +214,13 @@ fn build_test_wasm() -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
         return Err("Failed to build hello-axum wasm".into());
     }
 
-    Ok(std::path::PathBuf::from("./apps/hello-axum/target/wasm32-wasip2/release/hello-axum.wasm"))
+    Ok(std::path::PathBuf::from(
+        "./apps/hello-axum/target/wasm32-wasip2/release/hello-axum.wasm",
+    ))
 }
 
 fn compute_sha256(path: &std::path::Path) -> Result<String, Box<dyn std::error::Error>> {
-    use sha2::{Sha256, Digest};
+    use sha2::{Digest, Sha256};
     let data = std::fs::read(path)?;
     let hash = Sha256::digest(&data);
     Ok(format!("{:x}", hash))

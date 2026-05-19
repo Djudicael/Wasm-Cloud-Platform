@@ -1,4 +1,4 @@
-use common::types::AppId;
+use common::{error::PlatformError, types::AppId};
 use messaging::events::Event;
 use proxy::dns_webhook::DnsWebhookManager;
 use proxy::node_table::NodeLoadTable;
@@ -30,7 +30,7 @@ pub struct EventDispatcher {
 }
 
 impl EventDispatcher {
-    pub async fn handle(&self, event: Event) {
+    pub async fn handle(&self, event: Event) -> Result<(), PlatformError> {
         let event_name = format!("{:?}", std::mem::discriminant(&event));
         tracing::info!(event = %event_name, "received event in handler");
 
@@ -51,7 +51,7 @@ impl EventDispatcher {
             }
             Event::RemoveApp { app_id } => self.handle_remove(app_id).await,
             Event::RouteAdd { route } => {
-                self.store.save_route(&route).ok();
+                self.store.save_route(&route)?;
                 self.host_router
                     .add_route(
                         route.host.clone(),
@@ -66,16 +66,18 @@ impl EventDispatcher {
                         .notify_route_change("add", &route.host, &route.app_id.0)
                         .await;
                 }
+                Ok(())
             }
             Event::RouteRemove { host } => {
-                // Load route to get app_id and path_prefix for webhook before deleting
+                // Load route to get app_id and path_prefix for webhook before deleting.
+                // A missing pre-delete lookup is not fatal — it only affects webhook context.
                 let existing = self.store.load_route(&host).ok().flatten();
                 let app_id = existing.as_ref().map(|r| r.app_id.clone());
                 let path_prefix = existing
                     .as_ref()
                     .map(|r| r.path_prefix.clone())
                     .unwrap_or_default();
-                self.store.delete_route(&host).ok();
+                self.store.delete_route(&host)?;
                 self.host_router.remove_route(&host, &path_prefix).await;
                 info!(host, "route removed");
                 if let Some(ref webhook) = self.dns_webhook {
@@ -85,6 +87,7 @@ impl EventDispatcher {
                             .await;
                     }
                 }
+                Ok(())
             }
             Event::InstanceReady {
                 app_id,
@@ -97,6 +100,7 @@ impl EventDispatcher {
                     self.upstream.add(&app_id, addr).await;
                     info!(app = %app_id.0, %addr, from_node = %node_id, "remote instance registered");
                 }
+                Ok(())
             }
             Event::InstanceDead {
                 app_id,
@@ -107,6 +111,7 @@ impl EventDispatcher {
                     self.upstream.remove(&app_id, &addr).await;
                     info!(app = %app_id.0, %addr, from_node = %node_id, "remote instance deregistered");
                 }
+                Ok(())
             }
             Event::SecretUpdate {
                 app_id,
@@ -119,14 +124,13 @@ impl EventDispatcher {
                 // without proper decryption). The secret provider should handle
                 // decryption in a future iteration.
                 tracing::warn!("SecretUpdate received but decryption not yet implemented — secret may be unreadable");
-                if let Err(e) = self.store.save_secrets(&app_id, &encrypted_value) {
-                    error!(app = %app_id.0, error = %e, "failed to update secret in cache");
-                }
+                self.store.save_secrets(&app_id, &encrypted_value)?;
+                Ok(())
             }
             Event::ConfigUpdate { app_id, config } => {
-                if let Err(e) = self.store.save_config(&config) {
-                    error!(app = %app_id.0, error = %e, "config update failed");
-                }
+                self.store.save_config(&config)?;
+                info!(app = %app_id.0, "config updated");
+                Ok(())
             }
             Event::NodeLoad {
                 node_id,
@@ -161,6 +165,7 @@ impl EventDispatcher {
                     drop(nodes);
                     webhook.set_node_ips(ips).await;
                 }
+                Ok(())
             }
             Event::NodeJoined {
                 node_id,
@@ -176,7 +181,7 @@ impl EventDispatcher {
                     protocol_version,
                     binary_version,
                 )
-                .await;
+                .await
             }
             Event::StateSnapshot {
                 for_node_id,
@@ -187,11 +192,14 @@ impl EventDispatcher {
             } => {
                 if for_node_id == self.node_id {
                     self.handle_state_snapshot(configs, routes, encrypted_secrets, artifact_hashes)
-                        .await;
+                        .await
+                } else {
+                    Ok(())
                 }
             }
             Event::NodeUpgrade { .. } => {
                 self.handle_node_upgrade(event).await;
+                Ok(())
             }
             Event::NodeUpgradeComplete {
                 node_id,
@@ -206,6 +214,7 @@ impl EventDispatcher {
                 );
                 // Check if we were waiting for this node
                 // Re-evaluate our upgrade status if we're in a rolling upgrade
+                Ok(())
             }
             Event::NodeDraining {
                 node_id,
@@ -220,6 +229,7 @@ impl EventDispatcher {
                 } else {
                     info!(node = %node_id, "peer node draining");
                 }
+                Ok(())
             }
 
             // ── eBPF Monitor Events ──────────────────────────────────────
@@ -246,6 +256,7 @@ impl EventDispatcher {
                         );
                     }
                 }
+                Ok(())
             }
 
             Event::NodePressureRecovered { node_id } => {
@@ -255,6 +266,7 @@ impl EventDispatcher {
                     info!(node = %node_id, "peer node pressure recovered — restoring in routing");
                     self.node_table.mark_healthy(&node_id).await;
                 }
+                Ok(())
             }
 
             Event::SecurityIncident {
@@ -283,6 +295,7 @@ impl EventDispatcher {
                         "security incident on peer node — consider quarantining artifact"
                     );
                 }
+                Ok(())
             }
 
             // ── Health Events ─────────────────────────────────────────────
@@ -310,6 +323,7 @@ impl EventDispatcher {
                     _ => common::health::NodeHealthStatus::Degraded,
                 };
                 self.node_table.update_health(&node_id, health_status).await;
+                Ok(())
             }
 
             Event::NodeHealthSnapshot {
@@ -340,27 +354,26 @@ impl EventDispatcher {
                     _ => common::health::NodeHealthStatus::Degraded,
                 };
                 self.node_table.update_health(&node_id, health_status).await;
+                Ok(())
             }
 
             Event::GatewayConfigUpdate { app_id, config } => {
                 info!(app = %app_id.0, "received gateway config update");
-                if let Err(e) = self.store.save_gateway_config(&app_id.0, &config) {
-                    error!(app = %app_id.0, error = %e, "failed to save gateway config");
-                }
+                self.store.save_gateway_config(&app_id.0, &config)?;
                 // Keep the in-memory gateway cache in sync so the internal
                 // proxy can enforce endpoint policies without reloading from disk.
                 if let Some(ref gw) = self.gateway {
                     gw.set_route_config(&app_id.0, config).await;
                 }
+                Ok(())
             }
             Event::GatewayConfigRemove { app_id } => {
                 info!(app = %app_id.0, "received gateway config remove");
-                if let Err(e) = self.store.delete_gateway_config(&app_id.0) {
-                    error!(app = %app_id.0, error = %e, "failed to delete gateway config");
-                }
+                self.store.delete_gateway_config(&app_id.0)?;
                 if let Some(ref gw) = self.gateway {
                     gw.remove_route_config(&app_id.0).await;
                 }
+                Ok(())
             }
             // ── Configuration Hot-Reload ──────────────────────────────────
             Event::ConfigHotReload { node_id, changes } => {
@@ -373,6 +386,7 @@ impl EventDispatcher {
                 // Each node's operator controls its own configuration.
                 // The event is informational — it alerts operators that the
                 // cluster's configuration may have diverged.
+                Ok(())
             }
         }
     }
@@ -384,16 +398,12 @@ impl EventDispatcher {
         artifact_url: String,
         expected_hash: Option<String>,
         size_bytes: u64,
-    ) {
+    ) -> Result<(), PlatformError> {
         tracing::info!(app = %app_id.0, "handle_deploy invoked");
 
-        let sha256 = match &expected_hash {
-            Some(h) => h.clone(),
-            None => {
-                error!(app = %app_id.0, "deploy event missing expected_hash");
-                return;
-            }
-        };
+        let sha256 = expected_hash
+            .clone()
+            .ok_or_else(|| PlatformError::messaging("deploy event missing expected_hash"))?;
 
         info!(
             app = %app_id.0,
@@ -403,86 +413,58 @@ impl EventDispatcher {
         );
 
         // 1. Check local cache first (another node may have already stored it)
-        let wasm_bytes = if self.store.raw_wasm_exists(&sha256).unwrap_or(false) {
+        let wasm_bytes = if self.store.raw_wasm_exists(&sha256)? {
             info!(sha256, "artifact already in local cache");
-            match self.store.load_raw_wasm(&sha256) {
-                Ok(Some(bytes)) => bytes,
-                Ok(None) => {
-                    error!(sha256, "artifact vanished between exists and load");
-                    return;
-                }
-                Err(e) => {
-                    error!(sha256, error = %e, "failed to load cached artifact");
-                    return;
-                }
-            }
+            self.store.load_raw_wasm(&sha256)?.ok_or_else(|| {
+                PlatformError::storage("artifact vanished between exists and load")
+            })?
         } else {
             // 2. Fetch from the source node
             info!(url = %artifact_url, "fetching artifact via HTTP");
-            match fetch_artifact(&artifact_url, &sha256).await {
-                Ok(bytes) => {
-                    // Hash already verified by download_and_verify_bytes
+            let bytes = fetch_artifact(&artifact_url, &sha256)
+                .await
+                .map_err(PlatformError::external)?;
 
-                    // Store raw bytes for future use
-                    if let Err(e) = self.store.save_raw_wasm(&sha256, &bytes) {
-                        error!(sha256, error = %e, "failed to cache raw wasm");
-                    }
-                    bytes
-                }
-                Err(e) => {
-                    error!(url = %artifact_url, error = %e, "artifact fetch failed");
-                    return;
-                }
-            }
+            // Hash already verified by download_and_verify_bytes.
+            // Persisting raw bytes is part of successful deploy processing.
+            self.store.save_raw_wasm(&sha256, &bytes)?;
+            bytes
         };
 
         info!(app = %app_id.0, bytes = wasm_bytes.len(), "artifact ready, compiling");
 
         // 5. Compile (CPU-intensive — spawn_blocking)
         let runtime = self.runtime.clone();
-        let artifact = tokio::task::spawn_blocking(move || runtime.compile(&wasm_bytes)).await;
+        let artifact = tokio::task::spawn_blocking(move || runtime.compile(&wasm_bytes))
+            .await
+            .map_err(|e| PlatformError::runtime(format!("spawn_blocking panic: {e}")))?;
+        let artifact_bytes = artifact?;
 
-        match artifact {
-            Ok(Ok(artifact_bytes)) => {
-                // 6. Store compiled artifact, config, and hash
-                if let Err(e) = self.store.store_artifact(&app_id, &artifact_bytes) {
-                    error!(app = %app_id.0, error = %e, "failed to store artifact");
-                    return;
-                }
-                if let Err(e) = self.store.save_config(&config) {
-                    error!(app = %app_id.0, error = %e, "failed to store config");
-                    return;
-                }
-                if let Err(e) = self.store.save_artifact_hash(&app_id, &sha256) {
-                    error!(app = %app_id.0, error = %e, "failed to store artifact hash");
-                }
-                info!(
-                    app = %app_id.0,
-                    "deploy complete, waiting for first request"
-                );
-            }
-            Ok(Err(e)) => error!(app = %app_id.0, error = %e, "compilation failed"),
-            Err(e) => error!(app = %app_id.0, error = %e, "spawn_blocking panic"),
-        }
+        // 6. Store compiled artifact, config, and hash
+        self.store.store_artifact(&app_id, &artifact_bytes)?;
+        self.store.save_config(&config)?;
+        self.store.save_artifact_hash(&app_id, &sha256)?;
+        info!(
+            app = %app_id.0,
+            "deploy complete, waiting for first request"
+        );
+        Ok(())
     }
 
-    async fn handle_remove(&self, app_id: AppId) {
+    async fn handle_remove(&self, app_id: AppId) -> Result<(), PlatformError> {
         info!(app = %app_id.0, "removing app");
 
         // Kill all running instances first (this creates billing records)
-        if let Err(e) = self.supervisor.kill_all_instances(&app_id).await {
-            error!(app = %app_id.0, error = %e, "failed to kill instances");
-        }
+        self.supervisor.kill_all_instances(&app_id).await?;
 
         // Mark app as undeployed - starts grace period
         // Actual deletion happens after grace period expires in GC loop
-        if let Err(e) = self.store.mark_undeployed(&app_id.0) {
-            error!(app = %app_id.0, error = %e, "failed to mark app as undeployed");
-        }
+        self.store.mark_undeployed(&app_id.0)?;
 
         // Note: We don't immediately delete artifacts/configs anymore
         // The GC loop will purge them after the grace period
         info!(app = %app_id.0, "app marked for deletion, grace period started");
+        Ok(())
     }
 
     fn our_node_id(&self) -> String {
@@ -496,7 +478,7 @@ impl EventDispatcher {
         peer_public_key: Vec<u8>,
         protocol_version: u32,
         binary_version: String,
-    ) {
+    ) -> Result<(), PlatformError> {
         info!(
             new_node = %new_node_id,
             protocol = protocol_version,
@@ -510,7 +492,7 @@ impl EventDispatcher {
         // and ignore subsequent responses. Ideally, only the smallest existing node
         // would respond, but without knowing all node IDs, we use this simpler approach.
         if self.node_id > new_node_id {
-            return; // A smaller node should respond instead
+            return Ok(()); // A smaller node should respond instead
         }
 
         info!(
@@ -520,43 +502,35 @@ impl EventDispatcher {
         );
 
         // 1. Collect all configs
-        let configs = self
-            .store
-            .list_apps()
-            .unwrap_or_default()
-            .iter()
-            .filter_map(|id| self.store.load_config(id).ok().flatten())
-            .collect::<Vec<_>>();
+        let app_ids = self.store.list_apps()?;
+        let mut configs = Vec::with_capacity(app_ids.len());
+        for id in &app_ids {
+            if let Some(config) = self.store.load_config(id)? {
+                configs.push(config);
+            }
+        }
 
         // 2. Collect all routes
-        let routes = self.store.list_routes().unwrap_or_default();
+        let routes = self.store.list_routes()?;
 
         // 3. Encrypt secrets for each app
         let mut encrypted_secrets = Vec::new();
         for config in &configs {
-            if let Ok(keys) = self.secret_provider.list_keys(&config.id).await {
-                for key in keys {
-                    if let Ok(value) = self.secret_provider.get(&config.id, &key).await {
-                        if let Ok(encrypted) = encrypt_for_peer(&peer_public_key, value.as_bytes())
-                        {
-                            encrypted_secrets.push((config.id.0.clone(), key, encrypted));
-                        }
-                    }
-                }
+            let keys = self.secret_provider.list_keys(&config.id).await?;
+            for key in keys {
+                let value = self.secret_provider.get(&config.id, &key).await?;
+                let encrypted = encrypt_for_peer(&peer_public_key, value.as_bytes())?;
+                encrypted_secrets.push((config.id.0.clone(), key, encrypted));
             }
         }
 
         // 4. Collect artifact hashes
-        let artifact_hashes: Vec<(String, String)> = configs
-            .iter()
-            .filter_map(|c| {
-                self.store
-                    .get_artifact_sha256(&c.id)
-                    .ok()
-                    .flatten()
-                    .map(|h| (c.id.0.clone(), h))
-            })
-            .collect();
+        let mut artifact_hashes = Vec::new();
+        for config in &configs {
+            if let Some(hash) = self.store.get_artifact_sha256(&config.id)? {
+                artifact_hashes.push((config.id.0.clone(), hash));
+            }
+        }
 
         // 5. Publish the snapshot event
         let event = Event::StateSnapshot {
@@ -602,9 +576,8 @@ impl EventDispatcher {
         });
 
         // Publish the snapshot event via NATS
-        if let Err(e) = self.bus.publish(&event).await {
-            error!(new_node = %new_node_id, error = %e, "failed to publish snapshot event");
-        }
+        self.bus.publish(&event).await?;
+        Ok(())
     }
 
     async fn handle_state_snapshot(
@@ -613,7 +586,7 @@ impl EventDispatcher {
         routes: Vec<common::types::Route>,
         encrypted_secrets: Vec<(String, String, Vec<u8>)>,
         artifact_hashes: Vec<(String, String)>,
-    ) {
+    ) -> Result<(), PlatformError> {
         info!(
             apps = configs.len(),
             routes = routes.len(),
@@ -623,16 +596,12 @@ impl EventDispatcher {
 
         // 1. Store configs
         for config in &configs {
-            if let Err(e) = self.store.save_config(config) {
-                error!(app = %config.id.0, error = %e, "failed to save config");
-            }
+            self.store.save_config(config)?;
         }
 
         // 2. Store routes and load into HostRouter
         for route in &routes {
-            if let Err(e) = self.store.save_route(route) {
-                error!(host = %route.host, error = %e, "failed to save route");
-            }
+            self.store.save_route(route)?;
             self.host_router
                 .add_route(
                     route.host.clone(),
@@ -644,46 +613,25 @@ impl EventDispatcher {
         }
 
         // 3. Decrypt and store secrets
-        let keypair = match &self.bootstrap_keypair {
-            Some(kp) => kp,
-            None => {
-                error!("no bootstrap keypair available to decrypt secrets");
-                return;
-            }
-        };
+        let keypair = self.bootstrap_keypair.as_ref().ok_or_else(|| {
+            PlatformError::encryption("no bootstrap keypair available to decrypt secrets")
+        })?;
 
         for (app_id_str, key, encrypted_value) in encrypted_secrets {
             let app_id = AppId(app_id_str.clone());
 
             // Decrypt using our bootstrap keypair
-            let plaintext_bytes = match keypair.decrypt(&encrypted_value) {
-                Ok(bytes) => bytes,
-                Err(e) => {
-                    error!(app = app_id_str, key, error = %e, "failed to decrypt secret");
-                    continue;
-                }
-            };
-
-            match String::from_utf8(plaintext_bytes) {
-                Ok(plaintext) => {
-                    if let Err(e) = self.secret_provider.set(&app_id, &key, &plaintext).await {
-                        error!(app = app_id_str, key, error = %e, "failed to store secret");
-                    } else {
-                        info!(app = app_id_str, key, "secret decrypted and stored");
-                    }
-                }
-                Err(e) => {
-                    error!(app = app_id_str, key, error = %e, "secret not valid UTF-8");
-                }
-            }
+            let plaintext_bytes = keypair.decrypt(&encrypted_value)?;
+            let plaintext = String::from_utf8(plaintext_bytes)
+                .map_err(|e| PlatformError::encryption_with_msg("secret not valid UTF-8", e))?;
+            self.secret_provider.set(&app_id, &key, &plaintext).await?;
+            info!(app = app_id_str, key, "secret decrypted and stored");
         }
 
         // 4. Store artifact hashes
         for (app_id_str, sha256) in &artifact_hashes {
             let app_id = AppId(app_id_str.clone());
-            if let Err(e) = self.store.save_artifact_hash(&app_id, sha256) {
-                error!(app = app_id_str, error = %e, "failed to save artifact hash");
-            }
+            self.store.save_artifact_hash(&app_id, sha256)?;
         }
 
         // 5. Compile artifacts (artifacts should already be in our local store from push)
@@ -734,6 +682,7 @@ impl EventDispatcher {
         }
 
         info!("state snapshot import complete");
+        Ok(())
     }
 
     async fn handle_node_upgrade(&self, event: Event) {

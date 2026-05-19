@@ -13,12 +13,13 @@ pub async fn send_gateway_error(
         "status": status,
     });
 
-    let mut resp = pingora::http::ResponseHeader::build(status, None)
-        .map_err(|e| pingora_core::Error::because(
+    let mut resp = pingora::http::ResponseHeader::build(status, None).map_err(|e| {
+        pingora_core::Error::because(
             pingora_core::ErrorType::InternalError,
             "gateway error response",
             e,
-        ))?;
+        )
+    })?;
     let _ = resp.insert_header("Content-Type", "application/json");
 
     session.write_response_header(Box::new(resp), false).await?;

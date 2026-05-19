@@ -96,10 +96,16 @@ mod tests {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
             registry
-                .register(&app_a, SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 10100))
+                .register(
+                    &app_a,
+                    SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 10100),
+                )
                 .await;
             registry
-                .register(&app_b, SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 10101))
+                .register(
+                    &app_b,
+                    SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 10101),
+                )
                 .await;
         });
 
@@ -136,10 +142,16 @@ mod tests {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
             registry
-                .register(&app_a, SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 10100))
+                .register(
+                    &app_a,
+                    SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 10100),
+                )
                 .await;
             registry
-                .register(&app_b, SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 10101))
+                .register(
+                    &app_b,
+                    SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 10101),
+                )
                 .await;
         });
 
@@ -178,7 +190,10 @@ mod tests {
         });
 
         match decision {
-            ConnectDecision::Allow(addr) => assert_eq!(addr, SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 443)),
+            ConnectDecision::Allow(addr) => assert_eq!(
+                addr,
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 443)
+            ),
             other => panic!("expected Allow, got {:?}", other),
         }
     }

@@ -96,7 +96,10 @@ impl FirecrackerClient {
     /// Wait for the Firecracker socket to appear (with timeout).
     ///
     /// Polls every 50ms until the socket file exists or the timeout expires.
-    pub async fn wait_for_socket(&self, timeout: std::time::Duration) -> Result<(), FirecrackerError> {
+    pub async fn wait_for_socket(
+        &self,
+        timeout: std::time::Duration,
+    ) -> Result<(), FirecrackerError> {
         let start = std::time::Instant::now();
         let path = std::path::Path::new(&self.socket_path);
         while !path.exists() {
@@ -270,7 +273,10 @@ impl FirecrackerClient {
         });
 
         let resp = self
-            .request(reqwest::Method::PUT, &format!("/network-interfaces/{iface_id}"))
+            .request(
+                reqwest::Method::PUT,
+                &format!("/network-interfaces/{iface_id}"),
+            )
             .json(&body)
             .send()
             .await?;
@@ -417,7 +423,10 @@ impl FirecrackerClient {
     }
 
     /// Configure Firecracker metrics output.
-    pub async fn configure_metrics(&self, metrics_path: impl AsRef<Path>) -> Result<(), FirecrackerError> {
+    pub async fn configure_metrics(
+        &self,
+        metrics_path: impl AsRef<Path>,
+    ) -> Result<(), FirecrackerError> {
         let path = metrics_path.as_ref().to_string_lossy().to_string();
 
         let body = json!({ "metrics_path": path });

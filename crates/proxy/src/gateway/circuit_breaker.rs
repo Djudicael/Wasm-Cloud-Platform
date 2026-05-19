@@ -69,17 +69,23 @@ impl CircuitBreakerManager {
 
     /// Record a successful response from the upstream.
     pub fn record_success(&self, app_id: &str) {
-        let mut circuit = self.circuits.entry(app_id.to_string()).or_insert_with(|| Circuit {
-            state: CircuitState::Closed,
-            consecutive_failures: 0,
-            last_failure_at: None,
-            last_state_change: Instant::now(),
-        });
+        let mut circuit = self
+            .circuits
+            .entry(app_id.to_string())
+            .or_insert_with(|| Circuit {
+                state: CircuitState::Closed,
+                consecutive_failures: 0,
+                last_failure_at: None,
+                last_state_change: Instant::now(),
+            });
         if circuit.state == CircuitState::HalfOpen {
             circuit.state = CircuitState::Closed;
             circuit.consecutive_failures = 0;
             circuit.last_state_change = Instant::now();
-            tracing::info!(app = app_id, "circuit breaker: HALF-OPEN → CLOSED (recovered)");
+            tracing::info!(
+                app = app_id,
+                "circuit breaker: HALF-OPEN → CLOSED (recovered)"
+            );
         } else {
             circuit.consecutive_failures = 0;
         }
@@ -87,12 +93,15 @@ impl CircuitBreakerManager {
 
     /// Record a failure response from the upstream.
     pub fn record_failure(&self, app_id: &str) {
-        let mut circuit = self.circuits.entry(app_id.to_string()).or_insert_with(|| Circuit {
-            state: CircuitState::Closed,
-            consecutive_failures: 0,
-            last_failure_at: None,
-            last_state_change: Instant::now(),
-        });
+        let mut circuit = self
+            .circuits
+            .entry(app_id.to_string())
+            .or_insert_with(|| Circuit {
+                state: CircuitState::Closed,
+                consecutive_failures: 0,
+                last_failure_at: None,
+                last_state_change: Instant::now(),
+            });
         circuit.consecutive_failures += 1;
         circuit.last_failure_at = Some(Instant::now());
 
@@ -112,7 +121,10 @@ impl CircuitBreakerManager {
                 // Probe failed — go back to open
                 circuit.state = CircuitState::Open;
                 circuit.last_state_change = Instant::now();
-                tracing::warn!(app = app_id, "circuit breaker: HALF-OPEN → OPEN (probe failed)");
+                tracing::warn!(
+                    app = app_id,
+                    "circuit breaker: HALF-OPEN → OPEN (probe failed)"
+                );
             }
             CircuitState::Open => {} // already open, nothing to do
         }
@@ -148,12 +160,15 @@ impl CircuitBreakerManager {
 
     /// Set the last state change time for an app (test helper).
     pub fn set_last_state_change(&self, app_id: &str, instant: Instant) {
-        let mut circuit = self.circuits.entry(app_id.to_string()).or_insert_with(|| Circuit {
-            state: CircuitState::Closed,
-            consecutive_failures: 0,
-            last_failure_at: None,
-            last_state_change: Instant::now(),
-        });
+        let mut circuit = self
+            .circuits
+            .entry(app_id.to_string())
+            .or_insert_with(|| Circuit {
+                state: CircuitState::Closed,
+                consecutive_failures: 0,
+                last_failure_at: None,
+                last_state_change: Instant::now(),
+            });
         circuit.last_state_change = instant;
     }
 }

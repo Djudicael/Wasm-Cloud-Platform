@@ -750,7 +750,8 @@ pub fn ensure_hosts_entry(hostname: &str) -> Result<bool, Box<dyn std::error::Er
         Err(e) => {
             eprintln!(
                 "⚠️ Could not write /etc/hosts ({}). Try running with sudo, or add '{}' manually.",
-                e, entry.trim()
+                e,
+                entry.trim()
             );
             // Many test environments (CI, containers) cannot modify /etc/hosts.
             // The test apps connect to 127.0.0.1 directly for *.internal names,

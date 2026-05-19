@@ -95,13 +95,13 @@
 //! | `VM_NODE_ROOTFS` | Path to wasm-node rootfs | `./assets/wasm-node-rootfs.ext4` |
 //! | `VM_NODE_DATA_DRIVE` | Optional data drive template | None |
 
+pub mod cluster;
 pub mod firecracker;
 pub mod network;
 pub mod vm;
-pub mod cluster;
 
 // Re-export primary types for convenience
+pub use cluster::{ClusterError, ClusterFixture};
 pub use firecracker::FirecrackerClient;
 pub use network::{setup_network, teardown_network};
 pub use vm::{MicroVm, VmConfig, VmError};
-pub use cluster::{ClusterFixture, ClusterError};

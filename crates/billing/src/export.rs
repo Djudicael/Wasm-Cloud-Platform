@@ -207,11 +207,10 @@ pub fn start_export_loop(store: Store, exporter: Arc<dyn BillingExporter>, inter
                 Ok(()) => {
                     // Persist the export watermark using spawn_blocking
                     let store_clone = store.clone();
-                    if let Err(e) =
-                        tokio::task::spawn_blocking(move || {
-                            store_clone.set_billing_export_watermark(last_seq)
-                        })
-                        .await
+                    if let Err(e) = tokio::task::spawn_blocking(move || {
+                        store_clone.set_billing_export_watermark(last_seq)
+                    })
+                    .await
                     {
                         tracing::error!(error = %e, "spawn_blocking task panicked while saving watermark");
                         continue;

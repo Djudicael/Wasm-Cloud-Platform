@@ -22,7 +22,10 @@ pub fn authorize_roles(
     allowed_roles.iter().any(|required| {
         identity.roles.iter().any(|r| r == required)
             || client_id.map_or(false, |cid| {
-                identity.roles.iter().any(|r| r == &format!("{}:{}", cid, required))
+                identity
+                    .roles
+                    .iter()
+                    .any(|r| r == &format!("{}:{}", cid, required))
             })
     })
 }

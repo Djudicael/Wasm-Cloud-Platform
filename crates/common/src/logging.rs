@@ -896,8 +896,7 @@ impl RotatingFileWriter {
                 return;
             }
         };
-        let mut encoder =
-            flate2::write::GzEncoder::new(&mut output, flate2::Compression::fast());
+        let mut encoder = flate2::write::GzEncoder::new(&mut output, flate2::Compression::fast());
         if let Err(e) = std::io::copy(&mut input, &mut encoder) {
             tracing::warn!("failed to compress log file '{}': {}", path, e);
             return;

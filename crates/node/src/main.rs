@@ -816,66 +816,42 @@ async fn main() -> anyhow::Result<()> {
         gateway: Some(gateway.clone()),
     });
 
-    {
-        let d = dispatcher.clone();
-        let node_id = config.node.node_id.clone();
-        tracing::info!(subscribing_to = "DEPLOY", consumer = %node_id, "subscribing to deploy stream");
-        if let Err(e) = bus
-            .subscribe_durable("DEPLOY", &node_id, move |event| {
-                let d = d.clone();
-                async move { d.handle(event).await }
-            })
-            .await
-        {
-            tracing::error!(error = %e, "failed to subscribe to DEPLOY stream");
-        } else {
-            tracing::info!("successfully subscribed to DEPLOY stream");
-        }
-    }
+    // Subscribe to control-plane streams with subject-filtered durable consumers.
+    // This avoids duplicate delivery when a stream carries multiple event classes.
+    let subscription_specs = vec![
+        ("DEPLOY", "deploy.>"),
+        ("DEPLOY", "routes.>"),
+        ("CONTROL", "instance.ready.>"),
+        ("CONTROL", "instance.dead.>"),
+        ("CONTROL", "secrets.update.>"),
+        ("CONTROL", "config.update.>"),
+        ("CONTROL", "gateway.config.>"),
+        ("NODE", "node.load.>"),
+        ("NODE", "cluster.node_joined.>"),
+        ("NODE", "cluster.snapshot.>"),
+        ("HEALTH", "cluster.health.changed.>"),
+        ("HEALTH", "cluster.health.snapshot.>"),
+        ("PLATFORM", "platform.upgrade.>"),
+        ("PLATFORM", "platform.upgrade_complete.>"),
+        ("PLATFORM", "platform.draining.>"),
+        ("PLATFORM", "config.hot_reload.>"),
+        ("EBPF", "ebpf.pressure.*"),
+        ("EBPF", "ebpf.pressure.recovered.*"),
+        ("EBPF", "ebpf.security.incident.*"),
+    ];
 
-    // Subscribe to critical control plane events with durable consumers.
-    // Each subject gets a unique consumer name to avoid conflicts within the same stream.
-    // TODO: Pass subject to subscribe_durable for subject-filtered consumers
-    //       once the messaging API supports it.
-    for subject in &["instance.ready.>", "instance.dead.>"] {
-        let d = dispatcher.clone();
-        let stream = "CONTROL".to_string();
-        let consumer = format!(
-            "node-{}-{}",
-            config.node.node_id,
-            subject.replace('.', "-").replace('>', "all")
-        );
-        bus.subscribe_durable(&stream, &consumer, move |event| {
-            let d = d.clone();
-            async move { d.handle(event).await }
-        })
-        .await?;
-    }
+    let sanitize_subject = |subject: &str| {
+        subject
+            .replace('.', "-")
+            .replace('>', "all")
+            .replace('*', "one")
+    };
 
-    for subject in &["secrets.update.>", "config.update.>"] {
+    for (stream, subject) in subscription_specs {
         let d = dispatcher.clone();
-        let stream = "CONTROL".to_string();
-        let consumer = format!(
-            "node-{}-{}",
-            config.node.node_id,
-            subject.replace('.', "-").replace('>', "all")
-        );
-        bus.subscribe_durable(&stream, &consumer, move |event| {
-            let d = d.clone();
-            async move { d.handle(event).await }
-        })
-        .await?;
-    }
-
-    for subject in &["node.load.>", "routes.", "cluster.>"] {
-        let d = dispatcher.clone();
-        let stream = "NODE".to_string();
-        let consumer = format!(
-            "node-{}-{}",
-            config.node.node_id,
-            subject.replace('.', "-").replace('>', "all")
-        );
-        bus.subscribe_durable(&stream, &consumer, move |event| {
+        let consumer = format!("node-{}-{}", config.node.node_id, sanitize_subject(subject));
+        tracing::info!(stream, subject, consumer = %consumer, "subscribing durable consumer");
+        bus.subscribe_durable(stream, &consumer, Some(subject), move |event| {
             let d = d.clone();
             async move { d.handle(event).await }
         })

@@ -25,7 +25,9 @@ async fn test_gateway_config_admin_api() {
         .await
         .expect("Failed to start NATS");
     let bus = nats.connect().await.expect("Failed to connect to NATS");
-    bus.setup_jetstream().await.expect("Failed to setup JetStream");
+    bus.setup_jetstream()
+        .await
+        .expect("Failed to setup JetStream");
 
     // 2. Start node
     let node = NodeProcess::start_with_admin("gateway-test-node", &nats.url, 18080, 19100, 19090)
@@ -73,7 +75,12 @@ async fn test_gateway_config_admin_api() {
         .send()
         .await
         .expect("Failed to create gateway config");
-    assert_eq!(resp.status(), 200, "Expected 200 OK, got {:?}", resp.text().await);
+    assert_eq!(
+        resp.status(),
+        200,
+        "Expected 200 OK, got {:?}",
+        resp.text().await
+    );
 
     // 5. Read it back
     let resp = client
@@ -85,7 +92,10 @@ async fn test_gateway_config_admin_api() {
     let body: serde_json::Value = resp.json().await.unwrap();
     let config = body["config"].clone();
     assert_eq!(config["auth"]["type"], "Authenticated");
-    assert_eq!(config["cors"]["allowed_origins"][0], "https://app.example.com");
+    assert_eq!(
+        config["cors"]["allowed_origins"][0],
+        "https://app.example.com"
+    );
     assert_eq!(config["rate_limit"]["requests_per_second"], 500);
     assert_eq!(config["circuit_breaker"]["failure_threshold"], 5);
 
@@ -130,12 +140,15 @@ async fn test_gateway_config_persistence() {
         .await
         .expect("Failed to start NATS");
     let bus = nats.connect().await.expect("Failed to connect to NATS");
-    bus.setup_jetstream().await.expect("Failed to setup JetStream");
+    bus.setup_jetstream()
+        .await
+        .expect("Failed to setup JetStream");
 
     // 2. Start node
-    let node = NodeProcess::start_with_admin("gateway-persist-node", &nats.url, 18081, 19101, 19091)
-        .await
-        .expect("Failed to start node");
+    let node =
+        NodeProcess::start_with_admin("gateway-persist-node", &nats.url, 18081, 19101, 19091)
+            .await
+            .expect("Failed to start node");
 
     let client = reqwest::Client::new();
     let admin_base = format!("http://127.0.0.1:{}", node.admin_port);
@@ -212,7 +225,9 @@ async fn test_cors_preflight_e2e() {
         .await
         .expect("Failed to start NATS");
     let bus = nats.connect().await.expect("Failed to connect to NATS");
-    bus.setup_jetstream().await.expect("Failed to setup JetStream");
+    bus.setup_jetstream()
+        .await
+        .expect("Failed to setup JetStream");
 
     // 2. Start node
     let node = NodeProcess::start_with_admin("gateway-cors-node", &nats.url, 18082, 19102, 19092)
@@ -222,18 +237,30 @@ async fn test_cors_preflight_e2e() {
     // 3. Deploy hello-axum app
     let wasm_path = find_hello_axum_wasm().expect("hello-axum.wasm not found");
     let sha256 = compute_sha256(&wasm_path).expect("Failed to compute SHA-256");
-    let size_bytes = std::fs::metadata(&wasm_path).expect("Failed to get file size").len();
+    let size_bytes = std::fs::metadata(&wasm_path)
+        .expect("Failed to get file size")
+        .len();
 
     upload_artifact(node.artifact_port, &wasm_path, &sha256)
         .await
         .expect("Failed to upload artifact");
 
-    let artifact_url = format!("http://127.0.0.1:{}/artifacts/{}", node.artifact_port, sha256);
+    let artifact_url = format!(
+        "http://127.0.0.1:{}/artifacts/{}",
+        node.artifact_port, sha256
+    );
     let config = build_app_config("cors-app:v1", 100_000_000, 100, 2);
 
-    deploy_app(&bus, "cors-app:v1", artifact_url, sha256, size_bytes, config)
-        .await
-        .expect("Failed to deploy app");
+    deploy_app(
+        &bus,
+        "cors-app:v1",
+        artifact_url,
+        sha256,
+        size_bytes,
+        config,
+    )
+    .await
+    .expect("Failed to deploy app");
 
     add_route(&bus, "cors-test.local", "cors-app:v1")
         .await
@@ -269,11 +296,17 @@ async fn test_cors_preflight_e2e() {
 
     // 5. Send CORS preflight request
     let resp = client
-        .request(reqwest::Method::OPTIONS, format!("http://127.0.0.1:{}/", node.proxy_port))
+        .request(
+            reqwest::Method::OPTIONS,
+            format!("http://127.0.0.1:{}/", node.proxy_port),
+        )
         .header("host", "cors-test.local")
         .header("Origin", "https://app.example.com")
         .header("Access-Control-Request-Method", "POST")
-        .header("Access-Control-Request-Headers", "Authorization, Content-Type")
+        .header(
+            "Access-Control-Request-Headers",
+            "Authorization, Content-Type",
+        )
         .send()
         .await
         .expect("Failed to send preflight request");
@@ -281,29 +314,52 @@ async fn test_cors_preflight_e2e() {
     assert_eq!(resp.status(), 200, "Preflight should return 200");
     let headers = resp.headers();
     assert_eq!(
-        headers.get("access-control-allow-origin").unwrap().to_str().unwrap(),
+        headers
+            .get("access-control-allow-origin")
+            .unwrap()
+            .to_str()
+            .unwrap(),
         "https://app.example.com"
     );
     assert_eq!(
-        headers.get("access-control-allow-methods").unwrap().to_str().unwrap(),
+        headers
+            .get("access-control-allow-methods")
+            .unwrap()
+            .to_str()
+            .unwrap(),
         "GET, POST, OPTIONS"
     );
     assert_eq!(
-        headers.get("access-control-allow-headers").unwrap().to_str().unwrap(),
+        headers
+            .get("access-control-allow-headers")
+            .unwrap()
+            .to_str()
+            .unwrap(),
         "Authorization, Content-Type"
     );
     assert_eq!(
-        headers.get("access-control-allow-credentials").unwrap().to_str().unwrap(),
+        headers
+            .get("access-control-allow-credentials")
+            .unwrap()
+            .to_str()
+            .unwrap(),
         "true"
     );
     assert_eq!(
-        headers.get("access-control-max-age").unwrap().to_str().unwrap(),
+        headers
+            .get("access-control-max-age")
+            .unwrap()
+            .to_str()
+            .unwrap(),
         "3600"
     );
 
     // 6. Send preflight from disallowed origin → should fail
     let resp = client
-        .request(reqwest::Method::OPTIONS, format!("http://127.0.0.1:{}/", node.proxy_port))
+        .request(
+            reqwest::Method::OPTIONS,
+            format!("http://127.0.0.1:{}/", node.proxy_port),
+        )
         .header("host", "cors-test.local")
         .header("Origin", "https://evil.com")
         .header("Access-Control-Request-Method", "POST")
@@ -335,7 +391,9 @@ async fn test_auth_rejection_without_token() {
         .await
         .expect("Failed to start NATS");
     let bus = nats.connect().await.expect("Failed to connect to NATS");
-    bus.setup_jetstream().await.expect("Failed to setup JetStream");
+    bus.setup_jetstream()
+        .await
+        .expect("Failed to setup JetStream");
 
     // 2. Start node WITHOUT OIDC provider (auth should fail with "OIDC not configured")
     let node = NodeProcess::start_with_admin("gateway-auth-node", &nats.url, 18083, 19103, 19093)
@@ -345,18 +403,30 @@ async fn test_auth_rejection_without_token() {
     // 3. Deploy hello-axum app with auth
     let wasm_path = find_hello_axum_wasm().expect("hello-axum.wasm not found");
     let sha256 = compute_sha256(&wasm_path).expect("Failed to compute SHA-256");
-    let size_bytes = std::fs::metadata(&wasm_path).expect("Failed to get file size").len();
+    let size_bytes = std::fs::metadata(&wasm_path)
+        .expect("Failed to get file size")
+        .len();
 
     upload_artifact(node.artifact_port, &wasm_path, &sha256)
         .await
         .expect("Failed to upload artifact");
 
-    let artifact_url = format!("http://127.0.0.1:{}/artifacts/{}", node.artifact_port, sha256);
+    let artifact_url = format!(
+        "http://127.0.0.1:{}/artifacts/{}",
+        node.artifact_port, sha256
+    );
     let config = build_app_config("auth-app:v1", 100_000_000, 100, 2);
 
-    deploy_app(&bus, "auth-app:v1", artifact_url, sha256, size_bytes, config)
-        .await
-        .expect("Failed to deploy app");
+    deploy_app(
+        &bus,
+        "auth-app:v1",
+        artifact_url,
+        sha256,
+        size_bytes,
+        config,
+    )
+    .await
+    .expect("Failed to deploy app");
 
     add_route(&bus, "auth-test.local", "auth-app:v1")
         .await
@@ -435,7 +505,9 @@ async fn test_circuit_breaker_opens() {
         .await
         .expect("Failed to start NATS");
     let bus = nats.connect().await.expect("Failed to connect to NATS");
-    bus.setup_jetstream().await.expect("Failed to setup JetStream");
+    bus.setup_jetstream()
+        .await
+        .expect("Failed to setup JetStream");
 
     // 2. Start node
     let node = NodeProcess::start_with_admin("gateway-cb-node", &nats.url, 18084, 19104, 19094)
@@ -445,13 +517,18 @@ async fn test_circuit_breaker_opens() {
     // 3. Deploy hello-axum app with circuit breaker config
     let wasm_path = find_hello_axum_wasm().expect("hello-axum.wasm not found");
     let sha256 = compute_sha256(&wasm_path).expect("Failed to compute SHA-256");
-    let size_bytes = std::fs::metadata(&wasm_path).expect("Failed to get file size").len();
+    let size_bytes = std::fs::metadata(&wasm_path)
+        .expect("Failed to get file size")
+        .len();
 
     upload_artifact(node.artifact_port, &wasm_path, &sha256)
         .await
         .expect("Failed to upload artifact");
 
-    let artifact_url = format!("http://127.0.0.1:{}/artifacts/{}", node.artifact_port, sha256);
+    let artifact_url = format!(
+        "http://127.0.0.1:{}/artifacts/{}",
+        node.artifact_port, sha256
+    );
     let config = build_app_config("cb-app:v1", 100_000_000, 100, 2);
 
     deploy_app(&bus, "cb-app:v1", artifact_url, sha256, size_bytes, config)

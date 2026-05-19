@@ -111,7 +111,7 @@ fn build_response(query: &[u8]) -> Vec<u8> {
         resp.extend_from_slice(&[0x00, 0x01]);
         // TTL
         resp.extend_from_slice(&[0x00, 0x00, 0x00, 0x3C]); // 60 seconds
-        // RDLENGTH
+                                                           // RDLENGTH
         resp.extend_from_slice(&[0x00, 0x04]);
         // RDATA: 127.0.0.1
         resp.extend_from_slice(&[127, 0, 0, 1]);

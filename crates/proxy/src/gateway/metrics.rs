@@ -37,42 +37,54 @@ impl GatewayMetrics {
             "Requests that passed authentication",
         ))
         .unwrap();
-        registry.register(Box::new(auth_success_total.clone())).unwrap();
+        registry
+            .register(Box::new(auth_success_total.clone()))
+            .unwrap();
 
         let auth_failure_total = IntCounter::with_opts(Opts::new(
             "wasm_gateway_auth_failure_total",
             "Requests that failed authentication",
         ))
         .unwrap();
-        registry.register(Box::new(auth_failure_total.clone())).unwrap();
+        registry
+            .register(Box::new(auth_failure_total.clone()))
+            .unwrap();
 
         let authz_denied_total = IntCounter::with_opts(Opts::new(
             "wasm_gateway_authz_denied_total",
             "Requests denied by authorization (wrong roles)",
         ))
         .unwrap();
-        registry.register(Box::new(authz_denied_total.clone())).unwrap();
+        registry
+            .register(Box::new(authz_denied_total.clone()))
+            .unwrap();
 
         let cors_preflight_total = IntCounter::with_opts(Opts::new(
             "wasm_gateway_cors_preflight_total",
             "CORS preflight requests handled",
         ))
         .unwrap();
-        registry.register(Box::new(cors_preflight_total.clone())).unwrap();
+        registry
+            .register(Box::new(cors_preflight_total.clone()))
+            .unwrap();
 
         let rate_limit_denied_total = IntCounter::with_opts(Opts::new(
             "wasm_gateway_rate_limit_denied_total",
             "Requests denied by distributed rate limiter",
         ))
         .unwrap();
-        registry.register(Box::new(rate_limit_denied_total.clone())).unwrap();
+        registry
+            .register(Box::new(rate_limit_denied_total.clone()))
+            .unwrap();
 
         let circuit_breaker_rejected_total = IntCounter::with_opts(Opts::new(
             "wasm_gateway_circuit_breaker_rejected_total",
             "Requests rejected by circuit breaker",
         ))
         .unwrap();
-        registry.register(Box::new(circuit_breaker_rejected_total.clone())).unwrap();
+        registry
+            .register(Box::new(circuit_breaker_rejected_total.clone()))
+            .unwrap();
 
         let circuits_open = IntGauge::with_opts(Opts::new(
             "wasm_gateway_circuits_open",
@@ -86,14 +98,18 @@ impl GatewayMetrics {
             "JWKS cache refresh attempts",
         ))
         .unwrap();
-        registry.register(Box::new(jwks_refresh_total.clone())).unwrap();
+        registry
+            .register(Box::new(jwks_refresh_total.clone()))
+            .unwrap();
 
         let jwks_refresh_failures = IntCounter::with_opts(Opts::new(
             "wasm_gateway_jwks_refresh_failures",
             "JWKS cache refresh failures",
         ))
         .unwrap();
-        registry.register(Box::new(jwks_refresh_failures.clone())).unwrap();
+        registry
+            .register(Box::new(jwks_refresh_failures.clone()))
+            .unwrap();
 
         GatewayMetrics {
             auth_success_total,

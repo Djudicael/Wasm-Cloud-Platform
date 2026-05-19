@@ -162,8 +162,8 @@ pub async fn send_request_text(
 /// small files (Wasm artifacts are typically < 50 MB).
 pub fn sha256_file(path: &Path) -> Result<String, String> {
     use sha2::{Digest, Sha256};
-    let bytes = std::fs::read(path)
-        .map_err(|e| format!("failed to read file {}: {e}", path.display()))?;
+    let bytes =
+        std::fs::read(path).map_err(|e| format!("failed to read file {}: {e}", path.display()))?;
     let hash = Sha256::digest(&bytes);
     Ok(hex::encode(hash))
 }
@@ -503,7 +503,10 @@ pub fn ensure_hosts_entry(hostname: &str) -> Result<bool, String> {
                     info!(hostname, "added to /etc/hosts via sudo");
                     return Ok(true);
                 }
-                Ok(_) => info!(hostname, "sudo tee failed (wrong password or no sudo access)"),
+                Ok(_) => info!(
+                    hostname,
+                    "sudo tee failed (wrong password or no sudo access)"
+                ),
                 Err(e) => info!(hostname, error = %e, "sudo tee command failed"),
             }
         }
@@ -572,8 +575,7 @@ fn is_wsl() -> bool {
 /// **Must run inside WSL** because the WASI target requires a Unix-like
 /// toolchain.
 pub fn find_hello_axum_wasm() -> Result<PathBuf, String> {
-    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR")
-        .unwrap_or_else(|_| ".".to_string());
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string());
     let workspace_root = Path::new(&manifest_dir)
         .parent()
         .and_then(|p| p.parent())
@@ -631,8 +633,7 @@ pub fn find_hello_axum_wasm() -> Result<PathBuf, String> {
 ///
 /// Same logic as `find_hello_axum_wasm` but for the echo-service app.
 pub fn find_echo_service_wasm() -> Result<PathBuf, String> {
-    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR")
-        .unwrap_or_else(|_| ".".to_string());
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string());
     let workspace_root = Path::new(&manifest_dir)
         .parent()
         .and_then(|p| p.parent())
@@ -705,17 +706,11 @@ pub async fn count_billing_records(admin_addr: &str) -> Result<u64, String> {
         .map_err(|e| format!("billing count request failed: {e}"))?;
 
     if !resp.status().is_success() {
-        return Err(format!(
-            "billing count returned status {}",
-            resp.status()
-        ));
+        return Err(format!("billing count returned status {}", resp.status()));
     }
 
     let body: serde_json::Value = resp.json().await.unwrap_or_default();
-    Ok(body
-        .get("count")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0))
+    Ok(body.get("count").and_then(|v| v.as_u64()).unwrap_or(0))
 }
 
 // ── Retry Helper ─────────────────────────────────────────────────────
@@ -763,7 +758,10 @@ where
         }
     }
 
-    Err(format!("{name}: all {} retries failed — last error: {last_err}", max_retries))
+    Err(format!(
+        "{name}: all {} retries failed — last error: {last_err}",
+        max_retries
+    ))
 }
 
 // ── Setup Helpers (used by chaos scenarios) ──────────────────────────
@@ -838,7 +836,15 @@ pub async fn setup_deploy_app_only(
     let bus = fixture.connect_bus().await?;
     let config = build_app_config(app_id, 100_000_000, 100, 1);
 
-    deploy_app(&bus, app_id, artifact_url, sha256.clone(), size_bytes, config).await?;
+    deploy_app(
+        &bus,
+        app_id,
+        artifact_url,
+        sha256.clone(),
+        size_bytes,
+        config,
+    )
+    .await?;
 
     Ok(sha256)
 }

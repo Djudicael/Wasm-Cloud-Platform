@@ -187,8 +187,7 @@ pub fn create_tap(tap_name: &str, bridge_name: &str) -> Result<()> {
     }
 
     // Create TAP device
-    run(Command::new("ip")
-        .args(["tuntap", "add", tap_name, "mode", "tap"]))?;
+    run(Command::new("ip").args(["tuntap", "add", tap_name, "mode", "tap"]))?;
 
     // Bring up
     run(Command::new("ip").args(["link", "set", tap_name, "up"]))?;
@@ -217,14 +216,23 @@ pub fn remove_tap(tap_name: &str) -> Result<()> {
 pub fn enable_nat(bridge_name: &str, subnet: &str) -> Result<()> {
     info!(%bridge_name, %subnet, "Enabling NAT for microVMs");
 
-    run(Command::new("iptables")
-        .args(["-t", "nat", "-A", "POSTROUTING", "-s", subnet, "!", "-o", bridge_name, "-j", "MASQUERADE"]))?;
+    run(Command::new("iptables").args([
+        "-t",
+        "nat",
+        "-A",
+        "POSTROUTING",
+        "-s",
+        subnet,
+        "!",
+        "-o",
+        bridge_name,
+        "-j",
+        "MASQUERADE",
+    ]))?;
 
     // Allow forwarding from bridge
-    run(Command::new("iptables")
-        .args(["-A", "FORWARD", "-i", bridge_name, "-j", "ACCEPT"]))?;
-    run(Command::new("iptables")
-        .args(["-A", "FORWARD", "-o", bridge_name, "-j", "ACCEPT"]))?;
+    run(Command::new("iptables").args(["-A", "FORWARD", "-i", bridge_name, "-j", "ACCEPT"]))?;
+    run(Command::new("iptables").args(["-A", "FORWARD", "-o", bridge_name, "-j", "ACCEPT"]))?;
 
     info!("NAT enabled");
     Ok(())
@@ -234,13 +242,24 @@ pub fn enable_nat(bridge_name: &str, subnet: &str) -> Result<()> {
 pub fn disable_nat(bridge_name: &str, subnet: &str) -> Result<()> {
     info!(%bridge_name, "Disabling NAT");
 
-    let _ = run(Command::new("iptables")
-        .args(["-t", "nat", "-D", "POSTROUTING", "-s", subnet, "!", "-o", bridge_name, "-j", "MASQUERADE"]));
+    let _ = run(Command::new("iptables").args([
+        "-t",
+        "nat",
+        "-D",
+        "POSTROUTING",
+        "-s",
+        subnet,
+        "!",
+        "-o",
+        bridge_name,
+        "-j",
+        "MASQUERADE",
+    ]));
 
-    let _ = run(Command::new("iptables")
-        .args(["-D", "FORWARD", "-i", bridge_name, "-j", "ACCEPT"]));
-    let _ = run(Command::new("iptables")
-        .args(["-D", "FORWARD", "-o", bridge_name, "-j", "ACCEPT"]));
+    let _ =
+        run(Command::new("iptables").args(["-D", "FORWARD", "-i", bridge_name, "-j", "ACCEPT"]));
+    let _ =
+        run(Command::new("iptables").args(["-D", "FORWARD", "-o", bridge_name, "-j", "ACCEPT"]));
 
     Ok(())
 }
@@ -255,7 +274,11 @@ pub fn allocate_ip(subnet_prefix: &str, index: u8) -> Result<String> {
     if index >= 250 {
         return Err(NetworkError::IpExhausted(subnet_prefix.to_string()));
     }
-    let ip = format!("{}.{}", subnet_prefix.trim_end_matches(".0"), VM_IP_BASE + index);
+    let ip = format!(
+        "{}.{}",
+        subnet_prefix.trim_end_matches(".0"),
+        VM_IP_BASE + index
+    );
     Ok(ip)
 }
 
@@ -274,7 +297,10 @@ pub fn guest_mac(index: u8) -> String {
 pub fn setup_network(bridge_name: &str, bridge_ip: &str, enable_nat_outbound: bool) -> Result<()> {
     create_bridge(bridge_name, bridge_ip)?;
     if enable_nat_outbound {
-        let subnet = bridge_ip.rsplit_once('/').map(|(ip, _)| format!("{}/24", ip.trim_end_matches(".1").trim_end_matches("."))).unwrap_or_else(|| "172.20.0.0/24".to_string());
+        let subnet = bridge_ip
+            .rsplit_once('/')
+            .map(|(ip, _)| format!("{}/24", ip.trim_end_matches(".1").trim_end_matches(".")))
+            .unwrap_or_else(|| "172.20.0.0/24".to_string());
         enable_nat(bridge_name, &subnet)?;
     }
     Ok(())

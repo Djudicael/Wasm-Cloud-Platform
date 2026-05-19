@@ -52,23 +52,32 @@ pub enum GatewayAction {
         reset_timeout: u32,
     },
     /// Show gateway config for a route
-    Show {
-        app_id: String,
-    },
+    Show { app_id: String },
     /// Remove gateway config for a route (revert to public)
-    Reset {
-        app_id: String,
-    },
+    Reset { app_id: String },
 }
 
-pub async fn run(args: GatewayArgs, bus: &NatsBus, node_api: &str, http: &reqwest::Client) -> Result<()> {
+pub async fn run(
+    args: GatewayArgs,
+    bus: &NatsBus,
+    node_api: &str,
+    http: &reqwest::Client,
+) -> Result<()> {
     match args.action {
-        GatewayAction::SetAuth { app_id, policy, roles, client_id } => {
+        GatewayAction::SetAuth {
+            app_id,
+            policy,
+            roles,
+            client_id,
+        } => {
             let app_id = parse_app_id(&app_id)?;
             let auth = match policy.as_str() {
                 "none" => common::types::AuthPolicy::None,
                 "authenticated" => common::types::AuthPolicy::Authenticated,
-                "roles" => common::types::AuthPolicy::Roles { allowed_roles: roles, client_id },
+                "roles" => common::types::AuthPolicy::Roles {
+                    allowed_roles: roles,
+                    client_id,
+                },
                 other => anyhow::bail!("unknown auth policy: {}", other),
             };
             let config = GatewayRouteConfig {
@@ -77,7 +86,12 @@ pub async fn run(args: GatewayArgs, bus: &NatsBus, node_api: &str, http: &reqwes
             };
             publish_config_update(bus, app_id, config).await
         }
-        GatewayAction::SetCors { app_id, origins, credentials, max_age } => {
+        GatewayAction::SetCors {
+            app_id,
+            origins,
+            credentials,
+            max_age,
+        } => {
             let app_id = parse_app_id(&app_id)?;
             let cors = common::types::CorsPolicy {
                 allowed_origins: origins,
@@ -93,7 +107,12 @@ pub async fn run(args: GatewayArgs, bus: &NatsBus, node_api: &str, http: &reqwes
             };
             publish_config_update(bus, app_id, config).await
         }
-        GatewayAction::SetRateLimit { app_id, rps, burst, distributed } => {
+        GatewayAction::SetRateLimit {
+            app_id,
+            rps,
+            burst,
+            distributed,
+        } => {
             let app_id = parse_app_id(&app_id)?;
             let rate_limit = common::types::RouteRateLimit {
                 requests_per_second: rps,
@@ -106,7 +125,11 @@ pub async fn run(args: GatewayArgs, bus: &NatsBus, node_api: &str, http: &reqwes
             };
             publish_config_update(bus, app_id, config).await
         }
-        GatewayAction::SetCircuitBreaker { app_id, failure_threshold, reset_timeout } => {
+        GatewayAction::SetCircuitBreaker {
+            app_id,
+            failure_threshold,
+            reset_timeout,
+        } => {
             let app_id = parse_app_id(&app_id)?;
             let cb = common::types::CircuitBreakerConfig {
                 failure_threshold,
@@ -132,9 +155,15 @@ pub async fn run(args: GatewayArgs, bus: &NatsBus, node_api: &str, http: &reqwes
         }
         GatewayAction::Reset { app_id } => {
             let app_id = parse_app_id(&app_id)?;
-            let event = Event::GatewayConfigRemove { app_id: app_id.clone() };
+            let event = Event::GatewayConfigRemove {
+                app_id: app_id.clone(),
+            };
             bus.publish(&event).await?;
-            println!("{} Gateway config removed for {}", "✓".green(), app_id.0.cyan());
+            println!(
+                "{} Gateway config removed for {}",
+                "✓".green(),
+                app_id.0.cyan()
+            );
             Ok(())
         }
     }
@@ -148,9 +177,20 @@ fn parse_app_id(s: &str) -> Result<AppId> {
     Ok(AppId::new(parts[0], parts[1]))
 }
 
-async fn publish_config_update(bus: &NatsBus, app_id: AppId, config: GatewayRouteConfig) -> Result<()> {
-    let event = Event::GatewayConfigUpdate { app_id: app_id.clone(), config };
+async fn publish_config_update(
+    bus: &NatsBus,
+    app_id: AppId,
+    config: GatewayRouteConfig,
+) -> Result<()> {
+    let event = Event::GatewayConfigUpdate {
+        app_id: app_id.clone(),
+        config,
+    };
     bus.publish(&event).await?;
-    println!("{} Gateway config updated for {}", "✓".green(), app_id.0.cyan());
+    println!(
+        "{} Gateway config updated for {}",
+        "✓".green(),
+        app_id.0.cyan()
+    );
     Ok(())
 }

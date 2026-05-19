@@ -165,9 +165,7 @@ impl MicroVm {
             .map_err(|e| VmError::Firecracker(e))?;
 
         // 6. Configure logging
-        let _ = client
-            .configure_logging(&firecracker_log, "Info")
-            .await;
+        let _ = client.configure_logging(&firecracker_log, "Info").await;
         let _ = client.configure_metrics(&firecracker_metrics).await;
 
         // 7. Configure machine
@@ -178,7 +176,10 @@ impl MicroVm {
 
         // 8. Configure boot source
         client
-            .set_boot_source(&config.kernel_path, "console=ttyS0 reboot=k panic=1 pci=off quiet")
+            .set_boot_source(
+                &config.kernel_path,
+                "console=ttyS0 reboot=k panic=1 pci=off quiet",
+            )
             .await
             .map_err(VmError::Firecracker)?;
 
@@ -205,11 +206,17 @@ impl MicroVm {
 
         // 12. Configure MMDS if provided
         if let Some(ref mmds) = config.mmds_data {
-            client.configure_mmds(mmds.clone()).await.map_err(VmError::Firecracker)?;
+            client
+                .configure_mmds(mmds.clone())
+                .await
+                .map_err(VmError::Firecracker)?;
         }
 
         // 13. Start the VM
-        client.start_instance().await.map_err(VmError::Firecracker)?;
+        client
+            .start_instance()
+            .await
+            .map_err(VmError::Firecracker)?;
 
         info!(vm_id = %config.id, "MicroVM started successfully");
 

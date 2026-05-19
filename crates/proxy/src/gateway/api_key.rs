@@ -25,8 +25,7 @@ impl ApiKeyValidator {
         let hash = format!("sha256${}", hex::encode(hasher.finalize()));
 
         if let Some(record) = self.keys.get(&hash) {
-            return record.scopes.is_empty()
-                || record.scopes.iter().any(|s| path.starts_with(s));
+            return record.scopes.is_empty() || record.scopes.iter().any(|s| path.starts_with(s));
         }
         false
     }

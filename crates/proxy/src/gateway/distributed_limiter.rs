@@ -1,7 +1,7 @@
+use futures::StreamExt;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
-use futures::StreamExt;
 
 /// Distributed rate limiter using NATS KV for cross-node coordination.
 pub struct DistributedRateLimiter {
@@ -123,8 +123,7 @@ impl DistributedRateLimiter {
 
         let prefix = format!("ratelimit:{}:", self.app_id);
         let mut keys = Vec::new();
-        let mut key_stream = kv.keys().await
-            .map_err(|e| format!("kv keys: {e}"))?;
+        let mut key_stream = kv.keys().await.map_err(|e| format!("kv keys: {e}"))?;
         while let Some(key_result) = key_stream.next().await {
             match key_result {
                 Ok(key) => {
@@ -188,6 +187,10 @@ pub struct RateLimitEntry {
 
 impl RateLimitEntry {
     pub fn new(node_id: String, consumed: u64, timestamp: i64) -> Self {
-        RateLimitEntry { node_id, consumed, timestamp }
+        RateLimitEntry {
+            node_id,
+            consumed,
+            timestamp,
+        }
     }
 }

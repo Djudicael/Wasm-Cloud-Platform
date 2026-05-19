@@ -120,7 +120,11 @@ impl ClusterFixture {
     ///
     /// The NATS VM runs a minimal Linux with NATS Server + JetStream.
     /// It is allocated IP `172.20.0.10` by convention.
-    pub async fn start_nats(&mut self, memory_mb: usize, vcpus: usize) -> Result<&MicroVm, ClusterError> {
+    pub async fn start_nats(
+        &mut self,
+        memory_mb: usize,
+        vcpus: usize,
+    ) -> Result<&MicroVm, ClusterError> {
         if self.nats.is_some() {
             warn!("NATS VM already running");
             return Ok(self.nats.as_ref().unwrap());
@@ -421,10 +425,7 @@ fn find_node_data_drive() -> Option<PathBuf> {
         }
     }
 
-    let candidates = [
-        "./assets/node-data.ext4",
-        "/opt/vm-testbed/node-data.ext4",
-    ];
+    let candidates = ["./assets/node-data.ext4", "/opt/vm-testbed/node-data.ext4"];
 
     for c in &candidates {
         let p = PathBuf::from(c);

@@ -29,7 +29,7 @@
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 use std::time::Duration;
-use tracing::{info, error};
+use tracing::{error, info};
 
 #[derive(Parser)]
 #[command(name = "vm-testbed-cli")]
@@ -123,7 +123,15 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::SpawnNode { id, ip, memory, vcpus, kernel, rootfs, nats_url } => {
+        Commands::SpawnNode {
+            id,
+            ip,
+            memory,
+            vcpus,
+            kernel,
+            rootfs,
+            nats_url,
+        } => {
             info!(%id, %ip, memory, vcpus, "Spawning single node");
 
             let kernel_path = kernel.unwrap_or_else(|| find_kernel());
@@ -160,7 +168,13 @@ async fn main() -> anyhow::Result<()> {
             vm.shutdown().await?;
         }
 
-        Commands::SpawnCluster { nodes, node_memory, node_vcpus, nats_memory, nats_vcpus } => {
+        Commands::SpawnCluster {
+            nodes,
+            node_memory,
+            node_vcpus,
+            nats_memory,
+            nats_vcpus,
+        } => {
             info!(nodes, "Spawning cluster");
 
             let mut cluster = vm_testbed::ClusterFixture::new("cli-cluster").await?;
@@ -171,7 +185,9 @@ async fn main() -> anyhow::Result<()> {
                 info!(%id, "Node started");
             }
 
-            cluster.wait_for_all_healthy(Duration::from_secs(120)).await?;
+            cluster
+                .wait_for_all_healthy(Duration::from_secs(120))
+                .await?;
             info!("All nodes healthy!");
 
             // Print cluster info
@@ -179,7 +195,12 @@ async fn main() -> anyhow::Result<()> {
             println!("NATS URL: {}", cluster.nats_url()?);
             for id in cluster.node_ids() {
                 if let Ok(node) = cluster.get_node(&id) {
-                    println!("Node {}: admin={}, proxy={}", id, node.admin_addr(), node.proxy_addr());
+                    println!(
+                        "Node {}: admin={}, proxy={}",
+                        id,
+                        node.admin_addr(),
+                        node.proxy_addr()
+                    );
                 }
             }
 
@@ -227,13 +248,12 @@ async fn main() -> anyhow::Result<()> {
 }
 
 fn find_kernel() -> PathBuf {
-    let candidates = [
-        "./assets/vmlinux-6.1",
-        "/opt/vm-testbed/vmlinux-6.1",
-    ];
+    let candidates = ["./assets/vmlinux-6.1", "/opt/vm-testbed/vmlinux-6.1"];
     for c in &candidates {
         let p = PathBuf::from(c);
-        if p.exists() { return p; }
+        if p.exists() {
+            return p;
+        }
     }
     panic!("Kernel not found. Set VM_KERNEL_PATH.")
 }
@@ -245,7 +265,9 @@ fn find_node_rootfs() -> PathBuf {
     ];
     for c in &candidates {
         let p = PathBuf::from(c);
-        if p.exists() { return p; }
+        if p.exists() {
+            return p;
+        }
     }
     panic!("Rootfs not found. Set VM_NODE_ROOTFS.")
 }

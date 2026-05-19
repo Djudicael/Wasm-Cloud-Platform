@@ -476,7 +476,8 @@ async fn test_on_wire_encryption_verification() {
     let receiver_pubkey = receiver.public_bytes();
 
     let plaintext_secret = "my_super_secret_password_12345";
-    let encrypted = secrets::encrypt_for_peer(&receiver_pubkey, plaintext_secret.as_bytes()).unwrap();
+    let encrypted =
+        secrets::encrypt_for_peer(&receiver_pubkey, plaintext_secret.as_bytes()).unwrap();
 
     // Verify the encrypted blob does NOT contain the plaintext anywhere
     let encrypted_str = String::from_utf8_lossy(&encrypted);

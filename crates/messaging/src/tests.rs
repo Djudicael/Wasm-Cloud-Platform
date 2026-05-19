@@ -2,6 +2,10 @@
 mod test_helpers {
     use crate::{events::Event, NatsBus};
     use common::types::{AppConfig, AppId};
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
     use std::time::Duration;
     use testcontainers::{core::ContainerPort, runners::AsyncRunner, GenericImage, ImageExt};
     use tokio::sync::mpsc;
@@ -33,14 +37,14 @@ mod test_helpers {
         setup_container_runtime();
 
         let image = GenericImage::new("nats", "latest")
-            .with_mapped_port(4222, ContainerPort::Tcp(4222))
+            .with_mapped_port(4224, ContainerPort::Tcp(4222))
             .with_cmd(vec!["-js"]); // enable JetStream
         let _container = image.start().await.expect("Failed to start NATS container");
 
         // Wait for NATS to boot up
         tokio::time::sleep(Duration::from_secs(2)).await;
 
-        let url = "nats://127.0.0.1:4222".to_string();
+        let url = "nats://127.0.0.1:4224".to_string();
         let bus = NatsBus::connect(&url)
             .await
             .expect("Failed to connect to NATS");
@@ -133,10 +137,11 @@ mod test_helpers {
         let consumer_name = format!("test_consumer_{}", uuid::Uuid::new_v4().simple());
 
         // 3. Create the durable consumer
-        bus.subscribe_durable("DEPLOY", &consumer_name, move |event| {
+        bus.subscribe_durable("DEPLOY", &consumer_name, Some("deploy.>"), move |event| {
             let tx = tx.clone();
             async move {
                 let _ = tx.send(event).await; // Ignore send errors if test already finished
+                Ok::<(), common::error::PlatformError>(())
             }
         })
         .await
@@ -158,6 +163,73 @@ mod test_helpers {
                 assert_eq!(artifact_url, "http://example.com/durable.wasm");
             }
             _ => panic!("Received unexpected event variant from JetStream"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_jetstream_handler_error_redelivery() {
+        setup_container_runtime();
+
+        let image = GenericImage::new("nats", "latest")
+            .with_mapped_port(4225, ContainerPort::Tcp(4222))
+            .with_cmd(vec!["-js"]); // enable JetStream
+        let _container = image.start().await.expect("Failed to start NATS container");
+
+        tokio::time::sleep(Duration::from_secs(2)).await;
+
+        let url = "nats://127.0.0.1:4225".to_string();
+        let bus = NatsBus::connect(&url)
+            .await
+            .expect("Failed to connect to NATS");
+        bus.setup_jetstream().await.unwrap();
+
+        let app_id = AppId::new("retry-app", "v1");
+        let event = Event::DeployApp {
+            app_id: app_id.clone(),
+            config: AppConfig::default_for(app_id),
+            artifact_url: "http://example.com/retry.wasm".to_string(),
+            expected_hash: None,
+            size_bytes: 1024,
+        };
+        bus.publish(&event).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let (tx, mut rx) = mpsc::channel(10);
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let attempts_for_handler = attempts.clone();
+        let consumer_name = format!("retry_consumer_{}", uuid::Uuid::new_v4().simple());
+
+        bus.subscribe_durable("DEPLOY", &consumer_name, Some("deploy.>"), move |event| {
+            let tx = tx.clone();
+            let attempts = attempts_for_handler.clone();
+            async move {
+                let current = attempts.fetch_add(1, Ordering::SeqCst);
+                if current == 0 {
+                    Err(common::error::PlatformError::messaging(
+                        "transient handler failure",
+                    ))
+                } else {
+                    let _ = tx.send(event).await;
+                    Ok(())
+                }
+            }
+        })
+        .await
+        .unwrap();
+
+        let received = timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("Timed out waiting for redelivery")
+            .expect("Channel closed");
+
+        assert!(attempts.load(Ordering::SeqCst) >= 2);
+        match received {
+            Event::DeployApp {
+                app_id: recv_id, ..
+            } => {
+                assert_eq!(recv_id.0, "retry-app:v1");
+            }
+            _ => panic!("Received unexpected event variant from JetStream redelivery"),
         }
     }
 
@@ -191,7 +263,10 @@ mod test_helpers {
                 assert_eq!(app_id.0, "echo-service:v1");
                 assert_eq!(config, gw_config);
             }
-            _ => panic!("Expected GatewayConfigUpdate, got {:?}", deserialized.payload),
+            _ => panic!(
+                "Expected GatewayConfigUpdate, got {:?}",
+                deserialized.payload
+            ),
         }
     }
 
@@ -199,17 +274,97 @@ mod test_helpers {
     fn test_event_discriminants() {
         use common::types::GatewayRouteConfig;
         let events: Vec<(&str, Event)> = vec![
-            ("RemoveApp", Event::RemoveApp { app_id: AppId("a".to_string()) }),
-            ("RouteAdd", Event::RouteAdd { route: common::types::Route { host: "".to_string(), app_id: AppId("a".to_string()), path_prefix: "".to_string(), strip_prefix: false, created_at: 0, updated_at: 0 } }),
-            ("RouteRemove", Event::RouteRemove { host: "".to_string() }),
-            ("InstanceReady", Event::InstanceReady { app_id: AppId("a".to_string()), addr: "127.0.0.1:1".parse().unwrap(), node_id: "".to_string() }),
-            ("InstanceDead", Event::InstanceDead { app_id: AppId("a".to_string()), addr: "127.0.0.1:1".parse().unwrap(), node_id: "".to_string() }),
-            ("SecretUpdate", Event::SecretUpdate { app_id: AppId("a".to_string()), key: "".to_string(), encrypted_value: vec![] }),
-            ("GatewayConfigUpdate", Event::GatewayConfigUpdate { app_id: AppId("a".to_string()), config: GatewayRouteConfig::default() }),
-            ("GatewayConfigRemove", Event::GatewayConfigRemove { app_id: AppId("a".to_string()) }),
-            ("NodeLoad", Event::NodeLoad { node_id: "".to_string(), cpu_percent: 0.0, fuel_budget_used_percent: 0.0, active_instances: 0 }),
-            ("NodeJoined", Event::NodeJoined { node_id: "".to_string(), artifact_server_url: "".to_string(), public_key_bytes: vec![], protocol_version: 1, binary_version: "".to_string() }),
-            ("StateSnapshot", Event::StateSnapshot { for_node_id: "".to_string(), configs: vec![], routes: vec![], encrypted_secrets: vec![], artifact_hashes: vec![] }),
+            (
+                "RemoveApp",
+                Event::RemoveApp {
+                    app_id: AppId("a".to_string()),
+                },
+            ),
+            (
+                "RouteAdd",
+                Event::RouteAdd {
+                    route: common::types::Route {
+                        host: "".to_string(),
+                        app_id: AppId("a".to_string()),
+                        path_prefix: "".to_string(),
+                        strip_prefix: false,
+                        created_at: 0,
+                        updated_at: 0,
+                    },
+                },
+            ),
+            (
+                "RouteRemove",
+                Event::RouteRemove {
+                    host: "".to_string(),
+                },
+            ),
+            (
+                "InstanceReady",
+                Event::InstanceReady {
+                    app_id: AppId("a".to_string()),
+                    addr: "127.0.0.1:1".parse().unwrap(),
+                    node_id: "".to_string(),
+                },
+            ),
+            (
+                "InstanceDead",
+                Event::InstanceDead {
+                    app_id: AppId("a".to_string()),
+                    addr: "127.0.0.1:1".parse().unwrap(),
+                    node_id: "".to_string(),
+                },
+            ),
+            (
+                "SecretUpdate",
+                Event::SecretUpdate {
+                    app_id: AppId("a".to_string()),
+                    key: "".to_string(),
+                    encrypted_value: vec![],
+                },
+            ),
+            (
+                "GatewayConfigUpdate",
+                Event::GatewayConfigUpdate {
+                    app_id: AppId("a".to_string()),
+                    config: GatewayRouteConfig::default(),
+                },
+            ),
+            (
+                "GatewayConfigRemove",
+                Event::GatewayConfigRemove {
+                    app_id: AppId("a".to_string()),
+                },
+            ),
+            (
+                "NodeLoad",
+                Event::NodeLoad {
+                    node_id: "".to_string(),
+                    cpu_percent: 0.0,
+                    fuel_budget_used_percent: 0.0,
+                    active_instances: 0,
+                },
+            ),
+            (
+                "NodeJoined",
+                Event::NodeJoined {
+                    node_id: "".to_string(),
+                    artifact_server_url: "".to_string(),
+                    public_key_bytes: vec![],
+                    protocol_version: 1,
+                    binary_version: "".to_string(),
+                },
+            ),
+            (
+                "StateSnapshot",
+                Event::StateSnapshot {
+                    for_node_id: "".to_string(),
+                    configs: vec![],
+                    routes: vec![],
+                    encrypted_secrets: vec![],
+                    artifact_hashes: vec![],
+                },
+            ),
         ];
         for (name, event) in events {
             println!("{} -> {:?}", name, std::mem::discriminant(&event));

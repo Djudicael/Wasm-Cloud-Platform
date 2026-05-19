@@ -1,15 +1,19 @@
+use sha2::Digest;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use sha2::Digest;
 
 /// Test: public route allows all requests without authentication.
 #[tokio::test]
 async fn test_full_gateway_pipeline_public_route() {
     let gateway = Arc::new(proxy::gateway::Gateway::new(None));
     let config = common::types::GatewayRouteConfig::default(); // auth = None
-    gateway.set_route_config("test-app:v1", config.clone()).await;
+    gateway
+        .set_route_config("test-app:v1", config.clone())
+        .await;
 
-    let retrieved = gateway.get_route_config(&common::types::AppId("test-app:v1".to_string())).await;
+    let retrieved = gateway
+        .get_route_config(&common::types::AppId("test-app:v1".to_string()))
+        .await;
     assert!(retrieved.is_some());
     let cfg = retrieved.unwrap();
     assert_eq!(cfg.auth, common::types::AuthPolicy::None);
@@ -29,9 +33,9 @@ async fn test_full_gateway_pipeline_public_route() {
 #[tokio::test]
 async fn test_full_gateway_pipeline_authenticated_route() {
     // Generate a test RSA key pair
-    use rsa::{RsaPrivateKey, RsaPublicKey, traits::PublicKeyParts};
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
     use rsa::pkcs1::EncodeRsaPrivateKey;
-    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+    use rsa::{traits::PublicKeyParts, RsaPrivateKey, RsaPublicKey};
 
     let mut rng = rand::thread_rng();
     let private_key = RsaPrivateKey::new(&mut rng, 2048).unwrap();
@@ -59,7 +63,9 @@ async fn test_full_gateway_pipeline_authenticated_route() {
 
     // Inject the public key into the JWKS cache via test helper
     let decoding_key = jsonwebtoken::DecodingKey::from_rsa_components(&n_b64, &e_b64).unwrap();
-    provider.inject_jwks_key(kid.to_string(), decoding_key).await;
+    provider
+        .inject_jwks_key(kid.to_string(), decoding_key)
+        .await;
 
     let gateway = Arc::new(proxy::gateway::Gateway::new(Some(provider.clone())));
 
@@ -128,22 +134,37 @@ async fn test_full_gateway_pipeline_cors_preflight() {
     };
 
     // Allowed origin
-    assert!(proxy::gateway::cors::is_origin_allowed("https://app.example.com", &cors));
+    assert!(proxy::gateway::cors::is_origin_allowed(
+        "https://app.example.com",
+        &cors
+    ));
     // Disallowed origin
-    assert!(!proxy::gateway::cors::is_origin_allowed("https://evil.com", &cors));
+    assert!(!proxy::gateway::cors::is_origin_allowed(
+        "https://evil.com",
+        &cors
+    ));
     // Wildcard
     let wildcard_cors = common::types::CorsPolicy {
         allowed_origins: vec!["*".to_string()],
         ..cors.clone()
     };
-    assert!(proxy::gateway::cors::is_origin_allowed("https://anything.com", &wildcard_cors));
+    assert!(proxy::gateway::cors::is_origin_allowed(
+        "https://anything.com",
+        &wildcard_cors
+    ));
     // Subdomain wildcard
     let subdomain_cors = common::types::CorsPolicy {
         allowed_origins: vec!["*.example.com".to_string()],
         ..cors.clone()
     };
-    assert!(proxy::gateway::cors::is_origin_allowed("https://sub.example.com", &subdomain_cors));
-    assert!(!proxy::gateway::cors::is_origin_allowed("https://example.com", &subdomain_cors));
+    assert!(proxy::gateway::cors::is_origin_allowed(
+        "https://sub.example.com",
+        &subdomain_cors
+    ));
+    assert!(!proxy::gateway::cors::is_origin_allowed(
+        "https://example.com",
+        &subdomain_cors
+    ));
 }
 
 /// Test: circuit breaker opens after failures and recovers.
@@ -160,21 +181,33 @@ async fn test_full_gateway_pipeline_circuit_breaker() {
     for _ in 0..5 {
         cb_manager.record_failure(app_id);
     }
-    assert!(cb_manager.is_circuit_open(app_id), "circuit should be open after 5 failures");
+    assert!(
+        cb_manager.is_circuit_open(app_id),
+        "circuit should be open after 5 failures"
+    );
 
     // Record success should not close immediately (circuit is open, not half-open)
     cb_manager.record_success(app_id);
-    assert!(cb_manager.is_circuit_open(app_id), "circuit should still be open");
+    assert!(
+        cb_manager.is_circuit_open(app_id),
+        "circuit should still be open"
+    );
 
     // Use test helper to simulate time passing for reset timeout
     cb_manager.set_last_state_change(app_id, Instant::now() - Duration::from_secs(31));
 
     // Now it should transition to half-open and allow one request
-    assert!(!cb_manager.is_circuit_open(app_id), "circuit should be half-open after timeout");
+    assert!(
+        !cb_manager.is_circuit_open(app_id),
+        "circuit should be half-open after timeout"
+    );
 
     // If the probe succeeds, circuit closes
     cb_manager.record_success(app_id);
-    assert!(!cb_manager.is_circuit_open(app_id), "circuit should be closed after probe success");
+    assert!(
+        !cb_manager.is_circuit_open(app_id),
+        "circuit should be closed after probe success"
+    );
 
     // Re-open with failures
     for _ in 0..5 {
@@ -184,26 +217,34 @@ async fn test_full_gateway_pipeline_circuit_breaker() {
 
     // Half-open again
     cb_manager.set_last_state_change(app_id, Instant::now() - Duration::from_secs(31));
-    assert!(!cb_manager.is_circuit_open(app_id), "circuit should be half-open");
+    assert!(
+        !cb_manager.is_circuit_open(app_id),
+        "circuit should be half-open"
+    );
 
     // Probe fails → back to open
     cb_manager.record_failure(app_id);
-    assert!(cb_manager.is_circuit_open(app_id), "circuit should re-open after probe failure");
+    assert!(
+        cb_manager.is_circuit_open(app_id),
+        "circuit should re-open after probe failure"
+    );
 }
 
 /// Test: distributed rate limiter local bucket and KV sync.
 #[tokio::test]
 async fn test_full_gateway_pipeline_rate_limit_distributed() {
-    let limiter = Arc::new(proxy::gateway::distributed_limiter::DistributedRateLimiter::new(
-        "test-app:v1".to_string(),
-        "node-1".to_string(),
-        proxy::gateway::distributed_limiter::DistributedRateLimitConfig {
-            global_rps: 100,
-            per_node_burst: 10,
-            sync_interval_ms: 100,
-            kv_bucket: "test_rate_limits".to_string(),
-        },
-    ));
+    let limiter = Arc::new(
+        proxy::gateway::distributed_limiter::DistributedRateLimiter::new(
+            "test-app:v1".to_string(),
+            "node-1".to_string(),
+            proxy::gateway::distributed_limiter::DistributedRateLimitConfig {
+                global_rps: 100,
+                per_node_burst: 10,
+                sync_interval_ms: 100,
+                kv_bucket: "test_rate_limits".to_string(),
+            },
+        ),
+    );
 
     // Local bucket should allow requests up to burst capacity
     let mut allowed = 0;
@@ -212,11 +253,17 @@ async fn test_full_gateway_pipeline_rate_limit_distributed() {
             allowed += 1;
         }
     }
-    assert_eq!(allowed, 10, "should allow exactly burst capacity (10) requests initially");
+    assert_eq!(
+        allowed, 10,
+        "should allow exactly burst capacity (10) requests initially"
+    );
 
     // After consuming all tokens, subsequent requests should be denied
     for _ in 0..5 {
-        assert!(!limiter.check_request().await, "should deny when bucket is empty");
+        assert!(
+            !limiter.check_request().await,
+            "should deny when bucket is empty"
+        );
     }
 
     // Verify the KV sync serialization/deserialization works
@@ -226,7 +273,8 @@ async fn test_full_gateway_pipeline_rate_limit_distributed() {
         chrono::Utc::now().timestamp_millis(),
     );
     let json = serde_json::to_string(&entry).unwrap();
-    let deserialized: proxy::gateway::distributed_limiter::RateLimitEntry = serde_json::from_str(&json).unwrap();
+    let deserialized: proxy::gateway::distributed_limiter::RateLimitEntry =
+        serde_json::from_str(&json).unwrap();
     assert_eq!(deserialized.node_id, "node-1");
     assert_eq!(deserialized.consumed, 10);
 }
@@ -294,7 +342,9 @@ async fn test_jwks_cache_refresh_on_stale() {
     let provider = Arc::new(proxy::gateway::oidc::OidcProvider::new(oidc_config));
 
     // Set cache as very stale via test helper
-    provider.set_cache_fetched_at(Instant::now() - Duration::from_secs(10)).await;
+    provider
+        .set_cache_fetched_at(Instant::now() - Duration::from_secs(10))
+        .await;
 
     // The validation should detect stale cache and try to refresh
     // (this will fail because there's no real server, but it demonstrates the logic)
@@ -317,14 +367,28 @@ async fn test_endpoint_api_key_auth() {
         scopes: vec!["/api/public".to_string()],
     };
     let validator = proxy::gateway::api_key::ApiKeyValidator::new(vec![api_key_record]);
-    gateway.set_api_key_validator("default/test-app:v1", validator).await;
+    gateway
+        .set_api_key_validator("default/test-app:v1", validator)
+        .await;
 
     // Valid key for allowed path
-    assert!(gateway.validate_api_key("default/test-app:v1", "secret-key-123", "/api/public/users").await);
+    assert!(
+        gateway
+            .validate_api_key("default/test-app:v1", "secret-key-123", "/api/public/users")
+            .await
+    );
     // Valid key for disallowed path
-    assert!(!gateway.validate_api_key("default/test-app:v1", "secret-key-123", "/api/admin").await);
+    assert!(
+        !gateway
+            .validate_api_key("default/test-app:v1", "secret-key-123", "/api/admin")
+            .await
+    );
     // Invalid key
-    assert!(!gateway.validate_api_key("default/test-app:v1", "wrong-key", "/api/public").await);
+    assert!(
+        !gateway
+            .validate_api_key("default/test-app:v1", "wrong-key", "/api/public")
+            .await
+    );
 }
 
 /// Test: endpoint rules with per-path auth overrides.

@@ -33,20 +33,34 @@ async fn test_vm_kill_and_restart() {
     tracing_subscriber::fmt::init();
 
     // 1. Create cluster with 1 NATS + 2 nodes
-    let mut cluster = ClusterFixture::new("chaos-l2").await
+    let mut cluster = ClusterFixture::new("chaos-l2")
+        .await
         .expect("Failed to create cluster");
 
-    cluster.start_nats(256, 1).await.expect("Failed to start NATS");
-    let node_a = cluster.start_node(512, 2).await.expect("Failed to start node A");
-    let node_b = cluster.start_node(512, 2).await.expect("Failed to start node B");
+    cluster
+        .start_nats(256, 1)
+        .await
+        .expect("Failed to start NATS");
+    let node_a = cluster
+        .start_node(512, 2)
+        .await
+        .expect("Failed to start node A");
+    let node_b = cluster
+        .start_node(512, 2)
+        .await
+        .expect("Failed to start node B");
 
-    cluster.wait_for_all_healthy(Duration::from_secs(60)).await
+    cluster
+        .wait_for_all_healthy(Duration::from_secs(60))
+        .await
         .expect("Nodes did not become healthy");
 
     println!("✅ Cluster ready: NATS + {} nodes", cluster.node_count());
 
     // 2. Deploy an app on node A
-    deploy_test_app(&cluster, &node_a).await.expect("Failed to deploy app");
+    deploy_test_app(&cluster, &node_a)
+        .await
+        .expect("Failed to deploy app");
 
     // 3. Verify app is serving
     let resp = http_get(&cluster, &node_a, "test-app.local", "/").await;
@@ -55,7 +69,10 @@ async fn test_vm_kill_and_restart() {
 
     // 4. KILL node A (simulate hardware failure / power loss)
     println!("💥 Killing node {}...", node_a);
-    cluster.kill_node(&node_a).await.expect("Failed to kill node");
+    cluster
+        .kill_node(&node_a)
+        .await
+        .expect("Failed to kill node");
 
     // Wait a moment for the kill to take effect
     tokio::time::sleep(Duration::from_secs(2)).await;
@@ -69,23 +86,34 @@ async fn test_vm_kill_and_restart() {
 
     // 6. Restart node A
     println!("🔄 Restarting node {}...", node_a);
-    cluster.restart_node(&node_a).await.expect("Failed to restart node");
+    cluster
+        .restart_node(&node_a)
+        .await
+        .expect("Failed to restart node");
 
     // 7. Wait for node A to be healthy again
     {
         let node = cluster.get_node_mut(&node_a).expect("Node not found");
-        node.wait_for_health(Duration::from_secs(60)).await
+        node.wait_for_health(Duration::from_secs(60))
+            .await
             .expect("Restarted node did not become healthy");
     }
     println!("✅ Node is healthy after restart");
 
     // 8. Verify app is still serving (state restored from redb)
     let resp = http_get(&cluster, &node_a, "test-app.local", "/").await;
-    assert_eq!(resp.status(), 200, "App should still be serving after restart");
+    assert_eq!(
+        resp.status(),
+        200,
+        "App should still be serving after restart"
+    );
     println!("✅ App recovered after node restart");
 
     // 9. Cleanup
-    cluster.teardown().await.expect("Failed to teardown cluster");
+    cluster
+        .teardown()
+        .await
+        .expect("Failed to teardown cluster");
     println!("✅ L2 chaos test passed!");
 }
 
@@ -99,17 +127,28 @@ async fn test_vm_kill_and_restart() {
 async fn test_vm_network_partition() {
     tracing_subscriber::fmt::init();
 
-    let mut cluster = ClusterFixture::new("chaos-l5").await
+    let mut cluster = ClusterFixture::new("chaos-l5")
+        .await
         .expect("Failed to create cluster");
 
-    cluster.start_nats(256, 1).await.expect("Failed to start NATS");
-    let node_a = cluster.start_node(512, 2).await.expect("Failed to start node");
+    cluster
+        .start_nats(256, 1)
+        .await
+        .expect("Failed to start NATS");
+    let node_a = cluster
+        .start_node(512, 2)
+        .await
+        .expect("Failed to start node");
 
-    cluster.wait_for_all_healthy(Duration::from_secs(60)).await
+    cluster
+        .wait_for_all_healthy(Duration::from_secs(60))
+        .await
         .expect("Node did not become healthy");
 
     // Deploy app
-    deploy_test_app(&cluster, &node_a).await.expect("Failed to deploy app");
+    deploy_test_app(&cluster, &node_a)
+        .await
+        .expect("Failed to deploy app");
     tokio::time::sleep(Duration::from_secs(3)).await;
 
     // Verify app serving
@@ -119,9 +158,14 @@ async fn test_vm_network_partition() {
 
     // Create network partition: drop packets from node to NATS
     println!("🔌 Creating network partition...");
-    let nats_ip = cluster.nats_url().unwrap()
-        .strip_prefix("nats://").unwrap()
-        .split(':').next().unwrap()
+    let nats_ip = cluster
+        .nats_url()
+        .unwrap()
+        .strip_prefix("nats://")
+        .unwrap()
+        .split(':')
+        .next()
+        .unwrap()
         .to_string();
 
     // Use iptables to drop packets from node IP to NATS IP
@@ -190,12 +234,7 @@ fn create_partition(node_ip: &str, nats_ip: &str) -> Result<(), Box<dyn std::err
 
     // Drop outbound packets from node to NATS
     let status = Command::new("iptables")
-        .args([
-            "-A", "FORWARD",
-            "-s", node_ip,
-            "-d", nats_ip,
-            "-j", "DROP",
-        ])
+        .args(["-A", "FORWARD", "-s", node_ip, "-d", nats_ip, "-j", "DROP"])
         .status()?;
 
     if !status.success() {
@@ -204,12 +243,7 @@ fn create_partition(node_ip: &str, nats_ip: &str) -> Result<(), Box<dyn std::err
 
     // Drop inbound packets from NATS to node
     let status = Command::new("iptables")
-        .args([
-            "-A", "FORWARD",
-            "-s", nats_ip,
-            "-d", node_ip,
-            "-j", "DROP",
-        ])
+        .args(["-A", "FORWARD", "-s", nats_ip, "-d", node_ip, "-j", "DROP"])
         .status()?;
 
     if !status.success() {

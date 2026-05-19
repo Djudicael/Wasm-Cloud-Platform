@@ -70,14 +70,17 @@ impl BootstrapKeyPair {
 ///
 /// Returns an error if the peer public key is invalid or encryption fails,
 /// rather than silently returning an empty vector.
-pub fn encrypt_for_peer(peer_public_bytes: &[u8], plaintext: &[u8]) -> Result<Vec<u8>, PlatformError> {
+pub fn encrypt_for_peer(
+    peer_public_bytes: &[u8],
+    plaintext: &[u8],
+) -> Result<Vec<u8>, PlatformError> {
     let ephemeral = EphemeralSecret::random_from_rng(OsRng);
     let ephemeral_public = PublicKey::from(&ephemeral);
 
-    let peer_public = x25519_dalek::PublicKey::from(
-        *<&[u8; 32]>::try_from(peer_public_bytes)
-            .map_err(|_| PlatformError::encryption("Invalid peer public key length: expected 32 bytes"))?,
-    );
+    let peer_public =
+        x25519_dalek::PublicKey::from(*<&[u8; 32]>::try_from(peer_public_bytes).map_err(|_| {
+            PlatformError::encryption("Invalid peer public key length: expected 32 bytes")
+        })?);
 
     let shared = ephemeral.diffie_hellman(&peer_public);
     let cipher = ChaCha20Poly1305::new(shared.as_bytes().into());

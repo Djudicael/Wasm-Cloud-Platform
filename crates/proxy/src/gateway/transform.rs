@@ -12,18 +12,21 @@ pub fn apply_request_transform(
     if let Some(identity) = user_identity {
         let _ = request.headers.insert(
             http::header::HeaderName::from_bytes(b"X-User-Id").unwrap(),
-            http::header::HeaderValue::from_str(&identity.sub).unwrap_or_else(|_| http::header::HeaderValue::from_static("unknown")),
+            http::header::HeaderValue::from_str(&identity.sub)
+                .unwrap_or_else(|_| http::header::HeaderValue::from_static("unknown")),
         );
         if let Some(ref email) = identity.email {
             let _ = request.headers.insert(
                 http::header::HeaderName::from_bytes(b"X-User-Email").unwrap(),
-                http::header::HeaderValue::from_str(email).unwrap_or_else(|_| http::header::HeaderValue::from_static("")),
+                http::header::HeaderValue::from_str(email)
+                    .unwrap_or_else(|_| http::header::HeaderValue::from_static("")),
             );
         }
         if !identity.roles.is_empty() {
             let _ = request.headers.insert(
                 http::header::HeaderName::from_bytes(b"X-User-Roles").unwrap(),
-                http::header::HeaderValue::from_str(&identity.roles.join(",")).unwrap_or_else(|_| http::header::HeaderValue::from_static("")),
+                http::header::HeaderValue::from_str(&identity.roles.join(","))
+                    .unwrap_or_else(|_| http::header::HeaderValue::from_static("")),
             );
         }
     }
@@ -33,7 +36,8 @@ pub fn apply_request_transform(
         if let Ok(name) = http::header::HeaderName::from_bytes(key.as_bytes()) {
             let _ = request.headers.insert(
                 name,
-                http::header::HeaderValue::from_str(value).unwrap_or_else(|_| http::header::HeaderValue::from_static("")),
+                http::header::HeaderValue::from_str(value)
+                    .unwrap_or_else(|_| http::header::HeaderValue::from_static("")),
             );
         }
     }
@@ -99,7 +103,10 @@ mod tests {
     #[test]
     fn test_request_transform_remove_headers() {
         let mut req = RequestHeader::build(http::Method::GET, b"/", None).unwrap();
-        req.headers.insert("X-Internal-Token", http::header::HeaderValue::from_static("secret"));
+        req.headers.insert(
+            "X-Internal-Token",
+            http::header::HeaderValue::from_static("secret"),
+        );
         let transform = RequestTransform {
             remove_headers: vec!["X-Internal-Token".to_string()],
             ..Default::default()
@@ -121,7 +128,8 @@ mod tests {
 
     #[test]
     fn test_request_transform_strip_query() {
-        let mut req = RequestHeader::build(http::Method::GET, b"/search?q=rust&tracking=123", None).unwrap();
+        let mut req =
+            RequestHeader::build(http::Method::GET, b"/search?q=rust&tracking=123", None).unwrap();
         let transform = RequestTransform {
             strip_query_params: vec!["tracking".to_string()],
             ..Default::default()
@@ -140,8 +148,17 @@ mod tests {
             raw_claims: serde_json::json!({}),
         };
         apply_request_transform(&mut req, &RequestTransform::default(), Some(&identity));
-        assert_eq!(req.headers.get("X-User-Id").unwrap().to_str().unwrap(), "user-123");
-        assert_eq!(req.headers.get("X-User-Email").unwrap().to_str().unwrap(), "test@example.com");
-        assert_eq!(req.headers.get("X-User-Roles").unwrap().to_str().unwrap(), "admin,user");
+        assert_eq!(
+            req.headers.get("X-User-Id").unwrap().to_str().unwrap(),
+            "user-123"
+        );
+        assert_eq!(
+            req.headers.get("X-User-Email").unwrap().to_str().unwrap(),
+            "test@example.com"
+        );
+        assert_eq!(
+            req.headers.get("X-User-Roles").unwrap().to_str().unwrap(),
+            "admin,user"
+        );
     }
 }

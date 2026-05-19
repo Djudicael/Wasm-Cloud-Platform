@@ -92,7 +92,10 @@ impl std::fmt::Debug for AppSecretBundle {
         f.debug_struct("AppSecretBundle")
             .field("app_id", &self.app_id)
             .field("version", &self.version)
-            .field("encrypted_dek", &format!("[{} bytes]", self.encrypted_dek.len()))
+            .field(
+                "encrypted_dek",
+                &format!("[{} bytes]", self.encrypted_dek.len()),
+            )
             .field("secrets", &format!("{{{} keys}}", self.secrets.len()))
             .field("updated_at", &self.updated_at)
             .finish()

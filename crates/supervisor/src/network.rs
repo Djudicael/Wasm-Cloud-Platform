@@ -99,11 +99,12 @@ impl NamespaceRegistry {
     /// Get all services within a specific namespace, keyed by bare app name
     /// (without namespace prefix or version).
     /// Used by the Supervisor for service discovery env var injection.
-    pub async fn get_namespace_services(&self, namespace: &str) -> HashMap<String, Vec<SocketAddr>> {
+    pub async fn get_namespace_services(
+        &self,
+        namespace: &str,
+    ) -> HashMap<String, Vec<SocketAddr>> {
         let map = self.instances.read().await;
-        map.get(namespace)
-            .cloned()
-            .unwrap_or_default()
+        map.get(namespace).cloned().unwrap_or_default()
     }
 }
 

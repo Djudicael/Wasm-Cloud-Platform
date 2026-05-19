@@ -210,19 +210,25 @@ impl NatsBus {
 
     /// Subscribe to a durable JetStream consumer, acknowledging messages.
     ///
+    /// `filter_subject` narrows the consumer to a specific subset of subjects
+    /// inside the stream. This is important for correctness when a single
+    /// stream contains multiple event classes.
+    ///
     /// Messages are expected to be wrapped in a `MessageEnvelope`. If the
     /// envelope cannot be deserialized, a bare `Event` is tried as a fallback
-    /// for backward compatibility. Incompatible protocol versions are NAK'd
-    /// so they can be redelivered to a compatible node.
+    /// for backward compatibility. Incompatible protocol versions or handler
+    /// failures are NAK'd so they can be redelivered (up to the consumer's
+    /// retry limit).
     pub async fn subscribe_durable<F, Fut>(
         &self,
         stream_name: &str,
         consumer_name: &str,
+        filter_subject: Option<&str>,
         handler: F,
     ) -> Result<(), PlatformError>
     where
         F: Fn(Event) -> Fut + Send + Sync + 'static,
-        Fut: std::future::Future<Output = ()> + Send + 'static,
+        Fut: std::future::Future<Output = Result<(), PlatformError>> + Send + 'static,
     {
         let js = jetstream::new(self.client.clone());
         let stream = js
@@ -230,11 +236,13 @@ impl NatsBus {
             .await
             .map_err(PlatformError::messaging_source)?;
 
+        let filter_subject = filter_subject.unwrap_or_default().to_string();
         let consumer = stream
             .get_or_create_consumer(
                 consumer_name,
                 PullConfig {
                     durable_name: Some(consumer_name.to_string()),
+                    filter_subject,
                     // Give the consumer 30 seconds to process and ACK each message
                     // before it becomes eligible for redelivery.
                     ack_wait: std::time::Duration::from_secs(30),
@@ -255,10 +263,20 @@ impl NatsBus {
         tokio::spawn(async move {
             while let Some(Ok(msg)) = messages.next().await {
                 match Self::deserialize_event(&msg.payload) {
-                    Ok(event) => {
-                        handler(event).await;
-                        let _ = msg.ack().await;
-                    }
+                    Ok(event) => match handler(event).await {
+                        Ok(()) => {
+                            let _ = msg.ack().await;
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                error = %e,
+                                "JetStream handler failed; NAKing for redelivery"
+                            );
+                            let _ = msg
+                                .ack_with(async_nats::jetstream::AckKind::Nak(None))
+                                .await;
+                        }
+                    },
                     Err(e) => {
                         tracing::warn!(
                             error = %e,

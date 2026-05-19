@@ -135,7 +135,9 @@ fn test_compile_and_run_minimal() {
         .expect("Failed to prepare module");
 
     // 3. Spawn and Run
-    let mut instance = prepared.spawn_instance(vec![], 8080, None).expect("Spawn failed");
+    let mut instance = prepared
+        .spawn_instance(vec![], 8080, None)
+        .expect("Spawn failed");
     let stats = instance.run();
 
     assert!(

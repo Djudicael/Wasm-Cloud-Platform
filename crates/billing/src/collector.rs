@@ -50,7 +50,10 @@ impl BillingCollector {
                 .dropped_count
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             if dropped % 1000 == 0 {
-                warn!(total_dropped = dropped + 1, "billing channel full, dropping records");
+                warn!(
+                    total_dropped = dropped + 1,
+                    "billing channel full, dropping records"
+                );
             }
         }
     }
@@ -82,13 +85,12 @@ async fn billing_writer_loop(
     // Load seq and prev_hash from the persisted cursor for crash recovery.
     // Falls back to querying the store if no cursor is saved yet.
     let (mut seq, mut prev_hash) = if let Ok(Some(data)) = store.load_meta(BILLING_CURSOR_KEY) {
-        serde_json::from_str::<(u64, String)>(&data)
-            .unwrap_or_else(|_| {
-                (
-                    store.get_billing_sequence().unwrap_or(0),
-                    store.get_last_billing_hash().unwrap_or_default(),
-                )
-            })
+        serde_json::from_str::<(u64, String)>(&data).unwrap_or_else(|_| {
+            (
+                store.get_billing_sequence().unwrap_or(0),
+                store.get_last_billing_hash().unwrap_or_default(),
+            )
+        })
     } else {
         (
             store.get_billing_sequence().unwrap_or(0),

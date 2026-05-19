@@ -198,34 +198,42 @@ impl DeployManifest {
     pub fn to_gateway_config(&self) -> Option<common::types::GatewayRouteConfig> {
         let gw = self.gateway.as_ref()?;
         Some(common::types::GatewayRouteConfig {
-            auth: gw.auth.as_ref().map(|a| match a.policy.as_str() {
-                "none" => common::types::AuthPolicy::None,
-                "authenticated" => common::types::AuthPolicy::Authenticated,
-                "roles" => common::types::AuthPolicy::Roles {
-                    allowed_roles: a.allowed_roles.clone(),
-                    client_id: a.client_id.clone(),
-                },
-                _ => common::types::AuthPolicy::None,
-            }).unwrap_or_default(),
+            auth: gw
+                .auth
+                .as_ref()
+                .map(|a| match a.policy.as_str() {
+                    "none" => common::types::AuthPolicy::None,
+                    "authenticated" => common::types::AuthPolicy::Authenticated,
+                    "roles" => common::types::AuthPolicy::Roles {
+                        allowed_roles: a.allowed_roles.clone(),
+                        client_id: a.client_id.clone(),
+                    },
+                    _ => common::types::AuthPolicy::None,
+                })
+                .unwrap_or_default(),
             cors: gw.cors.clone(),
             transform: gw.transform.clone(),
             rate_limit: gw.rate_limit.clone(),
             circuit_breaker: gw.circuit_breaker.clone(),
-            endpoints: gw.endpoints.iter().map(|e| common::types::EndpointRule {
-                path: e.path.clone(),
-                methods: e.methods.clone(),
-                auth: match e.auth.as_str() {
-                    "none" => common::types::EndpointAuth::None,
-                    "authenticated" => common::types::EndpointAuth::Authenticated,
-                    "roles" => common::types::EndpointAuth::Roles {
-                        allowed_roles: e.allowed_roles.clone(),
-                        client_id: e.client_id.clone(),
+            endpoints: gw
+                .endpoints
+                .iter()
+                .map(|e| common::types::EndpointRule {
+                    path: e.path.clone(),
+                    methods: e.methods.clone(),
+                    auth: match e.auth.as_str() {
+                        "none" => common::types::EndpointAuth::None,
+                        "authenticated" => common::types::EndpointAuth::Authenticated,
+                        "roles" => common::types::EndpointAuth::Roles {
+                            allowed_roles: e.allowed_roles.clone(),
+                            client_id: e.client_id.clone(),
+                        },
+                        "api_key" => common::types::EndpointAuth::ApiKey,
+                        _ => common::types::EndpointAuth::Inherit,
                     },
-                    "api_key" => common::types::EndpointAuth::ApiKey,
-                    _ => common::types::EndpointAuth::Inherit,
-                },
-                rate_limit: e.rate_limit.clone(),
-            }).collect(),
+                    rate_limit: e.rate_limit.clone(),
+                })
+                .collect(),
         })
     }
 }
@@ -242,7 +250,10 @@ pub fn manifest_from_config(
         (nv[0].to_string(), nv.get(1).unwrap_or(&"v1").to_string())
     } else {
         let parts: Vec<&str> = app_config.id.0.split(':').collect();
-        (parts[0].to_string(), parts.get(1).unwrap_or(&"v1").to_string())
+        (
+            parts[0].to_string(),
+            parts.get(1).unwrap_or(&"v1").to_string(),
+        )
     };
 
     let gateway = gateway_config.map(|cfg| GatewayManifestSection {
@@ -254,7 +265,10 @@ pub fn manifest_from_config(
                 allowed_roles: vec![],
                 client_id: None,
             }),
-            common::types::AuthPolicy::Roles { allowed_roles, client_id } => Some(GatewayAuthManifest {
+            common::types::AuthPolicy::Roles {
+                allowed_roles,
+                client_id,
+            } => Some(GatewayAuthManifest {
                 policy: "roles".to_string(),
                 allowed_roles: allowed_roles.clone(),
                 client_id: client_id.clone(),
@@ -264,26 +278,32 @@ pub fn manifest_from_config(
         rate_limit: cfg.rate_limit.clone(),
         circuit_breaker: cfg.circuit_breaker.clone(),
         transform: cfg.transform.clone(),
-        endpoints: cfg.endpoints.iter().map(|e| EndpointRuleManifest {
-            path: e.path.clone(),
-            methods: e.methods.clone(),
-            auth: match &e.auth {
-                common::types::EndpointAuth::Inherit => "inherit".to_string(),
-                common::types::EndpointAuth::None => "none".to_string(),
-                common::types::EndpointAuth::Authenticated => "authenticated".to_string(),
-                common::types::EndpointAuth::Roles { .. } => "roles".to_string(),
-                common::types::EndpointAuth::ApiKey => "api_key".to_string(),
-            },
-            allowed_roles: match &e.auth {
-                common::types::EndpointAuth::Roles { allowed_roles, .. } => allowed_roles.clone(),
-                _ => vec![],
-            },
-            client_id: match &e.auth {
-                common::types::EndpointAuth::Roles { client_id, .. } => client_id.clone(),
-                _ => None,
-            },
-            rate_limit: e.rate_limit.clone(),
-        }).collect(),
+        endpoints: cfg
+            .endpoints
+            .iter()
+            .map(|e| EndpointRuleManifest {
+                path: e.path.clone(),
+                methods: e.methods.clone(),
+                auth: match &e.auth {
+                    common::types::EndpointAuth::Inherit => "inherit".to_string(),
+                    common::types::EndpointAuth::None => "none".to_string(),
+                    common::types::EndpointAuth::Authenticated => "authenticated".to_string(),
+                    common::types::EndpointAuth::Roles { .. } => "roles".to_string(),
+                    common::types::EndpointAuth::ApiKey => "api_key".to_string(),
+                },
+                allowed_roles: match &e.auth {
+                    common::types::EndpointAuth::Roles { allowed_roles, .. } => {
+                        allowed_roles.clone()
+                    }
+                    _ => vec![],
+                },
+                client_id: match &e.auth {
+                    common::types::EndpointAuth::Roles { client_id, .. } => client_id.clone(),
+                    _ => None,
+                },
+                rate_limit: e.rate_limit.clone(),
+            })
+            .collect(),
     });
 
     DeployManifest {
