@@ -1,5 +1,8 @@
 use crate::{
-    executor::{compose_socket_addr_check, SocketAddrUse, SocketPolicyCheck},
+    executor::{
+        compose_socket_addr_check, top_level_entry_point_candidates, SocketAddrUse,
+        SocketPolicyCheck,
+    },
     WasmRuntime,
 };
 use common::{
@@ -25,6 +28,57 @@ fn base_instance_policy() -> InstancePolicy {
         },
         filesystem: FilesystemPolicy::default(),
     }
+}
+
+fn compile_and_run_component(component_wat: &str) -> crate::executor::ExecutionStats {
+    let runtime = WasmRuntime::new().expect("Failed to create WasmRuntime");
+    let wasm_bytes = wat::parse_str(component_wat).expect("failed to parse component WAT");
+    let artifact = runtime.compile(&wasm_bytes).expect("Compilation failed");
+    let prepared = runtime
+        .prepare(&artifact, base_config())
+        .expect("Failed to prepare module");
+    let mut instance = prepared
+        .spawn_instance(vec![], 8080, None)
+        .expect("Spawn failed");
+    instance.run()
+}
+
+fn no_op_component_with_top_level_export(component_export_name: &str) -> String {
+    let core_export_name = "entry_impl";
+    format!(
+        r#"
+        (component
+            (core module $m
+                (memory (export "memory") 1)
+                (func (export "{core_export_name}")
+                    nop
+                )
+            )
+            (core instance $i (instantiate $m))
+            (func (export "{component_export_name}") (canon lift (core func $i "{core_export_name}")))
+        )
+        "#
+    )
+}
+
+fn no_op_component_with_wasi_cli_run_interface() -> &'static str {
+    r#"
+    (component
+        (core module $m
+            (memory (export "memory") 1)
+            (func (export "run")
+                nop
+            )
+        )
+        (core instance $i (instantiate $m))
+        (type $run-func (func))
+        (func $run (type $run-func) (canon lift (core func $i "run")))
+        (instance $cli-run
+            (export "run" (func $run))
+        )
+        (export "wasi:cli/run@0.2.6" (instance $cli-run))
+    )
+    "#
 }
 
 #[test]
@@ -119,6 +173,31 @@ fn test_list_hello_axum_exports() {
 fn test_runtime_initialization() {
     let runtime = WasmRuntime::new().expect("Failed to create WasmRuntime");
     assert!(Arc::strong_count(&runtime.engine) >= 1);
+}
+
+#[test]
+fn test_run_supports_wasi_cli_run_interface_export() {
+    let stats = compile_and_run_component(no_op_component_with_wasi_cli_run_interface());
+    assert!(
+        stats.trap.is_none(),
+        "wasi:cli/run interface export should execute successfully: {:?}",
+        stats.trap
+    );
+}
+
+#[test]
+fn test_run_supports_top_level_run_fallback() {
+    let stats = compile_and_run_component(&no_op_component_with_top_level_export("run"));
+    assert!(
+        stats.trap.is_none(),
+        "top-level run fallback should execute successfully: {:?}",
+        stats.trap
+    );
+}
+
+#[test]
+fn test_top_level_entry_point_candidates_include_start_fallback() {
+    assert_eq!(top_level_entry_point_candidates(), &["run", "_start"]);
 }
 
 #[test]

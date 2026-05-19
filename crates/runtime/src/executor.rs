@@ -138,6 +138,12 @@ pub(crate) fn compose_socket_addr_check(
     })
 }
 
+const TOP_LEVEL_ENTRY_POINT_FALLBACKS: &[&str] = &["run", "_start"];
+
+pub(crate) fn top_level_entry_point_candidates() -> &'static [&'static str] {
+    TOP_LEVEL_ENTRY_POINT_FALLBACKS
+}
+
 /// Store state for WASI Preview 2
 pub struct StoreState {
     pub ctx: WasiCtx,
@@ -335,6 +341,12 @@ pub struct RunningInstance {
     started_at: Instant,
 }
 
+#[derive(Debug, Clone)]
+struct ResolvedEntryPoint {
+    name: String,
+    func: wasmtime::component::Func,
+}
+
 impl Drop for RunningInstance {
     fn drop(&mut self) {
         // NOTE: We cannot easily decrement policy counters (outbound_connections_active,
@@ -349,100 +361,159 @@ impl Drop for RunningInstance {
 }
 
 impl RunningInstance {
-    /// Call `_start` (the WASI entry point). This blocks until the Wasm app exits.
-    /// For a server like Axum, this runs indefinitely until the Supervisor kills it.
-    pub fn run(&mut self) -> ExecutionStats {
-        tracing::info!(instance_id = %self.id.0, "RunningInstance::run() called");
-        let fuel_limit = self.config.fuel_quota.0;
-        let start = Instant::now();
-        let mut trap_msg = None;
-
-        // WASI Preview 2 components export `wasi:cli/run@0.2.x` as an interface containing `run`.
-        // We need to navigate: interface -> function inside it.
+    fn resolve_entry_point(&mut self) -> Option<ResolvedEntryPoint> {
+        // WASI Preview 2 components typically export `wasi:cli/run@0.2.x` as an interface
+        // containing `run`. For compatibility with older/minimal components and tests, also
+        // support top-level `run` and `_start` exports.
         let wasi_versions = [
             "0.2.6", "0.2.5", "0.2.4", "0.2.3", "0.2.2", "0.2.1", "0.2.0",
         ];
 
-        let start_fn = wasi_versions.iter().find_map(|ver| {
+        for ver in wasi_versions {
             let interface_name = format!("wasi:cli/run@{ver}");
-
-            // Get the interface index
             let interface_idx =
                 self.instance
                     .get_export_index(&mut self.store, None, &interface_name);
 
             tracing::trace!(interface = %interface_name, "checking for entry point");
 
-            let interface_idx = interface_idx?;
+            let Some(interface_idx) = interface_idx else {
+                continue;
+            };
 
-            // Get the function index inside the interface
             let func_idx =
                 self.instance
                     .get_export_index(&mut self.store, Some(&interface_idx), "run");
 
             tracing::trace!(interface = %interface_name, has_run = func_idx.is_some(), "checking for run function");
 
-            let func_idx = func_idx?;
-            self.instance.get_func(&mut self.store, func_idx)
-        });
+            let Some(func_idx) = func_idx else {
+                continue;
+            };
 
-        if start_fn.is_some() {
-            tracing::info!("WASI entry point found and callable");
+            if let Some(func) = self.instance.get_func(&mut self.store, func_idx) {
+                return Some(ResolvedEntryPoint {
+                    name: format!("{interface_name}#run"),
+                    func,
+                });
+            }
+        }
+
+        for export_name in top_level_entry_point_candidates() {
+            tracing::trace!(
+                export = export_name,
+                "checking top-level entry point fallback"
+            );
+            let func_idx = self
+                .instance
+                .get_export_index(&mut self.store, None, export_name);
+            let Some(func_idx) = func_idx else {
+                continue;
+            };
+
+            if let Some(func) = self.instance.get_func(&mut self.store, func_idx) {
+                return Some(ResolvedEntryPoint {
+                    name: export_name.to_string(),
+                    func,
+                });
+            }
+        }
+
+        None
+    }
+
+    fn invoke_entry_point(&mut self, entry_point: &ResolvedEntryPoint) -> Option<String> {
+        tracing::debug!(entry_point = %entry_point.name, "calling entry point");
+
+        // Preferred WASI Preview 2 signature: run() -> result<(), ()>
+        if let Ok(typed) = entry_point.func.typed::<(), (Result<(), ()>,)>(&self.store) {
+            return match typed.call(&mut self.store, ()) {
+                Ok((result,)) => match result {
+                    Ok(()) => {
+                        tracing::debug!(entry_point = %entry_point.name, "entry point completed successfully");
+                        None
+                    }
+                    Err(()) => {
+                        tracing::error!(instance_id = %self.id.0, entry_point = %entry_point.name, "WASM app exited with error");
+                        Some("WASM app exited with error".to_string())
+                    }
+                },
+                Err(e) => {
+                    let err_msg = e.to_string();
+                    tracing::error!(instance_id = %self.id.0, entry_point = %entry_point.name, error = %err_msg, "WASM trap");
+                    tracing::error!(instance = %self.id.0, entry_point = %entry_point.name, error = %err_msg, "WASM function call failed");
+                    Some(err_msg)
+                }
+            };
+        }
+
+        // Compatibility fallback: minimal components often export a top-level `run` or `_start`
+        // with no result payload.
+        if let Ok(typed) = entry_point.func.typed::<(), ()>(&self.store) {
+            return match typed.call(&mut self.store, ()) {
+                Ok(()) => {
+                    tracing::debug!(entry_point = %entry_point.name, "entry point completed successfully via no-result fallback");
+                    None
+                }
+                Err(e) => {
+                    let err_msg = e.to_string();
+                    tracing::error!(instance_id = %self.id.0, entry_point = %entry_point.name, error = %err_msg, "WASM trap");
+                    tracing::error!(instance = %self.id.0, entry_point = %entry_point.name, error = %err_msg, "WASM function call failed");
+                    Some(err_msg)
+                }
+            };
+        }
+
+        tracing::debug!(entry_point = %entry_point.name, "typed entry point invocation failed, trying untyped fallback");
+        if let Err(e) = entry_point.func.call(&mut self.store, &[], &mut []) {
+            let err_msg = e.to_string();
+            tracing::error!(instance_id = %self.id.0, entry_point = %entry_point.name, error = %err_msg, "WASM trap");
+            tracing::error!(instance = %self.id.0, entry_point = %entry_point.name, error = %err_msg, "WASM function call failed");
+            Some(err_msg)
+        } else {
+            tracing::debug!(entry_point = %entry_point.name, "entry point called successfully via untyped fallback");
+            None
+        }
+    }
+
+    /// Call `_start` (the WASI entry point). This blocks until the Wasm app exits.
+    /// For a server like Axum, this runs indefinitely until the Supervisor kills it.
+    pub fn run(&mut self) -> ExecutionStats {
+        tracing::info!(instance_id = %self.id.0, "RunningInstance::run() called");
+        let fuel_limit = self.config.fuel_quota.0;
+        let start = Instant::now();
+
+        let entry_point = self.resolve_entry_point();
+
+        if let Some(ref entry_point) = entry_point {
+            tracing::info!(entry_point = %entry_point.name, "WASI entry point found and callable");
         }
 
         tracing::debug!(
-            has_entry_point = start_fn.is_some(),
+            has_entry_point = entry_point.is_some(),
+            entry_point = entry_point
+                .as_ref()
+                .map(|e| e.name.as_str())
+                .unwrap_or("<none>"),
             "entry point lookup complete"
         );
         tracing::info!(
-            has_entry_point = start_fn.is_some(),
+            has_entry_point = entry_point.is_some(),
+            entry_point = entry_point
+                .as_ref()
+                .map(|e| e.name.as_str())
+                .unwrap_or("<none>"),
             "entry point lookup result"
         );
 
-        match start_fn {
-            Some(f) => {
-                tracing::debug!("calling entry point");
-                // The run function returns Result<(), ()> wrapped in a tuple
-                let typed = f.typed::<(), (Result<(), ()>,)>(&self.store);
-                match typed {
-                    Ok(t) => match t.call(&mut self.store, ()) {
-                        Ok((result,)) => match result {
-                            Ok(()) => {
-                                tracing::debug!("entry point completed successfully");
-                            }
-                            Err(()) => {
-                                let err = "WASM app exited with error".to_string();
-                                tracing::error!(instance_id = %self.id.0, "WASM app exited with error");
-                                trap_msg = Some(err);
-                            }
-                        },
-                        Err(e) => {
-                            let err_msg = e.to_string();
-                            tracing::error!(instance_id = %self.id.0, error = %err_msg, "WASM trap");
-                            tracing::error!(instance = %self.id.0, error = %err_msg, "WASM function call failed");
-                            trap_msg = Some(err_msg);
-                        }
-                    },
-                    Err(typed_err) => {
-                        // Fallback to untyped call
-                        tracing::debug!(error = ?typed_err, "typed call failed, trying untyped");
-                        if let Err(e) = f.call(&mut self.store, &[], &mut []) {
-                            let err_msg = e.to_string();
-                            tracing::error!(instance_id = %self.id.0, error = %err_msg, "WASM trap");
-                            tracing::error!(instance = %self.id.0, error = %err_msg, "WASM function call failed");
-                            trap_msg = Some(err_msg);
-                        } else {
-                            tracing::debug!("entry point called successfully");
-                        }
-                    }
-                }
-            }
+        let trap_msg = match entry_point {
+            Some(entry_point) => self.invoke_entry_point(&entry_point),
             None => {
                 tracing::error!(instance_id = %self.id.0, "No WASI entry point found");
                 tracing::error!(instance = %self.id.0, "No entry point found (wasi:cli/run@0.2.x#run, run, or _start)");
-                trap_msg = Some("export not found".to_string());
+                Some("export not found".to_string())
             }
-        }
+        };
 
         let fuel_remaining = read_fuel_remaining(&self.store);
         let fuel_consumed = fuel_limit.saturating_sub(fuel_remaining);
