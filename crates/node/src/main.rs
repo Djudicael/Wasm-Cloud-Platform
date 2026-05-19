@@ -134,6 +134,42 @@ fn artifact_server_url_is_loopback(url: &str) -> bool {
         .unwrap_or(false)
 }
 
+fn admin_tls_is_configured(config: &common::config::NodeConfig) -> bool {
+    config.proxy.tls_cert.is_some() && config.proxy.tls_key.is_some()
+}
+
+async fn serve_admin_app(
+    admin_addr: String,
+    admin_app: axum::Router,
+    tls_cert: Option<String>,
+    tls_key: Option<String>,
+) -> anyhow::Result<()> {
+    if let (Some(cert), Some(key)) = (tls_cert, tls_key) {
+        let rustls_config = axum_server::tls_rustls::RustlsConfig::from_pem_file(cert, key)
+            .await
+            .map_err(|e| anyhow::anyhow!("admin TLS config error: {e}"))?;
+        info!(addr = %admin_addr, "admin API listening with TLS");
+        axum_server::bind_rustls(
+            admin_addr
+                .parse()
+                .map_err(|e| anyhow::anyhow!("invalid admin bind address: {e}"))?,
+            rustls_config,
+        )
+        .serve(admin_app.into_make_service())
+        .await
+        .map_err(|e| anyhow::anyhow!("admin HTTPS server error: {e}"))?;
+    } else {
+        let listener = tokio::net::TcpListener::bind(&admin_addr)
+            .await
+            .map_err(|e| anyhow::anyhow!("admin API bind failed: {e}"))?;
+        info!(addr = %admin_addr, "admin API listening");
+        axum::serve(listener, admin_app)
+            .await
+            .map_err(|e| anyhow::anyhow!("admin HTTP server error: {e}"))?;
+    }
+    Ok(())
+}
+
 fn load_kek_from_config(
     store: &storage::Store,
     runtime: &common::config::RuntimeSection,
@@ -1482,9 +1518,8 @@ async fn main() -> anyhow::Result<()> {
         anyhow::bail!("Invalid auth configuration: {}", e);
     }
 
-    // Admin TLS is not yet implemented for the admin API listener. Enforce the
-    // documented fail-closed behavior when auth requires TLS.
-    proxy::auth_middleware::check_admin_tls_requirement(&effective_auth_config, false)
+    let admin_tls_enabled = admin_tls_is_configured(&config);
+    proxy::auth_middleware::check_admin_tls_requirement(&effective_auth_config, admin_tls_enabled)
         .map_err(anyhow::Error::msg)?;
 
     // Check config file permissions (warn if world-readable)
@@ -2658,12 +2693,13 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let admin_addr = bind_socket_address(&config.admin.bind_address, config.admin.port)?;
+    let admin_tls_cert = config.proxy.tls_cert.clone();
+    let admin_tls_key = config.proxy.tls_key.clone();
     tokio::spawn(async move {
-        let listener = tokio::net::TcpListener::bind(&admin_addr)
-            .await
-            .expect("admin API bind failed");
-        info!(addr = %admin_addr, "admin API listening");
-        axum::serve(listener, admin_app).await.unwrap();
+        if let Err(e) = serve_admin_app(admin_addr, admin_app, admin_tls_cert, admin_tls_key).await
+        {
+            tracing::error!(error = %e, "admin API server failed");
+        }
     });
 
     let artifact_app = storage::artifact_server::artifact_router(store.clone());
@@ -2733,10 +2769,10 @@ async fn main() -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        artifact_server_url_is_loopback, bind_socket_address, build_artifact_server_url,
-        load_kek_from_config, load_kek_from_env_spec,
+        admin_tls_is_configured, artifact_server_url_is_loopback, bind_socket_address,
+        build_artifact_server_url, load_kek_from_config, load_kek_from_env_spec,
     };
-    use common::config::{AdminSection, RuntimeSection};
+    use common::config::{AdminSection, NodeConfig, ProxySection, RuntimeSection};
     use storage::Store;
     use tempfile::{NamedTempFile, TempDir};
 
@@ -2746,6 +2782,19 @@ mod tests {
     fn test_bind_socket_address_formats_ipv6() {
         let addr = bind_socket_address("::1", 9090).unwrap();
         assert_eq!(addr, "[::1]:9090");
+    }
+
+    #[test]
+    fn test_admin_tls_is_configured_requires_cert_and_key() {
+        let mut config = NodeConfig::default();
+        assert!(!admin_tls_is_configured(&config));
+
+        config.proxy = ProxySection {
+            tls_cert: Some("/tmp/admin.crt".to_string()),
+            tls_key: Some("/tmp/admin.key".to_string()),
+            ..ProxySection::default()
+        };
+        assert!(admin_tls_is_configured(&config));
     }
 
     #[test]

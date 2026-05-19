@@ -65,9 +65,10 @@ enabled = true
 read_token = "CHANGE-ME-USE-A-STRONG-RANDOM-READ-TOKEN"
 # Read-write token for operators and automation.
 write_token = "CHANGE-ME-USE-A-STRONG-RANDOM-WRITE-TOKEN"
-# Admin TLS listener is not implemented yet. Keep the admin API loopback-only
-# or place it behind a TLS-terminating proxy if remote access is required.
-require_tls = false
+# Reuse the configured TLS certificate/key for the admin HTTPS listener.
+# Keep the admin API loopback-only or place it behind a trusted proxy unless
+# you intentionally expose it over the network.
+require_tls = true
 rate_limit_per_second = 10
 rate_limit_burst = 20
 

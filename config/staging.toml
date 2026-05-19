@@ -52,8 +52,8 @@ artifact_bind_address = "127.0.0.1"
 enabled = true
 read_token = "staging-read-token-change-me"
 write_token = "staging-write-token-change-me"
-# Admin TLS listener is not implemented yet. Keep the admin API loopback-only
-# or place it behind a TLS-terminating proxy if remote access is required.
+# No admin TLS certificate/key is configured in this staging example, so keep
+# the admin API loopback-only or place it behind a TLS-terminating proxy.
 require_tls = false
 rate_limit_per_second = 10
 rate_limit_burst = 20
