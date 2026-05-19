@@ -134,8 +134,18 @@ fn artifact_server_url_is_loopback(url: &str) -> bool {
         .unwrap_or(false)
 }
 
+fn admin_tls_material(config: &common::config::NodeConfig) -> Option<(String, String)> {
+    if let (Some(cert), Some(key)) = (config.admin.tls_cert.clone(), config.admin.tls_key.clone()) {
+        return Some((cert, key));
+    }
+    if let (Some(cert), Some(key)) = (config.proxy.tls_cert.clone(), config.proxy.tls_key.clone()) {
+        return Some((cert, key));
+    }
+    None
+}
+
 fn admin_tls_is_configured(config: &common::config::NodeConfig) -> bool {
-    config.proxy.tls_cert.is_some() && config.proxy.tls_key.is_some()
+    admin_tls_material(config).is_some()
 }
 
 async fn serve_admin_app(
@@ -426,6 +436,12 @@ struct Args {
     #[arg(long, env = "WASM_NODE_ADMIN_ARTIFACT_BIND_ADDRESS")]
     artifact_bind_address: Option<String>,
 
+    #[arg(long, env = "WASM_NODE_ADMIN_TLS_CERT")]
+    admin_tls_cert: Option<String>,
+
+    #[arg(long, env = "WASM_NODE_ADMIN_TLS_KEY")]
+    admin_tls_key: Option<String>,
+
     #[arg(long, env = "WASM_NODE_ADMIN_ADVERTISED_HOST")]
     admin_advertised_host: Option<String>,
 
@@ -622,6 +638,8 @@ async fn main() -> anyhow::Result<()> {
         artifact_port: Some(args.artifact_port),
         admin_bind_address: args.admin_bind_address.clone(),
         artifact_bind_address: args.artifact_bind_address.clone(),
+        admin_tls_cert: args.admin_tls_cert.clone(),
+        admin_tls_key: args.admin_tls_key.clone(),
         admin_advertised_host: args.admin_advertised_host.clone(),
         admin_advertised_artifact_url: args.admin_advertised_artifact_url.clone(),
         port_start: Some(args.port_start),
@@ -2693,8 +2711,11 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let admin_addr = bind_socket_address(&config.admin.bind_address, config.admin.port)?;
-    let admin_tls_cert = config.proxy.tls_cert.clone();
-    let admin_tls_key = config.proxy.tls_key.clone();
+    let admin_tls = admin_tls_material(&config);
+    let (admin_tls_cert, admin_tls_key) = match admin_tls {
+        Some((cert, key)) => (Some(cert), Some(key)),
+        None => (None, None),
+    };
     tokio::spawn(async move {
         if let Err(e) = serve_admin_app(admin_addr, admin_app, admin_tls_cert, admin_tls_key).await
         {
@@ -2769,8 +2790,9 @@ async fn main() -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        admin_tls_is_configured, artifact_server_url_is_loopback, bind_socket_address,
-        build_artifact_server_url, load_kek_from_config, load_kek_from_env_spec,
+        admin_tls_is_configured, admin_tls_material, artifact_server_url_is_loopback,
+        bind_socket_address, build_artifact_server_url, load_kek_from_config,
+        load_kek_from_env_spec,
     };
     use common::config::{AdminSection, NodeConfig, ProxySection, RuntimeSection};
     use storage::Store;
@@ -2795,6 +2817,22 @@ mod tests {
             ..ProxySection::default()
         };
         assert!(admin_tls_is_configured(&config));
+    }
+
+    #[test]
+    fn test_admin_tls_material_prefers_dedicated_admin_cert() {
+        let mut config = NodeConfig::default();
+        config.proxy = ProxySection {
+            tls_cert: Some("/tmp/proxy.crt".to_string()),
+            tls_key: Some("/tmp/proxy.key".to_string()),
+            ..ProxySection::default()
+        };
+        config.admin.tls_cert = Some("/tmp/admin.crt".to_string());
+        config.admin.tls_key = Some("/tmp/admin.key".to_string());
+
+        let material = admin_tls_material(&config).expect("admin TLS material should exist");
+        assert_eq!(material.0, "/tmp/admin.crt");
+        assert_eq!(material.1, "/tmp/admin.key");
     }
 
     #[test]

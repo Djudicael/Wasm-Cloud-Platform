@@ -43,6 +43,9 @@ bind_address = "127.0.0.1"
 artifact_port = 9091
 # Bind the artifact server locally by default.
 artifact_bind_address = "127.0.0.1"
+# Optional dedicated TLS certificate/key for the admin HTTPS listener.
+# tls_cert = "/etc/wasm-node/admin/server.crt"
+# tls_key = "/etc/wasm-node/admin/server.key"
 # Optional routable artifact advertisement for peer nodes.
 # advertised_host = "staging-node-1.internal"
 # advertised_artifact_url = "https://artifacts.staging-node-1.internal"

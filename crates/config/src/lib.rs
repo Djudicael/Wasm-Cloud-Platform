@@ -40,6 +40,8 @@ pub struct CliOverrides {
     pub artifact_port: Option<u16>,
     pub admin_bind_address: Option<String>,
     pub artifact_bind_address: Option<String>,
+    pub admin_tls_cert: Option<String>,
+    pub admin_tls_key: Option<String>,
     pub admin_advertised_host: Option<String>,
     pub admin_advertised_artifact_url: Option<String>,
     pub port_start: Option<u16>,
@@ -145,6 +147,8 @@ fn merge_config(base: NodeConfig, overlay: NodeConfig) -> NodeConfig {
             artifact_port: overlay.admin.artifact_port,
             bind_address: overlay.admin.bind_address,
             artifact_bind_address: overlay.admin.artifact_bind_address,
+            tls_cert: overlay.admin.tls_cert.or(base.admin.tls_cert),
+            tls_key: overlay.admin.tls_key.or(base.admin.tls_key),
             advertised_host: overlay.admin.advertised_host.or(base.admin.advertised_host),
             advertised_artifact_url: overlay
                 .admin
@@ -348,6 +352,12 @@ fn apply_env_overrides(mut config: NodeConfig) -> NodeConfig {
     if let Ok(v) = std::env::var("WASM_NODE_ADMIN_ARTIFACT_BIND_ADDRESS") {
         config.admin.artifact_bind_address = v;
     }
+    if let Ok(v) = std::env::var("WASM_NODE_ADMIN_TLS_CERT") {
+        config.admin.tls_cert = Some(v);
+    }
+    if let Ok(v) = std::env::var("WASM_NODE_ADMIN_TLS_KEY") {
+        config.admin.tls_key = Some(v);
+    }
     if let Ok(v) = std::env::var("WASM_NODE_ADMIN_ADVERTISED_HOST") {
         config.admin.advertised_host = Some(v);
     }
@@ -450,6 +460,12 @@ fn apply_cli_overrides(mut config: NodeConfig, cli: &CliOverrides) -> NodeConfig
     }
     if let Some(v) = &cli.artifact_bind_address {
         config.admin.artifact_bind_address = v.clone();
+    }
+    if let Some(v) = &cli.admin_tls_cert {
+        config.admin.tls_cert = Some(v.clone());
+    }
+    if let Some(v) = &cli.admin_tls_key {
+        config.admin.tls_key = Some(v.clone());
     }
     if let Some(v) = &cli.admin_advertised_host {
         config.admin.advertised_host = Some(v.clone());
@@ -559,6 +575,11 @@ fn validate_bind_address(label: &str, host: &str, errors: &mut Vec<String>) {
     if host.contains(':') && host_without_brackets.parse::<IpAddr>().is_err() {
         errors.push(format!("{label} must not include a port"));
     }
+}
+
+fn admin_tls_material_configured(config: &NodeConfig) -> bool {
+    (config.admin.tls_cert.is_some() && config.admin.tls_key.is_some())
+        || (config.proxy.tls_cert.is_some() && config.proxy.tls_key.is_some())
 }
 
 fn validate_admin_advertisement(config: &NodeConfig, errors: &mut Vec<String>) {
@@ -690,6 +711,11 @@ fn validate_config(config: &NodeConfig) -> Result<(), PlatformError> {
         errors.push("https_port requires tls_cert and tls_key".to_string());
     }
 
+    if config.admin.tls_cert.is_some() != config.admin.tls_key.is_some() {
+        errors
+            .push("admin.tls_cert and admin.tls_key must both be set or both be unset".to_string());
+    }
+
     validate_bind_address(
         "admin.bind_address",
         &config.admin.bind_address,
@@ -701,6 +727,13 @@ fn validate_config(config: &NodeConfig) -> Result<(), PlatformError> {
         &mut errors,
     );
     validate_admin_advertisement(config, &mut errors);
+
+    if config.auth.enabled && config.auth.require_tls && !admin_tls_material_configured(config) {
+        errors.push(
+            "auth.require_tls = true requires either admin.tls_cert/admin.tls_key or proxy.tls_cert/proxy.tls_key"
+                .to_string(),
+        );
+    }
 
     // Auth configuration
     let auth_config: common::auth::AuthConfig = config.auth.clone().into();
@@ -1145,6 +1178,8 @@ port = 9090
 artifact_port = 9091
 bind_address = "127.0.0.1"
 artifact_bind_address = "127.0.0.1"
+tls_cert = "/etc/wasm-node/admin/server.crt"
+tls_key = "/etc/wasm-node/admin/server.key"
 advertised_host = "node-1.internal"
 advertised_artifact_url = "https://artifacts.node-1.internal"
 auth_token = "secret-token"
@@ -1225,6 +1260,14 @@ default_memory_pages = 4096
         assert_eq!(config.admin.bind_address, "127.0.0.1");
         assert_eq!(config.admin.artifact_bind_address, "127.0.0.1");
         assert_eq!(
+            config.admin.tls_cert.as_deref(),
+            Some("/etc/wasm-node/admin/server.crt")
+        );
+        assert_eq!(
+            config.admin.tls_key.as_deref(),
+            Some("/etc/wasm-node/admin/server.key")
+        );
+        assert_eq!(
             config.admin.advertised_host.as_deref(),
             Some("node-1.internal")
         );
@@ -1264,6 +1307,7 @@ default_memory_pages = 4096
         std::env::set_var("WASM_NODE_NATS_URL", "nats://env:4222");
         std::env::set_var("WASM_NODE_ADMIN_ADVERTISED_HOST", "node-env.internal");
         std::env::set_var("WASM_NODE_ADMIN_BIND_ADDRESS", "0.0.0.0");
+        std::env::set_var("WASM_NODE_ADMIN_TLS_CERT", "/tmp/admin.crt");
         std::env::set_var(
             "WASM_NODE_STORAGE_OPEN_FAILURE_MODE",
             "quarantine_and_recreate",
@@ -1273,6 +1317,7 @@ default_memory_pages = 4096
         std::env::remove_var("WASM_NODE_NATS_URL");
         std::env::remove_var("WASM_NODE_ADMIN_ADVERTISED_HOST");
         std::env::remove_var("WASM_NODE_ADMIN_BIND_ADDRESS");
+        std::env::remove_var("WASM_NODE_ADMIN_TLS_CERT");
         std::env::remove_var("WASM_NODE_STORAGE_OPEN_FAILURE_MODE");
 
         assert_eq!(config.node.node_id, "from-env");
@@ -1282,6 +1327,7 @@ default_memory_pages = 4096
             Some("node-env.internal")
         );
         assert_eq!(config.admin.bind_address, "0.0.0.0");
+        assert_eq!(config.admin.tls_cert.as_deref(), Some("/tmp/admin.crt"));
         assert_eq!(
             config.storage.open_failure_mode,
             StorageOpenFailureMode::QuarantineAndRecreate
@@ -1300,6 +1346,7 @@ default_memory_pages = 4096
             http_port: Some(9090),
             admin_bind_address: Some("::1".to_string()),
             artifact_bind_address: Some("0.0.0.0".to_string()),
+            admin_tls_key: Some("/tmp/admin.key".to_string()),
             admin_advertised_artifact_url: Some("https://cli-artifacts.internal".to_string()),
             ..Default::default()
         };
@@ -1309,6 +1356,7 @@ default_memory_pages = 4096
         assert_eq!(config.proxy.http_port, 9090);
         assert_eq!(config.admin.bind_address, "::1");
         assert_eq!(config.admin.artifact_bind_address, "0.0.0.0");
+        assert_eq!(config.admin.tls_key.as_deref(), Some("/tmp/admin.key"));
         assert_eq!(
             config.admin.advertised_artifact_url.as_deref(),
             Some("https://cli-artifacts.internal")
@@ -1373,6 +1421,31 @@ default_memory_pages = 4096
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
         assert!(msg.contains("https_port requires tls_cert and tls_key"));
+    }
+
+    #[test]
+    fn test_validation_rejects_partial_admin_tls_config() {
+        let mut config = NodeConfig::default();
+        config.admin.tls_cert = Some("/tmp/admin.crt".to_string());
+        let result = validate_config(&config);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("admin.tls_cert and admin.tls_key must both be set or both be unset"));
+    }
+
+    #[test]
+    fn test_validation_rejects_require_tls_without_any_tls_material() {
+        let mut config = NodeConfig::default();
+        config.auth.enabled = true;
+        config.auth.require_tls = true;
+        config.proxy.tls_cert = None;
+        config.proxy.tls_key = None;
+        config.admin.tls_cert = None;
+        config.admin.tls_key = None;
+        let result = validate_config(&config);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("auth.require_tls = true requires either admin.tls_cert/admin.tls_key or proxy.tls_cert/proxy.tls_key"));
     }
 
     #[test]

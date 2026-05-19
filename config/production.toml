@@ -52,6 +52,10 @@ bind_address = "127.0.0.1"
 artifact_port = 9091
 # Bind the artifact server locally by default.
 artifact_bind_address = "127.0.0.1"
+# Dedicated TLS certificate/key for the admin HTTPS listener. If unset, the
+# node falls back to the shared [proxy] TLS material.
+tls_cert = "/etc/wasm-node/admin/server.crt"
+tls_key = "/etc/wasm-node/admin/server.key"
 # Optional routable artifact advertisement for peer nodes. Leave unset for
 # local-only mode. In multi-node deployments, set one of these to a routable
 # hostname or URL instead of relying on loopback defaults.
@@ -65,9 +69,8 @@ enabled = true
 read_token = "CHANGE-ME-USE-A-STRONG-RANDOM-READ-TOKEN"
 # Read-write token for operators and automation.
 write_token = "CHANGE-ME-USE-A-STRONG-RANDOM-WRITE-TOKEN"
-# Reuse the configured TLS certificate/key for the admin HTTPS listener.
-# Keep the admin API loopback-only or place it behind a trusted proxy unless
-# you intentionally expose it over the network.
+# The admin HTTPS listener uses admin.tls_cert/admin.tls_key when set, and
+# otherwise falls back to the shared [proxy] TLS material.
 require_tls = true
 rate_limit_per_second = 10
 rate_limit_burst = 20

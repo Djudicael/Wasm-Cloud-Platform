@@ -203,6 +203,14 @@ pub struct AdminSection {
     /// Local bind host/address for the artifact server listener.
     #[serde(default = "default_admin_bind_address")]
     pub artifact_bind_address: String,
+    /// Optional dedicated TLS certificate path for the admin HTTPS listener.
+    /// If unset, the node may fall back to the shared proxy TLS material.
+    #[serde(default)]
+    pub tls_cert: Option<String>,
+    /// Optional dedicated TLS private key path for the admin HTTPS listener.
+    /// If unset, the node may fall back to the shared proxy TLS material.
+    #[serde(default)]
+    pub tls_key: Option<String>,
     /// Optional routable host name or IP used when advertising the artifact endpoint
     /// to peer nodes. The local listener may still bind to loopback.
     #[serde(default)]
@@ -237,6 +245,8 @@ impl Default for AdminSection {
             artifact_port: default_artifact_port(),
             bind_address: default_admin_bind_address(),
             artifact_bind_address: default_admin_bind_address(),
+            tls_cert: None,
+            tls_key: None,
             advertised_host: None,
             advertised_artifact_url: None,
             auth_token: None,

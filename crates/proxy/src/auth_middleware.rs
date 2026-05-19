@@ -560,7 +560,7 @@ pub fn check_admin_tls_requirement(
             "Admin API requires TLS when authentication is enabled, \
              but no TLS certificate is configured. \
              Either:\n\
-             1. Configure shared TLS cert/key material (proxy.tls_cert / proxy.tls_key) for the admin HTTPS listener\n\
+             1. Configure admin.tls_cert / admin.tls_key (or shared proxy.tls_cert / proxy.tls_key) for the admin HTTPS listener\n\
              2. Set auth.require_tls = false (NOT recommended for production)\n\
              3. Disable authentication (auth.enabled = false, NOT recommended)"
         ));
