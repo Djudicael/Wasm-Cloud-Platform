@@ -320,10 +320,17 @@ impl PreparedModule {
         // is exposed as read-only.
         configure_filesystem_preopens(&mut builder, &policy)?;
 
+        let extended_limits = self
+            .config
+            .extended_limits
+            .clone()
+            .map(|cfg| cfg.to_limits())
+            .unwrap_or_default();
+
         let state = StoreState {
             ctx: builder.build(),
             table: ResourceTable::new(),
-            limiter: MemoryLimiter::new(self.config.memory_limit),
+            limiter: MemoryLimiter::new(self.config.memory_limit, extended_limits),
             policy_enforcer: PolicyEnforcer::new(policy),
         };
 

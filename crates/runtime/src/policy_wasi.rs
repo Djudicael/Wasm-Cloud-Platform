@@ -130,7 +130,7 @@ mod tests {
         let state = StoreState {
             ctx: WasiCtxBuilder::new().build(),
             table: ResourceTable::new(),
-            limiter: MemoryLimiter::new(MemoryPages(1)),
+            limiter: MemoryLimiter::new(MemoryPages(1), common::types::ExtendedLimits::default()),
             policy_enforcer: PolicyEnforcer::new(policy),
         };
         wasmtime::Store::new(&engine, state)

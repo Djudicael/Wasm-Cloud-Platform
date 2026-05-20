@@ -108,6 +108,7 @@ pub struct ExtendedLimits {
     pub max_fs_write_bytes: u64,
     pub max_net_egress_bytes: u64,
     pub max_outbound_connections: u32,
+    pub max_table_elements: u32,
 }
 
 impl Default for ExtendedLimits {
@@ -117,6 +118,7 @@ impl Default for ExtendedLimits {
             max_fs_write_bytes: 50 * 1024 * 1024,
             max_net_egress_bytes: 10 * 1024 * 1024,
             max_outbound_connections: 16,
+            max_table_elements: 10_000,
         }
     }
 }
@@ -127,6 +129,7 @@ pub struct ExtendedLimitsConfig {
     pub max_fs_write_bytes: Option<u64>,
     pub max_net_egress_bytes: Option<u64>,
     pub max_outbound_connections: Option<u32>,
+    pub max_table_elements: Option<u32>,
 }
 
 impl ExtendedLimitsConfig {
@@ -143,6 +146,9 @@ impl ExtendedLimitsConfig {
             max_outbound_connections: self
                 .max_outbound_connections
                 .unwrap_or(defaults.max_outbound_connections),
+            max_table_elements: self
+                .max_table_elements
+                .unwrap_or(defaults.max_table_elements),
         }
     }
 }

@@ -572,6 +572,7 @@ fn test_extended_limits_config_merge() {
         max_fs_write_bytes: None,
         max_net_egress_bytes: Some(500),
         max_outbound_connections: None,
+        max_table_elements: Some(2048),
     };
 
     let limits = config.to_limits();
@@ -589,6 +590,10 @@ fn test_extended_limits_config_merge() {
     assert_eq!(
         limits.max_outbound_connections, defaults.max_outbound_connections,
         "Missing field should use default"
+    );
+    assert_eq!(
+        limits.max_table_elements, 2048,
+        "User override should apply"
     );
 }
 
@@ -625,4 +630,10 @@ fn test_default_extended_limits_applied() {
     assert_eq!(stats.io_stats.fs_bytes_written, 0);
     assert_eq!(stats.io_stats.net_egress_bytes, 0);
     assert_eq!(stats.io_stats.outbound_connections, 0);
+}
+
+#[test]
+fn test_default_extended_limits_include_table_cap() {
+    let defaults = common::types::ExtendedLimits::default();
+    assert_eq!(defaults.max_table_elements, 10_000);
 }
