@@ -363,6 +363,10 @@ pub struct RuntimeSection {
     pub key_source: String,
     #[serde(default)]
     pub key_file: Option<String>,
+    /// Optional directory for Wasmtime code cache artifacts.
+    /// When set, the runtime enables Wasmtime's compilation cache.
+    #[serde(default)]
+    pub cache_directory: Option<String>,
 }
 
 fn default_port_start() -> u16 {
@@ -384,6 +388,7 @@ impl Default for RuntimeSection {
             port_end: default_port_end(),
             key_source: default_key_source(),
             key_file: None,
+            cache_directory: None,
         }
     }
 }

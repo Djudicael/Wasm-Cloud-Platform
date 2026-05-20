@@ -470,6 +470,9 @@ struct Args {
     #[arg(long)]
     key_file: Option<String>,
 
+    #[arg(long, env = "WASM_NODE_RUNTIME_CACHE_DIRECTORY")]
+    runtime_cache_directory: Option<String>,
+
     #[arg(long, env = "ADMIN_TOKEN")]
     admin_token: Option<String>,
 
@@ -650,6 +653,7 @@ async fn main() -> anyhow::Result<()> {
         port_end: Some(args.port_end),
         key_source: Some(args.key_source.clone()),
         key_file: args.key_file.clone(),
+        runtime_cache_directory: args.runtime_cache_directory.clone(),
         database_url: Some(args.database_url.clone()),
         pgbouncer_addr: Some(args.pgbouncer_addr.clone()),
         enable_db_proxy: Some(args.enable_db_proxy),
@@ -847,7 +851,8 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    let runtime = runtime::WasmRuntime::new().expect("Failed to create WasmRuntime");
+    let runtime = runtime::WasmRuntime::new_with_runtime_config(Some(&config.runtime))
+        .expect("Failed to create WasmRuntime");
     info!("Wasm runtime initialized (Cranelift AOT)");
 
     let bind_addr: IpAddr = "0.0.0.0".parse().unwrap();

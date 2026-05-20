@@ -14,6 +14,7 @@ use common::{
 };
 use std::sync::Arc;
 use std::thread;
+use tempfile::TempDir;
 
 fn base_config() -> AppConfig {
     let mut config = AppConfig::default_for(AppId::new("test-app", "v1"));
@@ -182,6 +183,31 @@ fn test_list_hello_axum_exports() {
 fn test_runtime_initialization() {
     let runtime = WasmRuntime::new().expect("Failed to create WasmRuntime");
     assert!(Arc::strong_count(&runtime.engine) >= 1);
+}
+
+#[test]
+fn test_runtime_initialization_with_code_cache_directory() {
+    let temp_dir = TempDir::new().unwrap();
+    let runtime_cfg = common::config::RuntimeSection {
+        cache_directory: Some(
+            temp_dir
+                .path()
+                .join("wasmtime-cache")
+                .to_string_lossy()
+                .to_string(),
+        ),
+        ..Default::default()
+    };
+
+    let runtime = WasmRuntime::new_with_runtime_config(Some(&runtime_cfg))
+        .expect("Failed to create WasmRuntime with cache directory");
+    assert!(Arc::strong_count(&runtime.engine) >= 1);
+    assert!(temp_dir.path().join("wasmtime-cache").exists());
+    assert!(temp_dir
+        .path()
+        .join("wasmtime-cache")
+        .join("wasmtime-cache-config.toml")
+        .exists());
 }
 
 #[test]

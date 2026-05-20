@@ -1,10 +1,49 @@
-use common::error::PlatformError;
+use common::{config::RuntimeSection, error::PlatformError};
+use std::path::{Path, PathBuf};
 use wasmtime::component::Component;
-use wasmtime::{Config, Engine};
+use wasmtime::{Cache, Config, Engine};
+
+fn configure_code_cache(
+    config: &mut Config,
+    runtime: Option<&RuntimeSection>,
+) -> Result<Option<PathBuf>, PlatformError> {
+    let Some(cache_dir) = runtime.and_then(|cfg| cfg.cache_directory.as_ref()) else {
+        return Ok(None);
+    };
+
+    let cache_dir_path = PathBuf::from(cache_dir);
+    std::fs::create_dir_all(&cache_dir_path).map_err(|e| {
+        PlatformError::runtime(format!(
+            "failed to create Wasmtime cache directory {}: {}",
+            cache_dir_path.display(),
+            e
+        ))
+    })?;
+
+    let config_path = cache_dir_path.join("wasmtime-cache-config.toml");
+    let config_body = format!("[cache]\ndirectory = '{}'\n", cache_dir_path.display());
+    std::fs::write(&config_path, config_body).map_err(|e| {
+        PlatformError::runtime(format!(
+            "failed to write Wasmtime cache config {}: {}",
+            config_path.display(),
+            e
+        ))
+    })?;
+
+    let cache = Cache::from_file(Some(Path::new(&config_path))).map_err(|e| {
+        PlatformError::runtime(format!(
+            "failed to load Wasmtime cache config {}: {}",
+            config_path.display(),
+            e
+        ))
+    })?;
+    config.cache(Some(cache));
+    Ok(Some(cache_dir_path))
+}
 
 /// Build a Cranelift-based AOT engine.
 /// Call once per process and share via Arc.
-pub fn build_engine() -> Result<Engine, PlatformError> {
+pub fn build_engine(runtime: Option<&RuntimeSection>) -> Result<Engine, PlatformError> {
     let mut config = Config::new();
 
     // Enable fuel metering for execution limits
@@ -19,6 +58,11 @@ pub fn build_engine() -> Result<Engine, PlatformError> {
 
     // Enable Component Model
     config.wasm_component_model(true);
+
+    let cache_dir = configure_code_cache(&mut config, runtime)?;
+    if let Some(path) = cache_dir.as_ref() {
+        tracing::info!(path = %path.display(), "Wasmtime code cache enabled");
+    }
 
     Engine::new(&config)
         .map_err(|e| PlatformError::runtime(format!("Failed to create Wasmtime Engine: {}", e)))

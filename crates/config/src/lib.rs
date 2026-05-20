@@ -48,6 +48,7 @@ pub struct CliOverrides {
     pub port_end: Option<u16>,
     pub key_source: Option<String>,
     pub key_file: Option<String>,
+    pub runtime_cache_directory: Option<String>,
     pub database_url: Option<String>,
     pub pgbouncer_addr: Option<String>,
     pub enable_db_proxy: Option<bool>,
@@ -169,6 +170,10 @@ fn merge_config(base: NodeConfig, overlay: NodeConfig) -> NodeConfig {
             port_end: overlay.runtime.port_end,
             key_source: overlay.runtime.key_source,
             key_file: overlay.runtime.key_file.or(base.runtime.key_file),
+            cache_directory: overlay
+                .runtime
+                .cache_directory
+                .or(base.runtime.cache_directory),
         },
         database: DatabaseSection {
             default_url: overlay.database.default_url,
@@ -420,6 +425,9 @@ fn apply_env_overrides(mut config: NodeConfig) -> NodeConfig {
             config.auth.rate_limit_burst = burst;
         }
     }
+    if let Ok(v) = std::env::var("WASM_NODE_RUNTIME_CACHE_DIRECTORY") {
+        config.runtime.cache_directory = Some(v);
+    }
     config
 }
 
@@ -484,6 +492,9 @@ fn apply_cli_overrides(mut config: NodeConfig, cli: &CliOverrides) -> NodeConfig
     }
     if let Some(v) = &cli.key_file {
         config.runtime.key_file = Some(v.clone());
+    }
+    if let Some(v) = &cli.runtime_cache_directory {
+        config.runtime.cache_directory = Some(v.clone());
     }
     if let Some(v) = &cli.database_url {
         config.database.default_url = v.clone();
@@ -1189,6 +1200,7 @@ port_start = 10000
 port_end = 19999
 key_source = "file"
 key_file = "/etc/wasm-node/master.key"
+cache_directory = "/var/cache/wasm-node/wasmtime"
 
 [database]
 default_url = "postgres://db.prod:5432"
@@ -1277,6 +1289,10 @@ default_memory_pages = 4096
         );
         assert_eq!(config.admin.auth_token, Some("secret-token".to_string()));
         assert_eq!(config.runtime.key_source, "file");
+        assert_eq!(
+            config.runtime.cache_directory.as_deref(),
+            Some("/var/cache/wasm-node/wasmtime")
+        );
         assert_eq!(config.database.enable_db_proxy, true);
         assert_eq!(config.database.db_proxy_max_connections, 50);
         assert_eq!(config.logging.level, "warn");
@@ -1308,6 +1324,7 @@ default_memory_pages = 4096
         std::env::set_var("WASM_NODE_ADMIN_ADVERTISED_HOST", "node-env.internal");
         std::env::set_var("WASM_NODE_ADMIN_BIND_ADDRESS", "0.0.0.0");
         std::env::set_var("WASM_NODE_ADMIN_TLS_CERT", "/tmp/admin.crt");
+        std::env::set_var("WASM_NODE_RUNTIME_CACHE_DIRECTORY", "/tmp/wasmtime-cache");
         std::env::set_var(
             "WASM_NODE_STORAGE_OPEN_FAILURE_MODE",
             "quarantine_and_recreate",
@@ -1318,6 +1335,7 @@ default_memory_pages = 4096
         std::env::remove_var("WASM_NODE_ADMIN_ADVERTISED_HOST");
         std::env::remove_var("WASM_NODE_ADMIN_BIND_ADDRESS");
         std::env::remove_var("WASM_NODE_ADMIN_TLS_CERT");
+        std::env::remove_var("WASM_NODE_RUNTIME_CACHE_DIRECTORY");
         std::env::remove_var("WASM_NODE_STORAGE_OPEN_FAILURE_MODE");
 
         assert_eq!(config.node.node_id, "from-env");
@@ -1328,6 +1346,10 @@ default_memory_pages = 4096
         );
         assert_eq!(config.admin.bind_address, "0.0.0.0");
         assert_eq!(config.admin.tls_cert.as_deref(), Some("/tmp/admin.crt"));
+        assert_eq!(
+            config.runtime.cache_directory.as_deref(),
+            Some("/tmp/wasmtime-cache")
+        );
         assert_eq!(
             config.storage.open_failure_mode,
             StorageOpenFailureMode::QuarantineAndRecreate
@@ -1347,6 +1369,7 @@ default_memory_pages = 4096
             admin_bind_address: Some("::1".to_string()),
             artifact_bind_address: Some("0.0.0.0".to_string()),
             admin_tls_key: Some("/tmp/admin.key".to_string()),
+            runtime_cache_directory: Some("/tmp/cli-wasmtime-cache".to_string()),
             admin_advertised_artifact_url: Some("https://cli-artifacts.internal".to_string()),
             ..Default::default()
         };
@@ -1357,6 +1380,10 @@ default_memory_pages = 4096
         assert_eq!(config.admin.bind_address, "::1");
         assert_eq!(config.admin.artifact_bind_address, "0.0.0.0");
         assert_eq!(config.admin.tls_key.as_deref(), Some("/tmp/admin.key"));
+        assert_eq!(
+            config.runtime.cache_directory.as_deref(),
+            Some("/tmp/cli-wasmtime-cache")
+        );
         assert_eq!(
             config.admin.advertised_artifact_url.as_deref(),
             Some("https://cli-artifacts.internal")

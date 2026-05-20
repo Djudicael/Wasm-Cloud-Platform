@@ -84,6 +84,8 @@ port_end = 19999
 # Use "file" in production so secrets survive restarts.
 key_source = "file"
 key_file = "/etc/wasm-node/master.key"
+# Optional Wasmtime code cache directory for faster repeated compilation/startup.
+cache_directory = "/var/cache/wasm-node/wasmtime"
 
 [database]
 # Default database URL injected into Wasm apps via DATABASE_URL env var.

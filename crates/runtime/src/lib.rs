@@ -8,7 +8,7 @@ pub mod virtual_dns;
 #[cfg(test)]
 mod tests;
 
-use common::{error::PlatformError, types::AppConfig};
+use common::{config::RuntimeSection, error::PlatformError, types::AppConfig};
 use executor::PreparedModule;
 use std::sync::Arc;
 use std::time::Duration;
@@ -39,7 +39,14 @@ impl WasmRuntime {
     /// Create a new WasmRuntime with a Cranelift-based AOT engine.
     /// Returns an error if the engine fails to initialize.
     pub fn new() -> Result<Self, PlatformError> {
-        let engine = compiler::build_engine()?;
+        Self::new_with_runtime_config(None)
+    }
+
+    /// Create a new WasmRuntime using optional runtime configuration.
+    pub fn new_with_runtime_config(
+        runtime: Option<&RuntimeSection>,
+    ) -> Result<Self, PlatformError> {
+        let engine = compiler::build_engine(runtime)?;
         start_epoch_thread(&engine);
         Ok(WasmRuntime {
             engine: Arc::new(engine),

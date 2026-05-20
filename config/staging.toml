@@ -68,6 +68,8 @@ port_end = 19999
 # Key source: "generate" (ephemeral), "file" (from key_file), "env:VAR_NAME"
 key_source = "generate"
 # key_file = "/etc/wasm-node/master.key"
+# Optional Wasmtime code cache directory for faster repeated compilation/startup.
+# cache_directory = "/var/cache/wasm-node/wasmtime"
 
 [database]
 # Default database URL injected into Wasm apps.
