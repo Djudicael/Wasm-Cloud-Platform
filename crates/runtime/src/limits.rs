@@ -4,6 +4,8 @@ use common::types::{ExtendedLimits, FuelQuota, MemoryPages};
 use wasmtime::{ResourceLimiter, Store};
 
 /// Apply resource limits to a Store before creating an Instance.
+pub const EPOCH_DEADLINE_TICKS: u64 = 10;
+
 pub fn configure_store<T>(store: &mut Store<T>, fuel: FuelQuota) -> Result<(), PlatformError> {
     // Set fuel limit (CPU metering).
     // Every Wasm instruction decrements this counter.
@@ -11,7 +13,16 @@ pub fn configure_store<T>(store: &mut Store<T>, fuel: FuelQuota) -> Result<(), P
         .set_fuel(fuel.0)
         .map_err(|e| PlatformError::runtime(format!("fuel error: {e}")))?;
 
-    tracing::debug!(fuel = fuel.0, "store fuel limits configured");
+    // Also configure coarse-grained epoch interruption so runaway guests can be
+    // interrupted even if fuel quotas are very large.
+    store.epoch_deadline_trap();
+    store.set_epoch_deadline(EPOCH_DEADLINE_TICKS);
+
+    tracing::debug!(
+        fuel = fuel.0,
+        epoch_deadline_ticks = EPOCH_DEADLINE_TICKS,
+        "store fuel and epoch limits configured"
+    );
     Ok(())
 }
 

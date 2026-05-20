@@ -11,7 +11,23 @@ mod tests;
 use common::{error::PlatformError, types::AppConfig};
 use executor::PreparedModule;
 use std::sync::Arc;
+use std::time::Duration;
 use wasmtime::Engine;
+
+const EPOCH_TICK_INTERVAL: Duration = Duration::from_millis(10);
+
+fn start_epoch_thread(engine: &Engine) {
+    let weak = engine.weak();
+    std::thread::Builder::new()
+        .name("wasmtime-epoch-ticker".to_string())
+        .spawn(move || {
+            while let Some(engine) = weak.upgrade() {
+                std::thread::sleep(EPOCH_TICK_INTERVAL);
+                engine.increment_epoch();
+            }
+        })
+        .expect("failed to spawn wasmtime epoch ticker thread");
+}
 
 /// High-level runtime handle shared across the node.
 #[derive(Clone)]
@@ -24,6 +40,7 @@ impl WasmRuntime {
     /// Returns an error if the engine fails to initialize.
     pub fn new() -> Result<Self, PlatformError> {
         let engine = compiler::build_engine()?;
+        start_epoch_thread(&engine);
         Ok(WasmRuntime {
             engine: Arc::new(engine),
         })

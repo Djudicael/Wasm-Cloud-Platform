@@ -481,6 +481,42 @@ fn test_zero_fuel_immediate_trap() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "MSVC unwinding issue on traps")]
+fn test_epoch_interruption_traps_long_running_guest() {
+    let runtime = WasmRuntime::new().expect("Failed to create WasmRuntime");
+    let wasm_bytes = wat::parse_str(
+        r#"
+        (component
+            (core module $m
+                (memory (export "memory") 1)
+                (func (export "run")
+                    (loop $my_loop
+                        br $my_loop
+                    )
+                )
+            )
+            (core instance $i (instantiate $m))
+            (func (export "run") (canon lift (core func $i "run")))
+        )
+        "#,
+    )
+    .unwrap();
+
+    let artifact = runtime.compile(&wasm_bytes).unwrap();
+    let mut config = base_config();
+    config.fuel_quota = FuelQuota(50_000_000_000);
+
+    let prepared = runtime.prepare(&artifact, config).unwrap();
+    let mut instance = prepared.spawn_instance(vec![], 8080, None).unwrap();
+    let stats = instance.run();
+
+    assert!(
+        stats.trap.is_some(),
+        "long-running guest should trap due to epoch interruption"
+    );
+}
+
+#[test]
 fn test_memory_limit_enforced() {
     let runtime = WasmRuntime::new().expect("Failed to create WasmRuntime");
     // Tries to grow memory by 10 pages.

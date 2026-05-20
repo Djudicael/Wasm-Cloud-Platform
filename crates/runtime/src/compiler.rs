@@ -10,6 +10,10 @@ pub fn build_engine() -> Result<Engine, PlatformError> {
     // Enable fuel metering for execution limits
     config.consume_fuel(true);
 
+    // Enable coarse-grained epoch interruption so long-running guests can be
+    // trapped even when fuel settings are generous or disabled in the future.
+    config.epoch_interruption(true);
+
     // Optimize for execution speed (AOT compilation)
     config.cranelift_opt_level(wasmtime::OptLevel::Speed);
 
