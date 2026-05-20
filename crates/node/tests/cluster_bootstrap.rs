@@ -1,7 +1,10 @@
 // crates/node/tests/cluster_bootstrap.rs
 //! Integration tests for cluster bootstrap and new node state synchronization.
 
-use common::types::{AppConfig, AppId, FuelQuota, MemoryPages};
+use common::{
+    artifact_transfer::{ArtifactTransferAuthority, BootstrapArtifactFetchAuthorization},
+    types::{AppConfig, AppId, FuelQuota, MemoryPages},
+};
 use messaging::events::Event;
 use secrets::{
     BootstrapKeyPair, SecretProvider, SecretTransportEntry, SecretTransportEnvelope,
@@ -169,6 +172,7 @@ async fn test_bootstrap_session_correlates_join_and_snapshot() {
         encrypted_secrets: vec![],
         gateway_configs: vec![],
         api_keys: vec![],
+        artifact_fetches: vec![],
         artifact_hashes: vec![],
     };
 
@@ -240,6 +244,49 @@ async fn test_secret_encryption_decryption() {
     );
 }
 
+#[test]
+fn test_snapshot_serializes_signed_artifact_fetch_authorizations() {
+    let fetch = BootstrapArtifactFetchAuthorization {
+        app_id: "app1:v1".to_string(),
+        sha256: "abc123".to_string(),
+        artifact_url: "http://node-0.internal:9091/artifacts/abc123".to_string(),
+        artifact_transfer_manifest: Some(
+            ArtifactTransferAuthority::derive("node-0", &[4u8; 32]).issue_read_manifest("abc123"),
+        ),
+    };
+
+    let snapshot = Event::StateSnapshot {
+        for_node_id: "node-1".to_string(),
+        bootstrap_session_id: "bootstrap-session-1".to_string(),
+        bootstrap_nonce: "bootstrap-nonce-1".to_string(),
+        configs: vec![],
+        routes: vec![],
+        encrypted_secrets: vec![],
+        gateway_configs: vec![],
+        api_keys: vec![],
+        artifact_fetches: vec![fetch.clone()],
+        artifact_hashes: vec![("app1:v1".to_string(), "abc123".to_string())],
+    };
+
+    let encoded = serde_json::to_string(&snapshot).unwrap();
+    let decoded: Event = serde_json::from_str(&encoded).unwrap();
+
+    match decoded {
+        Event::StateSnapshot {
+            artifact_fetches,
+            artifact_hashes,
+            ..
+        } => {
+            assert_eq!(artifact_fetches, vec![fetch]);
+            assert_eq!(
+                artifact_hashes,
+                vec![("app1:v1".to_string(), "abc123".to_string())]
+            );
+        }
+        other => panic!("unexpected event after roundtrip: {:?}", other),
+    }
+}
+
 #[tokio::test]
 async fn test_snapshot_event_structure() {
     let nats_url = get_nats_url().await;
@@ -292,6 +339,7 @@ async fn test_snapshot_event_structure() {
         encrypted_secrets: encrypted_secrets.clone(),
         gateway_configs: vec![],
         api_keys: vec![],
+        artifact_fetches: vec![],
         artifact_hashes: artifact_hashes.clone(),
     };
 
@@ -309,6 +357,7 @@ async fn test_snapshot_event_structure() {
         encrypted_secrets: s,
         gateway_configs,
         api_keys,
+        artifact_fetches,
         artifact_hashes: h,
     } = snapshot
     {
@@ -320,6 +369,7 @@ async fn test_snapshot_event_structure() {
         assert_eq!(s.len(), 1);
         assert!(gateway_configs.is_empty());
         assert!(api_keys.is_empty());
+        assert!(artifact_fetches.is_empty());
         assert_eq!(h.len(), 2);
 
         // Verify secrets are encrypted (not plaintext)
@@ -474,6 +524,7 @@ async fn test_two_node_bootstrap_simulation() {
         encrypted_secrets: encrypted_secrets.clone(),
         gateway_configs: gateway_configs.clone(),
         api_keys: api_key_snapshot.clone(),
+        artifact_fetches: vec![],
         artifact_hashes: artifact_hashes.clone(),
     };
 
@@ -489,6 +540,7 @@ async fn test_two_node_bootstrap_simulation() {
         encrypted_secrets,
         gateway_configs,
         api_keys,
+        artifact_fetches,
         artifact_hashes,
         ..
     } = snapshot.clone()
@@ -545,8 +597,13 @@ async fn test_two_node_bootstrap_simulation() {
             store1.clone(),
             secrets::crypto::SymmetricKey::from_bytes(kek1_bytes),
         );
-        let secret = verify_provider.get(&app_config.id, "API_KEY").await.unwrap();
+        let secret = verify_provider
+            .get(&app_config.id, "API_KEY")
+            .await
+            .unwrap();
         assert_eq!(secret, "sk_test_node0_secret");
+
+        assert!(artifact_fetches.is_empty());
 
         // Save artifact hashes
         for (app_id_str, hash) in artifact_hashes {
@@ -576,7 +633,10 @@ async fn test_two_node_bootstrap_simulation() {
     assert_eq!(loaded_routes[0].host, "hello.example.com");
 
     // Check gateway policy state
-    let loaded_gateway = store1.load_gateway_config(&app_config.id.0).unwrap().unwrap();
+    let loaded_gateway = store1
+        .load_gateway_config(&app_config.id.0)
+        .unwrap()
+        .unwrap();
     assert_eq!(loaded_gateway, gateway_config);
     let loaded_api_keys = store1.load_api_keys(&app_config.id.0).unwrap();
     assert_eq!(loaded_api_keys, api_keys);

@@ -1,5 +1,7 @@
 // crates/messaging/src/events.rs
-use common::artifact_transfer::SignedArtifactTransferManifest;
+use common::artifact_transfer::{
+    BootstrapArtifactFetchAuthorization, SignedArtifactTransferManifest,
+};
 use common::types::{ApiKeyRecord, AppConfig, AppId, GatewayRouteConfig};
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
@@ -141,6 +143,10 @@ pub enum Event {
         /// API-key policy state for each app.
         #[serde(default)]
         api_keys: Vec<(String, Vec<ApiKeyRecord>)>,
+        /// Per-artifact remote fetch authorizations for bootstrap recovery.
+        /// Newer nodes prefer this signed-fetch path over legacy remote PUT push.
+        #[serde(default)]
+        artifact_fetches: Vec<BootstrapArtifactFetchAuthorization>,
         /// SHA-256 of each app's .wasm (so node can fetch artifacts).
         artifact_hashes: Vec<(String, String)>, // (app_id, sha256)
     },

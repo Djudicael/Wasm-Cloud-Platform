@@ -1,5 +1,8 @@
 use common::{
-    artifact_transfer::{SignedArtifactTransferManifest, ARTIFACT_TRANSFER_MANIFEST_HEADER},
+    artifact_transfer::{
+        ArtifactTransferAuthority, BootstrapArtifactFetchAuthorization,
+        SignedArtifactTransferManifest, ARTIFACT_TRANSFER_MANIFEST_HEADER,
+    },
     error::PlatformError,
     types::AppId,
 };
@@ -15,6 +18,7 @@ use secrets::{
     SecretTransportEnvelope, SecretTransportPayload,
 };
 use sha2::Digest;
+use std::collections::HashMap;
 use std::net::IpAddr;
 use std::sync::Arc;
 use storage::Store;
@@ -163,6 +167,7 @@ pub struct EventDispatcher {
     pub runtime: WasmRuntime,
     pub node_id: String,
     pub artifact_server_url: String,
+    pub artifact_transfer_authority: ArtifactTransferAuthority,
     pub upgrade_signing_public_key: Option<String>,
     pub secret_provider: Arc<dyn SecretProvider>,
     pub(crate) bootstrap_session: Option<Arc<Mutex<BootstrapSessionState>>>,
@@ -348,6 +353,7 @@ impl EventDispatcher {
                 encrypted_secrets,
                 gateway_configs,
                 api_keys,
+                artifact_fetches,
                 artifact_hashes,
             } => {
                 if for_node_id == self.node_id {
@@ -359,6 +365,7 @@ impl EventDispatcher {
                         encrypted_secrets,
                         gateway_configs,
                         api_keys,
+                        artifact_fetches,
                         artifact_hashes,
                     )
                     .await
@@ -671,16 +678,6 @@ impl EventDispatcher {
         }
 
         validate_peer_artifact_url(&new_node_id, &peer_artifact_url)?;
-        if peer_artifact_token
-            .as_deref()
-            .map(str::is_empty)
-            .unwrap_or(true)
-        {
-            return Err(PlatformError::config_validation(format!(
-                "node {} advertised remote artifact URL {} without an artifact auth token",
-                new_node_id, peer_artifact_url
-            )));
-        }
 
         info!(
             new_node = %new_node_id,
@@ -719,9 +716,18 @@ impl EventDispatcher {
         let gateway_configs = self.store.list_gateway_configs()?;
         let mut api_keys = Vec::new();
         let mut artifact_hashes = Vec::new();
+        let mut artifact_fetches = Vec::new();
         for config in &configs {
             if let Some(hash) = self.store.get_artifact_sha256(&config.id)? {
-                artifact_hashes.push((config.id.0.clone(), hash));
+                artifact_hashes.push((config.id.0.clone(), hash.clone()));
+                artifact_fetches.push(BootstrapArtifactFetchAuthorization {
+                    app_id: config.id.0.clone(),
+                    sha256: hash.clone(),
+                    artifact_url: format!("{}/artifacts/{}", self.artifact_server_url, hash),
+                    artifact_transfer_manifest: Some(
+                        self.artifact_transfer_authority.issue_read_manifest(&hash),
+                    ),
+                });
             }
             let keys = self.store.load_api_keys(&config.id.0)?;
             if !keys.is_empty() {
@@ -742,46 +748,18 @@ impl EventDispatcher {
             encrypted_secrets,
             gateway_configs,
             api_keys,
+            artifact_fetches,
             artifact_hashes: artifact_hashes.clone(),
         };
 
-        // Publish via NATS (we need access to the bus - will fix in main.rs)
         info!(
             new_node = %new_node_id,
             apps = artifact_hashes.len(),
-            "snapshot prepared"
+            fetch_manifests = artifact_hashes.len(),
+            peer_artifact_url = %peer_artifact_url,
+            legacy_peer_token_present = peer_artifact_token.is_some(),
+            "snapshot prepared with signed artifact fetch authorizations"
         );
-
-        // 6. Push artifacts to new node in background
-        let store = self.store.clone();
-        tokio::spawn(async move {
-            let client = reqwest::Client::new();
-            for (app_id_str, sha256) in &artifact_hashes {
-                if let Ok(Some(raw)) = store.load_raw_wasm(sha256) {
-                    let url = format!("{peer_artifact_url}/artifacts/{sha256}");
-                    let mut request = client.put(&url).body(raw);
-                    if let Some(token) = peer_artifact_token.as_deref() {
-                        request = request.bearer_auth(token);
-                    }
-                    match request.send().await {
-                        Ok(resp) if resp.status().is_success() => {
-                            info!(app = app_id_str, sha256, "pushed artifact to new node");
-                        }
-                        Ok(resp) => {
-                            warn!(
-                                app = app_id_str,
-                                sha256,
-                                status = %resp.status(),
-                                "failed to push artifact"
-                            );
-                        }
-                        Err(e) => {
-                            warn!(app = app_id_str, sha256, error = %e, "artifact push error");
-                        }
-                    }
-                }
-            }
-        });
 
         // Publish the snapshot event via NATS
         self.bus.publish(&event).await?;
@@ -797,6 +775,7 @@ impl EventDispatcher {
         encrypted_secrets: Vec<SecretTransportEntry>,
         gateway_configs: Vec<(String, common::types::GatewayRouteConfig)>,
         api_keys: Vec<(String, Vec<common::types::ApiKeyRecord>)>,
+        artifact_fetches: Vec<BootstrapArtifactFetchAuthorization>,
         artifact_hashes: Vec<(String, String)>,
     ) -> Result<(), PlatformError> {
         info!(
@@ -890,21 +869,54 @@ impl EventDispatcher {
             self.store.save_artifact_hash(&app_id, sha256)?;
         }
 
-        // 6. Compile artifacts (artifacts should already be in our local store from push)
+        // 6. Fetch or locate artifacts, then compile them.
+        let artifact_fetches_by_sha: HashMap<String, BootstrapArtifactFetchAuthorization> =
+            artifact_fetches
+                .into_iter()
+                .map(|fetch| (fetch.sha256.clone(), fetch))
+                .collect();
+
         for (app_id_str, sha256) in artifact_hashes {
             let app_id = AppId(app_id_str.clone());
 
-            // Wait for the artifact to arrive via HTTP push with a retry loop.
-            // The peer node pushes artifacts asynchronously, so we may need to
-            // wait for the HTTP PUT to complete before we can compile.
-            let artifact = {
+            let artifact = if let Some(fetch) = artifact_fetches_by_sha.get(&sha256) {
+                match fetch_artifact(
+                    &fetch.artifact_url,
+                    None,
+                    fetch.artifact_transfer_manifest.as_ref(),
+                    &sha256,
+                )
+                .await
+                {
+                    Ok(raw) => {
+                        self.store.save_raw_wasm(&sha256, &raw)?;
+                        info!(
+                            app = %app_id_str,
+                            sha256,
+                            url = %fetch.artifact_url,
+                            "artifact fetched from peer via signed bootstrap manifest"
+                        );
+                        Some(raw)
+                    }
+                    Err(e) => {
+                        warn!(
+                            app = %app_id_str,
+                            sha256,
+                            url = %fetch.artifact_url,
+                            error = %e,
+                            "failed to fetch artifact from bootstrap snapshot authorization"
+                        );
+                        None
+                    }
+                }
+            } else {
+                // Compatibility fallback for older peers that still push artifacts.
                 let mut attempts = 0;
                 loop {
                     if let Ok(Some(raw)) = self.store.load_raw_wasm(&sha256) {
                         break Some(raw);
                     }
                     if attempts >= 50 {
-                        // 5 seconds total (50 * 100ms)
                         break None;
                     }
                     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;

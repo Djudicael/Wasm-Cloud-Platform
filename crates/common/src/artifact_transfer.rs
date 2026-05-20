@@ -258,6 +258,15 @@ pub struct ArtifactUploadAuthorizationResponse {
     pub signed_get_manifest: Option<SignedArtifactTransferManifest>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BootstrapArtifactFetchAuthorization {
+    pub app_id: String,
+    pub sha256: String,
+    pub artifact_url: String,
+    #[serde(default)]
+    pub artifact_transfer_manifest: Option<SignedArtifactTransferManifest>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -377,6 +377,7 @@ mod test_helpers {
                     encrypted_secrets: vec![],
                     gateway_configs: vec![],
                     api_keys: vec![],
+                    artifact_fetches: vec![],
                     artifact_hashes: vec![],
                 },
             ),

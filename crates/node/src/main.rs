@@ -1125,6 +1125,7 @@ async fn main() -> anyhow::Result<()> {
         runtime: runtime.clone(),
         node_id: config.node.node_id.clone(),
         artifact_server_url: artifact_server_url.clone(),
+        artifact_transfer_authority: artifact_transfer_authority.clone(),
         upgrade_signing_public_key: config.runtime.upgrade_signing_public_key.clone(),
         secret_provider: secret_provider.clone(),
         bootstrap_session: bootstrap_session.clone(),
