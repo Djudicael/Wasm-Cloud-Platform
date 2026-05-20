@@ -473,6 +473,24 @@ struct Args {
     #[arg(long, env = "WASM_NODE_RUNTIME_CACHE_DIRECTORY")]
     runtime_cache_directory: Option<String>,
 
+    #[arg(long, env = "WASM_NODE_RUNTIME_POOLING_ALLOCATOR")]
+    runtime_pooling_allocator: Option<bool>,
+
+    #[arg(long, env = "WASM_NODE_RUNTIME_POOLING_TOTAL_COMPONENT_INSTANCES")]
+    runtime_pooling_total_component_instances: Option<u32>,
+
+    #[arg(
+        long,
+        env = "WASM_NODE_RUNTIME_POOLING_MAX_CORE_INSTANCES_PER_COMPONENT"
+    )]
+    runtime_pooling_max_core_instances_per_component: Option<u32>,
+
+    #[arg(long, env = "WASM_NODE_RUNTIME_POOLING_MAX_MEMORIES_PER_COMPONENT")]
+    runtime_pooling_max_memories_per_component: Option<u32>,
+
+    #[arg(long, env = "WASM_NODE_RUNTIME_POOLING_MAX_TABLES_PER_COMPONENT")]
+    runtime_pooling_max_tables_per_component: Option<u32>,
+
     #[arg(long, env = "ADMIN_TOKEN")]
     admin_token: Option<String>,
 
@@ -654,6 +672,12 @@ async fn main() -> anyhow::Result<()> {
         key_source: Some(args.key_source.clone()),
         key_file: args.key_file.clone(),
         runtime_cache_directory: args.runtime_cache_directory.clone(),
+        runtime_pooling_allocator: args.runtime_pooling_allocator,
+        runtime_pooling_total_component_instances: args.runtime_pooling_total_component_instances,
+        runtime_pooling_max_core_instances_per_component: args
+            .runtime_pooling_max_core_instances_per_component,
+        runtime_pooling_max_memories_per_component: args.runtime_pooling_max_memories_per_component,
+        runtime_pooling_max_tables_per_component: args.runtime_pooling_max_tables_per_component,
         database_url: Some(args.database_url.clone()),
         pgbouncer_addr: Some(args.pgbouncer_addr.clone()),
         enable_db_proxy: Some(args.enable_db_proxy),

@@ -367,6 +367,21 @@ pub struct RuntimeSection {
     /// When set, the runtime enables Wasmtime's compilation cache.
     #[serde(default)]
     pub cache_directory: Option<String>,
+    /// Enable Wasmtime pooling allocator for component instances.
+    #[serde(default)]
+    pub pooling_allocator: bool,
+    /// Maximum number of concurrent component instances when pooling is enabled.
+    #[serde(default = "default_pooling_total_component_instances")]
+    pub pooling_total_component_instances: u32,
+    /// Optional cap on core instances per component when pooling is enabled.
+    #[serde(default)]
+    pub pooling_max_core_instances_per_component: Option<u32>,
+    /// Optional cap on memories per component when pooling is enabled.
+    #[serde(default)]
+    pub pooling_max_memories_per_component: Option<u32>,
+    /// Optional cap on tables per component when pooling is enabled.
+    #[serde(default)]
+    pub pooling_max_tables_per_component: Option<u32>,
 }
 
 fn default_port_start() -> u16 {
@@ -381,6 +396,10 @@ fn default_key_source() -> String {
     "generate".to_string()
 }
 
+fn default_pooling_total_component_instances() -> u32 {
+    1000
+}
+
 impl Default for RuntimeSection {
     fn default() -> Self {
         RuntimeSection {
@@ -389,6 +408,11 @@ impl Default for RuntimeSection {
             key_source: default_key_source(),
             key_file: None,
             cache_directory: None,
+            pooling_allocator: false,
+            pooling_total_component_instances: default_pooling_total_component_instances(),
+            pooling_max_core_instances_per_component: None,
+            pooling_max_memories_per_component: None,
+            pooling_max_tables_per_component: None,
         }
     }
 }

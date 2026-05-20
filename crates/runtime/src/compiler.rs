@@ -1,7 +1,7 @@
 use common::{config::RuntimeSection, error::PlatformError};
 use std::path::{Path, PathBuf};
 use wasmtime::component::Component;
-use wasmtime::{Cache, Config, Engine};
+use wasmtime::{Cache, Config, Engine, InstanceAllocationStrategy, PoolingAllocationConfig};
 
 fn configure_code_cache(
     config: &mut Config,
@@ -41,6 +41,35 @@ fn configure_code_cache(
     Ok(Some(cache_dir_path))
 }
 
+fn configure_pooling_allocator(config: &mut Config, runtime: Option<&RuntimeSection>) {
+    let Some(runtime) = runtime else {
+        return;
+    };
+    if !runtime.pooling_allocator {
+        return;
+    }
+
+    let mut pooling = PoolingAllocationConfig::default();
+    pooling.total_component_instances(runtime.pooling_total_component_instances);
+    if let Some(v) = runtime.pooling_max_core_instances_per_component {
+        pooling.max_core_instances_per_component(v);
+    }
+    if let Some(v) = runtime.pooling_max_memories_per_component {
+        pooling.max_memories_per_component(v);
+    }
+    if let Some(v) = runtime.pooling_max_tables_per_component {
+        pooling.max_tables_per_component(v);
+    }
+    config.allocation_strategy(InstanceAllocationStrategy::Pooling(pooling));
+    tracing::info!(
+        total_component_instances = runtime.pooling_total_component_instances,
+        max_core_instances_per_component = ?runtime.pooling_max_core_instances_per_component,
+        max_memories_per_component = ?runtime.pooling_max_memories_per_component,
+        max_tables_per_component = ?runtime.pooling_max_tables_per_component,
+        "Wasmtime pooling allocator enabled"
+    );
+}
+
 /// Build a Cranelift-based AOT engine.
 /// Call once per process and share via Arc.
 pub fn build_engine(runtime: Option<&RuntimeSection>) -> Result<Engine, PlatformError> {
@@ -58,6 +87,8 @@ pub fn build_engine(runtime: Option<&RuntimeSection>) -> Result<Engine, Platform
 
     // Enable Component Model
     config.wasm_component_model(true);
+
+    configure_pooling_allocator(&mut config, runtime);
 
     let cache_dir = configure_code_cache(&mut config, runtime)?;
     if let Some(path) = cache_dir.as_ref() {

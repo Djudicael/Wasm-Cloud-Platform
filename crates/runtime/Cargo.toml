@@ -5,7 +5,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-wasmtime = { workspace = true, features = ["component-model", "cache"] }
+wasmtime = { workspace = true, features = ["component-model", "cache", "pooling-allocator"] }
 wasmtime-wasi = { workspace = true }
 tokio = { workspace = true }
 thiserror = { workspace = true }

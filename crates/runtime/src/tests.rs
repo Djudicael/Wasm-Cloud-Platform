@@ -211,6 +211,22 @@ fn test_runtime_initialization_with_code_cache_directory() {
 }
 
 #[test]
+fn test_runtime_initialization_with_pooling_allocator() {
+    let runtime_cfg = common::config::RuntimeSection {
+        pooling_allocator: true,
+        pooling_total_component_instances: 64,
+        pooling_max_core_instances_per_component: Some(8),
+        pooling_max_memories_per_component: Some(4),
+        pooling_max_tables_per_component: Some(4),
+        ..Default::default()
+    };
+
+    let runtime = WasmRuntime::new_with_runtime_config(Some(&runtime_cfg))
+        .expect("Failed to create WasmRuntime with pooling allocator");
+    assert!(Arc::strong_count(&runtime.engine) >= 1);
+}
+
+#[test]
 fn test_run_supports_wasi_cli_run_interface_export() {
     let stats = compile_and_run_component(no_op_component_with_wasi_cli_run_interface());
     assert!(
