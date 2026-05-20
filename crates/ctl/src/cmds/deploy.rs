@@ -156,6 +156,7 @@ pub async fn run(
     args: DeployArgs,
     bus: &NatsBus,
     default_node_api: &str,
+    artifact_auth_token: Option<&str>,
     http: &reqwest::Client,
 ) -> Result<()> {
     // If manifest is provided, parse it and use its values (CLI flags override manifest values)
@@ -295,6 +296,7 @@ pub async fn run(
         app_id: app_id.clone(),
         config,
         artifact_url,
+        artifact_auth_token: artifact_auth_token.map(str::to_string),
         expected_hash: Some(sha256),
         size_bytes,
     };

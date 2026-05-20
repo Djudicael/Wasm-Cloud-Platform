@@ -155,6 +155,7 @@ async fn test_graceful_shutdown_via_platform_endpoint() {
         app_id: app_id.clone(),
         config: AppConfig::default_for(app_id.clone()),
         artifact_url: format!("http://127.0.0.1:{}/hello_axum.wasm", artifact_port),
+        artifact_auth_token: None,
         expected_hash: Some(expected_hash),
         size_bytes: wasm_bytes.len() as u64,
     };

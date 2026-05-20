@@ -134,6 +134,10 @@ fn artifact_server_url_is_loopback(url: &str) -> bool {
         .unwrap_or(false)
 }
 
+fn generate_artifact_peer_token() -> String {
+    common::auth::AuthConfig::generate_token()
+}
+
 fn admin_tls_material(config: &common::config::NodeConfig) -> Option<(String, String)> {
     if let (Some(cert), Some(key)) = (config.admin.tls_cert.clone(), config.admin.tls_key.clone()) {
         return Some((cert, key));
@@ -992,8 +996,13 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let artifact_server_url = build_artifact_server_url(&config.admin)?;
+    let artifact_peer_token = if artifact_server_url_is_loopback(&artifact_server_url) {
+        None
+    } else {
+        Some(generate_artifact_peer_token())
+    };
     if config.admin.advertised_artifact_url.is_some() || config.admin.advertised_host.is_some() {
-        info!(artifact_server_url = %artifact_server_url, "using configured advertised artifact endpoint");
+        info!(artifact_server_url = %artifact_server_url, remote_auth = artifact_peer_token.is_some(), "using configured advertised artifact endpoint");
     } else {
         info!(artifact_server_url = %artifact_server_url, "using local-only default advertised artifact endpoint");
     }
@@ -1112,6 +1121,7 @@ async fn main() -> anyhow::Result<()> {
         let join_event = messaging::events::Event::NodeJoined {
             node_id: config.node.node_id.clone(),
             artifact_server_url: artifact_server_url.clone(),
+            artifact_auth_token: artifact_peer_token.clone(),
             public_key_bytes,
             protocol_version: common::protocol::PROTOCOL_VERSION,
             binary_version: common::protocol::BINARY_VERSION.to_string(),
@@ -2723,7 +2733,20 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
-    let artifact_app = storage::artifact_server::artifact_router(store.clone());
+    let mut artifact_peer_tokens = Vec::new();
+    if let Some(token) = artifact_peer_token.clone() {
+        artifact_peer_tokens.push(token);
+    }
+    if let Some(token) = effective_auth_config.write_token.clone() {
+        if !artifact_peer_tokens
+            .iter()
+            .any(|existing| existing == &token)
+        {
+            artifact_peer_tokens.push(token);
+        }
+    }
+    let artifact_app =
+        storage::artifact_server::artifact_router(store.clone(), artifact_peer_tokens);
     let artifact_addr = bind_socket_address(
         &config.admin.artifact_bind_address,
         config.admin.artifact_port,

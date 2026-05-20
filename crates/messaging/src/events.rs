@@ -18,6 +18,9 @@ pub enum Event {
         /// The URL where the .wasm artifact can be fetched.
         /// Format: "http://<node-ip>:<port>/artifacts/<sha256>"
         artifact_url: String,
+        /// Optional bearer token peers may use when fetching the artifact remotely.
+        #[serde(default)]
+        artifact_auth_token: Option<String>,
         /// SHA-256 hex string of the raw .wasm bytes.
         expected_hash: Option<String>,
         /// Size in bytes (for logging and progress tracking).
@@ -85,6 +88,10 @@ pub enum Event {
         /// The node's advertised artifact base URL for peer exchange.
         /// This may differ from the local listener bind address.
         artifact_server_url: String,
+        /// Optional bearer token peers must present for remote artifact transfer.
+        /// Loopback/local-only deployments may leave this unset.
+        #[serde(default)]
+        artifact_auth_token: Option<String>,
         /// A one-time public key for encrypting the secret transfer.
         /// (Ephemeral X25519 key, used only for this bootstrap session.)
         public_key_bytes: Vec<u8>,

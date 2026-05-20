@@ -153,19 +153,23 @@ async fn test_full_platform_e2e() {
     hasher.update(&wasm_bytes);
     let expected_hash = hex::encode(hasher.finalize());
 
-    let event = Event::DeployApp {
+    let deploy_event = Event::DeployApp {
         app_id: app_id.clone(),
         config: AppConfig::default_for(app_id.clone()),
-        artifact_url: format!("http://127.0.0.1:{}/hello_axum.wasm", test_artifact_port),
+        artifact_url: format!("http://127.0.0.1:{}/hello_axum.wasm", artifact_port),
+        artifact_auth_token: None,
         expected_hash: Some(expected_hash),
         size_bytes: wasm_bytes.len() as u64,
     };
 
     println!("Publishing deploy event...");
-    bus.publish(&event)
+    bus.publish(&deploy_event)
         .await
         .expect("Failed to publish deploy event");
-    println!("Deploy event published to subject: {}", event.subject());
+    println!(
+        "Deploy event published to subject: {}",
+        deploy_event.subject()
+    );
 
     let route_event = Event::RouteAdd {
         route: common::types::Route {

@@ -70,8 +70,9 @@ mod test_helpers {
             app_id: app_id.clone(),
             config: AppConfig::default_for(app_id),
             artifact_url: "http://example.com/test.wasm".to_string(),
+            artifact_auth_token: None,
             expected_hash: None,
-            size_bytes: 1024,
+            size_bytes: 0,
         };
 
         bus.publish(&event).await.unwrap();
@@ -122,8 +123,9 @@ mod test_helpers {
             app_id: app_id.clone(),
             config: AppConfig::default_for(app_id.clone()),
             artifact_url: "http://example.com/durable.wasm".to_string(),
+            artifact_auth_token: None,
             expected_hash: None,
-            size_bytes: 1024,
+            size_bytes: 0,
         };
 
         bus.publish(&event).await.unwrap();
@@ -188,8 +190,9 @@ mod test_helpers {
             app_id: app_id.clone(),
             config: AppConfig::default_for(app_id),
             artifact_url: "http://example.com/retry.wasm".to_string(),
+            artifact_auth_token: None,
             expected_hash: None,
-            size_bytes: 1024,
+            size_bytes: 0,
         };
         bus.publish(&event).await.unwrap();
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -350,6 +353,7 @@ mod test_helpers {
                 Event::NodeJoined {
                     node_id: "".to_string(),
                     artifact_server_url: "".to_string(),
+                    artifact_auth_token: None,
                     public_key_bytes: vec![],
                     protocol_version: 1,
                     binary_version: "".to_string(),

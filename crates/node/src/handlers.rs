@@ -7,6 +7,7 @@ use proxy::upstream::UpstreamRegistry;
 use reqwest::Url;
 use runtime::WasmRuntime;
 use secrets::{encrypt_for_peer, BootstrapKeyPair, SecretProvider};
+use sha2::Digest;
 use std::net::IpAddr;
 use std::sync::Arc;
 use storage::Store;
@@ -87,6 +88,7 @@ impl EventDispatcher {
                 app_id,
                 config,
                 artifact_url,
+                artifact_auth_token,
                 expected_hash,
                 size_bytes,
             } => {
@@ -94,8 +96,15 @@ impl EventDispatcher {
                     "🚀 Handling DeployApp for app_id: {}, url: {}",
                     app_id.0, artifact_url
                 );
-                self.handle_deploy(app_id, config, artifact_url, expected_hash, size_bytes)
-                    .await
+                self.handle_deploy(
+                    app_id,
+                    config,
+                    artifact_url,
+                    artifact_auth_token,
+                    expected_hash,
+                    size_bytes,
+                )
+                .await
             }
             Event::RemoveApp { app_id } => self.handle_remove(app_id).await,
             Event::RouteAdd { route } => {
@@ -219,6 +228,7 @@ impl EventDispatcher {
             Event::NodeJoined {
                 node_id,
                 artifact_server_url,
+                artifact_auth_token,
                 public_key_bytes,
                 protocol_version,
                 binary_version,
@@ -226,6 +236,7 @@ impl EventDispatcher {
                 self.handle_node_joined(
                     node_id,
                     artifact_server_url,
+                    artifact_auth_token,
                     public_key_bytes,
                     protocol_version,
                     binary_version,
@@ -445,6 +456,7 @@ impl EventDispatcher {
         app_id: AppId,
         config: common::types::AppConfig,
         artifact_url: String,
+        artifact_auth_token: Option<String>,
         expected_hash: Option<String>,
         size_bytes: u64,
     ) -> Result<(), PlatformError> {
@@ -470,7 +482,7 @@ impl EventDispatcher {
         } else {
             // 2. Fetch from the source node
             info!(url = %artifact_url, "fetching artifact via HTTP");
-            let bytes = fetch_artifact(&artifact_url, &sha256)
+            let bytes = fetch_artifact(&artifact_url, artifact_auth_token.as_deref(), &sha256)
                 .await
                 .map_err(PlatformError::external)?;
 
@@ -524,6 +536,7 @@ impl EventDispatcher {
         &self,
         new_node_id: String,
         peer_artifact_url: String,
+        peer_artifact_token: Option<String>,
         peer_public_key: Vec<u8>,
         protocol_version: u32,
         binary_version: String,
@@ -537,6 +550,16 @@ impl EventDispatcher {
 
         if new_node_id != self.node_id {
             validate_peer_artifact_url(&new_node_id, &peer_artifact_url)?;
+            if peer_artifact_token
+                .as_deref()
+                .map(str::is_empty)
+                .unwrap_or(true)
+            {
+                return Err(PlatformError::config_validation(format!(
+                    "node {} advertised remote artifact URL {} without an artifact auth token",
+                    new_node_id, peer_artifact_url
+                )));
+            }
         }
 
         // Leader election: only nodes with IDs smaller than the new node respond.
@@ -608,7 +631,11 @@ impl EventDispatcher {
             for (app_id_str, sha256) in &artifact_hashes {
                 if let Ok(Some(raw)) = store.load_raw_wasm(sha256) {
                     let url = format!("{peer_artifact_url}/artifacts/{sha256}");
-                    match client.put(&url).body(raw).send().await {
+                    let mut request = client.put(&url).body(raw);
+                    if let Some(token) = peer_artifact_token.as_deref() {
+                        request = request.bearer_auth(token);
+                    }
+                    match request.send().await {
                         Ok(resp) if resp.status().is_success() => {
                             info!(app = app_id_str, sha256, "pushed artifact to new node");
                         }
@@ -881,10 +908,39 @@ impl EventDispatcher {
 }
 
 /// Fetch an artifact from a URL and verify its SHA-256 hash.
-async fn fetch_artifact(url: &str, expected_sha256: &str) -> Result<Vec<u8>, String> {
-    crate::upgrade::download_and_verify_bytes(url, expected_sha256)
+async fn fetch_artifact(
+    url: &str,
+    artifact_auth_token: Option<&str>,
+    expected_sha256: &str,
+) -> Result<Vec<u8>, String> {
+    let client = reqwest::Client::new();
+    let mut request = client.get(url);
+    if let Some(token) = artifact_auth_token {
+        request = request.bearer_auth(token);
+    }
+
+    let response = request
+        .send()
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| format!("download failed: {e}"))?;
+
+    if !response.status().is_success() {
+        return Err(format!("download failed with HTTP {}", response.status()));
+    }
+
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(|e| format!("failed to read artifact response body: {e}"))?;
+    let actual_sha256 = hex::encode(sha2::Sha256::digest(&bytes));
+    if actual_sha256 != expected_sha256 {
+        return Err(format!(
+            "artifact hash mismatch: expected {}, got {}",
+            expected_sha256, actual_sha256
+        ));
+    }
+
+    Ok(bytes.to_vec())
 }
 
 #[cfg(test)]

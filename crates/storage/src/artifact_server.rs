@@ -2,7 +2,7 @@
 use axum::{
     body::Bytes,
     extract::{ConnectInfo, Path, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     routing::{get, put},
     Router,
 };
@@ -13,30 +13,53 @@ use crate::Store;
 
 const MAX_ARTIFACT_SIZE: usize = 104_857_600; // 100 MB
 
-fn ensure_loopback_peer(peer_addr: SocketAddr) -> Result<(), StatusCode> {
+fn bearer_token(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+}
+
+fn ensure_authorized_peer(
+    peer_addr: SocketAddr,
+    headers: &HeaderMap,
+    peer_tokens: &[String],
+) -> Result<(), StatusCode> {
     if peer_addr.ip().is_loopback() {
-        Ok(())
-    } else {
-        tracing::warn!(peer = %peer_addr, "rejected non-loopback artifact request");
-        Err(StatusCode::FORBIDDEN)
+        return Ok(());
+    }
+
+    match bearer_token(headers) {
+        Some(provided) if peer_tokens.iter().any(|expected| expected == provided) => Ok(()),
+        Some(_) | None if !peer_tokens.is_empty() => {
+            tracing::warn!(peer = %peer_addr, "rejected non-loopback artifact request with missing/invalid bearer token");
+            Err(StatusCode::FORBIDDEN)
+        }
+        _ => {
+            tracing::warn!(peer = %peer_addr, "rejected non-loopback artifact request because no peer artifact token is configured");
+            Err(StatusCode::FORBIDDEN)
+        }
     }
 }
 
 #[derive(Clone)]
 struct ArtifactServerState {
     store: Store,
+    peer_tokens: Vec<String>,
 }
 
-/// GET /artifacts/:sha256 — serve raw .wasm bytes (loopback only)
+/// GET /artifacts/:sha256 — serve raw .wasm bytes.
+/// Loopback peers are allowed implicitly; remote peers must present the configured bearer token.
 async fn get_artifact(
     Path(sha256): Path<String>,
     State(s): State<ArtifactServerState>,
     ConnectInfo(peer_addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
 ) -> Result<Bytes, StatusCode> {
-    ensure_loopback_peer(peer_addr)?;
+    ensure_authorized_peer(peer_addr, &headers, &s.peer_tokens)?;
 
-    // We use sha256 as the lookup key for raw .wasm (pre-compilation)
-    // This is separate from the compiled artifact stored under AppId
     match s.store.load_raw_wasm(&sha256) {
         Ok(Some(bytes)) => {
             tracing::debug!(sha256, bytes = bytes.len(), "artifact served");
@@ -53,18 +76,19 @@ async fn get_artifact(
     }
 }
 
-/// PUT /artifacts/:sha256 — store raw .wasm bytes (loopback only)
+/// PUT /artifacts/:sha256 — store raw .wasm bytes.
+/// Loopback peers are allowed implicitly; remote peers must present the configured bearer token.
 async fn put_artifact(
     Path(sha256): Path<String>,
     State(s): State<ArtifactServerState>,
     ConnectInfo(peer_addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     body: Bytes,
 ) -> StatusCode {
-    if let Err(code) = ensure_loopback_peer(peer_addr) {
+    if let Err(code) = ensure_authorized_peer(peer_addr, &headers, &s.peer_tokens) {
         return code;
     }
 
-    // Check size limit
     if body.len() > MAX_ARTIFACT_SIZE {
         tracing::warn!(
             sha256,
@@ -75,7 +99,6 @@ async fn put_artifact(
         return StatusCode::PAYLOAD_TOO_LARGE;
     }
 
-    // Verify hash before storing
     let actual = hex::encode(Sha256::digest(&body));
     if actual != sha256 {
         tracing::warn!(expected = %sha256, actual, "SHA-256 mismatch on PUT");
@@ -95,8 +118,8 @@ async fn put_artifact(
 }
 
 /// Build the artifact server router.
-pub fn artifact_router(store: Store) -> Router {
-    let state = ArtifactServerState { store };
+pub fn artifact_router(store: Store, peer_tokens: Vec<String>) -> Router {
+    let state = ArtifactServerState { store, peer_tokens };
     Router::new()
         .route("/artifacts/{sha256}", get(get_artifact))
         .route("/artifacts/{sha256}", put(put_artifact))
@@ -116,7 +139,7 @@ mod tests {
         let temp_file = NamedTempFile::new().unwrap();
         let store = Store::open(temp_file.path()).unwrap();
 
-        let app = artifact_router(store);
+        let app = artifact_router(store, Vec::new());
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
 
@@ -129,14 +152,12 @@ mod tests {
             .unwrap();
         });
 
-        // Give server time to start
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
         let client = reqwest::Client::new();
         let wasm_bytes = b"fake wasm binary for testing";
         let sha256 = hex::encode(Sha256::digest(wasm_bytes));
 
-        // 1. PUT artifact
         let put_url = format!("http://{}/artifacts/{}", addr, sha256);
         let resp = client
             .put(&put_url)
@@ -146,7 +167,6 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::CREATED);
 
-        // 2. GET artifact
         let get_url = format!("http://{}/artifacts/{}", addr, sha256);
         let resp = client.get(&get_url).send().await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
@@ -160,7 +180,7 @@ mod tests {
         let temp_file = NamedTempFile::new().unwrap();
         let store = Store::open(temp_file.path()).unwrap();
 
-        let app = artifact_router(store);
+        let app = artifact_router(store, Vec::new());
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
 
@@ -179,7 +199,6 @@ mod tests {
         let wasm_bytes = b"fake wasm binary";
         let wrong_sha256 = "0000000000000000000000000000000000000000000000000000000000000000";
 
-        // PUT with wrong hash should fail
         let put_url = format!("http://{}/artifacts/{}", addr, wrong_sha256);
         let resp = client
             .put(&put_url)
@@ -195,7 +214,7 @@ mod tests {
         let temp_file = NamedTempFile::new().unwrap();
         let store = Store::open(temp_file.path()).unwrap();
 
-        let app = artifact_router(store);
+        let app = artifact_router(store, Vec::new());
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
 
@@ -218,14 +237,22 @@ mod tests {
     }
 
     #[test]
-    fn test_ensure_loopback_peer() {
+    fn test_ensure_authorized_peer() {
         let loopback: SocketAddr = "127.0.0.1:8080".parse().unwrap();
         let remote: SocketAddr = "10.0.0.5:8080".parse().unwrap();
+        let mut headers = HeaderMap::new();
+        let peer_tokens = vec!["peer-token".to_string()];
 
-        assert!(ensure_loopback_peer(loopback).is_ok());
+        assert!(ensure_authorized_peer(loopback, &headers, &[]).is_ok());
         assert_eq!(
-            ensure_loopback_peer(remote).unwrap_err(),
+            ensure_authorized_peer(remote, &headers, &peer_tokens).unwrap_err(),
             StatusCode::FORBIDDEN
         );
+
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            "Bearer peer-token".parse().unwrap(),
+        );
+        assert!(ensure_authorized_peer(remote, &headers, &peer_tokens).is_ok());
     }
 }

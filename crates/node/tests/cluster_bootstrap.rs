@@ -77,16 +77,18 @@ async fn test_fresh_node_publishes_node_joined() {
             if let Event::NodeJoined {
                 node_id,
                 artifact_server_url,
+                artifact_auth_token,
                 public_key_bytes,
                 protocol_version: _,
                 binary_version: _,
             } = event
             {
                 println!(
-                    "Received NodeJoined: node_id={}, url={}, pubkey_len={}",
+                    "Received NodeJoined: node_id={}, url={}, pubkey_len={}, has_artifact_auth_token={}",
                     node_id,
                     artifact_server_url,
-                    public_key_bytes.len()
+                    public_key_bytes.len(),
+                    artifact_auth_token.is_some()
                 );
             }
         }
@@ -102,6 +104,7 @@ async fn test_fresh_node_publishes_node_joined() {
     let join_event = Event::NodeJoined {
         node_id: "node-0".to_string(),
         artifact_server_url: "http://127.0.0.1:8080".to_string(),
+        artifact_auth_token: None,
         public_key_bytes: public_key_bytes.clone(),
         protocol_version: common::protocol::PROTOCOL_VERSION,
         binary_version: common::protocol::BINARY_VERSION.to_string(),
@@ -353,6 +356,7 @@ async fn test_two_node_bootstrap_simulation() {
     let join_event = Event::NodeJoined {
         node_id: "node-1".to_string(),
         artifact_server_url: advertised_artifact_url.clone(),
+        artifact_auth_token: Some("peer-artifact-token".to_string()),
         public_key_bytes: pubkey1.clone(),
         protocol_version: common::protocol::PROTOCOL_VERSION,
         binary_version: common::protocol::BINARY_VERSION.to_string(),
