@@ -68,6 +68,7 @@ pub struct EventDispatcher {
     pub runtime: WasmRuntime,
     pub node_id: String,
     pub artifact_server_url: String,
+    pub upgrade_signing_public_key: Option<String>,
     pub supervisor_addr: std::net::SocketAddr,
     pub secret_provider: Arc<dyn SecretProvider>,
     pub bootstrap_keypair: Option<BootstrapKeyPair>,
@@ -766,7 +767,9 @@ impl EventDispatcher {
     }
 
     async fn handle_node_upgrade(&self, event: Event) {
-        use crate::upgrade::{download_and_verify, handle_upgrade_event, UpgradeAction};
+        use crate::upgrade::{
+            download_and_verify, handle_upgrade_event, verify_upgrade_signature, UpgradeAction,
+        };
 
         // Collect all node IDs in the cluster for rolling upgrade ordering
         let cluster_nodes = {
@@ -780,6 +783,12 @@ impl EventDispatcher {
             }
             ids
         };
+
+        if let Err(e) = verify_upgrade_signature(&event, self.upgrade_signing_public_key.as_deref())
+        {
+            error!(error = %e, "upgrade signature verification failed");
+            return;
+        }
 
         match handle_upgrade_event(&event, &self.node_id, &cluster_nodes) {
             Ok(UpgradeAction::NotAnUpgradeEvent) => {
@@ -820,31 +829,9 @@ impl EventDispatcher {
                         .await
                     {
                         Ok(new_binary_path) => {
-                            info!(path = ?new_binary_path, "new binary downloaded and verified");
+                            info!(path = ?new_binary_path, "new binary downloaded, verified, and activated");
 
-                            // Update the symlink to point to the new binary
-                            let current_link = install_dir.join("current");
-                            if let Err(e) = std::fs::remove_file(&current_link) {
-                                if e.kind() != std::io::ErrorKind::NotFound {
-                                    error!(error = %e, "failed to remove old symlink");
-                                    return;
-                                }
-                            }
-
-                            #[cfg(unix)]
-                            let symlink_result =
-                                std::os::unix::fs::symlink(&new_binary_path, &current_link);
-
-                            #[cfg(windows)]
-                            let symlink_result =
-                                std::os::windows::fs::symlink_file(&new_binary_path, &current_link);
-
-                            if let Err(e) = symlink_result {
-                                error!(error = %e, "failed to create new symlink");
-                                return;
-                            }
-
-                            info!("symlink updated, initiating graceful shutdown");
+                            info!("release links updated, initiating graceful shutdown");
 
                             // Publish draining event
                             let drain_event = Event::NodeDraining {

@@ -8,6 +8,19 @@ fn default_protocol_version() -> u32 {
     common::protocol::PROTOCOL_VERSION
 }
 
+pub fn node_upgrade_signature_payload(
+    target_node: &str,
+    binary_url: &str,
+    binary_sha256: &str,
+    new_protocol_version: u32,
+    new_binary_version: &str,
+) -> Vec<u8> {
+    format!(
+        "target_node={target_node}\nbinary_url={binary_url}\nbinary_sha256={binary_sha256}\nnew_protocol_version={new_protocol_version}\nnew_binary_version={new_binary_version}\n"
+    )
+    .into_bytes()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Event {
@@ -124,6 +137,9 @@ pub enum Event {
         binary_url: String,
         /// Expected SHA-256 hash of the new binary.
         binary_sha256: String,
+        /// Optional Ed25519 signature over the upgrade metadata.
+        #[serde(default)]
+        signature_ed25519: Option<String>,
         /// The new binary's protocol version. Used for compatibility checks.
         new_protocol_version: u32,
         /// The new binary version string (e.g., "0.5.0").

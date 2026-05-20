@@ -1,7 +1,8 @@
 // crates/ctl/src/cmds/platform.rs
 use clap::Subcommand;
+use ed25519_dalek::{Signer, SigningKey};
 use hex;
-use messaging::events::Event;
+use messaging::events::{node_upgrade_signature_payload, Event};
 use messaging::NatsBus;
 
 #[derive(clap::Args)]
@@ -52,6 +53,10 @@ pub enum PlatformCommands {
         /// Target specific node (optional, defaults to all nodes)
         #[arg(long)]
         target_node: Option<String>,
+
+        /// Optional path to a 32-byte Ed25519 signing key encoded as hex.
+        #[arg(long)]
+        signing_key_file: Option<String>,
     },
 
     /// Check cluster upgrade status
@@ -93,6 +98,7 @@ pub async fn run(
             protocol_version,
             binary_version,
             target_node,
+            signing_key_file,
         } => {
             initiate_upgrade(
                 &binary_url,
@@ -100,6 +106,7 @@ pub async fn run(
                 protocol_version,
                 &binary_version,
                 target_node,
+                signing_key_file.as_deref(),
                 bus,
             )
             .await?;
@@ -156,12 +163,22 @@ async fn upload_binary(
     Ok(())
 }
 
+fn load_upgrade_signing_key(path: &str) -> anyhow::Result<SigningKey> {
+    let raw = std::fs::read_to_string(path)?;
+    let decoded = hex::decode(raw.trim())?;
+    let key_bytes: [u8; 32] = decoded
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("upgrade signing key must decode to exactly 32 bytes"))?;
+    Ok(SigningKey::from_bytes(&key_bytes))
+}
+
 async fn initiate_upgrade(
     binary_url: &str,
     sha256: &str,
     protocol_version: u32,
     binary_version: &str,
     target_node: Option<String>,
+    signing_key_file: Option<&str>,
     bus: &NatsBus,
 ) -> anyhow::Result<()> {
     println!("🚀 Initiating platform upgrade");
@@ -176,10 +193,26 @@ async fn initiate_upgrade(
         println!("   Target:           All nodes (rolling upgrade)");
     }
 
+    let target_node = target_node.unwrap_or_else(|| "*".to_string());
+    let signature_ed25519 = if let Some(path) = signing_key_file {
+        let signing_key = load_upgrade_signing_key(path)?;
+        let payload = node_upgrade_signature_payload(
+            &target_node,
+            binary_url,
+            sha256,
+            protocol_version,
+            binary_version,
+        );
+        Some(hex::encode(signing_key.sign(&payload).to_bytes()))
+    } else {
+        None
+    };
+
     let event = Event::NodeUpgrade {
-        target_node: target_node.unwrap_or_else(|| "*".to_string()),
+        target_node,
         binary_url: binary_url.to_string(),
         binary_sha256: sha256.to_string(),
+        signature_ed25519,
         new_protocol_version: protocol_version,
         new_binary_version: binary_version.to_string(),
     };

@@ -15,6 +15,7 @@ storage = { path = "../storage" }
 metrics = { path = "../metrics" }
 tokio = { workspace = true, features = ["full"] }
 url = { workspace = true }
+hex = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"

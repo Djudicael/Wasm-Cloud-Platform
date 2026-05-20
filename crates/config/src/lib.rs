@@ -49,6 +49,7 @@ pub struct CliOverrides {
     pub key_source: Option<String>,
     pub key_file: Option<String>,
     pub runtime_cache_directory: Option<String>,
+    pub runtime_upgrade_signing_public_key: Option<String>,
     pub runtime_pooling_allocator: Option<bool>,
     pub runtime_pooling_total_component_instances: Option<u32>,
     pub runtime_pooling_max_core_instances_per_component: Option<u32>,
@@ -179,6 +180,10 @@ fn merge_config(base: NodeConfig, overlay: NodeConfig) -> NodeConfig {
                 .runtime
                 .cache_directory
                 .or(base.runtime.cache_directory),
+            upgrade_signing_public_key: overlay
+                .runtime
+                .upgrade_signing_public_key
+                .or(base.runtime.upgrade_signing_public_key),
             pooling_allocator: overlay.runtime.pooling_allocator,
             pooling_total_component_instances: overlay.runtime.pooling_total_component_instances,
             pooling_max_core_instances_per_component: overlay
@@ -447,6 +452,9 @@ fn apply_env_overrides(mut config: NodeConfig) -> NodeConfig {
     if let Ok(v) = std::env::var("WASM_NODE_RUNTIME_CACHE_DIRECTORY") {
         config.runtime.cache_directory = Some(v);
     }
+    if let Ok(v) = std::env::var("WASM_NODE_RUNTIME_UPGRADE_SIGNING_PUBLIC_KEY") {
+        config.runtime.upgrade_signing_public_key = Some(v);
+    }
     if let Ok(v) = std::env::var("WASM_NODE_RUNTIME_POOLING_ALLOCATOR") {
         if let Ok(enabled) = v.parse() {
             config.runtime.pooling_allocator = enabled;
@@ -539,6 +547,9 @@ fn apply_cli_overrides(mut config: NodeConfig, cli: &CliOverrides) -> NodeConfig
     }
     if let Some(v) = &cli.runtime_cache_directory {
         config.runtime.cache_directory = Some(v.clone());
+    }
+    if let Some(v) = &cli.runtime_upgrade_signing_public_key {
+        config.runtime.upgrade_signing_public_key = Some(v.clone());
     }
     if let Some(v) = cli.runtime_pooling_allocator {
         config.runtime.pooling_allocator = v;
@@ -803,6 +814,21 @@ fn validate_config(config: &NodeConfig) -> Result<(), PlatformError> {
             "auth.require_tls = true requires either admin.tls_cert/admin.tls_key or proxy.tls_cert/proxy.tls_key"
                 .to_string(),
         );
+    }
+
+    if let Some(ref key_hex) = config.runtime.upgrade_signing_public_key {
+        let trimmed = key_hex.trim();
+        match hex::decode(trimmed) {
+            Ok(bytes) if bytes.len() == 32 => {}
+            Ok(bytes) => errors.push(format!(
+                "runtime.upgrade_signing_public_key must decode to 32 bytes, got {} bytes",
+                bytes.len()
+            )),
+            Err(e) => errors.push(format!(
+                "runtime.upgrade_signing_public_key is not valid hex: {}",
+                e
+            )),
+        }
     }
 
     if config.runtime.pooling_total_component_instances == 0 {
@@ -1420,6 +1446,10 @@ default_memory_pages = 4096
         std::env::set_var("WASM_NODE_ADMIN_BIND_ADDRESS", "0.0.0.0");
         std::env::set_var("WASM_NODE_ADMIN_TLS_CERT", "/tmp/admin.crt");
         std::env::set_var("WASM_NODE_RUNTIME_CACHE_DIRECTORY", "/tmp/wasmtime-cache");
+        std::env::set_var(
+            "WASM_NODE_RUNTIME_UPGRADE_SIGNING_PUBLIC_KEY",
+            "1111111111111111111111111111111111111111111111111111111111111111",
+        );
         std::env::set_var("WASM_NODE_RUNTIME_POOLING_ALLOCATOR", "true");
         std::env::set_var(
             "WASM_NODE_STORAGE_OPEN_FAILURE_MODE",
@@ -1432,6 +1462,7 @@ default_memory_pages = 4096
         std::env::remove_var("WASM_NODE_ADMIN_BIND_ADDRESS");
         std::env::remove_var("WASM_NODE_ADMIN_TLS_CERT");
         std::env::remove_var("WASM_NODE_RUNTIME_CACHE_DIRECTORY");
+        std::env::remove_var("WASM_NODE_RUNTIME_UPGRADE_SIGNING_PUBLIC_KEY");
         std::env::remove_var("WASM_NODE_RUNTIME_POOLING_ALLOCATOR");
         std::env::remove_var("WASM_NODE_STORAGE_OPEN_FAILURE_MODE");
 
@@ -1446,6 +1477,10 @@ default_memory_pages = 4096
         assert_eq!(
             config.runtime.cache_directory.as_deref(),
             Some("/tmp/wasmtime-cache")
+        );
+        assert_eq!(
+            config.runtime.upgrade_signing_public_key.as_deref(),
+            Some("1111111111111111111111111111111111111111111111111111111111111111")
         );
         assert!(config.runtime.pooling_allocator);
         assert_eq!(
@@ -1468,6 +1503,9 @@ default_memory_pages = 4096
             artifact_bind_address: Some("0.0.0.0".to_string()),
             admin_tls_key: Some("/tmp/admin.key".to_string()),
             runtime_cache_directory: Some("/tmp/cli-wasmtime-cache".to_string()),
+            runtime_upgrade_signing_public_key: Some(
+                "2222222222222222222222222222222222222222222222222222222222222222".to_string(),
+            ),
             runtime_pooling_total_component_instances: Some(256),
             runtime_pooling_max_tables_per_component: Some(12),
             admin_advertised_artifact_url: Some("https://cli-artifacts.internal".to_string()),
@@ -1483,6 +1521,10 @@ default_memory_pages = 4096
         assert_eq!(
             config.runtime.cache_directory.as_deref(),
             Some("/tmp/cli-wasmtime-cache")
+        );
+        assert_eq!(
+            config.runtime.upgrade_signing_public_key.as_deref(),
+            Some("2222222222222222222222222222222222222222222222222222222222222222")
         );
         assert_eq!(config.runtime.pooling_total_component_instances, 256);
         assert_eq!(config.runtime.pooling_max_tables_per_component, Some(12));
@@ -1550,6 +1592,16 @@ default_memory_pages = 4096
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
         assert!(msg.contains("https_port requires tls_cert and tls_key"));
+    }
+
+    #[test]
+    fn test_validation_rejects_invalid_upgrade_signing_public_key() {
+        let mut config = NodeConfig::default();
+        config.runtime.upgrade_signing_public_key = Some("not-hex".to_string());
+        let result = validate_config(&config);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("runtime.upgrade_signing_public_key is not valid hex"));
     }
 
     #[test]

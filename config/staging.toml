@@ -70,6 +70,8 @@ key_source = "generate"
 # key_file = "/etc/wasm-node/master.key"
 # Optional Wasmtime code cache directory for faster repeated compilation/startup.
 # cache_directory = "/var/cache/wasm-node/wasmtime"
+# Optional Ed25519 public key (32-byte hex) for signed upgrade metadata.
+# upgrade_signing_public_key = "PUT-32-BYTE-HEX-PUBLIC-KEY-HERE"
 # Optional pooling allocator for higher instantiation throughput. Keep disabled
 # unless you have benchmarked it for your workload and sized the pool limits.
 # pooling_allocator = true

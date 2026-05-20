@@ -367,6 +367,10 @@ pub struct RuntimeSection {
     /// When set, the runtime enables Wasmtime's compilation cache.
     #[serde(default)]
     pub cache_directory: Option<String>,
+    /// Optional Ed25519 public key (hex, 32 bytes) used to verify signed
+    /// platform upgrade metadata before installing a new node binary.
+    #[serde(default)]
+    pub upgrade_signing_public_key: Option<String>,
     /// Enable Wasmtime pooling allocator for component instances.
     #[serde(default)]
     pub pooling_allocator: bool,
@@ -408,6 +412,7 @@ impl Default for RuntimeSection {
             key_source: default_key_source(),
             key_file: None,
             cache_directory: None,
+            upgrade_signing_public_key: None,
             pooling_allocator: false,
             pooling_total_component_instances: default_pooling_total_component_instances(),
             pooling_max_core_instances_per_component: None,

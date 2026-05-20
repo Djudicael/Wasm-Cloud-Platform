@@ -473,6 +473,9 @@ struct Args {
     #[arg(long, env = "WASM_NODE_RUNTIME_CACHE_DIRECTORY")]
     runtime_cache_directory: Option<String>,
 
+    #[arg(long, env = "WASM_NODE_RUNTIME_UPGRADE_SIGNING_PUBLIC_KEY")]
+    runtime_upgrade_signing_public_key: Option<String>,
+
     #[arg(long, env = "WASM_NODE_RUNTIME_POOLING_ALLOCATOR")]
     runtime_pooling_allocator: Option<bool>,
 
@@ -672,6 +675,7 @@ async fn main() -> anyhow::Result<()> {
         key_source: Some(args.key_source.clone()),
         key_file: args.key_file.clone(),
         runtime_cache_directory: args.runtime_cache_directory.clone(),
+        runtime_upgrade_signing_public_key: args.runtime_upgrade_signing_public_key.clone(),
         runtime_pooling_allocator: args.runtime_pooling_allocator,
         runtime_pooling_total_component_instances: args.runtime_pooling_total_component_instances,
         runtime_pooling_max_core_instances_per_component: args
@@ -1075,6 +1079,7 @@ async fn main() -> anyhow::Result<()> {
         runtime: runtime.clone(),
         node_id: config.node.node_id.clone(),
         artifact_server_url: artifact_server_url.clone(),
+        upgrade_signing_public_key: config.runtime.upgrade_signing_public_key.clone(),
         supervisor_addr: format!("127.0.0.1:{}", config.admin.port)
             .parse()
             .unwrap_or_else(|_| "127.0.0.1:9000".parse().unwrap()),
