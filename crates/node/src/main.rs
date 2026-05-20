@@ -2886,9 +2886,20 @@ uoKQp7o8ET+CcFRg9vEG/uA=
         assert_eq!(material.1, "/tmp/admin.key");
     }
 
+    fn install_test_rustls_provider() {
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    }
+
+    fn test_admin_app() -> axum::Router {
+        axum::Router::new().route(
+            "/ping",
+            axum::routing::get(|| async { axum::Json(serde_json::json!({ "ok": true })) }),
+        )
+    }
+
     #[tokio::test]
     async fn test_serve_admin_app_tls_accepts_https_requests() {
-        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        install_test_rustls_provider();
 
         let temp_dir = TempDir::new().unwrap();
         let cert_path = temp_dir.path().join("admin.crt");
@@ -2900,14 +2911,9 @@ uoKQp7o8ET+CcFRg9vEG/uA=
         let port = probe_listener.local_addr().unwrap().port();
         drop(probe_listener);
 
-        let admin_app = axum::Router::new().route(
-            "/ping",
-            axum::routing::get(|| async { axum::Json(serde_json::json!({ "ok": true })) }),
-        );
-
         let handle = tokio::spawn(serve_admin_app(
             format!("127.0.0.1:{port}"),
-            admin_app,
+            test_admin_app(),
             Some(cert_path.to_string_lossy().to_string()),
             Some(key_path.to_string_lossy().to_string()),
         ));
@@ -2939,6 +2945,44 @@ uoKQp7o8ET+CcFRg9vEG/uA=
 
         handle.abort();
         let _ = handle.await;
+    }
+
+    #[tokio::test]
+    async fn test_serve_admin_app_tls_rejects_missing_cert_file() {
+        install_test_rustls_provider();
+
+        let err = serve_admin_app(
+            "127.0.0.1:0".to_string(),
+            test_admin_app(),
+            Some("/tmp/does-not-exist-admin.crt".to_string()),
+            Some("/tmp/does-not-exist-admin.key".to_string()),
+        )
+        .await
+        .expect_err("missing TLS files should fail");
+
+        assert!(err.to_string().contains("admin TLS config error"));
+    }
+
+    #[tokio::test]
+    async fn test_serve_admin_app_tls_rejects_invalid_pem_contents() {
+        install_test_rustls_provider();
+
+        let temp_dir = TempDir::new().unwrap();
+        let cert_path = temp_dir.path().join("bad-admin.crt");
+        let key_path = temp_dir.path().join("bad-admin.key");
+        std::fs::write(&cert_path, b"not a cert").unwrap();
+        std::fs::write(&key_path, b"not a key").unwrap();
+
+        let err = serve_admin_app(
+            "127.0.0.1:0".to_string(),
+            test_admin_app(),
+            Some(cert_path.to_string_lossy().to_string()),
+            Some(key_path.to_string_lossy().to_string()),
+        )
+        .await
+        .expect_err("invalid TLS PEM should fail");
+
+        assert!(err.to_string().contains("admin TLS config error"));
     }
 
     #[test]
