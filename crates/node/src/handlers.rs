@@ -4,12 +4,42 @@ use proxy::dns_webhook::DnsWebhookManager;
 use proxy::node_table::NodeLoadTable;
 use proxy::router::HostRouter;
 use proxy::upstream::UpstreamRegistry;
+use reqwest::Url;
 use runtime::WasmRuntime;
 use secrets::{encrypt_for_peer, BootstrapKeyPair, SecretProvider};
+use std::net::IpAddr;
 use std::sync::Arc;
 use storage::Store;
 use supervisor::Supervisor;
 use tracing::{error, info, warn};
+
+fn is_loopback_artifact_url(url: &str) -> bool {
+    Url::parse(url)
+        .ok()
+        .and_then(|parsed| parsed.host_str().map(str::to_string))
+        .map(|host| {
+            let trimmed = host.trim().trim_start_matches('[').trim_end_matches(']');
+            trimmed.eq_ignore_ascii_case("localhost")
+                || trimmed
+                    .parse::<IpAddr>()
+                    .map(|ip| ip.is_loopback())
+                    .unwrap_or(false)
+        })
+        .unwrap_or(false)
+}
+
+fn validate_peer_artifact_url(
+    new_node_id: &str,
+    peer_artifact_url: &str,
+) -> Result<(), PlatformError> {
+    if is_loopback_artifact_url(peer_artifact_url) {
+        return Err(PlatformError::config_validation(format!(
+            "node {} advertised loopback artifact URL {} which is invalid for remote cluster exchange",
+            new_node_id, peer_artifact_url
+        )));
+    }
+    Ok(())
+}
 
 async fn apply_secret_update<S: SecretProvider + ?Sized>(
     secret_provider: &S,
@@ -505,6 +535,10 @@ impl EventDispatcher {
             "node joined cluster"
         );
 
+        if new_node_id != self.node_id {
+            validate_peer_artifact_url(&new_node_id, &peer_artifact_url)?;
+        }
+
         // Leader election: only nodes with IDs smaller than the new node respond.
         // This means multiple existing nodes could respond if they all have smaller IDs.
         // In practice, the new node should accept the first valid snapshot it receives
@@ -855,11 +889,29 @@ async fn fetch_artifact(url: &str, expected_sha256: &str) -> Result<Vec<u8>, Str
 
 #[cfg(test)]
 mod tests {
-    use super::apply_secret_update;
+    use super::{apply_secret_update, is_loopback_artifact_url, validate_peer_artifact_url};
     use common::types::AppId;
     use secrets::{crypto::SymmetricKey, LocalSecretProvider, SecretProvider};
     use storage::Store;
     use tempfile::NamedTempFile;
+
+    #[test]
+    fn test_is_loopback_artifact_url_detects_loopback_hosts() {
+        assert!(is_loopback_artifact_url("http://127.0.0.1:9091"));
+        assert!(is_loopback_artifact_url("http://localhost:9091"));
+        assert!(!is_loopback_artifact_url("http://node-1.internal:9091"));
+    }
+
+    #[test]
+    fn test_validate_peer_artifact_url_rejects_loopback() {
+        let err = validate_peer_artifact_url("node-1", "http://127.0.0.1:9091").unwrap_err();
+        assert!(err.to_string().contains("loopback artifact URL"));
+    }
+
+    #[test]
+    fn test_validate_peer_artifact_url_accepts_routable_url() {
+        validate_peer_artifact_url("node-1", "http://node-1.internal:9091").unwrap();
+    }
 
     #[tokio::test]
     async fn test_apply_secret_update_uses_secret_provider_bundle_format() {

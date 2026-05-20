@@ -10,6 +10,20 @@ use std::time::Duration;
 use storage::Store;
 use tokio::time::sleep;
 
+fn is_loopback_url(url: &str) -> bool {
+    reqwest::Url::parse(url)
+        .ok()
+        .and_then(|parsed| parsed.host_str().map(str::to_string))
+        .map(|host| {
+            host.eq_ignore_ascii_case("localhost")
+                || host
+                    .parse::<std::net::IpAddr>()
+                    .map(|ip| ip.is_loopback())
+                    .unwrap_or(false)
+        })
+        .unwrap_or(false)
+}
+
 /// Helper to create a test AppConfig
 fn create_test_app_config(app_id: &str) -> AppConfig {
     AppConfig {
@@ -335,13 +349,18 @@ async fn test_two_node_bootstrap_simulation() {
     let pubkey1 = keypair1.public_bytes();
 
     // Node-1 publishes NodeJoined
+    let advertised_artifact_url = "http://node-1.internal:8081".to_string();
     let join_event = Event::NodeJoined {
         node_id: "node-1".to_string(),
-        artifact_server_url: "http://127.0.0.1:8081".to_string(),
+        artifact_server_url: advertised_artifact_url.clone(),
         public_key_bytes: pubkey1.clone(),
         protocol_version: common::protocol::PROTOCOL_VERSION,
         binary_version: common::protocol::BINARY_VERSION.to_string(),
     };
+    assert!(
+        !is_loopback_url(&advertised_artifact_url),
+        "two-node bootstrap simulation must use a routable artifact URL"
+    );
     bus.publish(&join_event).await.unwrap();
     println!("✓ Node-1 published NodeJoined");
 
