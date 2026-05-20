@@ -6,7 +6,10 @@ use crate::{
     WasmRuntime,
 };
 use common::{
-    policy::{FilesystemPolicy, InstancePolicy, NetworkPolicy, PolicyProfile},
+    policy::{
+        FilesystemPolicy, FilesystemPolicyConfig, InstancePolicy, NetworkPolicy, PolicyConfig,
+        PolicyProfile,
+    },
     types::{AppConfig, AppId, FuelQuota, MemoryPages},
 };
 use std::sync::Arc;
@@ -79,6 +82,12 @@ fn no_op_component_with_wasi_cli_run_interface() -> &'static str {
         (export "wasi:cli/run@0.2.6" (instance $cli-run))
     )
     "#
+}
+
+fn base_config_with_policy(policy: PolicyConfig) -> AppConfig {
+    let mut config = base_config();
+    config.policy = Some(policy);
+    config
 }
 
 #[test]
@@ -198,6 +207,58 @@ fn test_run_supports_top_level_run_fallback() {
 #[test]
 fn test_top_level_entry_point_candidates_include_start_fallback() {
     assert_eq!(top_level_entry_point_candidates(), &["run", "_start"]);
+}
+
+#[test]
+fn test_spawn_instance_preopens_allowed_filesystem_path() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let config = base_config_with_policy(PolicyConfig {
+        network: None,
+        filesystem: Some(FilesystemPolicyConfig {
+            max_open_fds: None,
+            max_fs_write_bytes: None,
+            max_fs_read_bytes: None,
+            allow_file_create: Some(false),
+            allow_file_delete: Some(false),
+            allowed_paths: Some(vec![temp_dir.path().to_string_lossy().to_string()]),
+        }),
+    });
+
+    let runtime = WasmRuntime::new().expect("Failed to create WasmRuntime");
+    let wasm_bytes = wat::parse_str(no_op_component_with_wasi_cli_run_interface()).unwrap();
+    let artifact = runtime.compile(&wasm_bytes).unwrap();
+    let prepared = runtime.prepare(&artifact, config).unwrap();
+
+    let instance = prepared.spawn_instance(vec![], 8080, None);
+    assert!(instance.is_ok(), "allowed preopen path should succeed");
+}
+
+#[test]
+fn test_spawn_instance_fails_for_missing_allowed_filesystem_path() {
+    let missing_path = "/definitely-missing-wcp-preopen-path".to_string();
+    let config = base_config_with_policy(PolicyConfig {
+        network: None,
+        filesystem: Some(FilesystemPolicyConfig {
+            max_open_fds: None,
+            max_fs_write_bytes: None,
+            max_fs_read_bytes: None,
+            allow_file_create: Some(false),
+            allow_file_delete: Some(false),
+            allowed_paths: Some(vec![missing_path.clone()]),
+        }),
+    });
+
+    let runtime = WasmRuntime::new().expect("Failed to create WasmRuntime");
+    let wasm_bytes = wat::parse_str(no_op_component_with_wasi_cli_run_interface()).unwrap();
+    let artifact = runtime.compile(&wasm_bytes).unwrap();
+    let prepared = runtime.prepare(&artifact, config).unwrap();
+
+    let err = match prepared.spawn_instance(vec![], 8080, None) {
+        Ok(_) => panic!("missing preopen path should fail"),
+        Err(err) => err,
+    };
+    assert!(err.to_string().contains("failed to preopen allowed path"));
+    assert!(err.to_string().contains(&missing_path));
 }
 
 #[test]

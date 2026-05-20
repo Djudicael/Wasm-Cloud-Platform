@@ -9,13 +9,14 @@ use common::{
 use std::collections::HashSet;
 use std::future::Future;
 use std::net::{IpAddr, SocketAddr};
+use std::path::Path;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Instant;
 use wasmtime::component::{Component, Instance, Linker, ResourceTable};
 use wasmtime::{Engine, Store};
 use wasmtime_wasi::p2::add_to_linker_sync;
-use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
+use wasmtime_wasi::{DirPerms, FilePerms, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
 /// Simplified mirror of `wasmtime_wasi::sockets::SocketAddrUse` for the public API.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -142,6 +143,33 @@ const TOP_LEVEL_ENTRY_POINT_FALLBACKS: &[&str] = &["run", "_start"];
 
 pub(crate) fn top_level_entry_point_candidates() -> &'static [&'static str] {
     TOP_LEVEL_ENTRY_POINT_FALLBACKS
+}
+
+fn configure_filesystem_preopens(
+    builder: &mut WasiCtxBuilder,
+    policy: &common::policy::InstancePolicy,
+) -> Result<(), PlatformError> {
+    if policy.filesystem.allowed_paths.is_empty() {
+        return Ok(());
+    }
+
+    let mut dir_perms = DirPerms::READ;
+    let mut file_perms = FilePerms::READ;
+    if policy.filesystem.allow_file_create || policy.filesystem.allow_file_delete {
+        dir_perms |= DirPerms::MUTATE;
+        file_perms |= FilePerms::WRITE;
+    }
+
+    for path in &policy.filesystem.allowed_paths {
+        let host_path = Path::new(path);
+        builder
+            .preopened_dir(host_path, path, dir_perms, file_perms)
+            .map_err(|e| {
+                PlatformError::runtime(format!("failed to preopen allowed path {}: {}", path, e))
+            })?;
+    }
+
+    Ok(())
 }
 
 /// Store state for WASI Preview 2
@@ -286,13 +314,11 @@ impl PreparedModule {
         let port_str = port.to_string();
         builder.env("PORT", &port_str);
 
-        // TODO(step-33): Preopened directories are not yet configured from
-        // policy.filesystem.allowed_paths. WasiCtxBuilder::preopened_dir()
-        // exists and can be wired up here — this is a complexity gap, not a
-        // library limitation. When implemented, each path in allowed_paths
-        // should be preopened with read-only or read-write permissions based
-        // on allow_file_create / allow_file_delete. Currently the Wasm module
-        // inherits the host filesystem with no restrictions at the WASI layer.
+        // Configure filesystem preopens from policy. The current policy model uses the
+        // configured path both as the host path and the guest-visible mount path. When file
+        // create/delete is allowed we grant write/mutate permissions; otherwise the directory
+        // is exposed as read-only.
+        configure_filesystem_preopens(&mut builder, &policy)?;
 
         let state = StoreState {
             ctx: builder.build(),
