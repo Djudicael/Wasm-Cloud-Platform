@@ -71,6 +71,7 @@ mod test_helpers {
             config: AppConfig::default_for(app_id),
             artifact_url: "http://example.com/test.wasm".to_string(),
             artifact_auth_token: None,
+            artifact_transfer_manifest: None,
             expected_hash: None,
             size_bytes: 0,
         };
@@ -124,6 +125,7 @@ mod test_helpers {
             config: AppConfig::default_for(app_id.clone()),
             artifact_url: "http://example.com/durable.wasm".to_string(),
             artifact_auth_token: None,
+            artifact_transfer_manifest: None,
             expected_hash: None,
             size_bytes: 0,
         };
@@ -191,6 +193,7 @@ mod test_helpers {
             config: AppConfig::default_for(app_id),
             artifact_url: "http://example.com/retry.wasm".to_string(),
             artifact_auth_token: None,
+            artifact_transfer_manifest: None,
             expected_hash: None,
             size_bytes: 0,
         };

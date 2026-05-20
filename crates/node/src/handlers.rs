@@ -1,4 +1,8 @@
-use common::{error::PlatformError, types::AppId};
+use common::{
+    artifact_transfer::{SignedArtifactTransferManifest, ARTIFACT_TRANSFER_MANIFEST_HEADER},
+    error::PlatformError,
+    types::AppId,
+};
 use messaging::events::Event;
 use proxy::dns_webhook::DnsWebhookManager;
 use proxy::node_table::NodeLoadTable;
@@ -12,10 +16,10 @@ use secrets::{
 };
 use sha2::Digest;
 use std::net::IpAddr;
-use tokio::sync::Mutex;
 use std::sync::Arc;
 use storage::Store;
 use supervisor::Supervisor;
+use tokio::sync::Mutex;
 use tracing::{error, info, warn};
 
 fn is_loopback_artifact_url(url: &str) -> bool {
@@ -139,11 +143,14 @@ fn persist_applied_bootstrap_session(
         nonce: nonce.to_string(),
         applied_at_ms: Some(now_unix_ms()),
     };
-    let json = serde_json::to_string(&record)
-        .map_err(|e| PlatformError::storage_with_msg("failed to serialize bootstrap metadata", e))?;
-    store.save_meta(BOOTSTRAP_APPLIED_META_KEY, &json)
+    let json = serde_json::to_string(&record).map_err(|e| {
+        PlatformError::storage_with_msg("failed to serialize bootstrap metadata", e)
+    })?;
+    store
+        .save_meta(BOOTSTRAP_APPLIED_META_KEY, &json)
         .map_err(PlatformError::storage_source)?;
-    store.delete_meta(BOOTSTRAP_PENDING_META_KEY)
+    store
+        .delete_meta(BOOTSTRAP_PENDING_META_KEY)
         .map_err(PlatformError::storage_source)?;
     Ok(())
 }
@@ -177,6 +184,7 @@ impl EventDispatcher {
                 config,
                 artifact_url,
                 artifact_auth_token,
+                artifact_transfer_manifest,
                 expected_hash,
                 size_bytes,
             } => {
@@ -189,6 +197,7 @@ impl EventDispatcher {
                     config,
                     artifact_url,
                     artifact_auth_token,
+                    artifact_transfer_manifest,
                     expected_hash,
                     size_bytes,
                 )
@@ -258,7 +267,11 @@ impl EventDispatcher {
                 }
                 Ok(())
             }
-            Event::SecretUpdate { app_id, key, secret } => {
+            Event::SecretUpdate {
+                app_id,
+                key,
+                secret,
+            } => {
                 info!(app = %app_id.0, key, "received secret rotation");
                 apply_secret_update(self.secret_provider.as_ref(), &app_id, &key, &secret).await?;
                 Ok(())
@@ -553,6 +566,7 @@ impl EventDispatcher {
         config: common::types::AppConfig,
         artifact_url: String,
         artifact_auth_token: Option<String>,
+        artifact_transfer_manifest: Option<SignedArtifactTransferManifest>,
         expected_hash: Option<String>,
         size_bytes: u64,
     ) -> Result<(), PlatformError> {
@@ -578,9 +592,14 @@ impl EventDispatcher {
         } else {
             // 2. Fetch from the source node
             info!(url = %artifact_url, "fetching artifact via HTTP");
-            let bytes = fetch_artifact(&artifact_url, artifact_auth_token.as_deref(), &sha256)
-                .await
-                .map_err(PlatformError::external)?;
+            let bytes = fetch_artifact(
+                &artifact_url,
+                artifact_auth_token.as_deref(),
+                artifact_transfer_manifest.as_ref(),
+                &sha256,
+            )
+            .await
+            .map_err(PlatformError::external)?;
 
             // Hash already verified by download_and_verify_bytes.
             // Persisting raw bytes is part of successful deploy processing.
@@ -1059,10 +1078,15 @@ impl EventDispatcher {
 async fn fetch_artifact(
     url: &str,
     artifact_auth_token: Option<&str>,
+    artifact_transfer_manifest: Option<&SignedArtifactTransferManifest>,
     expected_sha256: &str,
 ) -> Result<Vec<u8>, String> {
     let client = reqwest::Client::new();
     let mut request = client.get(url);
+    if let Some(manifest) = artifact_transfer_manifest {
+        let header_value = manifest.encode_header_value()?;
+        request = request.header(ARTIFACT_TRANSFER_MANIFEST_HEADER, header_value);
+    }
     if let Some(token) = artifact_auth_token {
         request = request.bearer_auth(token);
     }
@@ -1093,13 +1117,20 @@ async fn fetch_artifact(
 
 #[cfg(test)]
 mod tests {
-    use super::{apply_secret_update, is_loopback_artifact_url, validate_peer_artifact_url};
-    use common::types::AppId;
+    use super::{
+        apply_secret_update, fetch_artifact, is_loopback_artifact_url, validate_peer_artifact_url,
+    };
+    use common::{
+        artifact_transfer::{ArtifactTransferAuthority, ARTIFACT_TRANSFER_MANIFEST_HEADER},
+        types::AppId,
+    };
     use secrets::{
         crypto::SymmetricKey, LocalSecretProvider, SecretProvider, SecretTransportEnvelope,
     };
+    use sha2::Digest;
     use storage::Store;
     use tempfile::NamedTempFile;
+    use tokio::net::TcpListener;
 
     #[test]
     fn test_is_loopback_artifact_url_detects_loopback_hosts() {
@@ -1143,6 +1174,60 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_fetch_artifact_sends_signed_manifest_header() {
+        use axum::{
+            extract::Path,
+            http::{HeaderMap, StatusCode},
+            routing::get,
+            Router,
+        };
+
+        let wasm_bytes = b"artifact-manifest-header-test".to_vec();
+        let expected_sha256 = hex::encode(sha2::Sha256::digest(&wasm_bytes));
+        let authority = ArtifactTransferAuthority::derive("node-1", &[5u8; 32]);
+        let manifest = authority.issue_read_manifest(&expected_sha256);
+        let expected_header = manifest.encode_header_value().unwrap();
+        let app = Router::new().route(
+            "/artifacts/{sha256}",
+            get({
+                let wasm_bytes = wasm_bytes.clone();
+                let expected_header = expected_header.clone();
+                move |Path(_sha256): Path<String>, headers: HeaderMap| {
+                    let wasm_bytes = wasm_bytes.clone();
+                    let expected_header = expected_header.clone();
+                    async move {
+                        if headers
+                            .get(ARTIFACT_TRANSFER_MANIFEST_HEADER)
+                            .and_then(|value| value.to_str().ok())
+                            == Some(expected_header.as_str())
+                        {
+                            (StatusCode::OK, wasm_bytes)
+                        } else {
+                            (StatusCode::FORBIDDEN, Vec::new())
+                        }
+                    }
+                }
+            }),
+        );
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let fetched = fetch_artifact(
+            &format!("http://{addr}/artifacts/{expected_sha256}"),
+            None,
+            Some(&manifest),
+            &expected_sha256,
+        )
+        .await
+        .unwrap();
+        assert_eq!(fetched, wasm_bytes);
+    }
+
+    #[tokio::test]
     async fn test_apply_secret_update_rejects_bootstrap_payload_for_rotation() {
         let temp = NamedTempFile::new().unwrap();
         let store = Store::open(temp.path()).unwrap();
@@ -1157,7 +1242,9 @@ mod tests {
         )
         .await
         .unwrap_err();
-        assert!(err.to_string().contains("unexpected secret payload variant"));
+        assert!(err
+            .to_string()
+            .contains("unexpected secret payload variant"));
         assert!(store.load_secrets(&app_id).unwrap().is_none());
     }
 }

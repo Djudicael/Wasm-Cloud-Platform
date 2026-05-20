@@ -2,6 +2,7 @@
 use anyhow::Result;
 use clap::Args;
 use colored::Colorize;
+use common::artifact_transfer::ArtifactUploadAuthorizationResponse;
 use common::types::{AppConfig, AppId, FuelQuota, MemoryPages};
 use hex;
 use indicatif::{ProgressBar, ProgressStyle};
@@ -234,6 +235,10 @@ pub async fn run(
     if !resp.status().is_success() {
         anyhow::bail!("Artifact upload failed: {}", resp.status());
     }
+    let upload_authorization = resp
+        .json::<ArtifactUploadAuthorizationResponse>()
+        .await
+        .ok();
     println!("{} Artifact uploaded to {}", "✓".green(), upload_url);
 
     // 4. Build config from manifest (if any), then overlay CLI flags
@@ -297,6 +302,8 @@ pub async fn run(
         config,
         artifact_url,
         artifact_auth_token: artifact_auth_token.map(str::to_string),
+        artifact_transfer_manifest: upload_authorization
+            .and_then(|authorization| authorization.signed_get_manifest),
         expected_hash: Some(sha256),
         size_bytes,
     };

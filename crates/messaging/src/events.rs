@@ -1,4 +1,5 @@
 // crates/messaging/src/events.rs
+use common::artifact_transfer::SignedArtifactTransferManifest;
 use common::types::{ApiKeyRecord, AppConfig, AppId, GatewayRouteConfig};
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
@@ -32,8 +33,12 @@ pub enum Event {
         /// Format: "http://<node-ip>:<port>/artifacts/<sha256>"
         artifact_url: String,
         /// Optional bearer token peers may use when fetching the artifact remotely.
+        /// Retained as a compatibility path while signed transfer manifests roll out.
         #[serde(default)]
         artifact_auth_token: Option<String>,
+        /// Optional signed short-lived GET manifest for remote artifact fetch.
+        #[serde(default)]
+        artifact_transfer_manifest: Option<SignedArtifactTransferManifest>,
         /// SHA-256 hex string of the raw .wasm bytes.
         expected_hash: Option<String>,
         /// Size in bytes (for logging and progress tracking).

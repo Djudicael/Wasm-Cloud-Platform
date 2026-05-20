@@ -1,3 +1,4 @@
+pub mod artifact_transfer;
 pub mod auth;
 pub mod billing;
 pub mod config;

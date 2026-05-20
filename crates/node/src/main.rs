@@ -62,10 +62,8 @@ fn load_or_create_persisted_kek(
             Ok(legacy)
         }
         Some(sealed_blob) => {
-            let plaintext = secrets::crypto::decrypt(
-                seal_key,
-                &secrets::crypto::EncryptedBlob(sealed_blob),
-            )?;
+            let plaintext =
+                secrets::crypto::decrypt(seal_key, &secrets::crypto::EncryptedBlob(sealed_blob))?;
             tracing::info!("loaded sealed KEK from redb using configured key source");
             symm_key_from_exact_32(&plaintext, "persisted sealed KEK")
         }
@@ -76,9 +74,7 @@ fn load_or_create_persisted_kek(
             )?;
             let sealed = seal_kek_blob(seal_key, initial_kek.as_bytes())?;
             store.save_kek(&sealed)?;
-            tracing::info!(
-                "initialized sealed KEK in redb from configured key source"
-            );
+            tracing::info!("initialized sealed KEK in redb from configured key source");
             Ok(initial_kek)
         }
     }
@@ -1032,6 +1028,10 @@ async fn main() -> anyhow::Result<()> {
     // A legacy persisted KEK can be migrated into `runtime.key_file` when
     // `key_source=file` is configured and the file does not yet exist.
     let kek = load_kek_from_config(&store, &config.runtime)?;
+    let artifact_transfer_authority = common::artifact_transfer::ArtifactTransferAuthority::derive(
+        &config.node.node_id,
+        kek.as_bytes(),
+    );
     let secret_provider = Arc::new(secrets::LocalSecretProvider::new(store.clone(), kek));
 
     // Determine whether this node still needs bootstrap. An empty node that has
@@ -2830,17 +2830,20 @@ async fn main() -> anyhow::Result<()> {
         ));
     }
     if let Some(token) = effective_auth_config.write_token.clone() {
-        if !artifact_peer_tokens.iter().any(|existing| existing.token == token) {
+        if !artifact_peer_tokens
+            .iter()
+            .any(|existing| existing.token == token)
+        {
             artifact_peer_tokens.push(storage::artifact_server::ArtifactPeerTokenConfig::new(
-                token,
-                None,
-                true,
-                true,
+                token, None, true, true,
             ));
         }
     }
-    let artifact_app =
-        storage::artifact_server::artifact_router(store.clone(), artifact_peer_tokens);
+    let artifact_app = storage::artifact_server::artifact_router(
+        store.clone(),
+        artifact_peer_tokens,
+        Some(artifact_transfer_authority.clone()),
+    );
     let artifact_addr = bind_socket_address(
         &config.admin.artifact_bind_address,
         config.admin.artifact_port,

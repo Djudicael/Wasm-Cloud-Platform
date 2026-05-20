@@ -158,6 +158,7 @@ async fn test_full_platform_e2e() {
         config: AppConfig::default_for(app_id.clone()),
         artifact_url: format!("http://127.0.0.1:{}/hello_axum.wasm", artifact_port),
         artifact_auth_token: None,
+        artifact_transfer_manifest: None,
         expected_hash: Some(expected_hash),
         size_bytes: wasm_bytes.len() as u64,
     };

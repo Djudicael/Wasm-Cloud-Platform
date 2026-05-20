@@ -269,6 +269,7 @@ pub async fn deploy_app(
         config,
         artifact_url: artifact_url.clone(),
         artifact_auth_token: None,
+        artifact_transfer_manifest: None,
         expected_hash: Some(expected_hash.clone()),
         size_bytes,
     };
