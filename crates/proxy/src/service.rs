@@ -72,9 +72,26 @@ impl WasmProxy {
         if self.node_is_overloaded().await {
             // 3. Find a remote node with capacity
             if let Some(node) = self.node_table.least_loaded_node().await {
-                // Return the remote supervisor's address for this app
-                // Pingora will proxy the request to the remote node's Pingora
-                return Some(node.supervisor_addr);
+                match tokio::net::lookup_host(&node.proxy_address).await {
+                    Ok(mut addrs) => {
+                        if let Some(addr) = addrs.next() {
+                            return Some(addr);
+                        }
+                        tracing::warn!(
+                            node = %node.node_id,
+                            proxy_address = %node.proxy_address,
+                            "remote node advertised no resolvable proxy address"
+                        );
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            node = %node.node_id,
+                            proxy_address = %node.proxy_address,
+                            error = %error,
+                            "failed to resolve remote node proxy address"
+                        );
+                    }
+                }
             }
         }
 

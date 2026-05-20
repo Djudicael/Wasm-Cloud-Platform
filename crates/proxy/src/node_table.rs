@@ -1,7 +1,7 @@
 // crates/proxy/src/node_table.rs
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use std::net::SocketAddr;
+
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::RwLock;
@@ -9,7 +9,9 @@ use tokio::sync::RwLock;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NodeEntry {
     pub node_id: String,
-    pub supervisor_addr: SocketAddr,
+    /// Routable proxy endpoint for this node (for example `10.0.0.5:8080` or
+    /// `node-2.internal:8080`).
+    pub proxy_address: String,
     pub fuel_used_percent: f32,
     pub active_instances: u32,
     pub last_seen: u64,
@@ -111,7 +113,7 @@ mod tests {
 
         let node1 = NodeEntry {
             node_id: "node-1".to_string(),
-            supervisor_addr: "127.0.0.1:9001".parse().unwrap(),
+            proxy_address: "127.0.0.1:9001".to_string(),
             fuel_used_percent: 50.0,
             active_instances: 5,
             last_seen: now,
@@ -120,7 +122,7 @@ mod tests {
 
         let node2 = NodeEntry {
             node_id: "node-2".to_string(),
-            supervisor_addr: "127.0.0.1:9002".parse().unwrap(),
+            proxy_address: "127.0.0.1:9002".to_string(),
             fuel_used_percent: 20.0,
             active_instances: 2,
             last_seen: now,
@@ -129,7 +131,7 @@ mod tests {
 
         let node3 = NodeEntry {
             node_id: "node-3".to_string(),
-            supervisor_addr: "127.0.0.1:9003".parse().unwrap(),
+            proxy_address: "127.0.0.1:9003".to_string(),
             fuel_used_percent: 10.0,
             active_instances: 1,
             last_seen: now - 40,
@@ -154,7 +156,7 @@ mod tests {
 
         let node1 = NodeEntry {
             node_id: "node-1".to_string(),
-            supervisor_addr: "127.0.0.1:9001".parse().unwrap(),
+            proxy_address: "127.0.0.1:9001".to_string(),
             fuel_used_percent: 20.0,
             active_instances: 2,
             last_seen: now,
@@ -163,7 +165,7 @@ mod tests {
 
         let node2 = NodeEntry {
             node_id: "node-2".to_string(),
-            supervisor_addr: "127.0.0.1:9002".parse().unwrap(),
+            proxy_address: "127.0.0.1:9002".to_string(),
             fuel_used_percent: 50.0,
             active_instances: 5,
             last_seen: now,

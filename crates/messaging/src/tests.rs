@@ -276,6 +276,7 @@ mod test_helpers {
     #[test]
     fn test_event_discriminants() {
         use common::types::GatewayRouteConfig;
+        use secrets::SecretTransportEnvelope;
         let events: Vec<(&str, Event)> = vec![
             (
                 "RemoveApp",
@@ -323,7 +324,7 @@ mod test_helpers {
                 Event::SecretUpdate {
                     app_id: AppId("a".to_string()),
                     key: "".to_string(),
-                    encrypted_value: vec![],
+                    secret: SecretTransportEnvelope::plaintext_utf8(""),
                 },
             ),
             (
@@ -346,12 +347,15 @@ mod test_helpers {
                     cpu_percent: 0.0,
                     fuel_budget_used_percent: 0.0,
                     active_instances: 0,
+                    proxy_address: "127.0.0.1:8080".to_string(),
                 },
             ),
             (
                 "NodeJoined",
                 Event::NodeJoined {
                     node_id: "".to_string(),
+                    bootstrap_session_id: "session".to_string(),
+                    bootstrap_nonce: "nonce".to_string(),
                     artifact_server_url: "".to_string(),
                     artifact_auth_token: None,
                     public_key_bytes: vec![],
@@ -363,9 +367,13 @@ mod test_helpers {
                 "StateSnapshot",
                 Event::StateSnapshot {
                     for_node_id: "".to_string(),
+                    bootstrap_session_id: "session".to_string(),
+                    bootstrap_nonce: "nonce".to_string(),
                     configs: vec![],
                     routes: vec![],
                     encrypted_secrets: vec![],
+                    gateway_configs: vec![],
+                    api_keys: vec![],
                     artifact_hashes: vec![],
                 },
             ),

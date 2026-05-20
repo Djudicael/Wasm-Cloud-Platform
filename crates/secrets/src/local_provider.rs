@@ -52,14 +52,21 @@ impl LocalSecretProvider {
             Some(b) => {
                 // Decrypt the DEK using the KEK
                 let decrypted = decrypt(&self.kek, &EncryptedBlob(b.encrypted_dek))?;
+                if decrypted.len() != 32 {
+                    return Err(PlatformError::encryption(format!(
+                        "decrypted DEK for app '{}' had invalid length {}",
+                        app_id.0,
+                        decrypted.len()
+                    )));
+                }
                 let mut key_bytes = [0u8; 32];
-                key_bytes.copy_from_slice(&decrypted[..32]);
+                key_bytes.copy_from_slice(&decrypted);
                 Arc::new(SymmetricKey::from_bytes(key_bytes))
             }
             None => {
                 // First time: generate a new DEK, encrypt it with KEK, store bundle
                 let new_dek = Arc::new(SymmetricKey::generate());
-                let encrypted_dek = encrypt(&new_dek, new_dek.as_bytes())?;
+                let encrypted_dek = encrypt(&self.kek, new_dek.as_bytes())?;
                 let bundle = AppSecretBundle {
                     app_id: app_id.0.clone(),
                     encrypted_dek: encrypted_dek.0,
@@ -263,6 +270,28 @@ mod tests {
 
         // 6. Delete non-existent key -> OK (no-op)
         provider.delete(&app_id, "NONEXISTENT").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_local_provider_survives_restart_with_same_kek() {
+        let store = temp_store();
+        let kek_bytes = *SymmetricKey::generate().as_bytes();
+        let app_id = AppId("app-restart:v1".into());
+
+        {
+            let provider = LocalSecretProvider::new(
+                store.clone(),
+                SymmetricKey::from_bytes(kek_bytes),
+            );
+            provider
+                .set(&app_id, "API_TOKEN", "secret-after-restart")
+                .await
+                .unwrap();
+        }
+
+        let restarted = LocalSecretProvider::new(store.clone(), SymmetricKey::from_bytes(kek_bytes));
+        let plaintext = restarted.get(&app_id, "API_TOKEN").await.unwrap();
+        assert_eq!(plaintext, "secret-after-restart");
     }
 
     #[tokio::test]

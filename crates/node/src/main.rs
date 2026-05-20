@@ -40,32 +40,48 @@ fn load_kek_from_env_spec(spec: &str) -> anyhow::Result<secrets::crypto::Symmetr
     symm_key_from_exact_32(raw.as_bytes(), &format!("environment variable {var_name}"))
 }
 
-fn migrate_legacy_kek_to_file(
+fn seal_kek_blob(
+    seal_key: &secrets::crypto::SymmetricKey,
+    kek_bytes: &[u8],
+) -> anyhow::Result<Vec<u8>> {
+    Ok(secrets::crypto::encrypt(seal_key, kek_bytes)?.0)
+}
+
+fn load_or_create_persisted_kek(
     store: &storage::Store,
-    key_file: &str,
-    legacy_kek: &[u8],
+    seal_key: &secrets::crypto::SymmetricKey,
 ) -> anyhow::Result<secrets::crypto::SymmetricKey> {
-    let kek = symm_key_from_exact_32(legacy_kek, "legacy persisted KEK")?;
-
-    let path = std::path::Path::new(key_file);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
+    match store.load_kek()? {
+        Some(bytes) if bytes.len() == 32 => {
+            let legacy = symm_key_from_exact_32(&bytes, "legacy plaintext KEK")?;
+            let sealed = seal_kek_blob(seal_key, legacy.as_bytes())?;
+            store.save_kek(&sealed)?;
+            tracing::warn!(
+                "migrated legacy plaintext KEK in redb into a sealed-at-rest blob using the configured key source"
+            );
+            Ok(legacy)
+        }
+        Some(sealed_blob) => {
+            let plaintext = secrets::crypto::decrypt(
+                seal_key,
+                &secrets::crypto::EncryptedBlob(sealed_blob),
+            )?;
+            tracing::info!("loaded sealed KEK from redb using configured key source");
+            symm_key_from_exact_32(&plaintext, "persisted sealed KEK")
+        }
+        None => {
+            let initial_kek = symm_key_from_exact_32(
+                seal_key.as_bytes(),
+                "configured file/env key source initial KEK",
+            )?;
+            let sealed = seal_kek_blob(seal_key, initial_kek.as_bytes())?;
+            store.save_kek(&sealed)?;
+            tracing::info!(
+                "initialized sealed KEK in redb from configured key source"
+            );
+            Ok(initial_kek)
+        }
     }
-    std::fs::write(path, legacy_kek)?;
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let perms = std::fs::Permissions::from_mode(0o600);
-        std::fs::set_permissions(path, perms)?;
-    }
-
-    store.delete_kek()?;
-    tracing::warn!(
-        path = %key_file,
-        "migrated legacy KEK from plaintext redb storage into key file and removed DB copy"
-    );
-    Ok(kek)
 }
 
 fn is_loopback_host(host: &str) -> bool {
@@ -124,6 +140,13 @@ fn build_artifact_server_url(admin: &common::config::AdminSection) -> anyhow::Re
         return advertised_host_base_url(host, admin.artifact_port);
     }
     Ok(format!("http://127.0.0.1:{}", admin.artifact_port))
+}
+
+fn build_proxy_advertised_address(config: &common::config::NodeConfig) -> anyhow::Result<String> {
+    if let Some(host) = config.admin.advertised_host.as_deref() {
+        return bind_socket_address(host, config.proxy.http_port);
+    }
+    Ok(format!("127.0.0.1:{}", config.proxy.http_port))
 }
 
 fn artifact_server_url_is_loopback(url: &str) -> bool {
@@ -204,36 +227,20 @@ fn load_kek_from_config(
                 .as_ref()
                 .ok_or_else(|| anyhow::anyhow!("runtime.key_source=file requires runtime.key_file"))?;
 
-            match std::fs::read(key_file) {
-                Ok(bytes) => {
-                    tracing::info!(path = %key_file, "loaded KEK from key file");
-                    symm_key_from_exact_32(&bytes, &format!("key file {key_file}"))
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                    if let Some(legacy_kek) = store.load_kek()? {
-                        migrate_legacy_kek_to_file(store, key_file, &legacy_kek)
-                    } else {
-                        Err(anyhow::anyhow!(
-                            "key file {} not found and no legacy KEK exists to migrate",
-                            key_file
-                        ))
-                    }
-                }
-                Err(e) => Err(anyhow::anyhow!("failed to read key file {}: {}", key_file, e)),
-            }
+            let bytes = std::fs::read(key_file)
+                .map_err(|e| anyhow::anyhow!("failed to read key file {}: {}", key_file, e))?;
+            tracing::info!(path = %key_file, "loaded KEK seal key from key file");
+            let seal_key = symm_key_from_exact_32(&bytes, &format!("key file {key_file}"))?;
+            load_or_create_persisted_kek(store, &seal_key)
         }
         spec if spec.starts_with("env:") => {
-            if let Ok(Some(_legacy_kek)) = store.load_kek() {
-                tracing::warn!(
-                    "legacy plaintext KEK exists in redb, but env-based key sources cannot be auto-migrated; configure runtime.key_source=file temporarily if you need to preserve old secrets"
-                );
-            }
-            load_kek_from_env_spec(spec)
+            let seal_key = load_kek_from_env_spec(spec)?;
+            load_or_create_persisted_kek(store, &seal_key)
         }
         "generate" => {
-            if let Ok(Some(_legacy_kek)) = store.load_kek() {
+            if let Ok(Some(_persisted_kek)) = store.load_kek() {
                 anyhow::bail!(
-                    "legacy plaintext KEK detected in redb; key_source=generate no longer reuses persisted KEKs. Configure runtime.key_source=file and runtime.key_file to migrate existing secrets safely"
+                    "persisted KEK detected in redb; key_source=generate cannot unlock or replace persisted secret state safely. Configure runtime.key_source=file or env:VAR_NAME to keep existing secrets"
                 );
             }
             tracing::warn!(
@@ -1027,17 +1034,44 @@ async fn main() -> anyhow::Result<()> {
     let kek = load_kek_from_config(&store, &config.runtime)?;
     let secret_provider = Arc::new(secrets::LocalSecretProvider::new(store.clone(), kek));
 
-    // Check if this is a fresh node (no apps in storage)
-    let is_fresh = store.list_apps()?.is_empty();
-
-    // Generate bootstrap keypair if fresh (for receiving encrypted secrets)
-    let bootstrap_keypair = if is_fresh {
-        Some(secrets::BootstrapKeyPair::generate())
+    // Determine whether this node still needs bootstrap. An empty node that has
+    // already completed a valid bootstrap session (including an empty snapshot)
+    // should not re-bootstrap forever on restart.
+    let bootstrap_completed = store
+        .load_meta(handlers::BOOTSTRAP_APPLIED_META_KEY)
+        .ok()
+        .flatten()
+        .is_some();
+    let needs_bootstrap = store.list_apps()?.is_empty() && !bootstrap_completed;
+    let bootstrap_session = if needs_bootstrap {
+        let session_id = common::auth::AuthConfig::generate_token();
+        let nonce = common::auth::AuthConfig::generate_token();
+        let pending = serde_json::json!({
+            "session_id": session_id,
+            "nonce": nonce,
+            "requested_at_ms": std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0),
+        });
+        store
+            .save_meta(handlers::BOOTSTRAP_PENDING_META_KEY, &pending.to_string())
+            .map_err(anyhow::Error::from)?;
+        Some(Arc::new(tokio::sync::Mutex::new(
+            handlers::BootstrapSessionState {
+                session_id,
+                nonce,
+                keypair: secrets::BootstrapKeyPair::generate(),
+                applied: false,
+            },
+        )))
     } else {
         None
     };
 
     let artifact_server_url = build_artifact_server_url(&config.admin)?;
+    let proxy_address = build_proxy_advertised_address(&config)?;
+    let node_load_table = Arc::new(proxy::node_table::NodeLoadTable::default());
     let artifact_peer_token = if artifact_server_url_is_loopback(&artifact_server_url) {
         None
     } else {
@@ -1092,17 +1126,14 @@ async fn main() -> anyhow::Result<()> {
         node_id: config.node.node_id.clone(),
         artifact_server_url: artifact_server_url.clone(),
         upgrade_signing_public_key: config.runtime.upgrade_signing_public_key.clone(),
-        supervisor_addr: format!("127.0.0.1:{}", config.admin.port)
-            .parse()
-            .unwrap_or_else(|_| "127.0.0.1:9000".parse().unwrap()),
         secret_provider: secret_provider.clone(),
-        bootstrap_keypair,
+        bootstrap_session: bootstrap_session.clone(),
         bus: bus.clone(),
         dns_webhook: proxy::dns_webhook::DnsWebhookManager::new(
             config.dns.webhook_url.clone(),
             config.dns.webhook_token.clone(),
         ),
-        node_table: Arc::new(proxy::node_table::NodeLoadTable::default()),
+        node_table: node_load_table.clone(),
         gateway: Some(gateway.clone()),
     });
 
@@ -1149,7 +1180,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // If this is a fresh node, request state snapshot from cluster
-    if is_fresh {
+    if needs_bootstrap {
         info!("fresh node detected — requesting state snapshot from cluster");
         if artifact_server_url_is_loopback(&artifact_server_url) {
             warn!(
@@ -1158,14 +1189,23 @@ async fn main() -> anyhow::Result<()> {
             );
         }
 
-        let public_key_bytes = dispatcher
-            .bootstrap_keypair
-            .as_ref()
-            .map(|kp| kp.public_bytes())
-            .unwrap_or_default();
+        let (bootstrap_session_id, bootstrap_nonce, public_key_bytes) = {
+            let state = bootstrap_session
+                .as_ref()
+                .expect("bootstrap session should exist for fresh node")
+                .lock()
+                .await;
+            (
+                state.session_id.clone(),
+                state.nonce.clone(),
+                state.keypair.public_bytes(),
+            )
+        };
 
         let join_event = messaging::events::Event::NodeJoined {
             node_id: config.node.node_id.clone(),
+            bootstrap_session_id,
+            bootstrap_nonce,
             artifact_server_url: artifact_server_url.clone(),
             artifact_auth_token: artifact_peer_token.clone(),
             public_key_bytes,
@@ -1190,6 +1230,7 @@ async fn main() -> anyhow::Result<()> {
         supervisor.clone(),
         bus.clone(),
         config.node.node_id.clone(),
+        proxy_address.clone(),
         5_000_000_000,
     );
 
@@ -1396,7 +1437,7 @@ async fn main() -> anyhow::Result<()> {
         router: host_router.clone(),
         upstream: upstream_registry.clone(),
         rate_limiter,
-        node_table: Arc::new(proxy::node_table::NodeLoadTable::default()),
+        node_table: node_load_table.clone(),
         cold_start,
         backpressure: backpressure.clone(),
         metrics: Some(rate_limit_metrics),
@@ -2867,8 +2908,8 @@ async fn main() -> anyhow::Result<()> {
 mod tests {
     use super::{
         admin_tls_is_configured, admin_tls_material, artifact_server_url_is_loopback,
-        bind_socket_address, build_artifact_server_url, load_kek_from_config,
-        load_kek_from_env_spec, serve_admin_app,
+        bind_socket_address, build_artifact_server_url, build_proxy_advertised_address,
+        load_kek_from_config, load_kek_from_env_spec, serve_admin_app,
     };
     use common::config::{AdminSection, NodeConfig, ProxySection, RuntimeSection};
     use storage::Store;
@@ -3092,6 +3133,23 @@ uoKQp7o8ET+CcFRg9vEG/uA=
     }
 
     #[test]
+    fn test_build_proxy_advertised_address_defaults_to_loopback() {
+        let config = NodeConfig::default();
+        let addr = build_proxy_advertised_address(&config).unwrap();
+        assert_eq!(addr, "127.0.0.1:8080");
+    }
+
+    #[test]
+    fn test_build_proxy_advertised_address_uses_advertised_host() {
+        let mut config = NodeConfig::default();
+        config.admin.advertised_host = Some("node-1.internal".to_string());
+        config.proxy.http_port = 18080;
+
+        let addr = build_proxy_advertised_address(&config).unwrap();
+        assert_eq!(addr, "node-1.internal:18080");
+    }
+
+    #[test]
     fn test_load_kek_from_env_spec_hex() {
         let _guard = ENV_TEST_LOCK.lock().unwrap();
         let var_name = "WASM_NODE_TEST_KEK_HEX";
@@ -3118,14 +3176,60 @@ uoKQp7o8ET+CcFRg9vEG/uA=
     }
 
     #[test]
-    fn test_file_key_source_migrates_legacy_persisted_kek() {
+    fn test_file_key_source_initializes_sealed_kek_from_key_file() {
         let temp_db = NamedTempFile::new().unwrap();
         let store = Store::open(temp_db.path()).unwrap();
-        let legacy = [0x22u8; 32];
+
+        let temp_dir = TempDir::new().unwrap();
+        let key_path = temp_dir.path().join("master.key");
+        let seal_key = [0x22u8; 32];
+        std::fs::write(&key_path, seal_key).unwrap();
+
+        let runtime = RuntimeSection {
+            key_source: "file".to_string(),
+            key_file: Some(key_path.to_string_lossy().to_string()),
+            ..Default::default()
+        };
+
+        let key = load_kek_from_config(&store, &runtime).unwrap();
+        assert_eq!(key.as_bytes(), &seal_key);
+
+        let persisted = store.load_kek().unwrap().unwrap();
+        assert_ne!(persisted, seal_key.to_vec());
+        assert!(persisted.len() > 32);
+    }
+
+    #[test]
+    fn test_file_key_source_reloads_existing_sealed_kek() {
+        let temp_db = NamedTempFile::new().unwrap();
+        let store = Store::open(temp_db.path()).unwrap();
+
+        let temp_dir = TempDir::new().unwrap();
+        let key_path = temp_dir.path().join("master.key");
+        let seal_key = [0x44u8; 32];
+        std::fs::write(&key_path, seal_key).unwrap();
+
+        let runtime = RuntimeSection {
+            key_source: "file".to_string(),
+            key_file: Some(key_path.to_string_lossy().to_string()),
+            ..Default::default()
+        };
+
+        let first = load_kek_from_config(&store, &runtime).unwrap();
+        let second = load_kek_from_config(&store, &runtime).unwrap();
+        assert_eq!(first.as_bytes(), second.as_bytes());
+    }
+
+    #[test]
+    fn test_file_key_source_migrates_legacy_plaintext_db_kek_into_sealed_blob() {
+        let temp_db = NamedTempFile::new().unwrap();
+        let store = Store::open(temp_db.path()).unwrap();
+        let legacy = [0x55u8; 32];
         store.save_kek(&legacy).unwrap();
 
         let temp_dir = TempDir::new().unwrap();
         let key_path = temp_dir.path().join("master.key");
+        std::fs::write(&key_path, [0x66u8; 32]).unwrap();
         let runtime = RuntimeSection {
             key_source: "file".to_string(),
             key_file: Some(key_path.to_string_lossy().to_string()),
@@ -3134,15 +3238,35 @@ uoKQp7o8ET+CcFRg9vEG/uA=
 
         let key = load_kek_from_config(&store, &runtime).unwrap();
         assert_eq!(key.as_bytes(), &legacy);
-        assert_eq!(std::fs::read(&key_path).unwrap(), legacy);
-        assert!(store.load_kek().unwrap().is_none());
+        let persisted = store.load_kek().unwrap().unwrap();
+        assert_ne!(persisted, legacy.to_vec());
+        assert!(persisted.len() > 32);
     }
 
     #[test]
-    fn test_generate_key_source_rejects_legacy_persisted_kek() {
+    fn test_wrong_file_seal_key_rejects_sealed_kek() {
         let temp_db = NamedTempFile::new().unwrap();
         let store = Store::open(temp_db.path()).unwrap();
-        store.save_kek(&[0x33u8; 32]).unwrap();
+
+        let temp_dir = TempDir::new().unwrap();
+        let key_path = temp_dir.path().join("master.key");
+        std::fs::write(&key_path, [0x77u8; 32]).unwrap();
+        let runtime = RuntimeSection {
+            key_source: "file".to_string(),
+            key_file: Some(key_path.to_string_lossy().to_string()),
+            ..Default::default()
+        };
+        let _ = load_kek_from_config(&store, &runtime).unwrap();
+
+        std::fs::write(&key_path, [0x88u8; 32]).unwrap();
+        assert!(load_kek_from_config(&store, &runtime).is_err());
+    }
+
+    #[test]
+    fn test_generate_key_source_rejects_persisted_kek() {
+        let temp_db = NamedTempFile::new().unwrap();
+        let store = Store::open(temp_db.path()).unwrap();
+        store.save_kek(&[0x33u8; 48]).unwrap();
 
         let runtime = RuntimeSection {
             key_source: "generate".to_string(),
@@ -3150,10 +3274,10 @@ uoKQp7o8ET+CcFRg9vEG/uA=
         };
 
         let err = match load_kek_from_config(&store, &runtime) {
-            Ok(_) => panic!("expected legacy plaintext KEK rejection"),
+            Ok(_) => panic!("expected persisted KEK rejection"),
             Err(err) => err,
         };
-        assert!(err.to_string().contains("legacy plaintext KEK detected"));
+        assert!(err.to_string().contains("persisted KEK detected"));
     }
 }
 

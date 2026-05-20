@@ -4,6 +4,7 @@ use clap::{Args, Subcommand};
 use colored::Colorize;
 use common::types::AppId;
 use messaging::{events::Event, NatsBus};
+use secrets::SecretTransportEnvelope;
 
 #[derive(Args)]
 pub struct SecretsArgs {
@@ -42,20 +43,16 @@ pub async fn run(args: SecretsArgs, bus: &NatsBus) -> Result<()> {
                     rpassword::prompt_password(format!("Value for {}: ", key.cyan()))?
                 }
             };
-            // NOTE: In production, encrypt `plaintext` with a cluster public key
-            // before putting it in the NATS message.
-            //
-            // Current development compatibility path still sends UTF-8 plaintext
-            // bytes. The node normalizes this through the SecretProvider so the
-            // secret is stored in the provider's canonical encrypted bundle format.
-            // This is acceptable for development, not for production — see step 13 security.
+            // NOTE: This remains plaintext-over-NATS for development compatibility,
+            // but it now uses a canonical, versioned transport envelope so ctl ->
+            // NATS -> node all agree on one explicit secret update format.
             let (name, version) = app
                 .split_once(':')
                 .ok_or_else(|| anyhow::anyhow!("app must be <name>:<version>"))?;
             let event = Event::SecretUpdate {
                 app_id: AppId::new(name, version),
                 key: key.clone(),
-                encrypted_value: plaintext.into_bytes(), // TODO: encrypt with cluster key
+                secret: SecretTransportEnvelope::plaintext_utf8(plaintext),
             };
             bus.publish(&event).await?;
             println!(

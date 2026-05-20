@@ -167,6 +167,20 @@ impl InternalGateway {
 /// Handles app names that contain dots (e.g., "my.api-service.production.internal")
 /// by taking the last segment before ".internal" as the namespace and everything
 /// before it as the app name.
+fn strip_internal_identity_headers(headers: &mut HeaderMap) {
+    headers.remove("x-namespace");
+    headers.remove("x-source-app");
+    headers.remove("x-source-tid");
+}
+
+fn unsupported_endpoint_auth_status(auth: &common::types::EndpointAuth) -> Option<StatusCode> {
+    match auth {
+        common::types::EndpointAuth::Authenticated
+        | common::types::EndpointAuth::Roles { .. } => Some(StatusCode::NOT_IMPLEMENTED),
+        _ => None,
+    }
+}
+
 fn parse_internal_host(host: &str) -> Option<(&str, &str)> {
     // Strip port number if present (e.g., "echo-service.default.internal:9080")
     let hostname = if host.starts_with('[') {
@@ -203,7 +217,6 @@ fn parse_internal_host(host: &str) -> Option<(&str, &str)> {
 async fn proxy_handler(
     State(gw): State<Arc<InternalGateway>>,
     ConnectInfo(peer_addr): ConnectInfo<SocketAddr>,
-    mut headers: HeaderMap,
     req: Request<axum::body::Body>,
 ) -> Result<Response<axum::body::Body>, StatusCode> {
     let start_time = std::time::Instant::now();
@@ -214,9 +227,8 @@ async fn proxy_handler(
     // ── 0. STRIP all internal identity headers ──────────────────────────
     // Prevent header reflection attacks. The gateway resolves identity
     // from the connection table, not from headers.
-    headers.remove("x-namespace");
-    headers.remove("x-source-app");
-    headers.remove("x-source-tid");
+    let mut sanitized_headers = req.headers().clone();
+    strip_internal_identity_headers(&mut sanitized_headers);
 
     // ── 1. RESOLVE caller identity — ask the NamespaceMap ───────────────
     let caller_identity: Option<CallerIdentity> = if peer_addr.ip().is_loopback() {
@@ -275,7 +287,7 @@ async fn proxy_handler(
     };
 
     // ── 2. TARGET from the Host header ──────────────────────────────────
-    let host_header = headers
+    let host_header = sanitized_headers
         .get("host")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
@@ -402,16 +414,19 @@ async fn proxy_handler(
                         .iter()
                         .any(|m| m.eq_ignore_ascii_case(req_method_str.as_str())))
         }) {
+            if let Some(status) = unsupported_endpoint_auth_status(&rule.auth) {
+                tracing::warn!(
+                    target_app = %target_app_id.0,
+                    path = %req_path,
+                    "endpoint auth mode is configured but not implemented in the internal gateway"
+                );
+                return Err(status);
+            }
+
             match &rule.auth {
                 common::types::EndpointAuth::None | common::types::EndpointAuth::Inherit => {}
-                common::types::EndpointAuth::Authenticated => {
-                    // JWT required — placeholder for future implementation.
-                }
-                common::types::EndpointAuth::Roles { .. } => {
-                    // Role check placeholder.
-                }
                 common::types::EndpointAuth::ApiKey => {
-                    let api_key = headers.get("x-api-key").and_then(|v| v.to_str().ok());
+                    let api_key = sanitized_headers.get("x-api-key").and_then(|v| v.to_str().ok());
                     if let Some(key) = api_key {
                         if !gw
                             .gateway_config
@@ -424,6 +439,9 @@ async fn proxy_handler(
                         return Err(StatusCode::UNAUTHORIZED);
                     }
                 }
+                _ => unreachable!(
+                    "unsupported endpoint auth modes should have been rejected earlier"
+                ),
             }
 
             if let Some(ref rl) = rule.rate_limit {
@@ -444,7 +462,7 @@ async fn proxy_handler(
         req.uri().path_and_query().map(|p| p.as_str()).unwrap_or("")
     );
 
-    let req_headers = req.headers().clone();
+    let req_headers = sanitized_headers.clone();
 
     let body_bytes = match axum::body::to_bytes(req.into_body(), MAX_BODY_SIZE).await {
         Ok(bytes) => bytes,
@@ -547,6 +565,7 @@ async fn proxy_handler(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use http::HeaderValue;
     use std::net::{IpAddr, Ipv4Addr};
 
     async fn setup_gateway() -> (Arc<InternalGateway>, common::types::AppId) {
@@ -613,5 +632,43 @@ mod tests {
     async fn test_internal_gateway_creation() {
         let (gw, _app_id) = setup_gateway().await;
         assert!(!gw.circuit_breaker.is_circuit_open("test"));
+    }
+
+    #[test]
+    fn test_strip_internal_identity_headers_removes_forged_values() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-namespace", HeaderValue::from_static("forged"));
+        headers.insert("x-source-app", HeaderValue::from_static("evil-app"));
+        headers.insert("x-source-tid", HeaderValue::from_static("999"));
+        headers.insert("host", HeaderValue::from_static("target.default.internal"));
+
+        strip_internal_identity_headers(&mut headers);
+
+        assert!(headers.get("x-namespace").is_none());
+        assert!(headers.get("x-source-app").is_none());
+        assert!(headers.get("x-source-tid").is_none());
+        assert_eq!(
+            headers.get("host").and_then(|v| v.to_str().ok()),
+            Some("target.default.internal")
+        );
+    }
+
+    #[test]
+    fn test_unsupported_endpoint_auth_status_rejects_unimplemented_modes() {
+        assert_eq!(
+            unsupported_endpoint_auth_status(&common::types::EndpointAuth::Authenticated),
+            Some(StatusCode::NOT_IMPLEMENTED)
+        );
+        assert_eq!(
+            unsupported_endpoint_auth_status(&common::types::EndpointAuth::Roles {
+                allowed_roles: vec!["admin".to_string()],
+                client_id: None,
+            }),
+            Some(StatusCode::NOT_IMPLEMENTED)
+        );
+        assert_eq!(
+            unsupported_endpoint_auth_status(&common::types::EndpointAuth::ApiKey),
+            None
+        );
     }
 }

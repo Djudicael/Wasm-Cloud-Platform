@@ -6,9 +6,13 @@ use proxy::router::HostRouter;
 use proxy::upstream::UpstreamRegistry;
 use reqwest::Url;
 use runtime::WasmRuntime;
-use secrets::{encrypt_for_peer, BootstrapKeyPair, SecretProvider};
+use secrets::{
+    encrypt_for_peer, BootstrapKeyPair, SecretProvider, SecretTransportEntry,
+    SecretTransportEnvelope, SecretTransportPayload,
+};
 use sha2::Digest;
 use std::net::IpAddr;
+use tokio::sync::Mutex;
 use std::sync::Arc;
 use storage::Store;
 use supervisor::Supervisor;
@@ -42,22 +46,106 @@ fn validate_peer_artifact_url(
     Ok(())
 }
 
+pub(crate) const BOOTSTRAP_PENDING_META_KEY: &str = "bootstrap.pending_session";
+pub(crate) const BOOTSTRAP_APPLIED_META_KEY: &str = "bootstrap.applied_session";
+
+pub(crate) struct BootstrapSessionState {
+    pub session_id: String,
+    pub nonce: String,
+    pub keypair: BootstrapKeyPair,
+    pub applied: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct BootstrapSessionRecord {
+    session_id: String,
+    nonce: String,
+    applied_at_ms: Option<u64>,
+}
+
+fn now_unix_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+fn extract_proxy_host(address: &str) -> Option<String> {
+    Url::parse(&format!("http://{address}"))
+        .ok()
+        .and_then(|parsed| parsed.host_str().map(str::to_string))
+}
+
+fn decode_plaintext_secret(envelope: &SecretTransportEnvelope) -> Result<String, PlatformError> {
+    if envelope.version != SecretTransportEnvelope::VERSION_1 {
+        return Err(PlatformError::messaging(format!(
+            "unsupported secret transport version {}",
+            envelope.version
+        )));
+    }
+
+    match &envelope.payload {
+        SecretTransportPayload::PlaintextUtf8V1 { value } => Ok(value.clone()),
+        other => Err(PlatformError::messaging(format!(
+            "unexpected secret payload variant for secret rotation: {:?}",
+            other
+        ))),
+    }
+}
+
+fn decrypt_bootstrap_secret(
+    keypair: &BootstrapKeyPair,
+    envelope: &SecretTransportEnvelope,
+) -> Result<String, PlatformError> {
+    if envelope.version != SecretTransportEnvelope::VERSION_1 {
+        return Err(PlatformError::messaging(format!(
+            "unsupported bootstrap secret transport version {}",
+            envelope.version
+        )));
+    }
+
+    let ciphertext = match &envelope.payload {
+        SecretTransportPayload::BootstrapPeerCiphertextV1 { ciphertext } => ciphertext,
+        other => {
+            return Err(PlatformError::messaging(format!(
+                "unexpected bootstrap secret payload variant: {:?}",
+                other
+            )))
+        }
+    };
+
+    let plaintext_bytes = keypair.decrypt(ciphertext)?;
+    String::from_utf8(plaintext_bytes)
+        .map_err(|e| PlatformError::encryption_with_msg("bootstrap secret not valid UTF-8", e))
+}
+
 async fn apply_secret_update<S: SecretProvider + ?Sized>(
     secret_provider: &S,
     app_id: &AppId,
     key: &str,
-    secret_bytes: &[u8],
+    secret: &SecretTransportEnvelope,
 ) -> Result<(), PlatformError> {
-    // Current control-plane behavior sends UTF-8 plaintext bytes in SecretUpdate.
-    // Normalize those bytes through the SecretProvider so secrets are stored in the
-    // provider's canonical bundle format instead of raw bytes being written to redb.
-    //
-    // When cluster-key encryption is implemented, this function is the correct place
-    // to decrypt the incoming payload first and then call `secret_provider.set(...)`.
-    let plaintext = String::from_utf8(secret_bytes.to_vec()).map_err(|e| {
-        PlatformError::encryption_with_msg("secret update payload is not valid UTF-8 plaintext", e)
-    })?;
+    let plaintext = decode_plaintext_secret(secret)?;
     secret_provider.set(app_id, key, &plaintext).await
+}
+
+fn persist_applied_bootstrap_session(
+    store: &Store,
+    session_id: &str,
+    nonce: &str,
+) -> Result<(), PlatformError> {
+    let record = BootstrapSessionRecord {
+        session_id: session_id.to_string(),
+        nonce: nonce.to_string(),
+        applied_at_ms: Some(now_unix_ms()),
+    };
+    let json = serde_json::to_string(&record)
+        .map_err(|e| PlatformError::storage_with_msg("failed to serialize bootstrap metadata", e))?;
+    store.save_meta(BOOTSTRAP_APPLIED_META_KEY, &json)
+        .map_err(PlatformError::storage_source)?;
+    store.delete_meta(BOOTSTRAP_PENDING_META_KEY)
+        .map_err(PlatformError::storage_source)?;
+    Ok(())
 }
 
 pub struct EventDispatcher {
@@ -69,9 +157,8 @@ pub struct EventDispatcher {
     pub node_id: String,
     pub artifact_server_url: String,
     pub upgrade_signing_public_key: Option<String>,
-    pub supervisor_addr: std::net::SocketAddr,
     pub secret_provider: Arc<dyn SecretProvider>,
-    pub bootstrap_keypair: Option<BootstrapKeyPair>,
+    pub(crate) bootstrap_session: Option<Arc<Mutex<BootstrapSessionState>>>,
     pub bus: messaging::NatsBus,
     pub dns_webhook: Option<DnsWebhookManager>,
     pub node_table: Arc<NodeLoadTable>,
@@ -171,19 +258,9 @@ impl EventDispatcher {
                 }
                 Ok(())
             }
-            Event::SecretUpdate {
-                app_id,
-                key,
-                encrypted_value,
-            } => {
+            Event::SecretUpdate { app_id, key, secret } => {
                 info!(app = %app_id.0, key, "received secret rotation");
-                apply_secret_update(
-                    self.secret_provider.as_ref(),
-                    &app_id,
-                    &key,
-                    &encrypted_value,
-                )
-                .await?;
+                apply_secret_update(self.secret_provider.as_ref(), &app_id, &key, &secret).await?;
                 Ok(())
             }
             Event::ConfigUpdate { app_id, config } => {
@@ -196,6 +273,7 @@ impl EventDispatcher {
                 cpu_percent: _,
                 fuel_budget_used_percent,
                 active_instances,
+                proxy_address,
             } => {
                 // Update node table for cross-node routing decisions
                 use proxy::node_table::NodeEntry;
@@ -206,7 +284,7 @@ impl EventDispatcher {
                     .as_secs();
                 let entry = NodeEntry {
                     node_id: node_id.clone(),
-                    supervisor_addr: self.supervisor_addr,
+                    proxy_address,
                     fuel_used_percent: fuel_budget_used_percent,
                     active_instances,
                     last_seen: now,
@@ -219,7 +297,7 @@ impl EventDispatcher {
                     let nodes = self.node_table.nodes.read().await;
                     let ips: Vec<String> = nodes
                         .values()
-                        .map(|n| n.supervisor_addr.ip().to_string())
+                        .filter_map(|n| extract_proxy_host(&n.proxy_address))
                         .collect();
                     drop(nodes);
                     webhook.set_node_ips(ips).await;
@@ -228,6 +306,8 @@ impl EventDispatcher {
             }
             Event::NodeJoined {
                 node_id,
+                bootstrap_session_id,
+                bootstrap_nonce,
                 artifact_server_url,
                 artifact_auth_token,
                 public_key_bytes,
@@ -236,6 +316,8 @@ impl EventDispatcher {
             } => {
                 self.handle_node_joined(
                     node_id,
+                    bootstrap_session_id,
+                    bootstrap_nonce,
                     artifact_server_url,
                     artifact_auth_token,
                     public_key_bytes,
@@ -246,14 +328,27 @@ impl EventDispatcher {
             }
             Event::StateSnapshot {
                 for_node_id,
+                bootstrap_session_id,
+                bootstrap_nonce,
                 configs,
                 routes,
                 encrypted_secrets,
+                gateway_configs,
+                api_keys,
                 artifact_hashes,
             } => {
                 if for_node_id == self.node_id {
-                    self.handle_state_snapshot(configs, routes, encrypted_secrets, artifact_hashes)
-                        .await
+                    self.handle_state_snapshot(
+                        bootstrap_session_id,
+                        bootstrap_nonce,
+                        configs,
+                        routes,
+                        encrypted_secrets,
+                        gateway_configs,
+                        api_keys,
+                        artifact_hashes,
+                    )
+                    .await
                 } else {
                     Ok(())
                 }
@@ -536,6 +631,8 @@ impl EventDispatcher {
     async fn handle_node_joined(
         &self,
         new_node_id: String,
+        bootstrap_session_id: String,
+        bootstrap_nonce: String,
         peer_artifact_url: String,
         peer_artifact_token: Option<String>,
         peer_public_key: Vec<u8>,
@@ -549,27 +646,21 @@ impl EventDispatcher {
             "node joined cluster"
         );
 
-        if new_node_id != self.node_id {
-            validate_peer_artifact_url(&new_node_id, &peer_artifact_url)?;
-            if peer_artifact_token
-                .as_deref()
-                .map(str::is_empty)
-                .unwrap_or(true)
-            {
-                return Err(PlatformError::config_validation(format!(
-                    "node {} advertised remote artifact URL {} without an artifact auth token",
-                    new_node_id, peer_artifact_url
-                )));
-            }
+        if new_node_id == self.node_id {
+            tracing::debug!(new_node = %new_node_id, "ignoring our own NodeJoined event");
+            return Ok(());
         }
 
-        // Leader election: only nodes with IDs smaller than the new node respond.
-        // This means multiple existing nodes could respond if they all have smaller IDs.
-        // In practice, the new node should accept the first valid snapshot it receives
-        // and ignore subsequent responses. Ideally, only the smallest existing node
-        // would respond, but without knowing all node IDs, we use this simpler approach.
-        if self.node_id > new_node_id {
-            return Ok(()); // A smaller node should respond instead
+        validate_peer_artifact_url(&new_node_id, &peer_artifact_url)?;
+        if peer_artifact_token
+            .as_deref()
+            .map(str::is_empty)
+            .unwrap_or(true)
+        {
+            return Err(PlatformError::config_validation(format!(
+                "node {} advertised remote artifact URL {} without an artifact auth token",
+                new_node_id, peer_artifact_url
+            )));
         }
 
         info!(
@@ -590,31 +681,48 @@ impl EventDispatcher {
         // 2. Collect all routes
         let routes = self.store.list_routes()?;
 
-        // 3. Encrypt secrets for each app
-        let mut encrypted_secrets = Vec::new();
+        // 3. Encrypt secrets for each app using the canonical transport envelope
+        let mut encrypted_secrets: Vec<SecretTransportEntry> = Vec::new();
         for config in &configs {
             let keys = self.secret_provider.list_keys(&config.id).await?;
             for key in keys {
                 let value = self.secret_provider.get(&config.id, &key).await?;
                 let encrypted = encrypt_for_peer(&peer_public_key, value.as_bytes())?;
-                encrypted_secrets.push((config.id.0.clone(), key, encrypted));
+                encrypted_secrets.push(SecretTransportEntry {
+                    app_id: config.id.0.clone(),
+                    key,
+                    envelope: SecretTransportEnvelope::bootstrap_peer_ciphertext(encrypted),
+                });
             }
         }
 
-        // 4. Collect artifact hashes
+        // 4. Collect gateway policy state and artifact hashes
+        let gateway_configs = self.store.list_gateway_configs()?;
+        let mut api_keys = Vec::new();
         let mut artifact_hashes = Vec::new();
         for config in &configs {
             if let Some(hash) = self.store.get_artifact_sha256(&config.id)? {
                 artifact_hashes.push((config.id.0.clone(), hash));
             }
+            let keys = self.store.load_api_keys(&config.id.0)?;
+            if !keys.is_empty() {
+                api_keys.push((config.id.0.clone(), keys));
+            }
         }
 
-        // 5. Publish the snapshot event
+        // 5. Publish the snapshot event.
+        // Bootstrap coordination is explicit: every eligible existing node may respond,
+        // but the joining node accepts only the first valid session/nonce-matching
+        // snapshot and ignores duplicates for the same session afterwards.
         let event = Event::StateSnapshot {
             for_node_id: new_node_id.clone(),
+            bootstrap_session_id,
+            bootstrap_nonce,
             configs,
             routes,
             encrypted_secrets,
+            gateway_configs,
+            api_keys,
             artifact_hashes: artifact_hashes.clone(),
         };
 
@@ -663,17 +771,49 @@ impl EventDispatcher {
 
     async fn handle_state_snapshot(
         &self,
+        bootstrap_session_id: String,
+        bootstrap_nonce: String,
         configs: Vec<common::types::AppConfig>,
         routes: Vec<common::types::Route>,
-        encrypted_secrets: Vec<(String, String, Vec<u8>)>,
+        encrypted_secrets: Vec<SecretTransportEntry>,
+        gateway_configs: Vec<(String, common::types::GatewayRouteConfig)>,
+        api_keys: Vec<(String, Vec<common::types::ApiKeyRecord>)>,
         artifact_hashes: Vec<(String, String)>,
     ) -> Result<(), PlatformError> {
         info!(
+            session = %bootstrap_session_id,
             apps = configs.len(),
             routes = routes.len(),
             secrets = encrypted_secrets.len(),
             "received state snapshot"
         );
+
+        let Some(bootstrap_session) = self.bootstrap_session.as_ref() else {
+            tracing::warn!(
+                session = %bootstrap_session_id,
+                "ignoring snapshot because this node is not awaiting bootstrap"
+            );
+            return Ok(());
+        };
+
+        let mut bootstrap_state = bootstrap_session.lock().await;
+        if bootstrap_state.applied {
+            tracing::info!(
+                session = %bootstrap_session_id,
+                "ignoring duplicate snapshot after bootstrap already completed"
+            );
+            return Ok(());
+        }
+        if bootstrap_state.session_id != bootstrap_session_id
+            || bootstrap_state.nonce != bootstrap_nonce
+        {
+            tracing::warn!(
+                expected_session = %bootstrap_state.session_id,
+                received_session = %bootstrap_session_id,
+                "ignoring stale or mismatched bootstrap snapshot"
+            );
+            return Ok(());
+        }
 
         // 1. Store configs
         for config in &configs {
@@ -693,29 +833,45 @@ impl EventDispatcher {
                 .await;
         }
 
-        // 3. Decrypt and store secrets
-        let keypair = self.bootstrap_keypair.as_ref().ok_or_else(|| {
-            PlatformError::encryption("no bootstrap keypair available to decrypt secrets")
-        })?;
+        // 3. Import gateway policy state before secrets/artifacts so the node's
+        // routing/auth policy converges with the rest of the cluster during bootstrap.
+        for (app_id, config) in gateway_configs {
+            self.store.save_gateway_config(&app_id, &config)?;
+            if let Some(ref gw) = self.gateway {
+                gw.set_route_config(&app_id, config).await;
+            }
+        }
 
-        for (app_id_str, key, encrypted_value) in encrypted_secrets {
+        for (app_id, keys) in api_keys {
+            self.store.save_api_keys(&app_id, &keys)?;
+            if !keys.is_empty() {
+                let validator = proxy::gateway::api_key::ApiKeyValidator::new(keys);
+                if let Some(ref gw) = self.gateway {
+                    gw.set_api_key_validator(&app_id, validator).await;
+                }
+            }
+        }
+
+        // 4. Decrypt and store secrets
+        for SecretTransportEntry {
+            app_id: app_id_str,
+            key,
+            envelope,
+        } in encrypted_secrets
+        {
             let app_id = AppId(app_id_str.clone());
-
-            // Decrypt using our bootstrap keypair
-            let plaintext_bytes = keypair.decrypt(&encrypted_value)?;
-            let plaintext = String::from_utf8(plaintext_bytes)
-                .map_err(|e| PlatformError::encryption_with_msg("secret not valid UTF-8", e))?;
+            let plaintext = decrypt_bootstrap_secret(&bootstrap_state.keypair, &envelope)?;
             self.secret_provider.set(&app_id, &key, &plaintext).await?;
             info!(app = app_id_str, key, "secret decrypted and stored");
         }
 
-        // 4. Store artifact hashes
+        // 5. Store artifact hashes
         for (app_id_str, sha256) in &artifact_hashes {
             let app_id = AppId(app_id_str.clone());
             self.store.save_artifact_hash(&app_id, sha256)?;
         }
 
-        // 5. Compile artifacts (artifacts should already be in our local store from push)
+        // 6. Compile artifacts (artifacts should already be in our local store from push)
         for (app_id_str, sha256) in artifact_hashes {
             let app_id = AppId(app_id_str.clone());
 
@@ -762,7 +918,12 @@ impl EventDispatcher {
             }
         }
 
-        info!("state snapshot import complete");
+        bootstrap_state.applied = true;
+        drop(bootstrap_state);
+
+        persist_applied_bootstrap_session(&self.store, &bootstrap_session_id, &bootstrap_nonce)?;
+
+        info!(session = %bootstrap_session_id, "state snapshot import complete");
         Ok(())
     }
 
@@ -934,7 +1095,9 @@ async fn fetch_artifact(
 mod tests {
     use super::{apply_secret_update, is_loopback_artifact_url, validate_peer_artifact_url};
     use common::types::AppId;
-    use secrets::{crypto::SymmetricKey, LocalSecretProvider, SecretProvider};
+    use secrets::{
+        crypto::SymmetricKey, LocalSecretProvider, SecretProvider, SecretTransportEnvelope,
+    };
     use storage::Store;
     use tempfile::NamedTempFile;
 
@@ -963,9 +1126,14 @@ mod tests {
         let provider = LocalSecretProvider::new(store.clone(), SymmetricKey::generate());
         let app_id = AppId("secret-app:v1".to_string());
 
-        apply_secret_update(&provider, &app_id, "API_KEY", b"super-secret-value")
-            .await
-            .unwrap();
+        apply_secret_update(
+            &provider,
+            &app_id,
+            "API_KEY",
+            &SecretTransportEnvelope::plaintext_utf8("super-secret-value"),
+        )
+        .await
+        .unwrap();
 
         let plaintext = provider.get(&app_id, "API_KEY").await.unwrap();
         assert_eq!(plaintext, "super-secret-value");
@@ -975,16 +1143,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_apply_secret_update_rejects_non_utf8_plaintext_payload() {
+    async fn test_apply_secret_update_rejects_bootstrap_payload_for_rotation() {
         let temp = NamedTempFile::new().unwrap();
         let store = Store::open(temp.path()).unwrap();
         let provider = LocalSecretProvider::new(store.clone(), SymmetricKey::generate());
         let app_id = AppId("secret-app:v1".to_string());
 
-        let err = apply_secret_update(&provider, &app_id, "API_KEY", &[0xff, 0xfe, 0xfd])
-            .await
-            .unwrap_err();
-        assert!(err.to_string().contains("valid UTF-8 plaintext"));
+        let err = apply_secret_update(
+            &provider,
+            &app_id,
+            "API_KEY",
+            &SecretTransportEnvelope::bootstrap_peer_ciphertext(vec![0xff, 0xfe, 0xfd]),
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("unexpected secret payload variant"));
         assert!(store.load_secrets(&app_id).unwrap().is_none());
     }
 }

@@ -265,7 +265,12 @@ pub enum InstanceState {
     Starting,
     Ready { addr: std::net::SocketAddr },
     Busy,
-    Stopping,
+    /// Removed from routing and discovery; waiting for in-flight work to drain.
+    Draining { addr: std::net::SocketAddr },
+    /// Shutdown signal has been sent and the supervisor is waiting for process exit.
+    Stopping { addr: std::net::SocketAddr },
+    /// Grace timeout elapsed; the worker is fenced but not yet confirmed exited.
+    ExitTimedOut { addr: std::net::SocketAddr },
     Stopped,
 }
 

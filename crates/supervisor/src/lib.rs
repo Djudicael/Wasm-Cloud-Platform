@@ -15,7 +15,7 @@ pub mod scaling;
 mod tests;
 
 use crate::{
-    instance::{BillingInfo, ManagedInstance},
+    instance::{BillingInfo, ManagedInstance, ShutdownOutcome},
     network::LocalServiceRegistry,
     network_interceptor::{ConnectDecision, NetworkInterceptor},
     pool::InstancePool,
@@ -647,8 +647,8 @@ impl Supervisor {
             spawned_at: Instant::now(),
             last_request_at: Instant::now(),
             request_count: 0,
-            task,
-            shutdown_tx,
+            task: Some(task),
+            shutdown_tx: Some(shutdown_tx),
             billing_info: BillingInfo {
                 tenant_id: tenant_id.clone(),
                 fuel_quota,
@@ -793,28 +793,21 @@ impl Supervisor {
             }
         }
 
-        // Phase 3: Under write lock, remove dead and idle instances
-        {
-            let mut pools = self.pools.write().await;
-            for (app_id_str, app_id, idle_ids) in idle_by_app {
-                let pool = match pools.get_mut(&app_id_str) {
-                    Some(p) => p,
-                    None => continue,
-                };
-
-                // Kill dead instances
-                if let Some(dead_ids) = dead_by_app.remove(&app_id_str) {
-                    for id in dead_ids {
-                        self.kill_instance_internal(pool, &app_id, &id).await;
-                    }
-                }
-
-                // Kill idle instances
-                for id in idle_ids {
-                    self.kill_instance_internal(pool, &app_id, &id).await;
+        // Phase 3: Kill dead and idle instances without releasing resources until
+        // exit is authoritative.
+        for (app_id_str, app_id, idle_ids) in idle_by_app {
+            if let Some(dead_ids) = dead_by_app.remove(&app_id_str) {
+                for id in dead_ids {
+                    self.kill_instance_internal(&app_id, &id).await;
                 }
             }
+
+            for id in idle_ids {
+                self.kill_instance_internal(&app_id, &id).await;
+            }
         }
+
+        self.reap_finished_shutdowns().await;
 
         Ok(())
     }
@@ -832,6 +825,160 @@ impl Supervisor {
             }
         }
         Ok(())
+    }
+
+    async fn take_instance_for_shutdown(
+        &self,
+        app_id: &AppId,
+        id: &InstanceId,
+    ) -> Result<ManagedInstance, PlatformError> {
+        let instance = {
+            let mut pools = self.pools.write().await;
+            let pool = pools
+                .get_mut(&app_id.0)
+                .ok_or_else(|| PlatformError::AppNotFound(app_id.0.clone()))?;
+
+            let pos = pool
+                .instances
+                .iter()
+                .position(|i| i.id == *id)
+                .ok_or_else(|| PlatformError::runtime(format!("instance {} not found", id.0)))?;
+
+            pool.instances.remove(pos)
+        };
+
+        self.upstream_registry.remove(app_id, &instance.addr).await;
+        self.service_registry.deregister(app_id, &instance.addr).await;
+
+        Ok(instance)
+    }
+
+    async fn reinsert_fenced_instance(
+        &self,
+        app_id: &AppId,
+        instance: ManagedInstance,
+    ) -> Result<(), PlatformError> {
+        let mut pools = self.pools.write().await;
+        let pool = pools
+            .get_mut(&app_id.0)
+            .ok_or_else(|| PlatformError::AppNotFound(app_id.0.clone()))?;
+        pool.instances.push(instance);
+        Ok(())
+    }
+
+    async fn finalize_instance_exit(
+        &self,
+        app_id: &AppId,
+        id: &InstanceId,
+        mut instance: ManagedInstance,
+        stats: Option<ExecutionStats>,
+    ) {
+        instance.state = InstanceState::Stopped;
+
+        let wall_clock_ms = instance.spawned_at.elapsed().as_millis() as u64;
+        let (fuel_consumed, ram_bytes, is_trap) = match &stats {
+            Some(s) => (s.fuel_consumed, s.ram_bytes as u64, s.trap.is_some()),
+            None => (instance.billing_info.fuel_quota, instance.billing_info.ram_bytes, true),
+        };
+        self.send_billing_record(billing::BillingInput {
+            tenant_id: instance.billing_info.tenant_id.clone(),
+            app_id: app_id.0.clone(),
+            instance_id: id.0.to_string(),
+            node_id: self.node_id().to_string(),
+            fuel_consumed,
+            fuel_quota: instance.billing_info.fuel_quota,
+            ram_bytes,
+            wall_clock_ms,
+            status_code: if is_trap { 500 } else { 200 },
+            is_trap,
+        });
+
+        self.service_registry.deregister(app_id, &instance.addr).await;
+        self.service_registry.release_source_port(instance.addr.port()).await;
+        self.port_alloc.release(instance.addr.port());
+
+        if let Some(tid) = instance.tid {
+            if let Some(ref ns_map) = self.namespace_map {
+                let _ = ns_map.deregister_tid(tid);
+            }
+        }
+
+        let _ = self
+            .event_tx
+            .send(Event::InstanceDead {
+                app_id: app_id.clone(),
+                addr: instance.addr,
+                node_id: self.node_id().to_string(),
+            })
+            .await;
+    }
+
+    async fn handle_shutdown_outcome(
+        &self,
+        app_id: &AppId,
+        id: &InstanceId,
+        mut instance: ManagedInstance,
+        outcome: ShutdownOutcome,
+    ) -> Result<(), PlatformError> {
+        match outcome {
+            ShutdownOutcome::Exited(stats) => {
+                self.finalize_instance_exit(app_id, id, instance, Some(stats))
+                    .await;
+                Ok(())
+            }
+            ShutdownOutcome::TaskPanicked(error) => {
+                tracing::warn!(app = %app_id.0, instance = %id.0, error = %error, "instance task panicked during shutdown");
+                self.finalize_instance_exit(app_id, id, instance, None).await;
+                Ok(())
+            }
+            ShutdownOutcome::TimedOut => {
+                instance.state = InstanceState::ExitTimedOut { addr: instance.addr };
+                self.reinsert_fenced_instance(app_id, instance).await?;
+                Err(PlatformError::runtime(format!(
+                    "instance {} shutdown timed out; instance remains fenced until exit is confirmed",
+                    id.0
+                )))
+            }
+        }
+    }
+
+    async fn reap_finished_shutdowns(&self) {
+        let candidates: Vec<(AppId, InstanceId)> = {
+            let pools = self.pools.read().await;
+            pools
+                .iter()
+                .flat_map(|(app_id_str, pool)| {
+                    pool.instances.iter().filter_map(|inst| {
+                        let fenced = matches!(
+                            inst.state,
+                            InstanceState::Draining { .. }
+                                | InstanceState::Stopping { .. }
+                                | InstanceState::ExitTimedOut { .. }
+                        );
+                        let finished = inst.task.as_ref().map(|task| task.is_finished()).unwrap_or(false);
+                        if fenced && finished {
+                            Some((AppId(app_id_str.clone()), inst.id.clone()))
+                        } else {
+                            None
+                        }
+                    })
+                })
+                .collect()
+        };
+
+        for (app_id, instance_id) in candidates {
+            let mut instance = match self.take_instance_for_shutdown(&app_id, &instance_id).await {
+                Ok(instance) => instance,
+                Err(_) => continue,
+            };
+            let outcome = instance.await_exit(Duration::from_millis(1)).await;
+            if let Err(e) = self
+                .handle_shutdown_outcome(&app_id, &instance_id, instance, outcome)
+                .await
+            {
+                tracing::warn!(app = %app_id.0, instance = %instance_id.0, error = %e, "failed to reap finished fenced instance");
+            }
+        }
     }
 
     pub async fn kill_instance(
@@ -864,133 +1011,43 @@ impl Supervisor {
             "starting graceful shutdown"
         );
 
-        // 1. Remove from upstream registry first (stop new requests)
-        let instance = {
-            let mut pools = self.pools.write().await;
-            let pool = pools
-                .get_mut(&app_id.0)
-                .ok_or_else(|| PlatformError::AppNotFound(app_id.0.clone()))?;
-
-            let pos = pool
-                .instances
-                .iter()
-                .position(|i| i.id == *id)
-                .ok_or_else(|| PlatformError::runtime(format!("instance {} not found", id.0)))?;
-
-            // Remove from upstream immediately
-            let inst = &pool.instances[pos];
-            if let InstanceState::Ready { addr } = &inst.state {
-                self.upstream_registry.remove(app_id, addr).await;
-                tracing::debug!(
-                    app = %app_id.0,
-                    instance = %id.0,
-                    addr = %addr,
-                    "removed from upstream registry"
-                );
-            }
-
-            pool.instances.remove(pos)
+        let mut instance = self.take_instance_for_shutdown(app_id, id).await?;
+        instance.state = InstanceState::Draining {
+            addr: instance.addr,
         };
 
-        // 2. Wait for in-flight requests to drain
+        // Wait for in-flight requests to drain while the instance remains fenced.
         tokio::time::sleep(drain_timeout).await;
 
-        // 3. Save data we need after consuming instance
-        let addr = instance.addr;
-        let state = instance.state.clone();
-        let billing_info = instance.billing_info.clone();
-        let wall_clock_start = instance.spawned_at;
-        // 4. Initiate graceful shutdown (HTTP + channel signal + wait)
-        let stats = instance.initiate_shutdown(grace_timeout).await;
-
-        // 5. Record billing for this execution cycle
-        let wall_clock_ms = wall_clock_start.elapsed().as_millis() as u64;
-        let (fuel_consumed, ram_bytes, is_trap) = match &stats {
-            Some(s) => (s.fuel_consumed, s.ram_bytes as u64, s.trap.is_some()),
-            None => (billing_info.fuel_quota, billing_info.ram_bytes, true),
+        instance.state = InstanceState::Stopping {
+            addr: instance.addr,
         };
-        self.send_billing_record(billing::BillingInput {
-            tenant_id: billing_info.tenant_id,
-            app_id: app_id.0.clone(),
-            instance_id: id.0.to_string(),
-            node_id: self.node_id().to_string(),
-            fuel_consumed,
-            fuel_quota: billing_info.fuel_quota,
-            ram_bytes,
-            wall_clock_ms,
-            status_code: if is_trap { 500 } else { 200 },
-            is_trap,
-        });
-
-        // 6. Release resources
-        if let InstanceState::Ready { addr } = &state {
-            self.service_registry.deregister(app_id, addr).await;
-            self.service_registry.release_source_port(addr.port()).await;
-            self.port_alloc.release(addr.port());
-        }
-
-        // 7. Publish InstanceDead event
-        let _ = self
-            .event_tx
-            .send(Event::InstanceDead {
-                app_id: app_id.clone(),
-                addr,
-                node_id: self.node_id().to_string(),
-            })
-            .await;
-
-        if stats.is_some() {
-            tracing::info!(
-                app = %app_id.0,
-                instance = %id.0,
-                "graceful shutdown complete"
-            );
-        } else {
-            tracing::warn!(
-                app = %app_id.0,
-                instance = %id.0,
-                "graceful shutdown timeout — instance was aborted"
-            );
-        }
-
-        Ok(())
+        instance.begin_shutdown().await;
+        let outcome = instance.await_exit(grace_timeout).await;
+        self.handle_shutdown_outcome(app_id, id, instance, outcome)
+            .await
     }
 
-    async fn kill_instance_internal(
-        &self,
-        pool: &mut InstancePool,
-        app_id: &AppId,
-        id: &InstanceId,
-    ) {
-        if let Some(pos) = pool.instances.iter().position(|i| i.id == *id) {
-            let inst = pool.instances.remove(pos);
-            if let InstanceState::Ready { addr } = &inst.state {
-                self.upstream_registry.remove(app_id, addr).await;
-                self.service_registry.deregister(app_id, addr).await;
-                self.service_registry.release_source_port(addr.port()).await;
-                self.port_alloc.release(addr.port());
+    async fn kill_instance_internal(&self, app_id: &AppId, id: &InstanceId) {
+        let mut instance = match self.take_instance_for_shutdown(app_id, id).await {
+            Ok(instance) => instance,
+            Err(e) => {
+                tracing::warn!(app = %app_id.0, instance = %id.0, error = %e, "failed to take instance for shutdown");
+                return;
             }
-            inst.shutdown_tx.send(()).ok();
-            if let Err(e) = tokio::time::timeout(Duration::from_secs(5), inst.task).await {
-                tracing::warn!(instance_id = %id.0, "Instance task did not shut down in time: {}", e);
-            }
+        };
 
-            // Deregister TID from eBPF map on kill
-            if let Some(tid) = inst.tid {
-                if let Some(ref ns_map) = self.namespace_map {
-                    let _ = ns_map.deregister_tid(tid);
-                }
-            }
-
-            let _ = self
-                .event_tx
-                .send(Event::InstanceDead {
-                    app_id: app_id.clone(),
-                    addr: inst.addr,
-                    node_id: self.node_id().to_string(),
-                })
-                .await;
-
+        instance.state = InstanceState::Stopping {
+            addr: instance.addr,
+        };
+        instance.begin_shutdown().await;
+        let outcome = instance.await_exit(Duration::from_secs(5)).await;
+        if let Err(e) = self
+            .handle_shutdown_outcome(app_id, id, instance, outcome)
+            .await
+        {
+            tracing::warn!(app = %app_id.0, instance = %id.0, error = %e, "instance shutdown timed out while killing internally");
+        } else {
             tracing::info!(app = %app_id.0, instance = %id.0, "instance killed");
         }
     }
@@ -1361,7 +1418,7 @@ use proxy::health::InstanceCountProvider;
 impl InstanceCountProvider for Supervisor {
     fn active_instance_count(&self) -> u32 {
         match self.pools.try_read() {
-            Ok(pools) => pools.values().map(|p| p.instance_count() as u32).sum(),
+            Ok(pools) => pools.values().map(|p| p.active_count() as u32).sum(),
             Err(_) => 0,
         }
     }
@@ -1378,7 +1435,7 @@ impl InstanceCountProvider for Supervisor {
             Ok(pools) => pools
                 .iter()
                 .map(|(app_id, pool)| {
-                    let instances = pool.instance_count() as u32;
+                    let instances = pool.active_count() as u32;
                     AppHealthSummary {
                         app_id: app_id.clone(),
                         instances,

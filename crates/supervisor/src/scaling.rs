@@ -70,6 +70,7 @@ pub fn start_load_reporter(
     supervisor: Arc<Supervisor>,
     bus: NatsBus,
     node_id: String,
+    proxy_address: String,
     fuel_budget_per_sec: u64,
 ) {
     tokio::spawn(async move {
@@ -86,6 +87,7 @@ pub fn start_load_reporter(
                         / fuel_budget_per_sec as f32)
                         * 100.0,
                     active_instances: stats.total_instances as u32,
+                    proxy_address: proxy_address.clone(),
                 };
                 bus.publish(&load_event).await.ok();
             }

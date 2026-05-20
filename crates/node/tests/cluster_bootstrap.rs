@@ -3,7 +3,10 @@
 
 use common::types::{AppConfig, AppId, FuelQuota, MemoryPages};
 use messaging::events::Event;
-use secrets::{BootstrapKeyPair, SecretProvider};
+use secrets::{
+    BootstrapKeyPair, SecretProvider, SecretTransportEntry, SecretTransportEnvelope,
+    SecretTransportPayload,
+};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::time::Duration;
@@ -76,6 +79,8 @@ async fn test_fresh_node_publishes_node_joined() {
         async move {
             if let Event::NodeJoined {
                 node_id,
+                bootstrap_session_id,
+                bootstrap_nonce,
                 artifact_server_url,
                 artifact_auth_token,
                 public_key_bytes,
@@ -84,8 +89,10 @@ async fn test_fresh_node_publishes_node_joined() {
             } = event
             {
                 println!(
-                    "Received NodeJoined: node_id={}, url={}, pubkey_len={}, has_artifact_auth_token={}",
+                    "Received NodeJoined: node_id={}, session={}, nonce={}, url={}, pubkey_len={}, has_artifact_auth_token={}",
                     node_id,
+                    bootstrap_session_id,
+                    bootstrap_nonce,
                     artifact_server_url,
                     public_key_bytes.len(),
                     artifact_auth_token.is_some()
@@ -103,6 +110,8 @@ async fn test_fresh_node_publishes_node_joined() {
     // Publish NodeJoined event
     let join_event = Event::NodeJoined {
         node_id: "node-0".to_string(),
+        bootstrap_session_id: "session-node-0".to_string(),
+        bootstrap_nonce: "nonce-node-0".to_string(),
         artifact_server_url: "http://127.0.0.1:8080".to_string(),
         artifact_auth_token: None,
         public_key_bytes: public_key_bytes.clone(),
@@ -133,31 +142,56 @@ async fn test_existing_node_skips_bootstrap() {
 }
 
 #[tokio::test]
-async fn test_leader_election() {
+async fn test_bootstrap_session_correlates_join_and_snapshot() {
     let nats_url = get_nats_url().await;
     sleep(Duration::from_millis(100)).await;
 
     let bus = messaging::NatsBus::connect(&nats_url).await.unwrap();
     bus.setup_jetstream().await.unwrap();
 
-    // Simulate multiple nodes
-    let nodes = vec!["node-2", "node-0", "node-1", "node-3"];
+    let join_event = Event::NodeJoined {
+        node_id: "node-new".to_string(),
+        bootstrap_session_id: "bootstrap-session-1".to_string(),
+        bootstrap_nonce: "bootstrap-nonce-1".to_string(),
+        artifact_server_url: "http://node-new.internal:8081".to_string(),
+        artifact_auth_token: Some("peer-artifact-token".to_string()),
+        public_key_bytes: BootstrapKeyPair::generate().public_bytes(),
+        protocol_version: common::protocol::PROTOCOL_VERSION,
+        binary_version: common::protocol::BINARY_VERSION.to_string(),
+    };
 
-    // Leader should be node-0 (lexicographically smallest)
-    let leader = nodes.iter().min().unwrap();
+    let snapshot = Event::StateSnapshot {
+        for_node_id: "node-new".to_string(),
+        bootstrap_session_id: "bootstrap-session-1".to_string(),
+        bootstrap_nonce: "bootstrap-nonce-1".to_string(),
+        configs: vec![],
+        routes: vec![],
+        encrypted_secrets: vec![],
+        gateway_configs: vec![],
+        api_keys: vec![],
+        artifact_hashes: vec![],
+    };
 
-    assert_eq!(*leader, "node-0");
-
-    // In real implementation, only node-0 should respond
-    for node_id in &nodes {
-        let should_respond = *node_id <= "new-node";
-        println!(
-            "Node {} should respond to new-node: {}",
-            node_id, should_respond
-        );
+    match (join_event, snapshot) {
+        (
+            Event::NodeJoined {
+                bootstrap_session_id: join_session,
+                bootstrap_nonce: join_nonce,
+                ..
+            },
+            Event::StateSnapshot {
+                bootstrap_session_id: snapshot_session,
+                bootstrap_nonce: snapshot_nonce,
+                ..
+            },
+        ) => {
+            assert_eq!(join_session, snapshot_session);
+            assert_eq!(join_nonce, snapshot_nonce);
+        }
+        _ => unreachable!("expected bootstrap join + snapshot events"),
     }
 
-    println!("✓ Leader election logic verified (smallest node_id responds)");
+    println!("✓ Bootstrap session correlation data verified");
 }
 
 #[tokio::test]
@@ -236,11 +270,13 @@ async fn test_snapshot_event_structure() {
 
     // Encrypt secrets for new node
     let receiver = BootstrapKeyPair::generate();
-    let encrypted_secrets = vec![(
-        "app1:v1".to_string(),
-        "DB_URL".to_string(),
-        secrets::encrypt_for_peer(&receiver.public_bytes(), b"postgres://db").unwrap(),
-    )];
+    let encrypted_secrets = vec![SecretTransportEntry {
+        app_id: "app1:v1".to_string(),
+        key: "DB_URL".to_string(),
+        envelope: SecretTransportEnvelope::bootstrap_peer_ciphertext(
+            secrets::encrypt_for_peer(&receiver.public_bytes(), b"postgres://db").unwrap(),
+        ),
+    }];
 
     let artifact_hashes = vec![
         ("app1:v1".to_string(), "abc123".to_string()),
@@ -249,9 +285,13 @@ async fn test_snapshot_event_structure() {
 
     let snapshot = Event::StateSnapshot {
         for_node_id: "node-1".to_string(),
+        bootstrap_session_id: "bootstrap-session-1".to_string(),
+        bootstrap_nonce: "bootstrap-nonce-1".to_string(),
         configs: configs.clone(),
         routes: routes.clone(),
         encrypted_secrets: encrypted_secrets.clone(),
+        gateway_configs: vec![],
+        api_keys: vec![],
         artifact_hashes: artifact_hashes.clone(),
     };
 
@@ -262,22 +302,35 @@ async fn test_snapshot_event_structure() {
     // Verify structure
     if let Event::StateSnapshot {
         for_node_id,
+        bootstrap_session_id,
+        bootstrap_nonce,
         configs: c,
         routes: r,
         encrypted_secrets: s,
+        gateway_configs,
+        api_keys,
         artifact_hashes: h,
     } = snapshot
     {
         assert_eq!(for_node_id, "node-1");
+        assert_eq!(bootstrap_session_id, "bootstrap-session-1");
+        assert_eq!(bootstrap_nonce, "bootstrap-nonce-1");
         assert_eq!(c.len(), 2);
         assert_eq!(r.len(), 1);
         assert_eq!(s.len(), 1);
+        assert!(gateway_configs.is_empty());
+        assert!(api_keys.is_empty());
         assert_eq!(h.len(), 2);
 
         // Verify secrets are encrypted (not plaintext)
-        for (_, _, encrypted) in &s {
-            assert!(encrypted.len() > 32 + 12); // pubkey + nonce + ciphertext
-            assert_ne!(encrypted, b"postgres://db");
+        for entry in &s {
+            match &entry.envelope.payload {
+                SecretTransportPayload::BootstrapPeerCiphertextV1 { ciphertext } => {
+                    assert!(ciphertext.len() > 32 + 12); // pubkey + nonce + ciphertext
+                    assert_ne!(ciphertext, b"postgres://db");
+                }
+                other => panic!("unexpected secret payload variant in snapshot: {:?}", other),
+            }
         }
 
         println!("✓ StateSnapshot structure verified");
@@ -329,6 +382,20 @@ async fn test_two_node_bootstrap_simulation() {
     };
     store0.save_route(&route).unwrap();
 
+    let gateway_config = common::types::GatewayRouteConfig {
+        auth: common::types::AuthPolicy::Authenticated,
+        ..Default::default()
+    };
+    store0
+        .save_gateway_config(&app_config.id.0, &gateway_config)
+        .unwrap();
+    let api_keys = vec![common::types::ApiKeyRecord {
+        name: "bootstrap-key".to_string(),
+        key_hash: "sha256$bootstrap-key-hash".to_string(),
+        scopes: vec!["/".to_string()],
+    }];
+    store0.save_api_keys(&app_config.id.0, &api_keys).unwrap();
+
     // Initialize secret provider for node-0
     let kek0 = secrets::crypto::SymmetricKey::generate();
     let secret_provider0 = secrets::LocalSecretProvider::new(store0.clone(), kek0);
@@ -353,8 +420,12 @@ async fn test_two_node_bootstrap_simulation() {
 
     // Node-1 publishes NodeJoined
     let advertised_artifact_url = "http://node-1.internal:8081".to_string();
+    let bootstrap_session_id = "bootstrap-session-node-1".to_string();
+    let bootstrap_nonce = "bootstrap-nonce-node-1".to_string();
     let join_event = Event::NodeJoined {
         node_id: "node-1".to_string(),
+        bootstrap_session_id: bootstrap_session_id.clone(),
+        bootstrap_nonce: bootstrap_nonce.clone(),
         artifact_server_url: advertised_artifact_url.clone(),
         artifact_auth_token: Some("peer-artifact-token".to_string()),
         public_key_bytes: pubkey1.clone(),
@@ -371,8 +442,8 @@ async fn test_two_node_bootstrap_simulation() {
     sleep(Duration::from_millis(100)).await;
 
     // ═══ NODE-0: Respond with StateSnapshot ═══
-    // Simulate leader election (node-0 < node-1, so node-0 responds)
-    assert!("node-0" < "node-1");
+    // The joining node correlates the first valid session/nonce-matching snapshot
+    // and ignores duplicates afterwards.
 
     // Collect state from node-0
     let configs = vec![app_config.clone()];
@@ -384,19 +455,25 @@ async fn test_two_node_bootstrap_simulation() {
         .await
         .unwrap();
     let encrypted_secret = secrets::encrypt_for_peer(&pubkey1, secret_value.as_bytes()).unwrap();
-    let encrypted_secrets = vec![(
-        app_config.id.0.clone(),
-        "API_KEY".to_string(),
-        encrypted_secret,
-    )];
+    let encrypted_secrets = vec![SecretTransportEntry {
+        app_id: app_config.id.0.clone(),
+        key: "API_KEY".to_string(),
+        envelope: SecretTransportEnvelope::bootstrap_peer_ciphertext(encrypted_secret),
+    }];
 
     let artifact_hashes = vec![(app_config.id.0.clone(), sha256.clone())];
+    let gateway_configs = vec![(app_config.id.0.clone(), gateway_config.clone())];
+    let api_key_snapshot = vec![(app_config.id.0.clone(), api_keys.clone())];
 
     let snapshot = Event::StateSnapshot {
         for_node_id: "node-1".to_string(),
+        bootstrap_session_id: bootstrap_session_id.clone(),
+        bootstrap_nonce: bootstrap_nonce.clone(),
         configs,
         routes,
         encrypted_secrets: encrypted_secrets.clone(),
+        gateway_configs: gateway_configs.clone(),
+        api_keys: api_key_snapshot.clone(),
         artifact_hashes: artifact_hashes.clone(),
     };
 
@@ -410,6 +487,8 @@ async fn test_two_node_bootstrap_simulation() {
         configs,
         routes,
         encrypted_secrets,
+        gateway_configs,
+        api_keys,
         artifact_hashes,
         ..
     } = snapshot.clone()
@@ -424,12 +503,33 @@ async fn test_two_node_bootstrap_simulation() {
             store1.save_route(route).unwrap();
         }
 
-        // Decrypt and save secrets
-        let kek1 = secrets::crypto::SymmetricKey::generate();
-        let secret_provider1 = secrets::LocalSecretProvider::new(store1.clone(), kek1);
+        // Restore gateway policy state
+        for (app_id, config) in gateway_configs {
+            store1.save_gateway_config(&app_id, &config).unwrap();
+        }
+        for (app_id, keys) in api_keys {
+            store1.save_api_keys(&app_id, &keys).unwrap();
+        }
 
-        for (app_id_str, key, encrypted_value) in encrypted_secrets {
-            let plaintext_bytes = keypair1.decrypt(&encrypted_value).unwrap();
+        // Decrypt and save secrets
+        let kek1_bytes = *secrets::crypto::SymmetricKey::generate().as_bytes();
+        let secret_provider1 = secrets::LocalSecretProvider::new(
+            store1.clone(),
+            secrets::crypto::SymmetricKey::from_bytes(kek1_bytes),
+        );
+
+        for SecretTransportEntry {
+            app_id: app_id_str,
+            key,
+            envelope,
+        } in encrypted_secrets
+        {
+            let plaintext_bytes = match envelope.payload {
+                SecretTransportPayload::BootstrapPeerCiphertextV1 { ciphertext } => {
+                    keypair1.decrypt(&ciphertext).unwrap()
+                }
+                other => panic!("unexpected bootstrap secret payload variant: {:?}", other),
+            };
 
             let plaintext = String::from_utf8(plaintext_bytes).unwrap();
             assert_eq!(plaintext, "sk_test_node0_secret");
@@ -440,6 +540,13 @@ async fn test_two_node_bootstrap_simulation() {
                 .await
                 .unwrap();
         }
+
+        let verify_provider = secrets::LocalSecretProvider::new(
+            store1.clone(),
+            secrets::crypto::SymmetricKey::from_bytes(kek1_bytes),
+        );
+        let secret = verify_provider.get(&app_config.id, "API_KEY").await.unwrap();
+        assert_eq!(secret, "sk_test_node0_secret");
 
         // Save artifact hashes
         for (app_id_str, hash) in artifact_hashes {
@@ -468,11 +575,11 @@ async fn test_two_node_bootstrap_simulation() {
     assert_eq!(loaded_routes.len(), 1);
     assert_eq!(loaded_routes[0].host, "hello.example.com");
 
-    // Check secrets
-    let kek1 = secrets::crypto::SymmetricKey::generate();
-    let _secret_provider1 = secrets::LocalSecretProvider::new(store1.clone(), kek1);
-    // Note: We'd need to re-create the provider that was used during import
-    // For this test, we verify the structure was saved
+    // Check gateway policy state
+    let loaded_gateway = store1.load_gateway_config(&app_config.id.0).unwrap().unwrap();
+    assert_eq!(loaded_gateway, gateway_config);
+    let loaded_api_keys = store1.load_api_keys(&app_config.id.0).unwrap();
+    assert_eq!(loaded_api_keys, api_keys);
 
     // Check artifact hash
     let loaded_hash = store1.get_artifact_sha256(&app_config.id).unwrap().unwrap();

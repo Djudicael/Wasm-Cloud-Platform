@@ -1,5 +1,5 @@
 // crates/messaging/src/events.rs
-use common::types::{AppConfig, AppId};
+use common::types::{ApiKeyRecord, AppConfig, AppId, GatewayRouteConfig};
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 
@@ -68,12 +68,8 @@ pub enum Event {
     SecretUpdate {
         app_id: AppId,
         key: String,
-        /// Secret payload for rotation.
-        ///
-        /// Intended long-term format: ciphertext encrypted with the cluster key.
-        /// Current development compatibility path may still send UTF-8 plaintext
-        /// bytes, which the receiver normalizes through the `SecretProvider`.
-        encrypted_value: Vec<u8>,
+        /// Canonical secret transport envelope for ctl -> NATS -> node.
+        secret: secrets::SecretTransportEnvelope,
     },
     ConfigUpdate {
         app_id: AppId,
@@ -81,7 +77,7 @@ pub enum Event {
     },
     GatewayConfigUpdate {
         app_id: AppId,
-        config: common::types::GatewayRouteConfig,
+        config: GatewayRouteConfig,
     },
     GatewayConfigRemove {
         app_id: AppId,
@@ -93,11 +89,17 @@ pub enum Event {
         cpu_percent: f32,
         fuel_budget_used_percent: f32,
         active_instances: u32,
+        /// Routable proxy endpoint for this node, used for cross-node request steering.
+        proxy_address: String,
     },
 
     // ── Cluster Bootstrap ──────────────────────────────────────────
     NodeJoined {
         node_id: String,
+        /// Correlates a fresh-node bootstrap request with the snapshot that answers it.
+        bootstrap_session_id: String,
+        /// Single-use nonce bound to the current bootstrap attempt.
+        bootstrap_nonce: String,
         /// The node's advertised artifact base URL for peer exchange.
         /// This may differ from the local listener bind address.
         artifact_server_url: String,
@@ -118,13 +120,22 @@ pub enum Event {
     StateSnapshot {
         /// Recipient node ID.
         for_node_id: String,
+        /// Correlates this snapshot with the fresh-node bootstrap session that requested it.
+        bootstrap_session_id: String,
+        /// Single-use nonce echoed from the corresponding NodeJoined event.
+        bootstrap_nonce: String,
         /// All app configs (JSON).
         configs: Vec<AppConfig>,
         /// All routes.
         routes: Vec<common::types::Route>,
         /// Secrets encrypted with the joining node's one-time public key.
-        /// Format: Vec<(app_id, key, encrypted_value)>
-        encrypted_secrets: Vec<(String, String, Vec<u8>)>,
+        encrypted_secrets: Vec<secrets::SecretTransportEntry>,
+        /// Gateway policy state for each app.
+        #[serde(default)]
+        gateway_configs: Vec<(String, GatewayRouteConfig)>,
+        /// API-key policy state for each app.
+        #[serde(default)]
+        api_keys: Vec<(String, Vec<ApiKeyRecord>)>,
         /// SHA-256 of each app's .wasm (so node can fetch artifacts).
         artifact_hashes: Vec<(String, String)>, // (app_id, sha256)
     },

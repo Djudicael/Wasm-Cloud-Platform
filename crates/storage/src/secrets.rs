@@ -51,12 +51,11 @@ impl Store {
         tx.commit().map_err(PlatformError::storage_source)
     }
 
-    /// Persist the Key Encryption Key (KEK) to the database.
+    /// Persist the Key Encryption Key (KEK) blob to the database.
     ///
-    /// Legacy compatibility only: normal node startup no longer relies on
-    /// plaintext KEK persistence in redb. This method exists so older nodes or
-    /// migration tests can still stage a KEK for one-time migration into an
-    /// external key source (for example `runtime.key_source = "file"`).
+    /// The blob is normally a sealed/encrypted KEK produced by the node's
+    /// configured key source. Legacy tests may also stage a raw 32-byte KEK so
+    /// startup can migrate it into a sealed-at-rest form.
     pub fn save_kek(&self, kek_bytes: &[u8]) -> Result<(), PlatformError> {
         let tx = self
             .db
@@ -71,11 +70,10 @@ impl Store {
         tx.commit().map_err(PlatformError::storage_source)
     }
 
-    /// Load the Key Encryption Key (KEK) from the database.
+    /// Load the persisted Key Encryption Key (KEK) blob from the database.
     ///
-    /// Legacy compatibility only: returns the old plaintext-on-disk KEK so the
-    /// node can migrate it into an external key source. New deployments should
-    /// not depend on this for normal operation.
+    /// Callers interpret the blob as either a modern sealed KEK or a legacy raw
+    /// 32-byte KEK that still needs migration.
     pub fn load_kek(&self) -> Result<Option<Vec<u8>>, PlatformError> {
         let tx = self
             .db
