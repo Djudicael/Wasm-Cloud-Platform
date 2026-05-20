@@ -2,7 +2,6 @@ pub mod compiler;
 pub mod executor;
 pub mod limits;
 pub mod policy_tracker;
-pub mod policy_wasi;
 pub mod virtual_dns;
 
 #[cfg(test)]

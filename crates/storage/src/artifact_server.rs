@@ -8,10 +8,61 @@ use axum::{
 };
 use sha2::{Digest, Sha256};
 use std::net::SocketAddr;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::Store;
 
 const MAX_ARTIFACT_SIZE: usize = 104_857_600; // 100 MB
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ArtifactRequestAction {
+    Read,
+    Write,
+}
+
+#[derive(Debug, Clone)]
+pub struct ArtifactPeerTokenConfig {
+    pub token: String,
+    pub expires_at_ms: Option<u64>,
+    pub allow_read: bool,
+    pub allow_write: bool,
+}
+
+impl ArtifactPeerTokenConfig {
+    pub fn new(
+        token: String,
+        expires_at_ms: Option<u64>,
+        allow_read: bool,
+        allow_write: bool,
+    ) -> Self {
+        ArtifactPeerTokenConfig {
+            token,
+            expires_at_ms,
+            allow_read,
+            allow_write,
+        }
+    }
+
+    fn allows(&self, action: ArtifactRequestAction, now_ms: u64) -> bool {
+        if let Some(expires_at_ms) = self.expires_at_ms {
+            if now_ms >= expires_at_ms {
+                return false;
+            }
+        }
+
+        match action {
+            ArtifactRequestAction::Read => self.allow_read,
+            ArtifactRequestAction::Write => self.allow_write,
+        }
+    }
+}
+
+fn now_unix_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
 
 fn bearer_token(headers: &HeaderMap) -> Option<&str> {
     headers
@@ -25,20 +76,28 @@ fn bearer_token(headers: &HeaderMap) -> Option<&str> {
 fn ensure_authorized_peer(
     peer_addr: SocketAddr,
     headers: &HeaderMap,
-    peer_tokens: &[String],
+    peer_tokens: &[ArtifactPeerTokenConfig],
+    action: ArtifactRequestAction,
 ) -> Result<(), StatusCode> {
     if peer_addr.ip().is_loopback() {
         return Ok(());
     }
 
+    let now_ms = now_unix_ms();
     match bearer_token(headers) {
-        Some(provided) if peer_tokens.iter().any(|expected| expected == provided) => Ok(()),
+        Some(provided)
+            if peer_tokens
+                .iter()
+                .any(|cfg| cfg.token == provided && cfg.allows(action, now_ms)) =>
+        {
+            Ok(())
+        }
         Some(_) | None if !peer_tokens.is_empty() => {
-            tracing::warn!(peer = %peer_addr, "rejected non-loopback artifact request with missing/invalid bearer token");
+            tracing::warn!(peer = %peer_addr, action = ?action, "rejected non-loopback artifact request with missing/invalid/expired bearer token");
             Err(StatusCode::FORBIDDEN)
         }
         _ => {
-            tracing::warn!(peer = %peer_addr, "rejected non-loopback artifact request because no peer artifact token is configured");
+            tracing::warn!(peer = %peer_addr, action = ?action, "rejected non-loopback artifact request because no peer artifact token is configured");
             Err(StatusCode::FORBIDDEN)
         }
     }
@@ -47,7 +106,7 @@ fn ensure_authorized_peer(
 #[derive(Clone)]
 struct ArtifactServerState {
     store: Store,
-    peer_tokens: Vec<String>,
+    peer_tokens: Vec<ArtifactPeerTokenConfig>,
 }
 
 /// GET /artifacts/:sha256 — serve raw .wasm bytes.
@@ -58,7 +117,7 @@ async fn get_artifact(
     ConnectInfo(peer_addr): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
 ) -> Result<Bytes, StatusCode> {
-    ensure_authorized_peer(peer_addr, &headers, &s.peer_tokens)?;
+    ensure_authorized_peer(peer_addr, &headers, &s.peer_tokens, ArtifactRequestAction::Read)?;
 
     match s.store.load_raw_wasm(&sha256) {
         Ok(Some(bytes)) => {
@@ -85,7 +144,12 @@ async fn put_artifact(
     headers: HeaderMap,
     body: Bytes,
 ) -> StatusCode {
-    if let Err(code) = ensure_authorized_peer(peer_addr, &headers, &s.peer_tokens) {
+    if let Err(code) = ensure_authorized_peer(
+        peer_addr,
+        &headers,
+        &s.peer_tokens,
+        ArtifactRequestAction::Write,
+    ) {
         return code;
     }
 
@@ -118,7 +182,7 @@ async fn put_artifact(
 }
 
 /// Build the artifact server router.
-pub fn artifact_router(store: Store, peer_tokens: Vec<String>) -> Router {
+pub fn artifact_router(store: Store, peer_tokens: Vec<ArtifactPeerTokenConfig>) -> Router {
     let state = ArtifactServerState { store, peer_tokens };
     Router::new()
         .route("/artifacts/{sha256}", get(get_artifact))
@@ -241,11 +305,23 @@ mod tests {
         let loopback: SocketAddr = "127.0.0.1:8080".parse().unwrap();
         let remote: SocketAddr = "10.0.0.5:8080".parse().unwrap();
         let mut headers = HeaderMap::new();
-        let peer_tokens = vec!["peer-token".to_string()];
+        let peer_tokens = vec![ArtifactPeerTokenConfig::new(
+            "peer-token".to_string(),
+            None,
+            true,
+            true,
+        )];
 
-        assert!(ensure_authorized_peer(loopback, &headers, &[]).is_ok());
+        assert!(ensure_authorized_peer(
+            loopback,
+            &headers,
+            &[],
+            ArtifactRequestAction::Read
+        )
+        .is_ok());
         assert_eq!(
-            ensure_authorized_peer(remote, &headers, &peer_tokens).unwrap_err(),
+            ensure_authorized_peer(remote, &headers, &peer_tokens, ArtifactRequestAction::Read)
+                .unwrap_err(),
             StatusCode::FORBIDDEN
         );
 
@@ -253,6 +329,63 @@ mod tests {
             axum::http::header::AUTHORIZATION,
             "Bearer peer-token".parse().unwrap(),
         );
-        assert!(ensure_authorized_peer(remote, &headers, &peer_tokens).is_ok());
+        assert!(ensure_authorized_peer(
+            remote,
+            &headers,
+            &peer_tokens,
+            ArtifactRequestAction::Read
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn test_ensure_authorized_peer_rejects_expired_token() {
+        let remote: SocketAddr = "10.0.0.5:8080".parse().unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            "Bearer expired-token".parse().unwrap(),
+        );
+        let peer_tokens = vec![ArtifactPeerTokenConfig::new(
+            "expired-token".to_string(),
+            Some(now_unix_ms().saturating_sub(1)),
+            true,
+            true,
+        )];
+
+        assert_eq!(
+            ensure_authorized_peer(remote, &headers, &peer_tokens, ArtifactRequestAction::Read)
+                .unwrap_err(),
+            StatusCode::FORBIDDEN
+        );
+    }
+
+    #[test]
+    fn test_ensure_authorized_peer_enforces_scope() {
+        let remote: SocketAddr = "10.0.0.5:8080".parse().unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            "Bearer write-only-token".parse().unwrap(),
+        );
+        let peer_tokens = vec![ArtifactPeerTokenConfig::new(
+            "write-only-token".to_string(),
+            None,
+            false,
+            true,
+        )];
+
+        assert_eq!(
+            ensure_authorized_peer(remote, &headers, &peer_tokens, ArtifactRequestAction::Read)
+                .unwrap_err(),
+            StatusCode::FORBIDDEN
+        );
+        assert!(ensure_authorized_peer(
+            remote,
+            &headers,
+            &peer_tokens,
+            ArtifactRequestAction::Write
+        )
+        .is_ok());
     }
 }
