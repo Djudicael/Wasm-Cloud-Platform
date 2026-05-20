@@ -12,6 +12,7 @@ use common::{
     },
     types::{AppConfig, AppId, FuelQuota, MemoryPages},
 };
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::thread;
 use tempfile::TempDir;
@@ -91,6 +92,16 @@ fn base_config_with_policy(policy: PolicyConfig) -> AppConfig {
     config
 }
 
+fn find_hello_axum_component_path() -> Option<PathBuf> {
+    let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let candidates = [
+        workspace_root.join("target/wasm32-wasip2/release/hello-axum.wasm"),
+        workspace_root.join("target/wasm32-wasip2/release/hello_axum.wasm"),
+    ];
+
+    candidates.into_iter().find(|path| path.exists())
+}
+
 #[test]
 fn test_list_hello_axum_exports() {
     use wasmtime::component::ResourceTable;
@@ -110,10 +121,14 @@ fn test_list_hello_axum_exports() {
         }
     }
 
-    let wasm_bytes = std::fs::read(
-        "/mnt/d/dev/Wasm-Cloud-Platform/target/wasm32-wasip2/release/hello-axum.wasm",
-    )
-    .expect("Failed to read WASM file");
+    let Some(wasm_path) = find_hello_axum_component_path() else {
+        eprintln!(
+            "Skipping hello-axum export inspection: build apps/hello-axum for wasm32-wasip2 first"
+        );
+        return;
+    };
+
+    let wasm_bytes = std::fs::read(&wasm_path).expect("Failed to read WASM file");
 
     let runtime = WasmRuntime::new().expect("Failed to create WasmRuntime");
     let component = wasmtime::component::Component::from_binary(&runtime.engine, &wasm_bytes)
