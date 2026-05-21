@@ -1,5 +1,48 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ClusterNodeRecord {
+    pub node_id: String,
+    pub last_seen_unix_secs: u64,
+    pub joined_at_unix_secs: Option<u64>,
+    pub health_status: crate::health::NodeHealthStatus,
+    pub proxy_address: Option<String>,
+    pub artifact_server_url: Option<String>,
+    pub protocol_version: Option<u32>,
+    pub binary_version: Option<String>,
+    pub accepting_requests: Option<bool>,
+    pub active_instances: Option<u32>,
+    pub deployed_apps: Option<u32>,
+}
+
+impl ClusterNodeRecord {
+    pub fn new(node_id: impl Into<String>, last_seen_unix_secs: u64) -> Self {
+        Self {
+            node_id: node_id.into(),
+            last_seen_unix_secs,
+            joined_at_unix_secs: None,
+            health_status: crate::health::NodeHealthStatus::Healthy,
+            proxy_address: None,
+            artifact_server_url: None,
+            protocol_version: None,
+            binary_version: None,
+            accepting_requests: None,
+            active_instances: None,
+            deployed_apps: None,
+        }
+    }
+
+    pub fn is_stale(&self, max_age_secs: u64) -> bool {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| {
+                elapsed.as_secs().saturating_sub(self.last_seen_unix_secs) > max_age_secs
+            })
+            .unwrap_or(false)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct AppId(pub String);
 
@@ -263,14 +306,22 @@ impl AppConfig {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum InstanceState {
     Starting,
-    Ready { addr: std::net::SocketAddr },
+    Ready {
+        addr: std::net::SocketAddr,
+    },
     Busy,
     /// Removed from routing and discovery; waiting for in-flight work to drain.
-    Draining { addr: std::net::SocketAddr },
+    Draining {
+        addr: std::net::SocketAddr,
+    },
     /// Shutdown signal has been sent and the supervisor is waiting for process exit.
-    Stopping { addr: std::net::SocketAddr },
+    Stopping {
+        addr: std::net::SocketAddr,
+    },
     /// Grace timeout elapsed; the worker is fenced but not yet confirmed exited.
-    ExitTimedOut { addr: std::net::SocketAddr },
+    ExitTimedOut {
+        addr: std::net::SocketAddr,
+    },
     Stopped,
 }
 

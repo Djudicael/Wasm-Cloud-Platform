@@ -33,7 +33,8 @@ mod tests;
 /// - 4: Added BILLING and KEK tables
 /// - 5: Added GATEWAY_CONFIGS table
 /// - 6: Added API_KEYS table
-const CURRENT_SCHEMA_VERSION: u32 = 6;
+/// - 7: Added CLUSTER_NODES table
+const CURRENT_SCHEMA_VERSION: u32 = 7;
 
 #[derive(Clone)]
 pub struct Store {
@@ -154,6 +155,7 @@ impl Store {
             tx.open_table(tables::KEK)?;
             tx.open_table(tables::GATEWAY_CONFIGS)?;
             tx.open_table(tables::API_KEYS)?;
+            tx.open_table(tables::CLUSTER_NODES)?;
         }
         tx.commit()?;
 
@@ -259,6 +261,10 @@ impl Store {
             6 => {
                 // v5 → v6: Ensure API_KEYS table exists
                 self.migrate_v5_to_v6()?;
+            }
+            7 => {
+                // v6 → v7: Ensure CLUSTER_NODES table exists
+                self.migrate_v6_to_v7()?;
             }
             n => {
                 return Err(redb::Error::Corrupted(format!(
@@ -542,6 +548,99 @@ impl Store {
         tx.commit()?;
         tracing::info!("v5→v6: ensured API_KEYS table exists");
         Ok(())
+    }
+
+    /// Migration v6 → v7: Ensure CLUSTER_NODES table exists.
+    fn migrate_v6_to_v7(&self) -> Result<(), redb::Error> {
+        let tx = self.db.begin_write()?;
+        {
+            let _ = tx.open_table(tables::CLUSTER_NODES)?;
+            let mut meta_table = tx.open_table(tables::SCHEMA_META)?;
+            meta_table.insert("version", "7")?;
+        }
+        tx.commit()?;
+        tracing::info!("v6→v7: ensured CLUSTER_NODES table exists");
+        Ok(())
+    }
+
+    // ── Cluster Node Registry ────────────────────────────────────────────────
+
+    pub fn save_cluster_node(
+        &self,
+        node: &common::types::ClusterNodeRecord,
+    ) -> Result<(), PlatformError> {
+        let json = serde_json::to_string(node)
+            .map_err(|e| PlatformError::storage_with_msg("failed to serialize cluster node", e))?;
+        let tx = self
+            .db
+            .begin_write()
+            .map_err(|e| PlatformError::storage_with_msg("failed to begin write transaction", e))?;
+        {
+            let mut table = tx.open_table(tables::CLUSTER_NODES).map_err(|e| {
+                PlatformError::storage_with_msg("failed to open CLUSTER_NODES table", e)
+            })?;
+            table
+                .insert(node.node_id.as_str(), json.as_str())
+                .map_err(|e| PlatformError::storage_with_msg("failed to write cluster node", e))?;
+        }
+        tx.commit()
+            .map_err(|e| PlatformError::storage_with_msg("failed to commit cluster node", e))?;
+        Ok(())
+    }
+
+    pub fn load_cluster_node(
+        &self,
+        node_id: &str,
+    ) -> Result<Option<common::types::ClusterNodeRecord>, PlatformError> {
+        let tx = self
+            .db
+            .begin_read()
+            .map_err(|e| PlatformError::storage_with_msg("failed to begin read transaction", e))?;
+        let table = tx.open_table(tables::CLUSTER_NODES).map_err(|e| {
+            PlatformError::storage_with_msg("failed to open CLUSTER_NODES table", e)
+        })?;
+        match table
+            .get(node_id)
+            .map_err(|e| PlatformError::storage_with_msg("failed to read cluster node", e))?
+        {
+            Some(value) => {
+                let node = serde_json::from_str(value.value()).map_err(|e| {
+                    PlatformError::storage_with_msg("failed to deserialize cluster node", e)
+                })?;
+                Ok(Some(node))
+            }
+            None => Ok(None),
+        }
+    }
+
+    pub fn list_cluster_nodes(
+        &self,
+    ) -> Result<Vec<common::types::ClusterNodeRecord>, PlatformError> {
+        use redb::ReadableTable;
+
+        let tx = self
+            .db
+            .begin_read()
+            .map_err(|e| PlatformError::storage_with_msg("failed to begin read transaction", e))?;
+        let table = tx.open_table(tables::CLUSTER_NODES).map_err(|e| {
+            PlatformError::storage_with_msg("failed to open CLUSTER_NODES table", e)
+        })?;
+        let mut nodes = Vec::new();
+        for entry in table
+            .iter()
+            .map_err(|e| PlatformError::storage_with_msg("failed to iterate cluster nodes", e))?
+        {
+            let (_key, value) = entry.map_err(|e| {
+                PlatformError::storage_with_msg("failed to read cluster node entry", e)
+            })?;
+            let node: common::types::ClusterNodeRecord = serde_json::from_str(value.value())
+                .map_err(|e| {
+                    PlatformError::storage_with_msg("failed to deserialize cluster node", e)
+                })?;
+            nodes.push(node);
+        }
+        nodes.sort_by(|a, b| a.node_id.cmp(&b.node_id));
+        Ok(nodes)
     }
 
     // ── Gateway Config Persistence ─────────────────────────────────────────────

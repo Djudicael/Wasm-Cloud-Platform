@@ -28,6 +28,7 @@ async fn create_test_supervisor() -> Arc<supervisor::Supervisor> {
         upstream,
         host_router,
         service_registry,
+        common::INTERNAL_GATEWAY_PORT,
         env_resolver,
         event_tx,
         None,

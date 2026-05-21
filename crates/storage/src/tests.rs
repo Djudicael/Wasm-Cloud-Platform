@@ -1,5 +1,5 @@
 use crate::Store;
-use common::types::{AppConfig, AppId, FuelQuota, MemoryPages};
+use common::types::{AppConfig, AppId, ClusterNodeRecord, FuelQuota, MemoryPages};
 use redb::ReadableDatabase;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tempfile::NamedTempFile;
@@ -226,6 +226,27 @@ fn test_prune_old_versions() {
     assert!(store
         .artifact_exists(&AppId::new("app-prune", "v5"))
         .unwrap());
+}
+
+#[test]
+fn test_cluster_node_registry_roundtrip() {
+    let (store, _f) = make_store();
+    let mut node = ClusterNodeRecord::new("node-1", 1_700_000_000);
+    node.joined_at_unix_secs = Some(1_700_000_000);
+    node.proxy_address = Some("node-1.internal:8080".to_string());
+    node.artifact_server_url = Some("http://node-1.internal:9091".to_string());
+    node.protocol_version = Some(7);
+    node.binary_version = Some("0.5.0".to_string());
+    node.active_instances = Some(3);
+    node.deployed_apps = Some(2);
+
+    store.save_cluster_node(&node).unwrap();
+
+    let loaded = store.load_cluster_node("node-1").unwrap().unwrap();
+    assert_eq!(loaded, node);
+
+    let listed = store.list_cluster_nodes().unwrap();
+    assert_eq!(listed, vec![node]);
 }
 
 // ── SCHEMA MIGRATION TESTS ────────────────────────────────────────────────────

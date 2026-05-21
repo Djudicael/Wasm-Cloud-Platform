@@ -602,7 +602,7 @@ pub async fn deploy_app(
         app_id: common::types::AppId(app_id.to_string()),
         config,
         artifact_url: artifact_url.clone(),
-        artifact_transfer_manifest: None,
+        artifact_transfer_manifests: vec![],
         expected_hash: Some(expected_hash.clone()),
         size_bytes,
     };

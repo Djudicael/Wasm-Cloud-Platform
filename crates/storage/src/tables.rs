@@ -59,3 +59,8 @@ pub const GATEWAY_CONFIGS: TableDefinition<&str, &str> = TableDefinition::new("g
 // Key   : "<app_id>/api_keys"
 // Value : JSON-serialized Vec<ApiKeyRecord>
 pub const API_KEYS: TableDefinition<&str, &str> = TableDefinition::new("api_keys");
+
+// ── CLUSTER NODE REGISTRY ──────────────────────────────────────────────────────
+// Key   : node_id
+// Value : JSON-serialized ClusterNodeRecord
+pub const CLUSTER_NODES: TableDefinition<&str, &str> = TableDefinition::new("cluster_nodes");

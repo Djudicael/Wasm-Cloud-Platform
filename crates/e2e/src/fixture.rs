@@ -105,6 +105,7 @@ impl NodeProcess {
         artifact_port: u16,
         port_start: u16,
         port_end: u16,
+        seed_local_state: bool,
     ) -> Result<Self, String> {
         info!(
             node_id,
@@ -121,6 +122,16 @@ impl NodeProcess {
             tempfile::tempdir().map_err(|e| format!("failed to create temp dir: {e}"))?;
         let db_path = temp_dir.path().join(format!("chaos_{node_id}.redb"));
         let config_path = temp_dir.path().join(format!("chaos_{node_id}.toml"));
+        let gateway_port = admin_port.saturating_add(1000);
+        let dns_stub_port = admin_port.saturating_add(2000);
+
+        if seed_local_state {
+            let store = storage::Store::open(&db_path)
+                .map_err(|e| format!("failed to open seeded fixture store: {e}"))?;
+            store
+                .store_artifact(&common::types::AppId::new("__fixture", "v1"), b"fixture")
+                .map_err(|e| format!("failed to seed fixture artifact: {e}"))?;
+        }
 
         info!(node_id, config_path = %config_path.display(), db_path = %db_path.display(), "node paths configured");
 
@@ -152,12 +163,17 @@ output = "/tmp/wasm-node-e2e.log"
 
 [dns]
 stub_enabled = true
-stub_port = 15353
+stub_port = {dns_stub_port}
+
+[ebpf]
+gateway_port = {gateway_port}
 
 [health]
 check_interval_secs = 2
 "#,
-            db_path.display()
+            db_path.display(),
+            gateway_port = gateway_port,
+            dns_stub_port = dns_stub_port
         );
         std::fs::write(&config_path, &config_content)
             .map_err(|e| format!("failed to write config: {e}"))?;
@@ -235,7 +251,7 @@ check_interval_secs = 2
         info!(node_id, admin_port, "waiting for node health endpoint");
         crate::helpers::wait_for_health(
             &format!("127.0.0.1:{admin_port}"),
-            Duration::from_secs(30),
+            Duration::from_secs(60),
         )
         .await
         .map_err(|e| {
@@ -601,6 +617,7 @@ impl ClusterFixture {
                 artifact_port,
                 port_start,
                 port_end,
+                node_count > 1,
             )
             .await?;
 

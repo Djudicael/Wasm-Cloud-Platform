@@ -2,12 +2,14 @@ use axum::{
     body::Bytes,
     extract::{ConnectInfo, Path, State},
     http::{HeaderMap, StatusCode},
-    routing::{get, put},
+    routing::{get, post, put},
     Json, Router,
 };
 use common::artifact_transfer::{
+    ArtifactManifestAudienceBinding, ArtifactManifestBatchRequest, ArtifactManifestBatchResponse,
     ArtifactTransferAuthority, ArtifactTransferMethod, ArtifactUploadAuthorizationResponse,
     SignedArtifactTransferManifest, ARTIFACT_TRANSFER_MANIFEST_HEADER,
+    ARTIFACT_TRANSFER_REQUESTER_NODE_HEADER,
 };
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -87,6 +89,15 @@ fn bearer_token(headers: &HeaderMap) -> Option<&str> {
         .filter(|token| !token.is_empty())
 }
 
+fn requester_node_id(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get(ARTIFACT_TRANSFER_REQUESTER_NODE_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
 fn transfer_manifest(headers: &HeaderMap) -> Option<SignedArtifactTransferManifest> {
     headers
         .get(ARTIFACT_TRANSFER_MANIFEST_HEADER)
@@ -140,8 +151,15 @@ fn authorize_signed_manifest(
     let Some(manifest) = transfer_manifest(headers) else {
         return Ok(false);
     };
+    let requester_node_id = requester_node_id(headers);
 
-    if let Err(err) = authority.verify_manifest(&manifest, sha256, action.as_method(), now_ms) {
+    if let Err(err) = authority.verify_manifest(
+        &manifest,
+        sha256,
+        action.as_method(),
+        requester_node_id.as_deref(),
+        now_ms,
+    ) {
         tracing::warn!(
             peer = %peer_addr,
             action = ?action,
@@ -308,6 +326,54 @@ async fn put_artifact(
     }
 }
 
+async fn authorize_artifact(
+    Path(sha256): Path<String>,
+    State(s): State<ArtifactServerState>,
+    ConnectInfo(peer_addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Json(request): Json<ArtifactManifestBatchRequest>,
+) -> Result<Json<ArtifactManifestBatchResponse>, StatusCode> {
+    ensure_authorized_peer(
+        peer_addr,
+        &headers,
+        &s.peer_tokens,
+        s.manifest_authority.as_ref(),
+        &s.used_transfer_ids,
+        ArtifactRequestAction::Write,
+        &sha256,
+    )?;
+
+    if s.store
+        .load_raw_wasm(&sha256)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .is_none()
+    {
+        return Err(StatusCode::NOT_FOUND);
+    }
+
+    let Some(authority) = s.manifest_authority.as_ref() else {
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    };
+
+    let manifests = request
+        .audiences
+        .into_iter()
+        .filter_map(|audience| {
+            let trimmed = audience.trim();
+            if trimmed.is_empty() {
+                return None;
+            }
+            Some(ArtifactManifestAudienceBinding {
+                audience_node_id: trimmed.to_string(),
+                artifact_transfer_manifest: authority
+                    .issue_read_manifest_for_audience(&sha256, trimmed),
+            })
+        })
+        .collect();
+
+    Ok(Json(ArtifactManifestBatchResponse { sha256, manifests }))
+}
+
 /// Build the artifact server router.
 pub fn artifact_router(
     store: Store,
@@ -323,6 +389,7 @@ pub fn artifact_router(
     Router::new()
         .route("/artifacts/{sha256}", get(get_artifact))
         .route("/artifacts/{sha256}", put(put_artifact))
+        .route("/artifacts/{sha256}/authorize", post(authorize_artifact))
         .with_state(state)
 }
 
@@ -572,11 +639,15 @@ mod tests {
     fn test_ensure_authorized_peer_accepts_valid_signed_manifest() {
         let remote: SocketAddr = "10.0.0.5:8080".parse().unwrap();
         let authority = authority();
-        let manifest = authority.issue_read_manifest("abc123");
+        let manifest = authority.issue_read_manifest_for_audience("abc123", "node-2");
         let mut headers = HeaderMap::new();
         headers.insert(
             ARTIFACT_TRANSFER_MANIFEST_HEADER,
             manifest.encode_header_value().unwrap().parse().unwrap(),
+        );
+        headers.insert(
+            ARTIFACT_TRANSFER_REQUESTER_NODE_HEADER,
+            "node-2".parse().unwrap(),
         );
         let used_transfer_ids = Mutex::new(HashMap::new());
 
@@ -590,6 +661,79 @@ mod tests {
             "abc123"
         )
         .is_ok());
+    }
+
+    #[test]
+    fn test_ensure_authorized_peer_rejects_audience_bound_manifest_without_requester_header() {
+        let remote: SocketAddr = "10.0.0.5:8080".parse().unwrap();
+        let authority = authority();
+        let manifest = authority.issue_read_manifest_for_audience("abc123", "node-2");
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            ARTIFACT_TRANSFER_MANIFEST_HEADER,
+            manifest.encode_header_value().unwrap().parse().unwrap(),
+        );
+        let used_transfer_ids = Mutex::new(HashMap::new());
+
+        assert_eq!(
+            ensure_authorized_peer(
+                remote,
+                &headers,
+                &[],
+                Some(&authority),
+                &used_transfer_ids,
+                ArtifactRequestAction::Read,
+                "abc123"
+            )
+            .unwrap_err(),
+            StatusCode::FORBIDDEN
+        );
+    }
+
+    #[tokio::test]
+    async fn test_authorize_endpoint_returns_audience_bound_manifests() {
+        let temp_file = NamedTempFile::new().unwrap();
+        let store = Store::open(temp_file.path()).unwrap();
+        let wasm_bytes = b"authorize-manifest-test";
+        let sha256 = hex::encode(Sha256::digest(wasm_bytes));
+        store.save_raw_wasm(&sha256, wasm_bytes).unwrap();
+
+        let app = artifact_router(store, Vec::new(), Some(authority()));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .await
+            .unwrap();
+        });
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+        let client = reqwest::Client::new();
+        let url = format!("http://{}/artifacts/{}/authorize", addr, sha256);
+        let response = client
+            .post(&url)
+            .json(&ArtifactManifestBatchRequest {
+                audiences: vec!["node-2".to_string(), "node-3".to_string()],
+            })
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: ArtifactManifestBatchResponse = response.json().await.unwrap();
+        assert_eq!(body.sha256, sha256);
+        assert_eq!(body.manifests.len(), 2);
+        assert_eq!(body.manifests[0].audience_node_id, "node-2");
+        assert_eq!(
+            body.manifests[0]
+                .artifact_transfer_manifest
+                .manifest
+                .audience
+                .as_deref(),
+            Some("node-2")
+        );
     }
 
     #[test]

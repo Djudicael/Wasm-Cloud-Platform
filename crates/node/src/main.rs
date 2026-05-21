@@ -145,6 +145,13 @@ fn build_proxy_advertised_address(config: &common::config::NodeConfig) -> anyhow
     Ok(format!("127.0.0.1:{}", config.proxy.http_port))
 }
 
+fn now_unix_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
 fn artifact_server_url_is_loopback(url: &str) -> bool {
     Url::parse(url)
         .ok()
@@ -904,6 +911,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Initialize NATS health tracking for L5 (partition) recovery
     let nats_health = Arc::new(NatsHealth::new());
+    nats_health.mark_connected();
 
     // Start NATS health watcher (updates last message timestamp periodically)
     let _nats_watcher_handle =
@@ -979,6 +987,7 @@ async fn main() -> anyhow::Result<()> {
         upstream_registry.clone(),
         host_router.clone(),
         service_registry.clone(),
+        config.ebpf.gateway_port,
         env_resolver,
         event_tx.clone(),
         Some(billing_collector.tx()),
@@ -1059,6 +1068,19 @@ async fn main() -> anyhow::Result<()> {
     let artifact_server_url = build_artifact_server_url(&config.admin)?;
     let proxy_address = build_proxy_advertised_address(&config)?;
     let node_load_table = Arc::new(proxy::node_table::NodeLoadTable::default());
+    store.save_cluster_node(&common::types::ClusterNodeRecord {
+        node_id: config.node.node_id.clone(),
+        last_seen_unix_secs: now_unix_secs(),
+        joined_at_unix_secs: Some(now_unix_secs()),
+        health_status: common::health::NodeHealthStatus::Healthy,
+        proxy_address: Some(proxy_address.clone()),
+        artifact_server_url: Some(artifact_server_url.clone()),
+        protocol_version: Some(common::protocol::PROTOCOL_VERSION),
+        binary_version: Some(common::protocol::BINARY_VERSION.to_string()),
+        accepting_requests: None,
+        active_instances: Some(0),
+        deployed_apps: Some(0),
+    })?;
     if config.admin.advertised_artifact_url.is_some() || config.admin.advertised_host.is_some() {
         info!(artifact_server_url = %artifact_server_url, manifest_auth = true, "using configured advertised artifact endpoint");
     } else {
@@ -1393,7 +1415,7 @@ async fn main() -> anyhow::Result<()> {
 
     // ── Internal Mesh Gateway ─────────────────────────────────────────
     // Starts a local Axum proxy for East-West traffic between apps.
-    // Listens on a single port (9080). Namespace isolation relies on
+    // Listens on a configured loopback port. Namespace isolation relies on
     // service discovery: the Supervisor only injects service URLs for
     // same-namespace apps. The gateway port is open to all namespaces.
     let internal_gw = internal_gateway::InternalGateway::new(
@@ -1402,6 +1424,7 @@ async fn main() -> anyhow::Result<()> {
         gateway.circuit_breaker.clone(),
         gateway.clone(),
     )
+    .with_bind_port(config.ebpf.gateway_port)
     .with_namespace_map(_ebpf_handle.namespace_map.clone())
     .with_ebpf_active(_ebpf_handle.is_ebpf_active())
     .with_cold_start(cold_start.clone());
@@ -1410,7 +1433,10 @@ async fn main() -> anyhow::Result<()> {
             tracing::error!(error = %e, "internal gateway exited");
         }
     });
-    info!("internal gateway started for East-West traffic on port 9080");
+    info!(
+        port = config.ebpf.gateway_port,
+        "internal gateway started for East-West traffic"
+    );
 
     let wasm_proxy = proxy::service::WasmProxy {
         router: host_router.clone(),
@@ -2187,6 +2213,30 @@ async fn main() -> anyhow::Result<()> {
                             axum::http::StatusCode::OK,
                             axum::Json(serde_json::json!({"status": "removed"})),
                         )
+                    }
+                }
+            }),
+        )
+        .route(
+            "/admin/cluster/nodes",
+            axum::routing::get({
+                let store = store.clone();
+                move || {
+                    let store = store.clone();
+                    async move {
+                        match store.list_cluster_nodes() {
+                            Ok(nodes) => (
+                                axum::http::StatusCode::OK,
+                                axum::Json(serde_json::json!({ "nodes": nodes })),
+                            ),
+                            Err(e) => (
+                                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                                axum::Json(serde_json::json!({
+                                    "error": "storage_error",
+                                    "message": e.to_string(),
+                                })),
+                            ),
+                        }
                     }
                 }
             }),

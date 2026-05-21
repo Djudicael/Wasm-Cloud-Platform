@@ -279,17 +279,16 @@ mod tests {
         let app_id = AppId("app-restart:v1".into());
 
         {
-            let provider = LocalSecretProvider::new(
-                store.clone(),
-                SymmetricKey::from_bytes(kek_bytes),
-            );
+            let provider =
+                LocalSecretProvider::new(store.clone(), SymmetricKey::from_bytes(kek_bytes));
             provider
                 .set(&app_id, "API_TOKEN", "secret-after-restart")
                 .await
                 .unwrap();
         }
 
-        let restarted = LocalSecretProvider::new(store.clone(), SymmetricKey::from_bytes(kek_bytes));
+        let restarted =
+            LocalSecretProvider::new(store.clone(), SymmetricKey::from_bytes(kek_bytes));
         let plaintext = restarted.get(&app_id, "API_TOKEN").await.unwrap();
         assert_eq!(plaintext, "secret-after-restart");
     }

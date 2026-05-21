@@ -93,6 +93,7 @@ pub struct Supervisor {
     upstream_registry: Arc<UpstreamRegistry>,
     pub(crate) host_router: Arc<HostRouter>,
     service_registry: Arc<LocalServiceRegistry>,
+    internal_gateway_port: u16,
     env_resolver: Arc<dyn Fn(&AppConfig, u16) -> Vec<(String, String)> + Send + Sync>,
 
     /// Map of app_id → instance pool
@@ -135,6 +136,7 @@ impl Supervisor {
         upstream_registry: Arc<UpstreamRegistry>,
         host_router: Arc<HostRouter>,
         service_registry: Arc<LocalServiceRegistry>,
+        internal_gateway_port: u16,
         env_resolver: Arc<dyn Fn(&AppConfig, u16) -> Vec<(String, String)> + Send + Sync>,
         event_tx: mpsc::Sender<Event>,
         billing_tx: Option<mpsc::Sender<billing::BillingInput>>,
@@ -148,6 +150,7 @@ impl Supervisor {
             upstream_registry,
             host_router,
             service_registry,
+            internal_gateway_port,
             env_resolver,
             pools: Arc::new(RwLock::new(HashMap::new())),
             event_tx,
@@ -328,7 +331,7 @@ impl Supervisor {
                         "http://{}.{}.internal:{}",
                         bare_app_name,
                         qualified_app_id.namespace(),
-                        common::INTERNAL_GATEWAY_PORT
+                        self.internal_gateway_port
                     )
                 } else {
                     format!("http://127.0.0.1:{}", addr.port())
@@ -353,7 +356,7 @@ impl Supervisor {
         let allowed_ports = {
             let mut ports = std::collections::HashSet::new();
             // Allow connections to the internal gateway port
-            ports.insert(common::INTERNAL_GATEWAY_PORT);
+            ports.insert(self.internal_gateway_port);
             for addrs in ns_services.values() {
                 for addr in addrs {
                     ports.insert(addr.port());
@@ -365,6 +368,7 @@ impl Supervisor {
 
         let registry = self.service_registry.clone();
         let source_app = qualified_app_id.clone();
+        let internal_gateway_port = self.internal_gateway_port;
         let socket_addr_check: runtime::executor::SocketAddrCheckFn = Box::new(
             move |dest: std::net::SocketAddr, use_type: runtime::executor::SocketAddrUse| {
                 let allowed = allowed_ports.clone();
@@ -401,7 +405,7 @@ impl Supervisor {
                             // Internal gateway port is allowed without namespace check.
                             // The gateway port (9080) is open to all namespaces —
                             // namespace isolation relies on service discovery only.
-                            if dest.port() != common::INTERNAL_GATEWAY_PORT {
+                            if dest.port() != internal_gateway_port {
                                 let interceptor =
                                     NetworkInterceptor::new(registry, source_app.clone());
                                 match interceptor
@@ -848,7 +852,9 @@ impl Supervisor {
         };
 
         self.upstream_registry.remove(app_id, &instance.addr).await;
-        self.service_registry.deregister(app_id, &instance.addr).await;
+        self.service_registry
+            .deregister(app_id, &instance.addr)
+            .await;
 
         Ok(instance)
     }
@@ -878,7 +884,11 @@ impl Supervisor {
         let wall_clock_ms = instance.spawned_at.elapsed().as_millis() as u64;
         let (fuel_consumed, ram_bytes, is_trap) = match &stats {
             Some(s) => (s.fuel_consumed, s.ram_bytes as u64, s.trap.is_some()),
-            None => (instance.billing_info.fuel_quota, instance.billing_info.ram_bytes, true),
+            None => (
+                instance.billing_info.fuel_quota,
+                instance.billing_info.ram_bytes,
+                true,
+            ),
         };
         self.send_billing_record(billing::BillingInput {
             tenant_id: instance.billing_info.tenant_id.clone(),
@@ -893,8 +903,12 @@ impl Supervisor {
             is_trap,
         });
 
-        self.service_registry.deregister(app_id, &instance.addr).await;
-        self.service_registry.release_source_port(instance.addr.port()).await;
+        self.service_registry
+            .deregister(app_id, &instance.addr)
+            .await;
+        self.service_registry
+            .release_source_port(instance.addr.port())
+            .await;
         self.port_alloc.release(instance.addr.port());
 
         if let Some(tid) = instance.tid {
@@ -928,11 +942,14 @@ impl Supervisor {
             }
             ShutdownOutcome::TaskPanicked(error) => {
                 tracing::warn!(app = %app_id.0, instance = %id.0, error = %error, "instance task panicked during shutdown");
-                self.finalize_instance_exit(app_id, id, instance, None).await;
+                self.finalize_instance_exit(app_id, id, instance, None)
+                    .await;
                 Ok(())
             }
             ShutdownOutcome::TimedOut => {
-                instance.state = InstanceState::ExitTimedOut { addr: instance.addr };
+                instance.state = InstanceState::ExitTimedOut {
+                    addr: instance.addr,
+                };
                 self.reinsert_fenced_instance(app_id, instance).await?;
                 Err(PlatformError::runtime(format!(
                     "instance {} shutdown timed out; instance remains fenced until exit is confirmed",
@@ -955,7 +972,11 @@ impl Supervisor {
                                 | InstanceState::Stopping { .. }
                                 | InstanceState::ExitTimedOut { .. }
                         );
-                        let finished = inst.task.as_ref().map(|task| task.is_finished()).unwrap_or(false);
+                        let finished = inst
+                            .task
+                            .as_ref()
+                            .map(|task| task.is_finished())
+                            .unwrap_or(false);
                         if fenced && finished {
                             Some((AppId(app_id_str.clone()), inst.id.clone()))
                         } else {

@@ -1,6 +1,6 @@
 // crates/messaging/src/events.rs
 use common::artifact_transfer::{
-    BootstrapArtifactFetchAuthorization, SignedArtifactTransferManifest,
+    ArtifactManifestAudienceBinding, BootstrapArtifactFetchAuthorization,
 };
 use common::types::{ApiKeyRecord, AppConfig, AppId, GatewayRouteConfig};
 use serde::{Deserialize, Serialize};
@@ -34,9 +34,9 @@ pub enum Event {
         /// The URL where the .wasm artifact can be fetched.
         /// Format: "http://<node-ip>:<port>/artifacts/<sha256>"
         artifact_url: String,
-        /// Optional signed short-lived GET manifest for remote artifact fetch.
+        /// Per-node audience-bound GET manifests.
         #[serde(default)]
-        artifact_transfer_manifest: Option<SignedArtifactTransferManifest>,
+        artifact_transfer_manifests: Vec<ArtifactManifestAudienceBinding>,
         /// SHA-256 hex string of the raw .wasm bytes.
         expected_hash: Option<String>,
         /// Size in bytes (for logging and progress tracking).

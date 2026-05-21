@@ -1,10 +1,11 @@
 use common::{
     artifact_transfer::{
-        ArtifactTransferAuthority, BootstrapArtifactFetchAuthorization,
-        SignedArtifactTransferManifest, ARTIFACT_TRANSFER_MANIFEST_HEADER,
+        ArtifactManifestAudienceBinding, ArtifactTransferAuthority,
+        BootstrapArtifactFetchAuthorization, SignedArtifactTransferManifest,
+        ARTIFACT_TRANSFER_MANIFEST_HEADER, ARTIFACT_TRANSFER_REQUESTER_NODE_HEADER,
     },
     error::PlatformError,
-    types::AppId,
+    types::{AppId, ClusterNodeRecord},
 };
 use messaging::events::Event;
 use proxy::dns_webhook::DnsWebhookManager;
@@ -76,6 +77,20 @@ fn now_unix_ms() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
+}
+
+fn now_unix_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+fn merge_cluster_node_record(
+    existing: Option<ClusterNodeRecord>,
+    node_id: &str,
+) -> ClusterNodeRecord {
+    existing.unwrap_or_else(|| ClusterNodeRecord::new(node_id.to_string(), now_unix_secs()))
 }
 
 fn extract_proxy_host(address: &str) -> Option<String> {
@@ -188,7 +203,7 @@ impl EventDispatcher {
                 app_id,
                 config,
                 artifact_url,
-                artifact_transfer_manifest,
+                artifact_transfer_manifests,
                 expected_hash,
                 size_bytes,
             } => {
@@ -200,7 +215,7 @@ impl EventDispatcher {
                     app_id,
                     config,
                     artifact_url,
-                    artifact_transfer_manifest,
+                    artifact_transfer_manifests,
                     expected_hash,
                     size_bytes,
                 )
@@ -291,6 +306,13 @@ impl EventDispatcher {
                 active_instances,
                 proxy_address,
             } => {
+                let mut cluster_node =
+                    merge_cluster_node_record(self.store.load_cluster_node(&node_id)?, &node_id);
+                cluster_node.last_seen_unix_secs = now_unix_secs();
+                cluster_node.proxy_address = Some(proxy_address.clone());
+                cluster_node.active_instances = Some(active_instances);
+                self.store.save_cluster_node(&cluster_node)?;
+
                 // Update node table for cross-node routing decisions
                 use proxy::node_table::NodeEntry;
                 use std::time::{SystemTime, UNIX_EPOCH};
@@ -495,6 +517,13 @@ impl EventDispatcher {
                     _ => common::health::NodeHealthStatus::Degraded,
                 };
                 self.node_table.update_health(&node_id, health_status).await;
+                let mut cluster_node =
+                    merge_cluster_node_record(self.store.load_cluster_node(&node_id)?, &node_id);
+                cluster_node.last_seen_unix_secs = now_unix_secs();
+                cluster_node.health_status = health_status;
+                cluster_node.active_instances = Some(active_instances);
+                cluster_node.accepting_requests = Some(accepting_requests);
+                self.store.save_cluster_node(&cluster_node)?;
                 Ok(())
             }
 
@@ -526,6 +555,13 @@ impl EventDispatcher {
                     _ => common::health::NodeHealthStatus::Degraded,
                 };
                 self.node_table.update_health(&node_id, health_status).await;
+                let mut cluster_node =
+                    merge_cluster_node_record(self.store.load_cluster_node(&node_id)?, &node_id);
+                cluster_node.last_seen_unix_secs = now_unix_secs();
+                cluster_node.health_status = health_status;
+                cluster_node.active_instances = Some(active_instances);
+                cluster_node.deployed_apps = Some(deployed_apps);
+                self.store.save_cluster_node(&cluster_node)?;
                 Ok(())
             }
 
@@ -568,7 +604,7 @@ impl EventDispatcher {
         app_id: AppId,
         config: common::types::AppConfig,
         artifact_url: String,
-        artifact_transfer_manifest: Option<SignedArtifactTransferManifest>,
+        artifact_transfer_manifests: Vec<ArtifactManifestAudienceBinding>,
         expected_hash: Option<String>,
         size_bytes: u64,
     ) -> Result<(), PlatformError> {
@@ -594,9 +630,24 @@ impl EventDispatcher {
         } else {
             // 2. Fetch from the source node
             info!(url = %artifact_url, "fetching artifact via HTTP");
-            let bytes = fetch_artifact(&artifact_url, artifact_transfer_manifest.as_ref(), &sha256)
-                .await
-                .map_err(PlatformError::external)?;
+            let targeted_manifest = artifact_transfer_manifests
+                .iter()
+                .find(|binding| binding.audience_node_id == self.node_id)
+                .map(|binding| &binding.artifact_transfer_manifest)
+                .ok_or_else(|| {
+                    PlatformError::messaging(format!(
+                        "deploy event missing audience-bound artifact manifest for node {} (artifact {})",
+                        self.node_id, sha256
+                    ))
+                })?;
+            let bytes = fetch_artifact(
+                &artifact_url,
+                Some(self.node_id.as_str()),
+                Some(targeted_manifest),
+                &sha256,
+            )
+            .await
+            .map_err(PlatformError::external)?;
 
             // Hash already verified by download_and_verify_bytes.
             // Persisting raw bytes is part of successful deploy processing.
@@ -668,6 +719,17 @@ impl EventDispatcher {
 
         validate_peer_artifact_url(&new_node_id, &peer_artifact_url)?;
 
+        let mut cluster_node =
+            merge_cluster_node_record(self.store.load_cluster_node(&new_node_id)?, &new_node_id);
+        let now_secs = now_unix_secs();
+        cluster_node.last_seen_unix_secs = now_secs;
+        cluster_node.joined_at_unix_secs =
+            Some(cluster_node.joined_at_unix_secs.unwrap_or(now_secs));
+        cluster_node.artifact_server_url = Some(peer_artifact_url.clone());
+        cluster_node.protocol_version = Some(protocol_version);
+        cluster_node.binary_version = Some(binary_version.clone());
+        self.store.save_cluster_node(&cluster_node)?;
+
         info!(
             new_node = %new_node_id,
             our_node = %self.node_id,
@@ -714,7 +776,8 @@ impl EventDispatcher {
                     sha256: hash.clone(),
                     artifact_url: format!("{}/artifacts/{}", self.artifact_server_url, hash),
                     artifact_transfer_manifest: Some(
-                        self.artifact_transfer_authority.issue_read_manifest(&hash),
+                        self.artifact_transfer_authority
+                            .issue_read_manifest_for_audience(&hash, &new_node_id),
                     ),
                 });
             }
@@ -870,6 +933,7 @@ impl EventDispatcher {
             let artifact = if let Some(fetch) = artifact_fetches_by_sha.get(&sha256) {
                 match fetch_artifact(
                     &fetch.artifact_url,
+                    Some(self.node_id.as_str()),
                     fetch.artifact_transfer_manifest.as_ref(),
                     &sha256,
                 )
@@ -951,17 +1015,17 @@ impl EventDispatcher {
         };
 
         // Collect all node IDs in the cluster for rolling upgrade ordering
-        let cluster_nodes = {
-            // TODO: Maintain a proper node registry from NodeJoined/NodeLoad events
-            // For now, use the node load table which tracks known cluster nodes
-            let nodes = self.node_table.nodes.read().await;
-            let mut ids: Vec<String> = nodes.keys().cloned().collect();
-            // Always include our own node ID in case it's not in the table yet
-            if !ids.contains(&self.node_id) {
-                ids.push(self.node_id.clone());
-            }
-            ids
-        };
+        let mut cluster_nodes: Vec<String> = self
+            .store
+            .list_cluster_nodes()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|node| !node.is_stale(120))
+            .map(|node| node.node_id)
+            .collect();
+        if !cluster_nodes.contains(&self.node_id) {
+            cluster_nodes.push(self.node_id.clone());
+        }
 
         if let Err(e) = verify_upgrade_signature(&event, self.upgrade_signing_public_key.as_deref())
         {
@@ -1076,6 +1140,7 @@ impl EventDispatcher {
 /// Fetch an artifact from a URL and verify its SHA-256 hash.
 async fn fetch_artifact(
     url: &str,
+    requester_node_id: Option<&str>,
     artifact_transfer_manifest: Option<&SignedArtifactTransferManifest>,
     expected_sha256: &str,
 ) -> Result<Vec<u8>, String> {
@@ -1084,6 +1149,12 @@ async fn fetch_artifact(
     if let Some(manifest) = artifact_transfer_manifest {
         let header_value = manifest.encode_header_value()?;
         request = request.header(ARTIFACT_TRANSFER_MANIFEST_HEADER, header_value);
+        if manifest.manifest.audience.is_some() {
+            if let Some(requester_node_id) = requester_node_id {
+                request =
+                    request.header(ARTIFACT_TRANSFER_REQUESTER_NODE_HEADER, requester_node_id);
+            }
+        }
     }
 
     let response = request
@@ -1116,7 +1187,10 @@ mod tests {
         apply_secret_update, fetch_artifact, is_loopback_artifact_url, validate_peer_artifact_url,
     };
     use common::{
-        artifact_transfer::{ArtifactTransferAuthority, ARTIFACT_TRANSFER_MANIFEST_HEADER},
+        artifact_transfer::{
+            ArtifactTransferAuthority, ARTIFACT_TRANSFER_MANIFEST_HEADER,
+            ARTIFACT_TRANSFER_REQUESTER_NODE_HEADER,
+        },
         types::AppId,
     };
     use secrets::{
@@ -1180,7 +1254,9 @@ mod tests {
         let wasm_bytes = b"artifact-manifest-header-test".to_vec();
         let expected_sha256 = hex::encode(sha2::Sha256::digest(&wasm_bytes));
         let authority = ArtifactTransferAuthority::derive("node-1", &[5u8; 32]);
-        let manifest = authority.issue_read_manifest(&expected_sha256);
+        let requester_node_id = "node-2";
+        let manifest =
+            authority.issue_read_manifest_for_audience(&expected_sha256, requester_node_id);
         let expected_header = manifest.encode_header_value().unwrap();
         let app = Router::new().route(
             "/artifacts/{sha256}",
@@ -1195,6 +1271,10 @@ mod tests {
                             .get(ARTIFACT_TRANSFER_MANIFEST_HEADER)
                             .and_then(|value| value.to_str().ok())
                             == Some(expected_header.as_str())
+                            && headers
+                                .get(ARTIFACT_TRANSFER_REQUESTER_NODE_HEADER)
+                                .and_then(|value| value.to_str().ok())
+                                == Some(requester_node_id)
                         {
                             (StatusCode::OK, wasm_bytes)
                         } else {
@@ -1213,6 +1293,7 @@ mod tests {
 
         let fetched = fetch_artifact(
             &format!("http://{addr}/artifacts/{expected_sha256}"),
+            Some(requester_node_id),
             Some(&manifest),
             &expected_sha256,
         )

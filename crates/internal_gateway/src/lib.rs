@@ -69,6 +69,9 @@ pub struct InternalGateway {
     /// Whether to allow anonymous (unidentified) internal requests.
     pub allow_anonymous_internal: bool,
 
+    /// Loopback TCP port to bind for east-west traffic.
+    pub bind_port: u16,
+
     /// Callback to trigger a cold-start when the target app has no running instances.
     pub cold_start: Option<
         Arc<dyn Fn(common::types::AppId) -> BoxFuture<'static, Option<SocketAddr>> + Send + Sync>,
@@ -96,6 +99,7 @@ impl InternalGateway {
             namespace_map: None,
             ebpf_active: false,
             allow_anonymous_internal: false,
+            bind_port: common::INTERNAL_GATEWAY_PORT,
             cold_start: None,
         }
     }
@@ -118,6 +122,12 @@ impl InternalGateway {
         self
     }
 
+    /// Set the loopback port the internal gateway binds to.
+    pub fn with_bind_port(mut self, bind_port: u16) -> Self {
+        self.bind_port = bind_port;
+        self
+    }
+
     pub fn with_cold_start(
         mut self,
         cold_start: Arc<
@@ -137,7 +147,7 @@ impl InternalGateway {
 
         let bind_addr = SocketAddr::new(
             std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)),
-            common::INTERNAL_GATEWAY_PORT,
+            state.bind_port,
         );
 
         let app = Router::new()
@@ -175,8 +185,9 @@ fn strip_internal_identity_headers(headers: &mut HeaderMap) {
 
 fn unsupported_endpoint_auth_status(auth: &common::types::EndpointAuth) -> Option<StatusCode> {
     match auth {
-        common::types::EndpointAuth::Authenticated
-        | common::types::EndpointAuth::Roles { .. } => Some(StatusCode::NOT_IMPLEMENTED),
+        common::types::EndpointAuth::Authenticated | common::types::EndpointAuth::Roles { .. } => {
+            Some(StatusCode::NOT_IMPLEMENTED)
+        }
         _ => None,
     }
 }
@@ -426,7 +437,9 @@ async fn proxy_handler(
             match &rule.auth {
                 common::types::EndpointAuth::None | common::types::EndpointAuth::Inherit => {}
                 common::types::EndpointAuth::ApiKey => {
-                    let api_key = sanitized_headers.get("x-api-key").and_then(|v| v.to_str().ok());
+                    let api_key = sanitized_headers
+                        .get("x-api-key")
+                        .and_then(|v| v.to_str().ok());
                     if let Some(key) = api_key {
                         if !gw
                             .gateway_config

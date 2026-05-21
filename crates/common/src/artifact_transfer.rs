@@ -4,6 +4,7 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 pub const ARTIFACT_TRANSFER_MANIFEST_HEADER: &str = "x-wasm-artifact-transfer-manifest";
+pub const ARTIFACT_TRANSFER_REQUESTER_NODE_HEADER: &str = "x-wasm-artifact-requester-node-id";
 pub const DEFAULT_ARTIFACT_GET_MANIFEST_TTL_SECS: u64 = 60;
 pub const DEFAULT_ARTIFACT_PUT_MANIFEST_TTL_SECS: u64 = 60;
 
@@ -148,6 +149,7 @@ impl ArtifactTransferAuthority {
         method: ArtifactTransferMethod,
         ttl_secs: u64,
         single_use: bool,
+        audience: Option<&str>,
     ) -> SignedArtifactTransferManifest {
         let now_ms = now_unix_ms();
         let manifest = ArtifactTransferManifest {
@@ -156,7 +158,7 @@ impl ArtifactTransferAuthority {
             artifact_path: format!("/artifacts/{artifact_sha256}"),
             method,
             issuer: self.local_node_id.clone(),
-            audience: Some(self.local_node_id.clone()),
+            audience: audience.map(str::to_string),
             issued_at_ms: now_ms,
             expires_at_ms: now_ms.saturating_add(ttl_secs.saturating_mul(1000)),
             transfer_id: Uuid::new_v4().to_string(),
@@ -171,6 +173,21 @@ impl ArtifactTransferAuthority {
             ArtifactTransferMethod::Get,
             DEFAULT_ARTIFACT_GET_MANIFEST_TTL_SECS,
             false,
+            None,
+        )
+    }
+
+    pub fn issue_read_manifest_for_audience(
+        &self,
+        artifact_sha256: &str,
+        audience: &str,
+    ) -> SignedArtifactTransferManifest {
+        self.issue_manifest(
+            artifact_sha256,
+            ArtifactTransferMethod::Get,
+            DEFAULT_ARTIFACT_GET_MANIFEST_TTL_SECS,
+            false,
+            Some(audience),
         )
     }
 
@@ -180,6 +197,7 @@ impl ArtifactTransferAuthority {
             ArtifactTransferMethod::Put,
             DEFAULT_ARTIFACT_PUT_MANIFEST_TTL_SECS,
             true,
+            None,
         )
     }
 
@@ -188,6 +206,7 @@ impl ArtifactTransferAuthority {
         signed: &SignedArtifactTransferManifest,
         expected_sha256: &str,
         expected_method: ArtifactTransferMethod,
+        expected_requester_node_id: Option<&str>,
         now_ms: u64,
     ) -> Result<(), String> {
         signed.verify(&self.verifying_key())?;
@@ -223,11 +242,21 @@ impl ArtifactTransferAuthority {
                 self.local_node_id, signed.manifest.issuer
             ));
         }
-        if signed.manifest.audience.as_deref() != Some(self.local_node_id.as_str()) {
-            return Err(format!(
-                "manifest audience mismatch: expected {}, got {:?}",
-                self.local_node_id, signed.manifest.audience
-            ));
+        match (
+            expected_requester_node_id,
+            signed.manifest.audience.as_deref(),
+        ) {
+            (Some(expected), Some(actual)) if expected == actual => {}
+            (Some(expected), actual) => {
+                return Err(format!(
+                    "manifest audience mismatch: expected {}, got {:?}",
+                    expected, actual
+                ));
+            }
+            (None, Some(_)) => {
+                return Err("audience-bound manifest requires requester node identity".to_string());
+            }
+            (None, None) => {}
         }
         if signed.manifest.expires_at_ms <= signed.manifest.issued_at_ms {
             return Err("manifest expiry must be after issued_at".to_string());
@@ -256,6 +285,25 @@ pub struct ArtifactUploadAuthorizationResponse {
     pub sha256: String,
     #[serde(default)]
     pub signed_get_manifest: Option<SignedArtifactTransferManifest>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtifactManifestAudienceBinding {
+    pub audience_node_id: String,
+    pub artifact_transfer_manifest: SignedArtifactTransferManifest,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtifactManifestBatchRequest {
+    #[serde(default)]
+    pub audiences: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtifactManifestBatchResponse {
+    pub sha256: String,
+    #[serde(default)]
+    pub manifests: Vec<ArtifactManifestAudienceBinding>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -293,6 +341,7 @@ mod tests {
                 &signed,
                 "deadbeef",
                 ArtifactTransferMethod::Put,
+                None,
                 signed.manifest.issued_at_ms,
             )
             .unwrap();
@@ -308,6 +357,7 @@ mod tests {
                 &signed,
                 "artifact-b",
                 ArtifactTransferMethod::Get,
+                None,
                 signed.manifest.issued_at_ms,
             )
             .unwrap_err();
@@ -317,15 +367,48 @@ mod tests {
     #[test]
     fn test_manifest_verification_rejects_expired_manifest() {
         let authority = authority();
-        let signed = authority.issue_manifest("abc123", ArtifactTransferMethod::Get, 1, false);
+        let signed =
+            authority.issue_manifest("abc123", ArtifactTransferMethod::Get, 1, false, None);
         let err = authority
             .verify_manifest(
                 &signed,
                 "abc123",
                 ArtifactTransferMethod::Get,
+                None,
                 signed.manifest.expires_at_ms,
             )
             .unwrap_err();
         assert!(err.contains("expired"));
+    }
+
+    #[test]
+    fn test_manifest_verification_accepts_matching_audience() {
+        let authority = authority();
+        let signed = authority.issue_read_manifest_for_audience("abc123", "node-2");
+        authority
+            .verify_manifest(
+                &signed,
+                "abc123",
+                ArtifactTransferMethod::Get,
+                Some("node-2"),
+                signed.manifest.issued_at_ms,
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn test_manifest_verification_rejects_mismatched_audience() {
+        let authority = authority();
+        let signed = authority.issue_read_manifest_for_audience("abc123", "node-2");
+        let err = authority
+            .verify_manifest(
+                &signed,
+                "abc123",
+                ArtifactTransferMethod::Get,
+                Some("node-3"),
+                signed.manifest.issued_at_ms,
+            )
+            .unwrap_err();
+        assert!(err.contains("audience mismatch"));
     }
 }

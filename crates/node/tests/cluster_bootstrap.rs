@@ -247,7 +247,8 @@ fn test_snapshot_serializes_signed_artifact_fetch_authorizations() {
         sha256: "abc123".to_string(),
         artifact_url: "http://node-0.internal:9091/artifacts/abc123".to_string(),
         artifact_transfer_manifest: Some(
-            ArtifactTransferAuthority::derive("node-0", &[4u8; 32]).issue_read_manifest("abc123"),
+            ArtifactTransferAuthority::derive("node-0", &[4u8; 32])
+                .issue_read_manifest_for_audience("abc123", "node-1"),
         ),
     };
 

@@ -2,8 +2,11 @@
 use anyhow::Result;
 use clap::Args;
 use colored::Colorize;
-use common::artifact_transfer::ArtifactUploadAuthorizationResponse;
-use common::types::{AppConfig, AppId, FuelQuota, MemoryPages};
+use common::artifact_transfer::{
+    ArtifactManifestBatchRequest, ArtifactManifestBatchResponse,
+    ArtifactUploadAuthorizationResponse,
+};
+use common::types::{AppConfig, AppId, ClusterNodeRecord, FuelQuota, MemoryPages};
 use hex;
 use indicatif::{ProgressBar, ProgressStyle};
 use messaging::{events::Event, NatsBus};
@@ -153,6 +156,79 @@ fn parse_env_var(s: &str) -> Result<(String, String), String> {
         .ok_or_else(|| format!("expected KEY=VALUE, got: {s}"))
 }
 
+#[derive(serde::Deserialize)]
+struct ClusterNodeRegistryResponse {
+    nodes: Vec<ClusterNodeRecord>,
+}
+
+async fn load_cluster_node_registry(
+    http: &reqwest::Client,
+    node_api: &str,
+) -> Result<Vec<ClusterNodeRecord>> {
+    let registry_url = format!("{}/admin/cluster/nodes", node_api.trim_end_matches('/'));
+    let response = http.get(&registry_url).send().await?;
+    if !response.status().is_success() {
+        anyhow::bail!(
+            "cluster node registry request failed: HTTP {} from {}",
+            response.status(),
+            registry_url
+        );
+    }
+    let mut nodes = response.json::<ClusterNodeRegistryResponse>().await?.nodes;
+    nodes.sort_by(|a, b| a.node_id.cmp(&b.node_id));
+    Ok(nodes)
+}
+
+fn select_target_node_ids(
+    nodes: Vec<ClusterNodeRecord>,
+    upload_source_node_id: Option<&str>,
+    max_staleness_secs: u64,
+) -> Vec<String> {
+    nodes
+        .into_iter()
+        .filter(|node| !node.is_stale(max_staleness_secs))
+        .map(|node| node.node_id)
+        .filter(|node_id| upload_source_node_id != Some(node_id.as_str()))
+        .collect()
+}
+
+async fn request_per_node_manifests(
+    http: &reqwest::Client,
+    node_api: &str,
+    sha256: &str,
+    target_node_ids: &[String],
+) -> Result<Vec<common::artifact_transfer::ArtifactManifestAudienceBinding>> {
+    if target_node_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let authorize_url = format!(
+        "{}/artifacts/{}/authorize",
+        node_api.trim_end_matches('/'),
+        sha256
+    );
+    let response = http
+        .post(&authorize_url)
+        .json(&ArtifactManifestBatchRequest {
+            audiences: target_node_ids.to_vec(),
+        })
+        .send()
+        .await?;
+
+    if !response.status().is_success() {
+        anyhow::bail!(
+            "artifact manifest authorization failed: HTTP {} from {}",
+            response.status(),
+            authorize_url
+        );
+    }
+
+    Ok(response
+        .json::<ArtifactManifestBatchResponse>()
+        .await?
+        .manifests)
+}
+
 pub async fn run(
     args: DeployArgs,
     bus: &NatsBus,
@@ -240,6 +316,27 @@ pub async fn run(
         .ok();
     println!("{} Artifact uploaded to {}", "✓".green(), upload_url);
 
+    let upload_source_node_id = upload_authorization
+        .as_ref()
+        .and_then(|authorization| authorization.signed_get_manifest.as_ref())
+        .map(|manifest| manifest.manifest.issuer.clone());
+
+    let registered_nodes = load_cluster_node_registry(http, node_api).await?;
+    let target_node_ids =
+        select_target_node_ids(registered_nodes, upload_source_node_id.as_deref(), 120);
+
+    let per_node_manifests =
+        match request_per_node_manifests(http, node_api, &sha256, &target_node_ids).await {
+            Ok(manifests) => manifests,
+            Err(e) => {
+                eprintln!(
+                    "warning: failed to request per-node artifact manifests: {}",
+                    e
+                );
+                Vec::new()
+            }
+        };
+
     // 4. Build config from manifest (if any), then overlay CLI flags
     let (config, gateway_config, api_keys) = if let Some(manifest) = manifest {
         let mut config = manifest.to_app_config();
@@ -295,13 +392,18 @@ pub async fn run(
         (config, gateway_config, Vec::new())
     };
 
+    if target_node_ids.is_empty() {
+        eprintln!(
+            "warning: the authoritative cluster node registry contains no active peer nodes beyond the upload source; no per-node artifact manifests were needed"
+        );
+    }
+
     // 5. Publish deploy event
     let event = Event::DeployApp {
         app_id: app_id.clone(),
         config,
         artifact_url,
-        artifact_transfer_manifest: upload_authorization
-            .and_then(|authorization| authorization.signed_get_manifest),
+        artifact_transfer_manifests: per_node_manifests,
         expected_hash: Some(sha256),
         size_bytes,
     };
@@ -528,4 +630,123 @@ pub async fn remove(app_id_str: &str, bus: &NatsBus) -> Result<()> {
         app_id_str.cyan()
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{load_cluster_node_registry, request_per_node_manifests, select_target_node_ids};
+    use axum::{
+        extract::State,
+        routing::{get, post},
+        Json, Router,
+    };
+    use common::{
+        artifact_transfer::{
+            ArtifactManifestBatchRequest, ArtifactManifestBatchResponse, ArtifactTransferAuthority,
+        },
+        health::NodeHealthStatus,
+        types::ClusterNodeRecord,
+    };
+    use std::sync::Arc;
+    use tokio::sync::Mutex;
+
+    #[derive(Clone)]
+    struct TestState {
+        nodes: Vec<ClusterNodeRecord>,
+        requested_audiences: Arc<Mutex<Vec<String>>>,
+    }
+
+    fn active_node(node_id: &str, last_seen_unix_secs: u64) -> ClusterNodeRecord {
+        ClusterNodeRecord {
+            node_id: node_id.to_string(),
+            last_seen_unix_secs,
+            joined_at_unix_secs: Some(last_seen_unix_secs),
+            health_status: NodeHealthStatus::Healthy,
+            proxy_address: Some(format!("{node_id}.internal:8080")),
+            artifact_server_url: Some(format!("http://{node_id}.internal:9091")),
+            protocol_version: Some(common::protocol::PROTOCOL_VERSION),
+            binary_version: Some(common::protocol::BINARY_VERSION.to_string()),
+            accepting_requests: Some(true),
+            active_instances: Some(1),
+            deployed_apps: Some(1),
+        }
+    }
+
+    fn now_secs() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0)
+    }
+
+    #[tokio::test]
+    async fn test_registry_backed_manifest_fanout_uses_exact_active_peers() {
+        let authority = ArtifactTransferAuthority::derive("node-1", &[9u8; 32]);
+        let requested_audiences = Arc::new(Mutex::new(Vec::new()));
+        let state = TestState {
+            nodes: vec![
+                active_node("node-1", now_secs()),
+                active_node("node-2", now_secs()),
+                active_node("node-3", now_secs().saturating_sub(10_000)),
+            ],
+            requested_audiences: requested_audiences.clone(),
+        };
+
+        async fn cluster_nodes(State(state): State<TestState>) -> Json<serde_json::Value> {
+            Json(serde_json::json!({ "nodes": state.nodes }))
+        }
+
+        async fn authorize(
+            State(state): State<TestState>,
+            Json(body): Json<ArtifactManifestBatchRequest>,
+        ) -> Json<ArtifactManifestBatchResponse> {
+            *state.requested_audiences.lock().await = body.audiences.clone();
+            let authority = ArtifactTransferAuthority::derive("node-1", &[9u8; 32]);
+            Json(ArtifactManifestBatchResponse {
+                sha256: "abc123".to_string(),
+                manifests: body
+                    .audiences
+                    .into_iter()
+                    .map(|audience_node_id| {
+                        common::artifact_transfer::ArtifactManifestAudienceBinding {
+                            artifact_transfer_manifest: authority
+                                .issue_read_manifest_for_audience("abc123", &audience_node_id),
+                            audience_node_id,
+                        }
+                    })
+                    .collect(),
+            })
+        }
+
+        let app = Router::new()
+            .route("/admin/cluster/nodes", get(cluster_nodes))
+            .route("/artifacts/abc123/authorize", post(authorize))
+            .with_state(state);
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let http = reqwest::Client::new();
+        let base_url = format!("http://{}", addr);
+        let registry = load_cluster_node_registry(&http, &base_url).await.unwrap();
+        let target_node_ids = select_target_node_ids(registry, Some("node-1"), 120);
+        assert_eq!(target_node_ids, vec!["node-2".to_string()]);
+
+        let manifests = request_per_node_manifests(&http, &base_url, "abc123", &target_node_ids)
+            .await
+            .unwrap();
+        assert_eq!(manifests.len(), 1);
+        assert_eq!(manifests[0].audience_node_id, "node-2");
+        assert_eq!(
+            *requested_audiences.lock().await,
+            vec!["node-2".to_string()]
+        );
+        assert_eq!(
+            manifests[0].artifact_transfer_manifest.manifest.issuer,
+            authority.local_node_id()
+        );
+    }
 }
