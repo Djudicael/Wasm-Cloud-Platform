@@ -173,6 +173,9 @@ platform_domain = "myplatform.com"
 [health]
 # Health check loop interval (seconds).
 check_interval_secs = 5
+# Treat cluster-node registry entries as stale after this many seconds without
+# a fresh event. Used by deploy peer selection and rolling upgrades.
+cluster_node_stale_after_secs = 120
 # Instance idle timeout (seconds). Kill instances idle for 5 minutes.
 default_idle_timeout_secs = 300
 # Maximum instances per app on this node.

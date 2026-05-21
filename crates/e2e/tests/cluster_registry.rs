@@ -6,6 +6,12 @@ use std::time::{Duration, Instant};
 
 static NODE_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+#[derive(serde::Deserialize)]
+struct ClusterRegistryResponse {
+    nodes: Vec<ClusterNodeRecord>,
+    active_staleness_secs: u64,
+}
+
 fn admin_url(port: u16, path: &str) -> String {
     format!("http://127.0.0.1:{port}{path}")
 }
@@ -22,16 +28,14 @@ async fn wait_for_registry(
     loop {
         match http.get(&url).send().await {
             Ok(resp) if resp.status().is_success() => {
-                let body: serde_json::Value = resp
+                let body: ClusterRegistryResponse = resp
                     .json()
                     .await
                     .map_err(|e| format!("failed to decode cluster registry response: {e}"))?;
-                let nodes: Vec<ClusterNodeRecord> = serde_json::from_value(
-                    body.get("nodes")
-                        .cloned()
-                        .unwrap_or_else(|| serde_json::json!([])),
-                )
-                .map_err(|e| format!("failed to deserialize cluster registry nodes: {e}"))?;
+                let nodes = body.nodes;
+                if body.active_staleness_secs == 0 {
+                    return Err("cluster registry returned invalid active_staleness_secs=0".into());
+                }
 
                 let ids: Vec<&str> = nodes.iter().map(|node| node.node_id.as_str()).collect();
                 if expected_node_ids
@@ -56,7 +60,7 @@ async fn wait_for_registry(
 }
 
 #[tokio::test]
-#[ignore = "requires NATS + wasm-node binary + live two-node cluster in WSL"]
+#[ignore = "live cluster regression; run explicitly or via CI E2E lane"]
 async fn test_live_cluster_registry_drives_artifact_authorize_audience_set() {
     let _guard = NODE_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
 

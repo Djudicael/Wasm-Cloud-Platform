@@ -41,16 +41,22 @@ podman ps
 
 ## Running Tests
 
-### Run All E2E Tests
+### Run Default E2E Suite
 
 ```bash
-cargo test -p e2e -- --ignored --test-threads=1 --nocapture
+cargo test -p e2e
 ```
 
-**Important flags:**
-- `--ignored`: E2E tests are marked with `#[ignore]` to prevent running in normal `cargo test`
-- `--test-threads=1`: Run tests sequentially to avoid port conflicts
-- `--nocapture`: Show test output (useful for debugging)
+### Run Live Cluster Regressions
+
+```bash
+cargo test -p e2e test_live_cluster_registry_drives_artifact_authorize_audience_set -- --ignored --test-threads=1 --nocapture
+```
+
+**Important flags for live cluster tests:**
+- `--ignored`: live multi-process regressions stay opt-in for local runs
+- `--test-threads=1`: run sequentially to avoid port conflicts
+- `--nocapture`: show node/fixture output during failures
 
 ### Run Individual Tests
 
@@ -72,6 +78,9 @@ cargo test -p e2e test_fuel_exhaustion_returns_4xx -- --ignored --nocapture
 
 # Secret rotation test
 cargo test -p e2e test_secret_rotation -- --ignored --nocapture
+
+# Cluster registry -> audience-bound manifest regression
+cargo test -p e2e test_live_cluster_registry_drives_artifact_authorize_audience_set -- --ignored --test-threads=1 --nocapture
 ```
 
 ## Tests Overview
@@ -86,6 +95,7 @@ cargo test -p e2e test_secret_rotation -- --ignored --nocapture
 | `test_node_restart_restores_state` | Restart node and verify state restored | State persists across restarts |
 | `test_fuel_exhaustion_returns_4xx` | Request with tiny fuel limit | Returns 4xx, not 500 error |
 | `test_secret_rotation` | Rotate a secret and verify app continues | Secret rotation works |
+| `test_live_cluster_registry_drives_artifact_authorize_audience_set` | Start a live two-node cluster and authorize artifact transfer | Registry convergence and per-node manifest audience binding work |
 
 ## Troubleshooting
 
@@ -155,7 +165,10 @@ To run these tests in CI:
     RUSTFLAGS='--cfg tokio_unstable' cargo build --manifest-path apps/hello-axum/Cargo.toml --target wasm32-wasip2 --release
 
 - name: Run E2E tests
-  run: cargo test -p e2e -- --ignored --test-threads=1
+  run: cargo test -p e2e
+
+- name: Run cluster registry live regression
+  run: cargo test -p e2e test_live_cluster_registry_drives_artifact_authorize_audience_set -- --ignored --test-threads=1 --nocapture
 ```
 
 ## Adding New Tests
@@ -168,7 +181,7 @@ To run these tests in CI:
    - `deploy_app(...)` - Deploy an app
    - `add_route(...)` - Add a route
    - `send_request(...)` - Send HTTP request
-4. Mark test with `#[ignore]` to exclude from normal runs
+4. Mark only the heavier live multi-node regressions with `#[ignore]`
 5. Document what the test verifies
 
 Example:

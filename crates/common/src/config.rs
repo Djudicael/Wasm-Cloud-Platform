@@ -913,6 +913,8 @@ pub struct HealthSection {
     pub max_memory_bytes: u64,
     #[serde(default = "default_snapshot_interval")]
     pub snapshot_interval_secs: u64,
+    #[serde(default = "default_cluster_node_stale_after_secs")]
+    pub cluster_node_stale_after_secs: u64,
     #[serde(default)]
     pub app_defaults: AppHealthCheckDefaults,
 }
@@ -959,6 +961,10 @@ fn default_max_memory_bytes() -> u64 {
 
 fn default_snapshot_interval() -> u64 {
     60
+}
+
+fn default_cluster_node_stale_after_secs() -> u64 {
+    120
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1028,6 +1034,7 @@ impl Default for HealthSection {
             min_disk_free_bytes: default_min_disk_free_bytes(),
             max_memory_bytes: default_max_memory_bytes(),
             snapshot_interval_secs: default_snapshot_interval(),
+            cluster_node_stale_after_secs: default_cluster_node_stale_after_secs(),
             app_defaults: AppHealthCheckDefaults::default(),
         }
     }

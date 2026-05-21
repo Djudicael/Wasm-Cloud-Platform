@@ -159,12 +159,18 @@ fn parse_env_var(s: &str) -> Result<(String, String), String> {
 #[derive(serde::Deserialize)]
 struct ClusterNodeRegistryResponse {
     nodes: Vec<ClusterNodeRecord>,
+    #[serde(default = "default_cluster_node_staleness_secs")]
+    active_staleness_secs: u64,
+}
+
+fn default_cluster_node_staleness_secs() -> u64 {
+    120
 }
 
 async fn load_cluster_node_registry(
     http: &reqwest::Client,
     node_api: &str,
-) -> Result<Vec<ClusterNodeRecord>> {
+) -> Result<ClusterNodeRegistryResponse> {
     let registry_url = format!("{}/admin/cluster/nodes", node_api.trim_end_matches('/'));
     let response = http.get(&registry_url).send().await?;
     if !response.status().is_success() {
@@ -174,9 +180,9 @@ async fn load_cluster_node_registry(
             registry_url
         );
     }
-    let mut nodes = response.json::<ClusterNodeRegistryResponse>().await?.nodes;
-    nodes.sort_by(|a, b| a.node_id.cmp(&b.node_id));
-    Ok(nodes)
+    let mut registry = response.json::<ClusterNodeRegistryResponse>().await?;
+    registry.nodes.sort_by(|a, b| a.node_id.cmp(&b.node_id));
+    Ok(registry)
 }
 
 fn select_target_node_ids(
@@ -322,8 +328,11 @@ pub async fn run(
         .map(|manifest| manifest.manifest.issuer.clone());
 
     let registered_nodes = load_cluster_node_registry(http, node_api).await?;
-    let target_node_ids =
-        select_target_node_ids(registered_nodes, upload_source_node_id.as_deref(), 120);
+    let target_node_ids = select_target_node_ids(
+        registered_nodes.nodes,
+        upload_source_node_id.as_deref(),
+        registered_nodes.active_staleness_secs,
+    );
 
     let per_node_manifests =
         match request_per_node_manifests(http, node_api, &sha256, &target_node_ids).await {
@@ -693,7 +702,10 @@ mod tests {
         };
 
         async fn cluster_nodes(State(state): State<TestState>) -> Json<serde_json::Value> {
-            Json(serde_json::json!({ "nodes": state.nodes }))
+            Json(serde_json::json!({
+                "nodes": state.nodes,
+                "active_staleness_secs": 60,
+            }))
         }
 
         async fn authorize(
@@ -732,7 +744,12 @@ mod tests {
         let http = reqwest::Client::new();
         let base_url = format!("http://{}", addr);
         let registry = load_cluster_node_registry(&http, &base_url).await.unwrap();
-        let target_node_ids = select_target_node_ids(registry, Some("node-1"), 120);
+        assert_eq!(registry.active_staleness_secs, 60);
+        let target_node_ids = select_target_node_ids(
+            registry.nodes,
+            Some("node-1"),
+            registry.active_staleness_secs,
+        );
         assert_eq!(target_node_ids, vec!["node-2".to_string()]);
 
         let manifests = request_per_node_manifests(&http, &base_url, "abc123", &target_node_ids)

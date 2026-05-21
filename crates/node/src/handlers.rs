@@ -189,6 +189,7 @@ pub struct EventDispatcher {
     pub bus: messaging::NatsBus,
     pub dns_webhook: Option<DnsWebhookManager>,
     pub node_table: Arc<NodeLoadTable>,
+    pub cluster_node_stale_after_secs: u64,
     /// In-memory gateway cache (also updated when persistent storage changes).
     pub gateway: Option<Arc<proxy::gateway::Gateway>>,
 }
@@ -1020,7 +1021,7 @@ impl EventDispatcher {
             .list_cluster_nodes()
             .unwrap_or_default()
             .into_iter()
-            .filter(|node| !node.is_stale(120))
+            .filter(|node| !node.is_stale(self.cluster_node_stale_after_secs))
             .map(|node| node.node_id)
             .collect();
         if !cluster_nodes.contains(&self.node_id) {

@@ -1136,6 +1136,7 @@ async fn main() -> anyhow::Result<()> {
             config.dns.webhook_token.clone(),
         ),
         node_table: node_load_table.clone(),
+        cluster_node_stale_after_secs: config.health.cluster_node_stale_after_secs,
         gateway: Some(gateway.clone()),
     });
 
@@ -2221,13 +2222,17 @@ async fn main() -> anyhow::Result<()> {
             "/admin/cluster/nodes",
             axum::routing::get({
                 let store = store.clone();
+                let cluster_node_stale_after_secs = config.health.cluster_node_stale_after_secs;
                 move || {
                     let store = store.clone();
                     async move {
                         match store.list_cluster_nodes() {
                             Ok(nodes) => (
                                 axum::http::StatusCode::OK,
-                                axum::Json(serde_json::json!({ "nodes": nodes })),
+                                axum::Json(serde_json::json!({
+                                    "nodes": nodes,
+                                    "active_staleness_secs": cluster_node_stale_after_secs,
+                                })),
                             ),
                             Err(e) => (
                                 axum::http::StatusCode::INTERNAL_SERVER_ERROR,

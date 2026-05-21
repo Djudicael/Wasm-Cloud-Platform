@@ -271,6 +271,7 @@ fn merge_config(base: NodeConfig, overlay: NodeConfig) -> NodeConfig {
             min_disk_free_bytes: overlay.health.min_disk_free_bytes,
             max_memory_bytes: overlay.health.max_memory_bytes,
             snapshot_interval_secs: overlay.health.snapshot_interval_secs,
+            cluster_node_stale_after_secs: overlay.health.cluster_node_stale_after_secs,
             app_defaults: overlay.health.app_defaults.clone(),
         },
         gateway: GatewaySection {
