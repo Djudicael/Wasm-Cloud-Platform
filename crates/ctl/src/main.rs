@@ -514,9 +514,7 @@ async fn main() -> anyhow::Result<()> {
     let http = build_http_client(auth_token.as_deref())?;
 
     match cli.command {
-        Commands::Deploy(args) => {
-            cmds::deploy::run(args, &bus, &cli.node_api, cli.auth_token.as_deref(), &http).await?
-        }
+        Commands::Deploy(args) => cmds::deploy::run(args, &bus, &cli.node_api, &http).await?,
         Commands::Remove { app_id } => cmds::deploy::remove(&app_id, &bus).await?,
         Commands::List => cmds::list::run(&cli.node_api, &http).await?,
         Commands::Instances => cmds::list::instances(&cli.node_api, &http).await?,

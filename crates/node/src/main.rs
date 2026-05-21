@@ -153,19 +153,6 @@ fn artifact_server_url_is_loopback(url: &str) -> bool {
         .unwrap_or(false)
 }
 
-const BOOTSTRAP_ARTIFACT_TOKEN_TTL_SECS: u64 = 600;
-
-fn generate_artifact_peer_token() -> String {
-    common::auth::AuthConfig::generate_token()
-}
-
-fn now_unix_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
-}
-
 fn admin_tls_material(config: &common::config::NodeConfig) -> Option<(String, String)> {
     if let (Some(cert), Some(key)) = (config.admin.tls_cert.clone(), config.admin.tls_key.clone()) {
         return Some((cert, key));
@@ -1072,16 +1059,8 @@ async fn main() -> anyhow::Result<()> {
     let artifact_server_url = build_artifact_server_url(&config.admin)?;
     let proxy_address = build_proxy_advertised_address(&config)?;
     let node_load_table = Arc::new(proxy::node_table::NodeLoadTable::default());
-    let artifact_peer_token = if artifact_server_url_is_loopback(&artifact_server_url) {
-        None
-    } else {
-        Some(generate_artifact_peer_token())
-    };
-    let artifact_peer_token_expires_at_ms = artifact_peer_token
-        .as_ref()
-        .map(|_| now_unix_ms() + BOOTSTRAP_ARTIFACT_TOKEN_TTL_SECS * 1000);
     if config.admin.advertised_artifact_url.is_some() || config.admin.advertised_host.is_some() {
-        info!(artifact_server_url = %artifact_server_url, remote_auth = artifact_peer_token.is_some(), "using configured advertised artifact endpoint");
+        info!(artifact_server_url = %artifact_server_url, manifest_auth = true, "using configured advertised artifact endpoint");
     } else {
         info!(artifact_server_url = %artifact_server_url, "using local-only default advertised artifact endpoint");
     }
@@ -1208,7 +1187,6 @@ async fn main() -> anyhow::Result<()> {
             bootstrap_session_id,
             bootstrap_nonce,
             artifact_server_url: artifact_server_url.clone(),
-            artifact_auth_token: artifact_peer_token.clone(),
             public_key_bytes,
             protocol_version: common::protocol::PROTOCOL_VERSION,
             binary_version: common::protocol::BINARY_VERSION.to_string(),
@@ -2821,15 +2799,8 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
-    let mut artifact_peer_tokens = Vec::new();
-    if let Some(token) = artifact_peer_token.clone() {
-        artifact_peer_tokens.push(storage::artifact_server::ArtifactPeerTokenConfig::new(
-            token,
-            artifact_peer_token_expires_at_ms,
-            false,
-            true,
-        ));
-    }
+    let mut artifact_peer_tokens: Vec<storage::artifact_server::ArtifactPeerTokenConfig> =
+        Vec::new();
     if let Some(token) = effective_auth_config.write_token.clone() {
         if !artifact_peer_tokens
             .iter()

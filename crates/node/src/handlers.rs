@@ -188,7 +188,6 @@ impl EventDispatcher {
                 app_id,
                 config,
                 artifact_url,
-                artifact_auth_token,
                 artifact_transfer_manifest,
                 expected_hash,
                 size_bytes,
@@ -201,7 +200,6 @@ impl EventDispatcher {
                     app_id,
                     config,
                     artifact_url,
-                    artifact_auth_token,
                     artifact_transfer_manifest,
                     expected_hash,
                     size_bytes,
@@ -327,7 +325,6 @@ impl EventDispatcher {
                 bootstrap_session_id,
                 bootstrap_nonce,
                 artifact_server_url,
-                artifact_auth_token,
                 public_key_bytes,
                 protocol_version,
                 binary_version,
@@ -337,7 +334,6 @@ impl EventDispatcher {
                     bootstrap_session_id,
                     bootstrap_nonce,
                     artifact_server_url,
-                    artifact_auth_token,
                     public_key_bytes,
                     protocol_version,
                     binary_version,
@@ -572,7 +568,6 @@ impl EventDispatcher {
         app_id: AppId,
         config: common::types::AppConfig,
         artifact_url: String,
-        artifact_auth_token: Option<String>,
         artifact_transfer_manifest: Option<SignedArtifactTransferManifest>,
         expected_hash: Option<String>,
         size_bytes: u64,
@@ -599,14 +594,9 @@ impl EventDispatcher {
         } else {
             // 2. Fetch from the source node
             info!(url = %artifact_url, "fetching artifact via HTTP");
-            let bytes = fetch_artifact(
-                &artifact_url,
-                artifact_auth_token.as_deref(),
-                artifact_transfer_manifest.as_ref(),
-                &sha256,
-            )
-            .await
-            .map_err(PlatformError::external)?;
+            let bytes = fetch_artifact(&artifact_url, artifact_transfer_manifest.as_ref(), &sha256)
+                .await
+                .map_err(PlatformError::external)?;
 
             // Hash already verified by download_and_verify_bytes.
             // Persisting raw bytes is part of successful deploy processing.
@@ -660,7 +650,6 @@ impl EventDispatcher {
         bootstrap_session_id: String,
         bootstrap_nonce: String,
         peer_artifact_url: String,
-        peer_artifact_token: Option<String>,
         peer_public_key: Vec<u8>,
         protocol_version: u32,
         binary_version: String,
@@ -757,7 +746,6 @@ impl EventDispatcher {
             apps = artifact_hashes.len(),
             fetch_manifests = artifact_hashes.len(),
             peer_artifact_url = %peer_artifact_url,
-            legacy_peer_token_present = peer_artifact_token.is_some(),
             "snapshot prepared with signed artifact fetch authorizations"
         );
 
@@ -882,7 +870,6 @@ impl EventDispatcher {
             let artifact = if let Some(fetch) = artifact_fetches_by_sha.get(&sha256) {
                 match fetch_artifact(
                     &fetch.artifact_url,
-                    None,
                     fetch.artifact_transfer_manifest.as_ref(),
                     &sha256,
                 )
@@ -1089,7 +1076,6 @@ impl EventDispatcher {
 /// Fetch an artifact from a URL and verify its SHA-256 hash.
 async fn fetch_artifact(
     url: &str,
-    artifact_auth_token: Option<&str>,
     artifact_transfer_manifest: Option<&SignedArtifactTransferManifest>,
     expected_sha256: &str,
 ) -> Result<Vec<u8>, String> {
@@ -1098,9 +1084,6 @@ async fn fetch_artifact(
     if let Some(manifest) = artifact_transfer_manifest {
         let header_value = manifest.encode_header_value()?;
         request = request.header(ARTIFACT_TRANSFER_MANIFEST_HEADER, header_value);
-    }
-    if let Some(token) = artifact_auth_token {
-        request = request.bearer_auth(token);
     }
 
     let response = request
@@ -1230,7 +1213,6 @@ mod tests {
 
         let fetched = fetch_artifact(
             &format!("http://{addr}/artifacts/{expected_sha256}"),
-            None,
             Some(&manifest),
             &expected_sha256,
         )

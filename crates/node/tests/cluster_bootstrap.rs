@@ -85,20 +85,18 @@ async fn test_fresh_node_publishes_node_joined() {
                 bootstrap_session_id,
                 bootstrap_nonce,
                 artifact_server_url,
-                artifact_auth_token,
                 public_key_bytes,
                 protocol_version: _,
                 binary_version: _,
             } = event
             {
                 println!(
-                    "Received NodeJoined: node_id={}, session={}, nonce={}, url={}, pubkey_len={}, has_artifact_auth_token={}",
+                    "Received NodeJoined: node_id={}, session={}, nonce={}, url={}, pubkey_len={}",
                     node_id,
                     bootstrap_session_id,
                     bootstrap_nonce,
                     artifact_server_url,
-                    public_key_bytes.len(),
-                    artifact_auth_token.is_some()
+                    public_key_bytes.len()
                 );
             }
         }
@@ -116,7 +114,6 @@ async fn test_fresh_node_publishes_node_joined() {
         bootstrap_session_id: "session-node-0".to_string(),
         bootstrap_nonce: "nonce-node-0".to_string(),
         artifact_server_url: "http://127.0.0.1:8080".to_string(),
-        artifact_auth_token: None,
         public_key_bytes: public_key_bytes.clone(),
         protocol_version: common::protocol::PROTOCOL_VERSION,
         binary_version: common::protocol::BINARY_VERSION.to_string(),
@@ -157,7 +154,6 @@ async fn test_bootstrap_session_correlates_join_and_snapshot() {
         bootstrap_session_id: "bootstrap-session-1".to_string(),
         bootstrap_nonce: "bootstrap-nonce-1".to_string(),
         artifact_server_url: "http://node-new.internal:8081".to_string(),
-        artifact_auth_token: Some("peer-artifact-token".to_string()),
         public_key_bytes: BootstrapKeyPair::generate().public_bytes(),
         protocol_version: common::protocol::PROTOCOL_VERSION,
         binary_version: common::protocol::BINARY_VERSION.to_string(),
@@ -477,7 +473,6 @@ async fn test_two_node_bootstrap_simulation() {
         bootstrap_session_id: bootstrap_session_id.clone(),
         bootstrap_nonce: bootstrap_nonce.clone(),
         artifact_server_url: advertised_artifact_url.clone(),
-        artifact_auth_token: Some("peer-artifact-token".to_string()),
         public_key_bytes: pubkey1.clone(),
         protocol_version: common::protocol::PROTOCOL_VERSION,
         binary_version: common::protocol::BINARY_VERSION.to_string(),

@@ -200,11 +200,11 @@ fn ensure_authorized_peer(
             Ok(())
         }
         Some(_) | None if !peer_tokens.is_empty() => {
-            tracing::warn!(peer = %peer_addr, action = ?action, sha256, "rejected non-loopback artifact request with missing/invalid/expired bearer token and no valid signed manifest");
+            tracing::warn!(peer = %peer_addr, action = ?action, sha256, "rejected non-loopback artifact request with missing/invalid/expired compatible bearer token and no valid signed manifest");
             Err(StatusCode::FORBIDDEN)
         }
         _ => {
-            tracing::warn!(peer = %peer_addr, action = ?action, sha256, "rejected non-loopback artifact request because no peer artifact token or valid signed manifest is configured");
+            tracing::warn!(peer = %peer_addr, action = ?action, sha256, "rejected non-loopback artifact request because no compatible bearer token or valid signed manifest is configured");
             Err(StatusCode::FORBIDDEN)
         }
     }

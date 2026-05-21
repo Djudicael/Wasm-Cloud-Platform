@@ -1454,6 +1454,7 @@ dependencies = [
  "messaging",
  "reqwest 0.12.28",
  "rpassword",
+ "secrets",
  "serde",
  "serde_json",
  "sha2 0.11.0",

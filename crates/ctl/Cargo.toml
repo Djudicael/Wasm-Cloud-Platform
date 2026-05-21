@@ -26,6 +26,7 @@ futures = "0.3"
 chrono = { workspace = true }
 common = { path = "../common" }
 messaging = { path = "../messaging" }
+secrets = { path = "../secrets" }
 storage = { path = "../storage" }
 billing = { path = "../billing" }
 ipnet = "2.12.0"
