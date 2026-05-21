@@ -45,7 +45,7 @@ async fn test_vm_kill_and_restart() {
         .start_node(512, 2)
         .await
         .expect("Failed to start node A");
-    let node_b = cluster
+    let _node_b = cluster
         .start_node(512, 2)
         .await
         .expect("Failed to start node B");
@@ -79,7 +79,7 @@ async fn test_vm_kill_and_restart() {
 
     // 5. Verify node A is dead
     {
-        let node = cluster.get_node(&node_a).expect("Node not found");
+        let node = cluster.get_node_mut(&node_a).expect("Node not found");
         assert!(!node.is_running(), "Node should be dead after kill");
     }
     println!("✅ Node is confirmed dead");

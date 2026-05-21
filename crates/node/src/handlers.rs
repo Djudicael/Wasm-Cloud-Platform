@@ -1194,13 +1194,28 @@ mod tests {
         },
         types::AppId,
     };
+    use e2e::NatsContainer;
+    use messaging::{events::Event, NatsBus};
     use secrets::{
         crypto::SymmetricKey, LocalSecretProvider, SecretProvider, SecretTransportEnvelope,
     };
     use sha2::Digest;
+    use std::sync::atomic::{AtomicU16, Ordering};
     use storage::Store;
     use tempfile::NamedTempFile;
     use tokio::net::TcpListener;
+    use tokio::sync::oneshot;
+
+    static NATS_PORT_COUNTER: AtomicU16 = AtomicU16::new(0);
+
+    fn allocate_nats_port() -> u16 {
+        let base = 25000 + ((std::process::id() as u16) % 1000);
+        base + NATS_PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+    }
+
+    async fn start_test_nats() -> Result<NatsContainer, String> {
+        NatsContainer::start(allocate_nats_port()).await
+    }
 
     #[test]
     fn test_is_loopback_artifact_url_detects_loopback_hosts() {
@@ -1241,6 +1256,73 @@ mod tests {
 
         let raw = store.load_secrets(&app_id).unwrap().unwrap();
         assert_ne!(raw, b"super-secret-value");
+    }
+
+    #[tokio::test]
+    async fn test_secret_update_event_roundtrip_persists_plaintext_via_secret_provider() {
+        let _nats = start_test_nats().await.unwrap();
+        let bus = NatsBus::connect(&_nats.url).await.unwrap();
+        bus.setup_jetstream().await.unwrap();
+
+        let temp = NamedTempFile::new().unwrap();
+        let store = Store::open(temp.path()).unwrap();
+        let provider = std::sync::Arc::new(LocalSecretProvider::new(
+            store.clone(),
+            SymmetricKey::generate(),
+        ));
+        let app_id = AppId("secret-app:v1".to_string());
+        let key = "API_KEY".to_string();
+        let expected_value = "super-secret-over-nats".to_string();
+        let (tx, rx) = oneshot::channel();
+        let provider_for_handler = provider.clone();
+        let app_id_for_handler = app_id.clone();
+        let key_for_handler = key.clone();
+        let tx = std::sync::Arc::new(std::sync::Mutex::new(Some(tx)));
+        let tx_for_handler = tx.clone();
+
+        bus.subscribe(&format!("secrets.update.{}", app_id.0), move |event| {
+            let provider = provider_for_handler.clone();
+            let tx = tx_for_handler.clone();
+            let expected_app_id = app_id_for_handler.clone();
+            let expected_key = key_for_handler.clone();
+            async move {
+                if let Event::SecretUpdate {
+                    app_id,
+                    key,
+                    secret,
+                } = event
+                {
+                    assert_eq!(app_id, expected_app_id);
+                    assert_eq!(key, expected_key);
+                    apply_secret_update(provider.as_ref(), &app_id, &key, &secret)
+                        .await
+                        .unwrap();
+                    if let Some(tx) = tx.lock().unwrap().take() {
+                        let _ = tx.send(());
+                    }
+                }
+            }
+        })
+        .await
+        .unwrap();
+
+        bus.publish(&Event::SecretUpdate {
+            app_id: app_id.clone(),
+            key: key.clone(),
+            secret: SecretTransportEnvelope::plaintext_utf8(expected_value.clone()),
+        })
+        .await
+        .unwrap();
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), rx)
+            .await
+            .expect("timed out waiting for secret update event to be handled")
+            .expect("secret update handler dropped before acknowledging");
+
+        let plaintext = provider.get(&app_id, &key).await.unwrap();
+        assert_eq!(plaintext, expected_value);
+        let raw = store.load_secrets(&app_id).unwrap().unwrap();
+        assert_ne!(raw, expected_value.as_bytes());
     }
 
     #[tokio::test]

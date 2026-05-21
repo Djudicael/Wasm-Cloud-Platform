@@ -34,6 +34,10 @@ messaging = { path = "../messaging" }
 [dev-dependencies]
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
 assert_cmd = "2"
+testcontainers = { workspace = true }
+async-nats = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
 
 [[bin]]
 name = "vm-testbed-cli"

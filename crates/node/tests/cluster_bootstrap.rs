@@ -5,6 +5,7 @@ use common::{
     artifact_transfer::{ArtifactTransferAuthority, BootstrapArtifactFetchAuthorization},
     types::{AppConfig, AppId, FuelQuota, MemoryPages},
 };
+use e2e::NatsContainer;
 use messaging::events::Event;
 use secrets::{
     BootstrapKeyPair, SecretProvider, SecretTransportEntry, SecretTransportEnvelope,
@@ -15,6 +16,8 @@ use std::collections::HashMap;
 use std::time::Duration;
 use storage::Store;
 use tokio::time::sleep;
+
+static NATS_PORT_COUNTER: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(0);
 
 fn is_loopback_url(url: &str) -> bool {
     reqwest::Url::parse(url)
@@ -51,15 +54,20 @@ fn create_test_app_config(app_id: &str) -> AppConfig {
     }
 }
 
-/// Helper to get NATS connection (assumes NATS is running on port 4222)
-/// Run: podman run -d --rm --name nats-test -p 4222:4222 docker.io/library/nats:2.10-alpine
-async fn get_nats_url() -> String {
-    "nats://127.0.0.1:4222".to_string()
+fn allocate_nats_port() -> u16 {
+    use std::sync::atomic::Ordering;
+    let base = 24000 + ((std::process::id() as u16) % 1000);
+    base + NATS_PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+}
+
+async fn start_test_nats() -> Result<NatsContainer, String> {
+    NatsContainer::start(allocate_nats_port()).await
 }
 
 #[tokio::test]
 async fn test_fresh_node_publishes_node_joined() {
-    let nats_url = get_nats_url().await;
+    let nats = start_test_nats().await.unwrap();
+    let nats_url = nats.url.clone();
     sleep(Duration::from_millis(100)).await;
 
     // Create a fresh node (empty storage)
@@ -143,7 +151,8 @@ async fn test_existing_node_skips_bootstrap() {
 
 #[tokio::test]
 async fn test_bootstrap_session_correlates_join_and_snapshot() {
-    let nats_url = get_nats_url().await;
+    let nats = start_test_nats().await.unwrap();
+    let nats_url = nats.url.clone();
     sleep(Duration::from_millis(100)).await;
 
     let bus = messaging::NatsBus::connect(&nats_url).await.unwrap();
@@ -286,7 +295,8 @@ fn test_snapshot_serializes_signed_artifact_fetch_authorizations() {
 
 #[tokio::test]
 async fn test_snapshot_event_structure() {
-    let nats_url = get_nats_url().await;
+    let nats = start_test_nats().await.unwrap();
+    let nats_url = nats.url.clone();
     sleep(Duration::from_millis(100)).await;
 
     let bus = messaging::NatsBus::connect(&nats_url).await.unwrap();
@@ -393,7 +403,8 @@ async fn test_snapshot_event_structure() {
 
 #[tokio::test]
 async fn test_two_node_bootstrap_simulation() {
-    let nats_url = get_nats_url().await;
+    let nats = start_test_nats().await.unwrap();
+    let nats_url = nats.url.clone();
     sleep(Duration::from_millis(100)).await;
 
     let bus = messaging::NatsBus::connect(&nats_url).await.unwrap();

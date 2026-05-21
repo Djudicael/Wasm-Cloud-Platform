@@ -123,7 +123,7 @@ async fn test_single_node_deploy() {
 
 async fn start_nats_container() -> Result<NatsContainer, Box<dyn std::error::Error>> {
     // Re-use testcontainers from the e2e crate
-    use testcontainers::{core::WaitFor, runners::AsyncRunner, GenericImage};
+    use testcontainers::{core::WaitFor, runners::AsyncRunner, GenericImage, ImageExt};
 
     let image = GenericImage::new("nats", "2.10-alpine")
         .with_exposed_port(4222.into())
@@ -223,7 +223,7 @@ fn compute_sha256(path: &std::path::Path) -> Result<String, Box<dyn std::error::
     use sha2::{Digest, Sha256};
     let data = std::fs::read(path)?;
     let hash = Sha256::digest(&data);
-    Ok(format!("{:x}", hash))
+    Ok(hex::encode(hash))
 }
 
 async fn upload_artifact(

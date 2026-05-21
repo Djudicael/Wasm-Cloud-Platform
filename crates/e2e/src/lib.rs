@@ -66,7 +66,7 @@ pub mod verifier;
 pub mod chaos;
 
 // Re-export the primary public API types for convenience.
-pub use fixture::{ClusterFixture, NodeProcess};
+pub use fixture::{ClusterFixture, NatsContainer, NodeProcess};
 pub use injector::InjectionResult;
 pub use reporter::{TestReport, TestResult};
 pub use verifier::{CheckResult, VerificationResult};

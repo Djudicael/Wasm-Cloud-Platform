@@ -12,6 +12,7 @@ use testcontainers::{core::ContainerPort, runners::AsyncRunner, GenericImage, Im
 use tokio::time::sleep;
 
 #[tokio::test]
+#[ignore = "full-platform smoke test; requires long-running artifact hosting and acceptance-style deployment flow"]
 async fn test_full_platform_e2e() {
     // 1. Build the Wasm app
     println!("Building hello-axum to wasm32-wasi...");
@@ -77,7 +78,6 @@ async fn test_full_platform_e2e() {
 
     let proxy_port = 8080;
     let admin_port = 9090;
-    let test_artifact_port = 9091; // Test's artifact server port
     let node_artifact_port = 19091; // Node's artifact server (different from test's)
 
     println!("Starting wasm-node process in background...");

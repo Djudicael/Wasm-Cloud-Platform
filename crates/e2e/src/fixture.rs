@@ -12,6 +12,11 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 use tempfile::TempDir;
+use testcontainers::{
+    core::{ContainerPort, WaitFor},
+    runners::AsyncRunner,
+    ContainerAsync, GenericImage, ImageExt,
+};
 
 use tokio::time::sleep;
 use tracing::{info, warn};
@@ -426,32 +431,90 @@ impl Drop for NodeProcess {
 /// process that created the container. With `--network=host`, NATS binds
 /// directly to the host port and any child process (like `wasm-node`) can
 /// connect.
+enum NatsContainerBackend {
+    Testcontainers(ContainerAsync<GenericImage>),
+    HostRuntime {
+        runtime: String,
+        container_id: String,
+    },
+}
+
 pub struct NatsContainer {
     pub url: String,
     pub port: u16,
-    container_id: String,
+    backend: NatsContainerBackend,
 }
 
 impl NatsContainer {
-    /// Start a NATS container with JetStream enabled on the given host port.
-    ///
-    /// Runs `podman run -d --network=host` so that the NATS server binds
-    /// directly to the host's network namespace. The `--port` flag tells
-    /// NATS to listen on the requested port instead of the default 4222.
-    pub async fn start(port: u16) -> Result<Self, String> {
-        setup_container_runtime();
+    fn should_use_host_runtime_fallback() -> bool {
+        std::env::var("DOCKER_HOST")
+            .map(|host| host.contains("podman.sock"))
+            .unwrap_or(false)
+    }
 
-        info!(port, "starting NATS container on host port");
+    async fn start_with_testcontainers(_port_hint: u16) -> Result<Self, String> {
+        let image = GenericImage::new("nats", "2.10-alpine")
+            .with_exposed_port(ContainerPort::Tcp(4222))
+            .with_wait_for(WaitFor::message_on_stdout("Server is ready"))
+            .with_cmd(["-js"]);
+
+        let container = image
+            .start()
+            .await
+            .map_err(|e| format!("testcontainers failed to start NATS: {e}"))?;
+        let host = container
+            .get_host()
+            .await
+            .map_err(|e| format!("testcontainers failed to resolve NATS host: {e}"))?
+            .to_string();
+        let port = container
+            .get_host_port_ipv4(4222)
+            .await
+            .map_err(|e| format!("testcontainers failed to resolve NATS port: {e}"))?;
+
+        crate::helpers::wait_for_tcp(&host, port, Duration::from_secs(10))
+            .await
+            .map_err(|e| format!("NATS via testcontainers not reachable on {host}:{port}: {e}"))?;
+
+        let url = format!("nats://{host}:{port}");
+        info!(%url, "NATS container ready via testcontainers");
+        Ok(NatsContainer {
+            url,
+            port,
+            backend: NatsContainerBackend::Testcontainers(container),
+        })
+    }
+
+    async fn start_with_host_runtime(port: u16) -> Result<Self, String> {
+        let runtime = if Command::new("podman")
+            .arg("--version")
+            .output()
+            .map(|output| output.status.success())
+            .unwrap_or(false)
+        {
+            "podman"
+        } else if Command::new("docker")
+            .arg("--version")
+            .output()
+            .map(|output| output.status.success())
+            .unwrap_or(false)
+        {
+            "docker"
+        } else {
+            return Err(
+                "neither podman nor docker is available for host-network NATS fallback".to_string(),
+            );
+        };
+
+        info!(port, runtime, "starting NATS container on host port");
 
         let container_name = format!("nats-chaos-{port}");
 
-        // Remove any leftover container with the same name from a previous run
-        let _ = Command::new("podman")
+        let _ = Command::new(runtime)
             .args(["rm", "-f", &container_name])
             .output();
 
-        // Run NATS directly via podman with --network=host.
-        let output = Command::new("podman")
+        let output = Command::new(runtime)
             .args([
                 "run",
                 "-d",
@@ -464,25 +527,23 @@ impl NatsContainer {
                 &port.to_string(),
             ])
             .output()
-            .map_err(|e| format!("failed to run podman: {e}"))?;
+            .map_err(|e| format!("failed to run {runtime}: {e}"))?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(format!("podman run failed: {stderr}"));
+            return Err(format!("{runtime} run failed: {stderr}"));
         }
 
         let container_id = String::from_utf8_lossy(&output.stdout).trim().to_string();
 
-        info!(port, %container_id, "NATS container started, waiting for readiness");
+        info!(port, %container_id, runtime, "NATS container started, waiting for readiness");
 
-        // Wait for NATS to be ready
         sleep(Duration::from_secs(2)).await;
 
         crate::helpers::wait_for_tcp("127.0.0.1", port, Duration::from_secs(10))
             .await
             .map_err(|e| format!("NATS not reachable on port {port}: {e}"))?;
 
-        // Double-check: verify the port is still listening after a brief pause
         sleep(Duration::from_millis(500)).await;
         if let Err(e) =
             crate::helpers::wait_for_tcp("127.0.0.1", port, Duration::from_secs(5)).await
@@ -492,13 +553,40 @@ impl NatsContainer {
 
         let url = format!("nats://127.0.0.1:{port}");
 
-        info!(port, url, "NATS container ready");
+        info!(
+            port,
+            url, runtime, "NATS container ready via host-network fallback"
+        );
 
         Ok(NatsContainer {
             url,
             port,
-            container_id,
+            backend: NatsContainerBackend::HostRuntime {
+                runtime: runtime.to_string(),
+                container_id,
+            },
         })
+    }
+
+    /// Start a NATS container with JetStream enabled on the given host port.
+    ///
+    /// Prefers `testcontainers` for normal Docker-style environments.
+    /// Falls back to a direct host-network container launch for WSL/rootless
+    /// Podman where port mapping is not reliably reachable by child processes.
+    pub async fn start(port: u16) -> Result<Self, String> {
+        setup_container_runtime();
+
+        if Self::should_use_host_runtime_fallback() {
+            return Self::start_with_host_runtime(port).await;
+        }
+
+        match Self::start_with_testcontainers(port).await {
+            Ok(container) => Ok(container),
+            Err(error) => {
+                warn!(port, error = %error, "testcontainers NATS startup failed, falling back to host-network container runtime");
+                Self::start_with_host_runtime(port).await
+            }
+        }
     }
 
     /// Connect to this NATS instance and return a `NatsBus`.
@@ -512,13 +600,23 @@ impl NatsContainer {
 
 impl Drop for NatsContainer {
     fn drop(&mut self) {
-        let container_id = self.container_id.clone();
-        match Command::new("podman")
-            .args(["rm", "-f", &container_id])
-            .output()
-        {
-            Ok(_) => info!(%container_id, "NATS container removed"),
-            Err(e) => warn!(%container_id, error = %e, "failed to remove NATS container"),
+        match &self.backend {
+            NatsContainerBackend::Testcontainers(container) => {
+                let _ = container.id();
+                info!("NATS testcontainers backend dropped");
+            }
+            NatsContainerBackend::HostRuntime {
+                runtime,
+                container_id,
+            } => match Command::new(runtime)
+                .args(["rm", "-f", container_id])
+                .output()
+            {
+                Ok(_) => info!(%container_id, runtime, "NATS container removed"),
+                Err(e) => {
+                    warn!(%container_id, runtime, error = %e, "failed to remove NATS container")
+                }
+            },
         }
     }
 }
