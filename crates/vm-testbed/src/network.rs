@@ -35,6 +35,7 @@
 //! Run with `sudo` or grant the capability to your test binary.
 
 use std::process::Command;
+use std::str::FromStr;
 use tracing::{debug, info};
 
 /// Default bridge name for the Wasm testbed network.
@@ -61,6 +62,8 @@ pub enum NetworkError {
     TapExists(String),
     #[error("IP allocation exhausted in subnet {0}")]
     IpExhausted(String),
+    #[error("Invalid subnet or CIDR: {0}")]
+    InvalidSubnet(String),
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 }
@@ -274,12 +277,15 @@ pub fn allocate_ip(subnet_prefix: &str, index: u8) -> Result<String> {
     if index >= 250 {
         return Err(NetworkError::IpExhausted(subnet_prefix.to_string()));
     }
-    let ip = format!(
-        "{}.{}",
-        subnet_prefix.trim_end_matches(".0"),
+    let network = parse_ipv4_network(subnet_prefix)?;
+    let octets = network.octets();
+    Ok(format!(
+        "{}.{}.{}.{}",
+        octets[0],
+        octets[1],
+        octets[2],
         VM_IP_BASE + index
-    );
-    Ok(ip)
+    ))
 }
 
 /// Generate a guest MAC address from an index.
@@ -297,10 +303,7 @@ pub fn guest_mac(index: u8) -> String {
 pub fn setup_network(bridge_name: &str, bridge_ip: &str, enable_nat_outbound: bool) -> Result<()> {
     create_bridge(bridge_name, bridge_ip)?;
     if enable_nat_outbound {
-        let subnet = bridge_ip
-            .rsplit_once('/')
-            .map(|(ip, _)| format!("{}/24", ip.trim_end_matches(".1").trim_end_matches(".")))
-            .unwrap_or_else(|| "172.20.0.0/24".to_string());
+        let subnet = derive_subnet_from_bridge_cidr(bridge_ip)?;
         enable_nat(bridge_name, &subnet)?;
     }
     Ok(())
@@ -311,6 +314,51 @@ pub fn teardown_network(bridge_name: &str, subnet: &str) -> Result<()> {
     let _ = disable_nat(bridge_name, subnet);
     remove_bridge(bridge_name)?;
     Ok(())
+}
+
+fn parse_ipv4_network(input: &str) -> Result<std::net::Ipv4Addr> {
+    let trimmed = input.trim();
+    let ip = match trimmed.split_once('/') {
+        Some((ip, prefix)) => {
+            let addr = std::net::Ipv4Addr::from_str(ip)
+                .map_err(|_| NetworkError::InvalidSubnet(trimmed.to_string()))?;
+            let prefix_len = prefix
+                .parse::<u8>()
+                .ok()
+                .filter(|len| *len <= 32)
+                .ok_or_else(|| NetworkError::InvalidSubnet(trimmed.to_string()))?;
+            apply_prefix_mask(addr, prefix_len)
+        }
+        None => std::net::Ipv4Addr::from_str(trimmed)
+            .map_err(|_| NetworkError::InvalidSubnet(trimmed.to_string()))?,
+    };
+    Ok(ip)
+}
+
+fn derive_subnet_from_bridge_cidr(bridge_cidr: &str) -> Result<String> {
+    let (ip, prefix) = bridge_cidr
+        .trim()
+        .split_once('/')
+        .ok_or_else(|| NetworkError::InvalidSubnet(bridge_cidr.to_string()))?;
+    let addr = std::net::Ipv4Addr::from_str(ip)
+        .map_err(|_| NetworkError::InvalidSubnet(bridge_cidr.to_string()))?;
+    let prefix_len = prefix
+        .parse::<u8>()
+        .ok()
+        .filter(|len| *len <= 32)
+        .ok_or_else(|| NetworkError::InvalidSubnet(bridge_cidr.to_string()))?;
+    let network = apply_prefix_mask(addr, prefix_len);
+    Ok(format!("{network}/{prefix_len}"))
+}
+
+fn apply_prefix_mask(addr: std::net::Ipv4Addr, prefix_len: u8) -> std::net::Ipv4Addr {
+    let raw = u32::from(addr);
+    let mask = if prefix_len == 0 {
+        0
+    } else {
+        u32::MAX << (32 - prefix_len)
+    };
+    std::net::Ipv4Addr::from(raw & mask)
 }
 
 #[cfg(test)]
@@ -326,9 +374,44 @@ mod tests {
 
     #[test]
     fn test_allocate_ip() {
-        let ip = allocate_ip("172.20.0.0", 0).unwrap();
+        let ip = allocate_ip("172.20.0.0/24", 0).unwrap();
         assert_eq!(ip, "172.20.0.2");
-        let ip = allocate_ip("172.20.0.0", 5).unwrap();
+        let ip = allocate_ip("172.20.0.0/24", 5).unwrap();
         assert_eq!(ip, "172.20.0.7");
+    }
+
+    #[test]
+    fn test_allocate_ip_accepts_bare_network_address() {
+        let ip = allocate_ip("172.20.0.0", 1).unwrap();
+        assert_eq!(ip, "172.20.0.3");
+    }
+
+    #[test]
+    fn test_allocate_ip_rejects_invalid_subnet() {
+        assert!(matches!(
+            allocate_ip("172.20.bad.0/24", 0),
+            Err(NetworkError::InvalidSubnet(_))
+        ));
+    }
+
+    #[test]
+    fn test_derive_subnet_from_bridge_cidr_uses_real_prefix_mask() {
+        let subnet = derive_subnet_from_bridge_cidr("172.20.0.1/24").unwrap();
+        assert_eq!(subnet, "172.20.0.0/24");
+
+        let subnet = derive_subnet_from_bridge_cidr("10.42.7.129/20").unwrap();
+        assert_eq!(subnet, "10.42.0.0/20");
+    }
+
+    #[test]
+    fn test_derive_subnet_from_bridge_cidr_rejects_invalid_input() {
+        assert!(matches!(
+            derive_subnet_from_bridge_cidr("172.20.0.1"),
+            Err(NetworkError::InvalidSubnet(_))
+        ));
+        assert!(matches!(
+            derive_subnet_from_bridge_cidr("172.20.0.1/99"),
+            Err(NetworkError::InvalidSubnet(_))
+        ));
     }
 }
