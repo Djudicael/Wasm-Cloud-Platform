@@ -2,6 +2,7 @@
 mod test_helpers {
     use crate::{events::Event, NatsBus};
     use common::types::{AppConfig, AppId};
+    use std::net::TcpListener;
     use std::sync::{
         atomic::{AtomicUsize, Ordering},
         Arc,
@@ -30,6 +31,14 @@ mod test_helpers {
         if std::env::var("TESTCONTAINERS_RYUK_DISABLED").is_err() {
             std::env::set_var("TESTCONTAINERS_RYUK_DISABLED", "true");
         }
+    }
+
+    fn reserve_host_port() -> u16 {
+        TcpListener::bind("127.0.0.1:0")
+            .expect("bind ephemeral test port")
+            .local_addr()
+            .expect("read ephemeral test port")
+            .port()
     }
 
     #[tokio::test]
@@ -234,6 +243,285 @@ mod test_helpers {
             }
             _ => panic!("Received unexpected event variant from JetStream redelivery"),
         }
+    }
+
+    #[tokio::test]
+    async fn test_malformed_message_does_not_block_other_filtered_consumers() {
+        setup_container_runtime();
+
+        let image = GenericImage::new("nats", "latest")
+            .with_mapped_port(4226, ContainerPort::Tcp(4222))
+            .with_cmd(vec!["-js"]);
+        let _container = image.start().await.expect("Failed to start NATS container");
+
+        tokio::time::sleep(Duration::from_secs(2)).await;
+
+        let url = "nats://127.0.0.1:4226".to_string();
+        let bus = NatsBus::connect(&url)
+            .await
+            .expect("Failed to connect to NATS");
+        bus.setup_jetstream().await.unwrap();
+
+        let (secret_tx, mut secret_rx) = mpsc::channel(4);
+        let malformed_attempts = Arc::new(AtomicUsize::new(0));
+        let malformed_attempts_for_handler = malformed_attempts.clone();
+
+        let secret_consumer = format!("secret_consumer_{}", uuid::Uuid::new_v4().simple());
+        bus.subscribe_durable(
+            "CONTROL",
+            &secret_consumer,
+            Some("secrets.update.>"),
+            move |event| {
+                let secret_tx = secret_tx.clone();
+                async move {
+                    let _ = secret_tx.send(event).await;
+                    Ok::<(), common::error::PlatformError>(())
+                }
+            },
+        )
+        .await
+        .unwrap();
+
+        let malformed_consumer = format!("malformed_consumer_{}", uuid::Uuid::new_v4().simple());
+        bus.subscribe_durable(
+            "CONTROL",
+            &malformed_consumer,
+            Some("config.update.>"),
+            move |_event| {
+                let malformed_attempts = malformed_attempts_for_handler.clone();
+                async move {
+                    malformed_attempts.fetch_add(1, Ordering::SeqCst);
+                    Ok::<(), common::error::PlatformError>(())
+                }
+            },
+        )
+        .await
+        .unwrap();
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        bus.client()
+            .publish(
+                "config.update.bad-app:v1".to_string(),
+                b"{not-json".to_vec().into(),
+            )
+            .await
+            .unwrap();
+
+        let secret_event = Event::SecretUpdate {
+            app_id: AppId::new("good-app", "v1"),
+            key: "API_KEY".to_string(),
+            secret: secrets::SecretTransportEnvelope::plaintext_utf8("super-secret"),
+        };
+        bus.publish(&secret_event).await.unwrap();
+
+        let received = timeout(Duration::from_secs(5), secret_rx.recv())
+            .await
+            .expect("Timed out waiting for valid secret update delivery")
+            .expect("Secret consumer channel closed");
+
+        match received {
+            Event::SecretUpdate { app_id, key, .. } => {
+                assert_eq!(app_id.0, "good-app:v1");
+                assert_eq!(key, "API_KEY");
+            }
+            other => panic!("Expected SecretUpdate event, got {other:?}"),
+        }
+
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        assert_eq!(
+            malformed_attempts.load(Ordering::SeqCst),
+            0,
+            "malformed payload should not reach the typed handler"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_control_event_is_handled_exactly_once_by_intended_filtered_consumer() {
+        setup_container_runtime();
+
+        let host_port = reserve_host_port();
+
+        let image = GenericImage::new("nats", "latest")
+            .with_mapped_port(host_port, ContainerPort::Tcp(4222))
+            .with_cmd(vec!["-js"]);
+        let _container = image.start().await.expect("Failed to start NATS container");
+
+        tokio::time::sleep(Duration::from_secs(2)).await;
+
+        let url = format!("nats://127.0.0.1:{host_port}");
+        let bus = NatsBus::connect(&url)
+            .await
+            .expect("Failed to connect to NATS");
+        bus.setup_jetstream().await.unwrap();
+
+        let intended_hits = Arc::new(AtomicUsize::new(0));
+        let sibling_hits = Arc::new(AtomicUsize::new(0));
+        let (tx, mut rx) = mpsc::channel(1);
+
+        let secret_consumer = format!("control_secret_{}", uuid::Uuid::new_v4().simple());
+        let intended_hits_for_handler = intended_hits.clone();
+        bus.subscribe_durable(
+            "CONTROL",
+            &secret_consumer,
+            Some("secrets.update.>"),
+            move |event| {
+                let intended_hits = intended_hits_for_handler.clone();
+                let tx = tx.clone();
+                async move {
+                    intended_hits.fetch_add(1, Ordering::SeqCst);
+                    let _ = tx.send(event).await;
+                    Ok::<(), common::error::PlatformError>(())
+                }
+            },
+        )
+        .await
+        .unwrap();
+
+        for filter in [
+            "instance.ready.>",
+            "instance.dead.>",
+            "config.update.>",
+            "gateway.config.>",
+        ] {
+            let sibling_consumer = format!(
+                "control_sibling_{}_{}",
+                filter.replace('.', "_").replace('>', "all"),
+                uuid::Uuid::new_v4().simple()
+            );
+            let sibling_hits_for_handler = sibling_hits.clone();
+            bus.subscribe_durable("CONTROL", &sibling_consumer, Some(filter), move |_event| {
+                let sibling_hits = sibling_hits_for_handler.clone();
+                async move {
+                    sibling_hits.fetch_add(1, Ordering::SeqCst);
+                    Ok::<(), common::error::PlatformError>(())
+                }
+            })
+            .await
+            .unwrap();
+        }
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let event = Event::SecretUpdate {
+            app_id: AppId::new("exact-control", "v1"),
+            key: "TOKEN".to_string(),
+            secret: secrets::SecretTransportEnvelope::plaintext_utf8("value"),
+        };
+        bus.publish(&event).await.unwrap();
+
+        let received = timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("Timed out waiting for control event delivery")
+            .expect("Control consumer channel closed");
+        match received {
+            Event::SecretUpdate { app_id, key, .. } => {
+                assert_eq!(app_id.0, "exact-control:v1");
+                assert_eq!(key, "TOKEN");
+            }
+            other => panic!("Expected SecretUpdate event, got {other:?}"),
+        }
+
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        assert_eq!(intended_hits.load(Ordering::SeqCst), 1);
+        assert_eq!(sibling_hits.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn test_node_event_is_handled_exactly_once_by_intended_filtered_consumer() {
+        setup_container_runtime();
+
+        let host_port = reserve_host_port();
+
+        let image = GenericImage::new("nats", "latest")
+            .with_mapped_port(host_port, ContainerPort::Tcp(4222))
+            .with_cmd(vec!["-js"]);
+        let _container = image.start().await.expect("Failed to start NATS container");
+
+        tokio::time::sleep(Duration::from_secs(2)).await;
+
+        let url = format!("nats://127.0.0.1:{host_port}");
+        let bus = NatsBus::connect(&url)
+            .await
+            .expect("Failed to connect to NATS");
+        bus.setup_jetstream().await.unwrap();
+
+        let intended_hits = Arc::new(AtomicUsize::new(0));
+        let sibling_hits = Arc::new(AtomicUsize::new(0));
+        let (tx, mut rx) = mpsc::channel(1);
+
+        let snapshot_consumer = format!("node_snapshot_{}", uuid::Uuid::new_v4().simple());
+        let intended_hits_for_handler = intended_hits.clone();
+        bus.subscribe_durable(
+            "NODE",
+            &snapshot_consumer,
+            Some("cluster.snapshot.>"),
+            move |event| {
+                let intended_hits = intended_hits_for_handler.clone();
+                let tx = tx.clone();
+                async move {
+                    intended_hits.fetch_add(1, Ordering::SeqCst);
+                    let _ = tx.send(event).await;
+                    Ok::<(), common::error::PlatformError>(())
+                }
+            },
+        )
+        .await
+        .unwrap();
+
+        for filter in ["node.load.>", "cluster.node_joined.>"] {
+            let sibling_consumer = format!(
+                "node_sibling_{}_{}",
+                filter.replace('.', "_").replace('>', "all"),
+                uuid::Uuid::new_v4().simple()
+            );
+            let sibling_hits_for_handler = sibling_hits.clone();
+            bus.subscribe_durable("NODE", &sibling_consumer, Some(filter), move |_event| {
+                let sibling_hits = sibling_hits_for_handler.clone();
+                async move {
+                    sibling_hits.fetch_add(1, Ordering::SeqCst);
+                    Ok::<(), common::error::PlatformError>(())
+                }
+            })
+            .await
+            .unwrap();
+        }
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let event = Event::StateSnapshot {
+            for_node_id: "fresh-node".to_string(),
+            bootstrap_session_id: "session-1".to_string(),
+            bootstrap_nonce: "nonce-1".to_string(),
+            configs: vec![],
+            routes: vec![],
+            encrypted_secrets: vec![],
+            gateway_configs: vec![],
+            api_keys: vec![],
+            artifact_fetches: vec![],
+            artifact_hashes: vec![],
+        };
+        bus.publish(&event).await.unwrap();
+
+        let received = timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("Timed out waiting for node event delivery")
+            .expect("Node consumer channel closed");
+        match received {
+            Event::StateSnapshot {
+                for_node_id,
+                bootstrap_session_id,
+                ..
+            } => {
+                assert_eq!(for_node_id, "fresh-node");
+                assert_eq!(bootstrap_session_id, "session-1");
+            }
+            other => panic!("Expected StateSnapshot event, got {other:?}"),
+        }
+
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        assert_eq!(intended_hits.load(Ordering::SeqCst), 1);
+        assert_eq!(sibling_hits.load(Ordering::SeqCst), 0);
     }
 
     #[test]
