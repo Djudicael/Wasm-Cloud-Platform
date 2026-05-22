@@ -173,6 +173,12 @@ impl CircuitBreakerManager {
     }
 }
 
+impl Default for CircuitBreakerManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

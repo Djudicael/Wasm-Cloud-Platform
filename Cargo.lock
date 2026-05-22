@@ -4379,6 +4379,7 @@ dependencies = [
  "chrono",
  "common",
  "dashmap",
+ "e2e",
  "futures",
  "hex",
  "http 1.4.0",

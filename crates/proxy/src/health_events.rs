@@ -3,6 +3,9 @@ use common::health::NodeHealthStatus;
 use messaging::events::Event;
 use messaging::NatsBus;
 use std::sync::Arc;
+use std::time::Duration;
+
+const HEALTH_EVENT_PUBLISH_FLUSH_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Publishes health state changes via NATS.
 pub struct HealthEventPublisher {
@@ -52,8 +55,9 @@ impl HealthEventPublisher {
                 accepting_requests,
             };
 
-            if let Err(e) = self.bus.publish(&event).await {
+            if let Err(e) = self.publish_and_confirm(&event).await {
                 tracing::warn!(error = %e, "failed to publish health change event");
+                return;
             }
 
             *last = new_status;
@@ -88,6 +92,32 @@ impl HealthEventPublisher {
         if let Err(e) = self.bus.publish(&event).await {
             tracing::debug!(error = %e, "failed to publish health snapshot");
         }
+    }
+
+    async fn publish_and_confirm(&self, event: &Event) -> Result<(), String> {
+        let connection_state = self.bus.client().connection_state();
+        if connection_state != async_nats::connection::State::Connected {
+            return Err(format!(
+                "NATS client is {connection_state}; skipping health transition publish"
+            ));
+        }
+
+        self.bus.publish(event).await.map_err(|e| e.to_string())?;
+
+        tokio::time::timeout(
+            HEALTH_EVENT_PUBLISH_FLUSH_TIMEOUT,
+            self.bus.client().flush(),
+        )
+        .await
+        .map_err(|_| {
+            format!(
+                "timed out waiting {:?} for NATS publish confirmation",
+                HEALTH_EVENT_PUBLISH_FLUSH_TIMEOUT
+            )
+        })?
+        .map_err(|e| format!("failed to confirm NATS publish: {e}"))?;
+
+        Ok(())
     }
 }
 
@@ -172,4 +202,114 @@ pub fn start_health_loop(
             }
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use e2e::NatsContainer;
+    use std::net::TcpListener;
+
+    fn free_port() -> u16 {
+        TcpListener::bind("127.0.0.1:0")
+            .expect("bind ephemeral test port")
+            .local_addr()
+            .expect("read ephemeral test port")
+            .port()
+    }
+
+    #[tokio::test]
+    async fn test_health_transition_retries_after_publish_failure() {
+        let nats = NatsContainer::start(free_port())
+            .await
+            .expect("start NATS test container");
+
+        let mut failed_bus = nats.connect().await.expect("connect failed bus");
+        failed_bus.set_node_id("health-test-node".to_string());
+
+        let publisher = HealthEventPublisher::new(failed_bus, "health-test-node".to_string());
+
+        nats.stop().expect("stop NATS to force publish failure");
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while publisher.bus.client().connection_state()
+                == async_nats::connection::State::Connected
+            {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .expect("wait for disconnected NATS client state");
+
+        publisher
+            .on_status_change(
+                NodeHealthStatus::Degraded,
+                Some("nats unavailable".to_string()),
+                3,
+                false,
+            )
+            .await;
+
+        assert_eq!(
+            *publisher.last_status.read().await,
+            NodeHealthStatus::Healthy,
+            "failed publish must not advance the cached last_status"
+        );
+
+        nats.resume()
+            .await
+            .expect("restart NATS after forced failure");
+
+        let observer_bus = nats.connect().await.expect("connect observer bus");
+        let wait_for_event = tokio::spawn(async move {
+            observer_bus
+                .wait_for_event("cluster.health.changed.>")
+                .await
+        });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let mut recovered_bus = nats.connect().await.expect("connect recovered bus");
+        recovered_bus.set_node_id("health-test-node".to_string());
+        let recovered_publisher = HealthEventPublisher {
+            bus: recovered_bus,
+            node_id: "health-test-node".to_string(),
+            last_status: Arc::clone(&publisher.last_status),
+        };
+
+        recovered_publisher
+            .on_status_change(
+                NodeHealthStatus::Degraded,
+                Some("nats recovered".to_string()),
+                3,
+                false,
+            )
+            .await;
+
+        let event = tokio::time::timeout(Duration::from_secs(5), wait_for_event)
+            .await
+            .expect("wait for health event task")
+            .expect("health event task join")
+            .expect("receive health event");
+
+        match event {
+            Event::NodeHealthChanged {
+                node_id,
+                status,
+                active_instances,
+                accepting_requests,
+                ..
+            } => {
+                assert_eq!(node_id, "health-test-node");
+                assert_eq!(status, "degraded");
+                assert_eq!(active_instances, 3);
+                assert!(!accepting_requests);
+            }
+            other => panic!("expected NodeHealthChanged event, got {other:?}"),
+        }
+
+        assert_eq!(
+            *recovered_publisher.last_status.read().await,
+            NodeHealthStatus::Degraded,
+            "successful publish should advance the cached last_status"
+        );
+    }
 }

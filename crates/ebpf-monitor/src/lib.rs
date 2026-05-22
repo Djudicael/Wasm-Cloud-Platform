@@ -500,7 +500,13 @@ mod tests {
     async fn test_fallback_dispatcher_updates_namespace_map_port_bindings() {
         let metrics = make_test_metrics();
         let dispatcher = noop_dispatcher(metrics.clone(), "test-node".to_string());
-        let handle = init(MonitorConfig::default(), metrics, dispatcher, std::process::id()).await;
+        let handle = init(
+            MonitorConfig::default(),
+            metrics,
+            dispatcher,
+            std::process::id(),
+        )
+        .await;
 
         handle
             .namespace_map

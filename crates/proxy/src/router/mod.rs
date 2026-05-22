@@ -76,7 +76,7 @@ impl HostRouter {
         });
 
         // Sort by path_prefix length descending (longest first) for efficient lookup
-        entries.sort_by(|a, b| b.path_prefix.len().cmp(&a.path_prefix.len()));
+        entries.sort_by_key(|entry| std::cmp::Reverse(entry.path_prefix.len()));
     }
 
     /// Remove a route by host and path_prefix.
@@ -146,7 +146,7 @@ impl HostRouter {
                 }
                 // Sort each host's entries by prefix length (longest first)
                 for entries in map.values_mut() {
-                    entries.sort_by(|a, b| b.path_prefix.len().cmp(&a.path_prefix.len()));
+                    entries.sort_by_key(|entry| std::cmp::Reverse(entry.path_prefix.len()));
                 }
                 tracing::info!(count = map.len(), "routes loaded from storage");
             }

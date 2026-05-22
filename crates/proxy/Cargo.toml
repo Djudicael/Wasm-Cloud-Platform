@@ -34,3 +34,4 @@ sha2 = { workspace = true }
 tower = "0.5"
 rsa = "0.9"
 base64 = "0.22"
+e2e = { path = "../e2e" }

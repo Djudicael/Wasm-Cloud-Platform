@@ -555,15 +555,15 @@ impl<S: Subscriber> Layer<S> for SamplingLayer {
             Level::ERROR | Level::WARN => true, // Always emit
             Level::INFO => {
                 let count = self.info_counter.fetch_add(1, Ordering::Relaxed);
-                count % self.info_rate.load(Ordering::Relaxed) == 0
+                count.is_multiple_of(self.info_rate.load(Ordering::Relaxed))
             }
             Level::DEBUG => {
                 let count = self.debug_counter.fetch_add(1, Ordering::Relaxed);
-                count % self.debug_rate.load(Ordering::Relaxed) == 0
+                count.is_multiple_of(self.debug_rate.load(Ordering::Relaxed))
             }
             Level::TRACE => {
                 let count = self.trace_counter.fetch_add(1, Ordering::Relaxed);
-                count % self.trace_rate.load(Ordering::Relaxed) == 0
+                count.is_multiple_of(self.trace_rate.load(Ordering::Relaxed))
             }
         }
     }
@@ -680,13 +680,14 @@ impl AuditLogger {
         if self.tx.try_send(record).is_err() {
             use std::sync::atomic::Ordering;
             let dropped = self.dropped_count.fetch_add(1, Ordering::Relaxed) + 1;
-            if dropped == 1 || dropped % 1000 == 0 {
+            if dropped == 1 || dropped.is_multiple_of(1000) {
                 tracing::warn!("audit log record dropped ({} total dropped)", dropped);
             }
         }
     }
 
     /// Record an audit event with full details.
+    #[allow(clippy::too_many_arguments)]
     pub fn record_detailed(
         &self,
         action: &str,
@@ -712,7 +713,7 @@ impl AuditLogger {
         if self.tx.try_send(record).is_err() {
             use std::sync::atomic::Ordering;
             let dropped = self.dropped_count.fetch_add(1, Ordering::Relaxed) + 1;
-            if dropped == 1 || dropped % 1000 == 0 {
+            if dropped == 1 || dropped.is_multiple_of(1000) {
                 tracing::warn!("audit log record dropped ({} total dropped)", dropped);
             }
         }

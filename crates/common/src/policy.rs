@@ -102,7 +102,7 @@ pub struct InstancePolicy {
 
 /// Policy configuration stored in AppConfig (operator-facing).
 /// Resolved into InstancePolicy at spawn time.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct PolicyConfig {
     /// Network policy overrides. None = use defaults.
     #[serde(default)]
@@ -111,15 +111,6 @@ pub struct PolicyConfig {
     /// Filesystem policy overrides. None = use defaults.
     #[serde(default)]
     pub filesystem: Option<FilesystemPolicyConfig>,
-}
-
-impl Default for PolicyConfig {
-    fn default() -> Self {
-        PolicyConfig {
-            network: None,
-            filesystem: None,
-        }
-    }
 }
 
 /// Operator-facing network policy config (in TOML / deploy manifest).

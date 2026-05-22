@@ -185,8 +185,8 @@ impl AuthConfig {
     fn extract_bearer_token(header: Option<&str>) -> Option<String> {
         let header = header?;
         let prefix = "Bearer ";
-        if header.starts_with(prefix) {
-            let token = header[prefix.len()..].trim().to_string();
+        if let Some(stripped) = header.strip_prefix(prefix) {
+            let token = stripped.trim().to_string();
             if token.is_empty() {
                 None
             } else {

@@ -124,8 +124,7 @@ impl OidcProvider {
                 key.e.as_deref(),
             ) {
                 if kty == "RSA" {
-                    if let Ok(decoding_key) = jsonwebtoken::DecodingKey::from_rsa_components(n, e)
-                    {
+                    if let Ok(decoding_key) = jsonwebtoken::DecodingKey::from_rsa_components(n, e) {
                         keys.insert(kid.to_string(), decoding_key);
                     }
                 }
@@ -387,7 +386,10 @@ mod tests {
         assert_eq!(state.discovery_hits.load(Ordering::SeqCst), 1);
         assert_eq!(state.jwks_hits.load(Ordering::SeqCst), 1);
         assert_ne!(
-            discovery_url.replace("/.well-known/openid-configuration", "/protocol/openid-connect/certs"),
+            discovery_url.replace(
+                "/.well-known/openid-configuration",
+                "/protocol/openid-connect/certs"
+            ),
             jwks_url
         );
 

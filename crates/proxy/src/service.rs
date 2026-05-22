@@ -496,9 +496,7 @@ impl ProxyHttp for WasmProxy {
                 let original_uri = upstream_request.uri.to_string();
                 let path = upstream_request.uri.path().to_string();
                 let query = upstream_request.uri.query().map(str::to_string);
-                if let Some(new_uri) =
-                    strip_uri_prefix(&path, query.as_deref(), prefix)
-                {
+                if let Some(new_uri) = strip_uri_prefix(&path, query.as_deref(), prefix) {
                     let _ = upstream_request
                         .insert_header("X-Forwarded-Prefix", prefix.as_str())
                         .map(|_| ());

@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 /// Top-level configuration for a wasm-node.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct NodeConfig {
     #[serde(default)]
     pub node: NodeSection,
@@ -41,29 +41,6 @@ pub struct NodeConfig {
     pub gateway: GatewaySection,
 }
 
-impl Default for NodeConfig {
-    fn default() -> Self {
-        NodeConfig {
-            node: NodeSection::default(),
-            storage: StorageSection::default(),
-            nats: NatsSection::default(),
-            proxy: ProxySection::default(),
-            admin: AdminSection::default(),
-            auth: AuthSection::default(),
-            runtime: RuntimeSection::default(),
-            database: DatabaseSection::default(),
-            logging: LoggingSection::default(),
-            billing: BillingSection::default(),
-            gc: GcSection::default(),
-            rate_limit: RateLimitSection::default(),
-            ebpf: EbpfSection::default(),
-            dns: DnsSection::default(),
-            health: HealthSection::default(),
-            gateway: GatewaySection::default(),
-        }
-    }
-}
-
 fn default_true() -> bool {
     true
 }
@@ -86,35 +63,25 @@ impl Default for NodeSection {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum StorageOpenFailureMode {
     /// Preserve the unreadable DB by moving it aside, then fail startup.
+    #[default]
     QuarantineAndFail,
     /// Preserve the unreadable DB by moving it aside, then create a fresh DB.
     QuarantineAndRecreate,
 }
 
-impl Default for StorageOpenFailureMode {
-    fn default() -> Self {
-        StorageOpenFailureMode::QuarantineAndFail
-    }
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum StorageIntegrityFailureMode {
     /// Preserve the corrupted DB by moving it aside, then exit and require an operator restart.
+    #[default]
     QuarantineAndExit,
     /// Delete the corrupted DB on exit. This is destructive and should only be used
     /// when the operator explicitly opts into disposable local state.
     DeleteAndExit,
-}
-
-impl Default for StorageIntegrityFailureMode {
-    fn default() -> Self {
-        StorageIntegrityFailureMode::QuarantineAndExit
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1058,7 +1025,7 @@ impl Default for HealthSection {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct GatewaySection {
     #[serde(default)]
     pub oidc: Option<crate::types::OidcConfig>,
@@ -1114,16 +1081,6 @@ impl Default for GatewayCircuitBreakerSection {
         GatewayCircuitBreakerSection {
             default_failure_threshold: default_cb_failure_threshold(),
             default_reset_timeout_secs: default_cb_reset_timeout_secs(),
-        }
-    }
-}
-
-impl Default for GatewaySection {
-    fn default() -> Self {
-        GatewaySection {
-            oidc: None,
-            rate_limit: GatewayRateLimitSection::default(),
-            circuit_breaker: GatewayCircuitBreakerSection::default(),
         }
     }
 }

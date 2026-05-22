@@ -490,6 +490,33 @@ pub struct NatsContainer {
 }
 
 impl NatsContainer {
+    fn runtime_and_container_id(&self) -> Result<(&str, &str), String> {
+        match &self.backend {
+            NatsContainerBackend::Testcontainers(container) => {
+                let runtime = match detect_host_container_runtime() {
+                    Some(HostContainerRuntime::Podman) => "podman",
+                    Some(HostContainerRuntime::Docker) => "docker",
+                    None => return Err(
+                        "no container runtime available to control testcontainers NATS instance"
+                            .to_string(),
+                    ),
+                };
+                Ok((runtime, container.id()))
+            }
+            NatsContainerBackend::HostRuntime {
+                runtime,
+                container_id,
+            } => Ok((runtime.as_str(), container_id.as_str())),
+        }
+    }
+
+    fn host_for_waits(&self) -> &str {
+        self.url
+            .strip_prefix("nats://")
+            .and_then(|endpoint| endpoint.rsplit_once(':').map(|(host, _)| host))
+            .unwrap_or("127.0.0.1")
+    }
+
     fn should_use_host_runtime_fallback() -> bool {
         std::env::var("DOCKER_HOST")
             .map(|host| host.contains("podman.sock"))
@@ -630,6 +657,46 @@ impl NatsContainer {
             .await
             .map_err(|e| format!("failed to connect to NATS: {e}"))?;
         Ok(bus)
+    }
+
+    pub fn stop(&self) -> Result<(), String> {
+        let (runtime, container_id) = self.runtime_and_container_id()?;
+        let output = Command::new(runtime)
+            .args(["stop", container_id])
+            .output()
+            .map_err(|e| format!("failed to stop NATS container via {runtime}: {e}"))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(format!("{runtime} stop {container_id} failed: {stderr}"));
+        }
+
+        Ok(())
+    }
+
+    pub async fn resume(&self) -> Result<(), String> {
+        let (runtime, container_id) = self.runtime_and_container_id()?;
+        let output = Command::new(runtime)
+            .args(["start", container_id])
+            .output()
+            .map_err(|e| format!("failed to start NATS container via {runtime}: {e}"))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(format!("{runtime} start {container_id} failed: {stderr}"));
+        }
+
+        crate::helpers::wait_for_tcp(self.host_for_waits(), self.port, Duration::from_secs(10))
+            .await
+            .map_err(|e| {
+                format!(
+                    "resumed NATS not reachable on {}:{}: {e}",
+                    self.host_for_waits(),
+                    self.port
+                )
+            })?;
+
+        Ok(())
     }
 }
 

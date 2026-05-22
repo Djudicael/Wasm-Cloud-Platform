@@ -21,7 +21,7 @@ pub fn authorize_roles(
 ) -> bool {
     allowed_roles.iter().any(|required| {
         identity.roles.iter().any(|r| r == required)
-            || client_id.map_or(false, |cid| {
+            || client_id.is_some_and(|cid| {
                 identity
                     .roles
                     .iter()

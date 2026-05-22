@@ -418,7 +418,9 @@ pub async fn remove_nats_partition(nats_ip: &str, nats_port: u16) -> Result<(), 
 
     if !tc_output.status.success() {
         let stderr = String::from_utf8_lossy(&tc_output.stderr);
-        return Err(format!("failed to remove NATS partition. tc stderr: {stderr}"));
+        return Err(format!(
+            "failed to remove NATS partition. tc stderr: {stderr}"
+        ));
     }
 
     info!("NATS partition removed via tc clsact cleanup");

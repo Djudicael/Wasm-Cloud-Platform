@@ -527,7 +527,7 @@ pub fn validate_rotation_request(req: &RotateTokenRequest) -> Result<String, Str
     let new_token = req
         .new_token
         .clone()
-        .unwrap_or_else(|| AuthConfig::generate_token());
+        .unwrap_or_else(AuthConfig::generate_token);
 
     if new_token.len() < 16 {
         return Err(format!(
@@ -592,14 +592,15 @@ pub fn check_admin_tls_requirement(
     }
 
     if !admin_tls_configured {
-        return Err(format!(
+        return Err(
             "Admin API requires TLS when authentication is enabled, \
              but no TLS certificate is configured. \
              Either:\n\
              1. Configure admin.tls_cert / admin.tls_key (or shared proxy.tls_cert / proxy.tls_key) for the admin HTTPS listener\n\
              2. Set auth.require_tls = false (NOT recommended for production)\n\
              3. Disable authentication (auth.enabled = false, NOT recommended)"
-        ));
+                .to_string(),
+        );
     }
 
     Ok(())

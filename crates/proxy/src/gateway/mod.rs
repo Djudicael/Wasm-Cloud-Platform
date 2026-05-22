@@ -17,6 +17,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
+type CrossNamespaceAllowlist = Option<HashMap<(String, String), bool>>;
+
 /// The API gateway. Owns all middleware state and orchestrates the pipeline.
 pub struct Gateway {
     /// OIDC provider for JWT validation. None = auth disabled globally.
@@ -43,7 +45,7 @@ pub struct Gateway {
 
     /// Cross-namespace allowlist: (source_ns, target_ns) → allowed.
     /// Default: deny all cross-namespace calls.
-    pub cross_namespace_allowlist: Arc<RwLock<Option<HashMap<(String, String), bool>>>>,
+    pub cross_namespace_allowlist: Arc<RwLock<CrossNamespaceAllowlist>>,
 }
 
 impl Gateway {
