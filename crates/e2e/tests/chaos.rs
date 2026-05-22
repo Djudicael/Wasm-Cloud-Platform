@@ -10,7 +10,7 @@
 /// - Unix process signals (`SIGKILL`, `SIGTERM`) for process management
 /// - `tc` / `iptables` for network partition simulation (L5)
 /// - Podman or Docker for testcontainers (NATS containers)
-/// - `CAP_NET_ADMIN` for `tc netem` (L5 NATS partition tests)
+/// - `CAP_NET_ADMIN` for scoped `tc` / `iptables` NATS partition tests
 /// - The `wasm-node` binary built (`cargo build --bin wasm-node`)
 /// - The test WASM app built (`hello-axum` target `wasm32-wasip2`)
 ///
@@ -75,8 +75,8 @@
 /// failure, but as a safety net:
 ///
 /// ```bash
-/// # Remove tc netem rules from loopback
-/// sudo tc qdisc del dev lo root 2>/dev/null
+/// # Remove tc clsact rules from loopback
+/// sudo tc qdisc del dev lo clsact 2>/dev/null
 ///
 /// # Or flush iptables OUTPUT chain (use with caution)
 /// sudo iptables -F OUTPUT 2>/dev/null

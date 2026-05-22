@@ -307,6 +307,21 @@ enum LogWriter {
     File(Arc<std::sync::Mutex<std::fs::File>>),
 }
 
+fn build_log_writer(output: &LogOutput) -> Result<LogWriter, String> {
+    match output {
+        LogOutput::Stdout => Ok(LogWriter::Stdout),
+        LogOutput::Stderr => Ok(LogWriter::Stderr),
+        LogOutput::File { path } => {
+            let file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+                .map_err(|e| format!("failed to open log file {}: {}", path.display(), e))?;
+            Ok(LogWriter::File(Arc::new(std::sync::Mutex::new(file))))
+        }
+    }
+}
+
 impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogWriter {
     type Writer = LogWriterGuard<'a>;
     fn make_writer(&'a self) -> Self::Writer {
@@ -430,25 +445,10 @@ pub fn init_logging(config: &LoggingConfig) -> LogReloadHandle {
     let (filter_layer, reload_handle) = tracing_subscriber::reload::Layer::new(env_filter);
 
     // Writer selection
-    let writer = match &config.output {
-        LogOutput::Stdout => LogWriter::Stdout,
-        LogOutput::Stderr => LogWriter::Stderr,
-        LogOutput::File { path } => {
-            let file = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(path)
-                .unwrap_or_else(|e| {
-                    eprintln!(
-                        "failed to open log file {}: {}, falling back to stdout",
-                        path.display(),
-                        e
-                    );
-                    std::process::exit(1);
-                });
-            LogWriter::File(Arc::new(std::sync::Mutex::new(file)))
-        }
-    };
+    let writer = build_log_writer(&config.output).unwrap_or_else(|e| {
+        eprintln!("{e}; exiting");
+        std::process::exit(1);
+    });
 
     // Create the formatting layer
     match config.format {
@@ -917,6 +917,7 @@ impl RotatingFileWriter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     #[test]
     fn test_logging_config_default() {
@@ -970,7 +971,6 @@ mod tests {
 
     #[test]
     fn test_field_collector() {
-        use tracing::field::Visit;
         let mut collector = FieldCollector::default();
         // Insert directly to test the map behaviour.
         collector.fields.insert(
@@ -989,5 +989,27 @@ mod tests {
             collector.fields.get("status"),
             Some(&serde_json::Value::Number(200u64.into()))
         );
+    }
+
+    #[test]
+    fn test_build_log_writer_opens_file_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("app.log");
+
+        let writer = build_log_writer(&LogOutput::File { path: path.clone() });
+        assert!(writer.is_ok());
+        assert!(path.exists());
+    }
+
+    #[test]
+    fn test_build_log_writer_reports_file_open_failure() {
+        let path = PathBuf::from("/definitely-missing-parent-dir/child/app.log");
+
+        let err = match build_log_writer(&LogOutput::File { path: path.clone() }) {
+            Ok(_) => panic!("expected file-open failure"),
+            Err(err) => err,
+        };
+        assert!(err.contains("failed to open log file"));
+        assert!(err.contains(&path.display().to_string()));
     }
 }

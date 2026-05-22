@@ -22,8 +22,8 @@
 //! - **L2** (`inject_node_kill`): Uses `SIGKILL` (no Windows equivalent).
 //! - **L3** (`inject_redb_corruption`): Direct file I/O works everywhere, but
 //!   the node's integrity check only runs on startup (Unix process model).
-//! - **L5** (`inject_nats_partition`): Uses `tc netem` or `iptables`, which
-//!   require `CAP_NET_ADMIN` and a Linux kernel.
+//! - **L5** (`inject_nats_partition`): Uses scoped `tc` or `iptables` rules,
+//!   which require `CAP_NET_ADMIN` and a Linux kernel.
 //!
 //! Run these inside WSL or on a native Linux host.
 
@@ -252,12 +252,12 @@ pub fn inject_redb_corruption(db_path: &std::path::Path) -> Result<InjectionResu
 
 /// Inject an L5 failure: network partition (NATS disconnection).
 ///
-/// Uses `tc netem` (traffic control network emulator) to drop all packets
-/// to the NATS server. If `tc` fails (e.g., missing `CAP_NET_ADMIN`),
-/// falls back to `iptables` OUTPUT rule.
+/// Uses a flow-scoped network rule to drop only traffic to the target NATS
+/// endpoint. Prefers an `iptables` OUTPUT rule, and falls back to a `tc`
+/// `clsact` egress filter on loopback when iptables is unavailable.
 ///
 /// **Requires**: Linux host with `CAP_NET_ADMIN` (WSL or native Linux).
-/// The test runner must have permission to run `tc` and `iptables`.
+/// The test runner must have permission to run `iptables` and/or `tc`.
 ///
 /// After calling this, the node should:
 /// 1. Detect the NATS disconnection via `NatsHealthWatcher`
@@ -275,31 +275,7 @@ pub async fn inject_nats_partition(
     // Register cleanup handler in case the test is interrupted (Ctrl+C)
     register_cleanup(nats_ip, nats_port);
 
-    // Strategy 1: Use `tc qdisc` to add 100% packet loss on loopback
-    let tc_output = std::process::Command::new("tc")
-        .args([
-            "qdisc", "add", "dev", "lo", "root", "handle", "1:", "netem", "loss", "100%",
-        ])
-        .output();
-
-    match tc_output {
-        Ok(output) if output.status.success() => {
-            info!("NATS partition injected via tc netem (100% loss on lo)");
-            return Ok(InjectionResult {
-                injected_at: start,
-                description: format!("L5: NATS partition to {nats_ip}:{nats_port} (tc netem)"),
-            });
-        }
-        Ok(output) => {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            warn!(%stderr, "tc qdisc add failed, trying iptables fallback");
-        }
-        Err(e) => {
-            warn!(error = %e, "tc command not found, trying iptables fallback");
-        }
-    }
-
-    // Strategy 2: Use `iptables` to block outbound traffic to NATS
+    // Strategy 1: Use `iptables` to block only outbound traffic to NATS.
     let ipt_output = std::process::Command::new("iptables")
         .args([
             "-A",
@@ -314,22 +290,86 @@ pub async fn inject_nats_partition(
             "DROP",
         ])
         .output()
-        .map_err(|e| format!("failed to run iptables: {e}"))?;
+        .map_err(|e| format!("failed to run iptables: {e}"));
 
-    if !ipt_output.status.success() {
-        let stderr = String::from_utf8_lossy(&ipt_output.stderr);
+    match ipt_output {
+        Ok(output) if output.status.success() => {
+            info!("NATS partition injected via iptables DROP rule");
+            return Ok(InjectionResult {
+                injected_at: start,
+                description: format!("L5: NATS partition to {nats_ip}:{nats_port} (iptables)"),
+            });
+        }
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            warn!(%stderr, "iptables rule add failed, trying tc fallback");
+        }
+        Err(e) => {
+            warn!(error = %e, "iptables command not available, trying tc fallback");
+        }
+    }
+
+    // Strategy 2: Use `tc` clsact/flower to drop only the target NATS flow.
+    let tc_qdisc_output = std::process::Command::new("tc")
+        .args(["qdisc", "add", "dev", "lo", "clsact"])
+        .output();
+
+    match tc_qdisc_output {
+        Ok(output) if output.status.success() => {}
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if !stderr.contains("File exists") {
+                return Err(format!(
+                    "failed to inject NATS partition: iptables failed and tc clsact setup failed: {stderr}. \
+                     Ensure you have CAP_NET_ADMIN or run as root."
+                ));
+            }
+        }
+        Err(e) => {
+            return Err(format!(
+                "failed to inject NATS partition: iptables failed and tc is unavailable: {e}. \
+                 Ensure you have CAP_NET_ADMIN or run as root."
+            ));
+        }
+    }
+
+    let tc_filter_output = std::process::Command::new("tc")
+        .args([
+            "filter",
+            "add",
+            "dev",
+            "lo",
+            "egress",
+            "protocol",
+            "ip",
+            "pref",
+            "1",
+            "flower",
+            "ip_proto",
+            "tcp",
+            "dst_ip",
+            nats_ip,
+            "dst_port",
+            &nats_port.to_string(),
+            "action",
+            "drop",
+        ])
+        .output()
+        .map_err(|e| format!("failed to run tc filter add: {e}"))?;
+
+    if !tc_filter_output.status.success() {
+        let stderr = String::from_utf8_lossy(&tc_filter_output.stderr);
         return Err(format!(
-            "failed to inject NATS partition (both tc and iptables failed). \
-             tc stderr was logged above. iptables stderr: {stderr}. \
-             Ensure you have CAP_NET_ADMIN or run as root."
+            "failed to inject NATS partition (iptables and tc filter both failed). \
+             tc filter stderr: {stderr}. Ensure you have CAP_NET_ADMIN or run as root."
         ));
     }
 
-    info!("NATS partition injected via iptables DROP rule");
+    info!("NATS partition injected via tc clsact flower DROP filter");
 
     Ok(InjectionResult {
         injected_at: start,
-        description: format!("L5: NATS partition to {nats_ip}:{nats_port} (iptables)"),
+        description: format!("L5: NATS partition to {nats_ip}:{nats_port} (tc filter)"),
     })
 }
 
@@ -340,26 +380,7 @@ pub async fn inject_nats_partition(
 pub async fn remove_nats_partition(nats_ip: &str, nats_port: u16) -> Result<(), String> {
     info!(nats = %nats_ip, "removing NATS partition");
 
-    // Try removing tc qdisc first
-    let tc_result = std::process::Command::new("tc")
-        .args(["qdisc", "del", "dev", "lo", "root", "handle", "1:"])
-        .output();
-
-    match tc_result {
-        Ok(output) if output.status.success() => {
-            info!("NATS partition removed via tc qdisc del");
-            return Ok(());
-        }
-        Ok(output) => {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            warn!(%stderr, "tc qdisc del failed, trying iptables cleanup");
-        }
-        Err(e) => {
-            warn!(error = %e, "tc command not found for cleanup, trying iptables");
-        }
-    }
-
-    // Fall back to iptables rule removal
+    // Try removing the scoped iptables rule first.
     let ipt_output = std::process::Command::new("iptables")
         .args([
             "-D",
@@ -373,17 +394,34 @@ pub async fn remove_nats_partition(nats_ip: &str, nats_port: u16) -> Result<(), 
             "-j",
             "DROP",
         ])
-        .output()
-        .map_err(|e| format!("failed to remove iptables rule: {e}"))?;
+        .output();
 
-    if !ipt_output.status.success() {
-        let stderr = String::from_utf8_lossy(&ipt_output.stderr);
-        return Err(format!(
-            "failed to remove NATS partition. iptables stderr: {stderr}"
-        ));
+    match ipt_output {
+        Ok(output) if output.status.success() => {
+            info!("NATS partition removed via iptables DELETE");
+            return Ok(());
+        }
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            warn!(%stderr, "iptables cleanup failed, trying tc cleanup");
+        }
+        Err(e) => {
+            warn!(error = %e, "iptables command not available for cleanup, trying tc");
+        }
     }
 
-    info!("NATS partition removed via iptables DELETE");
+    // Fall back to removing the tc clsact qdisc and its scoped filters.
+    let tc_output = std::process::Command::new("tc")
+        .args(["qdisc", "del", "dev", "lo", "clsact"])
+        .output()
+        .map_err(|e| format!("failed to remove tc qdisc: {e}"))?;
+
+    if !tc_output.status.success() {
+        let stderr = String::from_utf8_lossy(&tc_output.stderr);
+        return Err(format!("failed to remove NATS partition. tc stderr: {stderr}"));
+    }
+
+    info!("NATS partition removed via tc clsact cleanup");
 
     Ok(())
 }
@@ -539,7 +577,7 @@ fn register_cleanup(nats_ip: &str, nats_port: u16) {
 
         // Best-effort cleanup of tc qdisc
         let _ = std::process::Command::new("tc")
-            .args(["qdisc", "del", "dev", "lo", "root", "handle", "1:"])
+            .args(["qdisc", "del", "dev", "lo", "clsact"])
             .output();
 
         // Best-effort cleanup of disk pressure file
@@ -554,6 +592,12 @@ fn register_cleanup(nats_ip: &str, nats_port: u16) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, OnceLock};
+
+    fn disk_latency_test_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
 
     #[test]
     fn test_injection_result_description() {
@@ -598,6 +642,8 @@ mod tests {
 
     #[test]
     fn test_remove_disk_latency_cleans_up() {
+        let _guard = disk_latency_test_lock().lock().unwrap();
+
         // Create the pressure file
         let temp_file = std::env::temp_dir().join("chaos_disk_pressure.dat");
         std::fs::write(&temp_file, b"test").unwrap();
@@ -610,6 +656,8 @@ mod tests {
 
     #[test]
     fn test_remove_disk_latency_idempotent() {
+        let _guard = disk_latency_test_lock().lock().unwrap();
+
         // Should not error if the file doesn't exist
         let temp_file = std::env::temp_dir().join("chaos_disk_pressure.dat");
         let _ = std::fs::remove_file(&temp_file);

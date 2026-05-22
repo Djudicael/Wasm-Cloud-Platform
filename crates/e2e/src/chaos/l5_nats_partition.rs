@@ -27,7 +27,8 @@
 //!
 //! ## WSL / Linux Requirement
 //!
-//! This test uses `tc netem` or `iptables` to simulate a network partition,
+//! This test uses a flow-scoped `iptables` rule or `tc` filter to simulate a
+//! network partition,
 //! which requires:
 //!
 //! - A Linux kernel with `tc` (traffic control) support
@@ -40,9 +41,9 @@
 //!
 //! ## Safety
 //!
-//! Network partition rules (`iptables` DROP rules or `tc qdisc`) are global
-//! to the host. If the test is interrupted (Ctrl+C) during a partition, the
-//! rules may persist and break subsequent tests or normal system operation.
+//! Network partition rules (`iptables` DROP rules or `tc` filters) still act
+//! at the host level. If the test is interrupted (Ctrl+C) during a partition,
+//! the rules may persist and break subsequent tests or normal system operation.
 //!
 //! To mitigate this:
 //!
@@ -57,8 +58,8 @@
 //! network administration tasks: configuring interfaces, setting up firewall
 //! rules, and manipulating traffic control (`tc`). In the context of these
 //! chaos tests, it is required because simulating a network partition
-//! involves injecting global `iptables` DROP rules or `tc netem` packet-loss
-//! policies on the host's loopback interface.
+//! involves injecting scoped `iptables` DROP rules or `tc` drop filters for
+//! the node's outbound NATS flow.
 //!
 //! ### Why this is safe in production CI
 //!
@@ -95,8 +96,8 @@
 //! connectivity with:
 //!
 //! ```bash
-//! # Remove tc netem rules
-//! sudo tc qdisc del dev lo root 2>/dev/null
+//! # Remove tc clsact rules
+//! sudo tc qdisc del dev lo clsact 2>/dev/null
 //!
 //! # Flush iptables OUTPUT chain (use with caution)
 //! sudo iptables -F OUTPUT 2>/dev/null
@@ -117,7 +118,7 @@ use tracing::{info, warn};
 ///
 /// 1. **Setup**: Start a single-node cluster and deploy `chaos-app:v1`
 /// 2. **Verify**: The app is running and serving traffic
-/// 3. **Inject**: Block NATS connectivity via `tc netem` or `iptables` (L5 failure)
+/// 3. **Inject**: Block only the node's NATS connectivity via scoped `iptables` or `tc`
 /// 4. **Verify**: The node enters degraded mode (NATS status = "disconnected")
 /// 5. **Verify**: The node still serves existing apps (degraded mode)
 /// 6. **Recover**: Remove the NATS partition (restore connectivity)
@@ -170,6 +171,7 @@ pub async fn test_l5_nats_partition_recovery() -> TestReport {
     // Extract owned addresses before any steps
     let admin_addr = fixture.node(0).admin_addr_str();
     let proxy_addr = fixture.node(0).proxy_addr_str();
+    let artifact_port = fixture.nodes[0].artifact_port;
     let nats_ip = "127.0.0.1";
     let nats_port = fixture.nats_container.port;
 
@@ -220,7 +222,7 @@ pub async fn test_l5_nats_partition_recovery() -> TestReport {
     }
 
     // ── Inject: Block NATS connectivity ─────────────────────────────
-    // Use tc netem or iptables to drop all packets to the NATS server.
+    // Use scoped iptables or tc rules to drop only the node's NATS traffic.
     // This simulates a network partition between the node and NATS.
     let step = match injector::inject_nats_partition(nats_ip, nats_port).await {
         Ok(result) => StepResult::pass("inject_nats_partition", &result.description),
@@ -261,6 +263,34 @@ pub async fn test_l5_nats_partition_recovery() -> TestReport {
             &format!("{}ms", ttr.as_millis()),
         ),
         Err(e) => StepResult::fail("verify_serves_in_degraded", &e),
+    };
+    report.add_step(step);
+
+    // Verify the admin API still responds to route reads while NATS is down.
+    let step = match verifier::verify_route_exists(&admin_addr, host).await {
+        Ok(ttr) => StepResult::pass(
+            "verify_admin_route_read_in_degraded",
+            &format!("{}ms", ttr.as_millis()),
+        ),
+        Err(e) => StepResult::fail("verify_admin_route_read_in_degraded", &e),
+    };
+    report.add_step(step);
+
+    // Verify the artifact server still accepts loopback uploads while only
+    // the node's NATS connection is partitioned.
+    let step = match async {
+        let wasm_path = helpers::find_hello_axum_wasm()?;
+        let sha256 = helpers::sha256_file(&wasm_path)?;
+        helpers::upload_artifact(artifact_port, &wasm_path, &sha256).await?;
+        Ok::<String, String>(sha256)
+    }
+    .await
+    {
+        Ok(sha256) => StepResult::pass(
+            "verify_artifact_upload_in_degraded",
+            &format!("uploaded {sha256}"),
+        ),
+        Err(e) => StepResult::fail("verify_artifact_upload_in_degraded", &e),
     };
     report.add_step(step);
 
