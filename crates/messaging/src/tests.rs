@@ -11,6 +11,7 @@ mod test_helpers {
     use testcontainers::{core::ContainerPort, runners::AsyncRunner, GenericImage, ImageExt};
     use tokio::sync::mpsc;
     use tokio::time::timeout;
+    use tokio_stream::StreamExt;
 
     /// Configure Podman socket if available (for WSL users)
     /// This ensures testcontainers can find Podman
@@ -243,6 +244,77 @@ mod test_helpers {
             }
             _ => panic!("Received unexpected event variant from JetStream redelivery"),
         }
+    }
+
+    #[tokio::test]
+    async fn test_poison_handler_failure_is_quarantined_after_retry_exhaustion() {
+        setup_container_runtime();
+
+        let host_port = reserve_host_port();
+        let image = GenericImage::new("nats", "latest")
+            .with_mapped_port(host_port, ContainerPort::Tcp(4222))
+            .with_cmd(vec!["-js"]);
+        let _container = image.start().await.expect("Failed to start NATS container");
+
+        tokio::time::sleep(Duration::from_secs(2)).await;
+
+        let url = format!("nats://127.0.0.1:{host_port}");
+        let bus = NatsBus::connect(&url)
+            .await
+            .expect("Failed to connect to NATS");
+        bus.setup_jetstream().await.unwrap();
+
+        let mut quarantine_sub = bus
+            .client()
+            .subscribe("quarantine.>".to_string())
+            .await
+            .expect("failed to subscribe to quarantine subject");
+
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let attempts_for_handler = attempts.clone();
+        let consumer_name = format!("poison_consumer_{}", uuid::Uuid::new_v4().simple());
+        bus.subscribe_durable("DEPLOY", &consumer_name, Some("deploy.>"), move |_event| {
+            let attempts = attempts_for_handler.clone();
+            async move {
+                attempts.fetch_add(1, Ordering::SeqCst);
+                Err::<(), common::error::PlatformError>(common::error::PlatformError::messaging(
+                    "permanent handler failure",
+                ))
+            }
+        })
+        .await
+        .unwrap();
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let app_id = AppId::new("poison-app", "v1");
+        let event = Event::DeployApp {
+            app_id: app_id.clone(),
+            config: AppConfig::default_for(app_id),
+            artifact_url: "http://example.com/poison.wasm".to_string(),
+            artifact_transfer_manifests: vec![],
+            expected_hash: None,
+            size_bytes: 0,
+        };
+        bus.publish(&event).await.unwrap();
+
+        let quarantine_msg = timeout(Duration::from_secs(10), quarantine_sub.next())
+            .await
+            .expect("timed out waiting for quarantined message")
+            .expect("quarantine subscription ended");
+        let record: serde_json::Value = serde_json::from_slice(&quarantine_msg.payload)
+            .expect("quarantine payload should be JSON");
+
+        assert_eq!(attempts.load(Ordering::SeqCst), 3);
+        assert_eq!(record["stream"], "DEPLOY");
+        assert_eq!(record["consumer"], consumer_name);
+        assert_eq!(record["original_subject"], "deploy.app.new");
+        assert_eq!(record["delivered"], 3);
+        assert!(record["reason"]
+            .as_str()
+            .unwrap()
+            .contains("permanent handler failure"));
+        assert!(record["payload"].as_array().unwrap().len() > 10);
     }
 
     #[tokio::test]

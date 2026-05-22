@@ -14,6 +14,23 @@ use common::protocol::{MessageEnvelope, PROTOCOL_VERSION};
 use events::Event;
 use tokio_stream::StreamExt;
 
+const DURABLE_MAX_DELIVER: i64 = 3;
+const QUARANTINE_STREAM: &str = "QUARANTINE";
+const QUARANTINE_SUBJECT_PREFIX: &str = "quarantine";
+
+#[derive(Debug, serde::Serialize)]
+struct QuarantinedJetStreamMessage {
+    stream: String,
+    consumer: String,
+    original_subject: String,
+    stream_sequence: u64,
+    consumer_sequence: u64,
+    delivered: i64,
+    reason: String,
+    quarantined_at: String,
+    payload: Vec<u8>,
+}
+
 #[derive(Clone)]
 /// NATS message bus for publish/subscribe.
 /// Cloning is cheap because [`async_nats::Client`] uses internal `Arc`s.
@@ -205,6 +222,15 @@ impl NatsBus {
         .await
         .map_err(PlatformError::messaging_source)?;
 
+        js.get_or_create_stream(StreamConfig {
+            name: QUARANTINE_STREAM.to_string(),
+            subjects: vec![format!("{QUARANTINE_SUBJECT_PREFIX}.>")],
+            max_messages: 10_000,
+            ..Default::default()
+        })
+        .await
+        .map_err(PlatformError::messaging_source)?;
+
         Ok(())
     }
 
@@ -260,6 +286,7 @@ impl NatsBus {
             .await
             .map_err(PlatformError::messaging_source)?;
 
+        let quarantine_client = self.client.clone();
         tokio::spawn(async move {
             while let Some(Ok(msg)) = messages.next().await {
                 match Self::deserialize_event(&msg.payload) {
@@ -268,6 +295,16 @@ impl NatsBus {
                             let _ = msg.ack().await;
                         }
                         Err(e) => {
+                            if Self::delivery_exhausted(&msg) {
+                                Self::quarantine_message(
+                                    &quarantine_client,
+                                    &msg,
+                                    format!("handler failed after retry exhaustion: {e}"),
+                                )
+                                .await;
+                                let _ = msg.ack_with(async_nats::jetstream::AckKind::Term).await;
+                                continue;
+                            }
                             tracing::warn!(
                                 error = %e,
                                 "JetStream handler failed; NAKing for redelivery"
@@ -278,6 +315,16 @@ impl NatsBus {
                         }
                     },
                     Err(e) => {
+                        if Self::delivery_exhausted(&msg) {
+                            Self::quarantine_message(
+                                &quarantine_client,
+                                &msg,
+                                format!("deserialization failed after retry exhaustion: {e}"),
+                            )
+                            .await;
+                            let _ = msg.ack_with(async_nats::jetstream::AckKind::Term).await;
+                            continue;
+                        }
                         tracing::warn!(
                             error = %e,
                             "failed to deserialize NATS JetStream message"
@@ -292,6 +339,52 @@ impl NatsBus {
             }
         });
         Ok(())
+    }
+
+    fn delivery_exhausted(msg: &async_nats::jetstream::Message) -> bool {
+        msg.info()
+            .map(|info| info.delivered >= DURABLE_MAX_DELIVER)
+            .unwrap_or(false)
+    }
+
+    async fn quarantine_message(
+        client: &Client,
+        msg: &async_nats::jetstream::Message,
+        reason: String,
+    ) {
+        let info = match msg.info() {
+            Ok(info) => info,
+            Err(error) => {
+                tracing::error!(error = %error, "failed to read JetStream message metadata for quarantine");
+                return;
+            }
+        };
+        let record = QuarantinedJetStreamMessage {
+            stream: info.stream.to_string(),
+            consumer: info.consumer.to_string(),
+            original_subject: msg.subject.to_string(),
+            stream_sequence: info.stream_sequence,
+            consumer_sequence: info.consumer_sequence,
+            delivered: info.delivered,
+            reason,
+            quarantined_at: chrono::Utc::now().to_rfc3339(),
+            payload: msg.payload.to_vec(),
+        };
+        let subject = format!(
+            "{QUARANTINE_SUBJECT_PREFIX}.{}.{}",
+            sanitize_subject_token(&record.stream),
+            sanitize_subject_token(&record.consumer)
+        );
+        match serde_json::to_vec(&record) {
+            Ok(payload) => {
+                if let Err(error) = client.publish(subject, payload.into()).await {
+                    tracing::error!(error = %error, "failed to publish quarantined JetStream message");
+                }
+            }
+            Err(error) => {
+                tracing::error!(error = %error, "failed to serialize quarantined JetStream message");
+            }
+        }
     }
 
     pub fn client(&self) -> &Client {
@@ -350,4 +443,17 @@ impl NatsBus {
         rx.await
             .map_err(|_| PlatformError::messaging("timeout waiting for event".to_string()))
     }
+}
+
+fn sanitize_subject_token(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect()
 }
