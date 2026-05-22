@@ -658,6 +658,14 @@ fn bind_address_is_loopback(host: &str) -> bool {
     !trimmed.is_empty() && is_loopback_host(trimmed)
 }
 
+fn effective_write_auth_token(config: &NodeConfig) -> Option<&str> {
+    config
+        .auth
+        .write_token
+        .as_deref()
+        .or(config.admin.auth_token.as_deref())
+}
+
 fn validate_bind_address(label: &str, host: &str, errors: &mut Vec<String>) {
     let host = host.trim();
     let host_without_brackets = host.trim_start_matches('[').trim_end_matches(']');
@@ -842,6 +850,15 @@ fn validate_config(config: &NodeConfig) -> Result<(), PlatformError> {
     {
         errors.push(
             "auth.require_tls = false with a non-loopback admin.bind_address requires auth.trusted_proxies so forwarded client IP headers are only trusted from explicit peers"
+                .to_string(),
+        );
+    }
+
+    if !bind_address_is_loopback(&config.admin.artifact_bind_address)
+        && effective_write_auth_token(config).is_none()
+    {
+        errors.push(
+            "non-loopback admin.artifact_bind_address requires auth.write_token or legacy admin.auth_token so remote artifact uploads/authorization are not exposed without authentication"
                 .to_string(),
         );
     }
@@ -1726,6 +1743,27 @@ default_memory_pages = 4096
         config.admin.advertised_host = Some("node-1.internal".to_string());
         config.admin.advertised_artifact_url =
             Some("https://artifacts.node-1.internal/base".to_string());
+        assert!(validate_config(&config).is_ok());
+    }
+
+    #[test]
+    fn test_validation_rejects_public_artifact_bind_without_write_auth() {
+        let mut config = NodeConfig::default();
+        config.admin.artifact_bind_address = "10.0.0.5".to_string();
+        config.admin.auth_token = None;
+        config.auth.write_token = None;
+        let result = validate_config(&config);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("admin.artifact_bind_address"));
+        assert!(msg.contains("auth.write_token"));
+    }
+
+    #[test]
+    fn test_validation_accepts_public_artifact_bind_with_write_auth() {
+        let mut config = NodeConfig::default();
+        config.admin.artifact_bind_address = "10.0.0.5".to_string();
+        config.auth.write_token = Some("valid_write_token_1234567890".to_string());
         assert!(validate_config(&config).is_ok());
     }
 

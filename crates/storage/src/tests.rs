@@ -617,6 +617,7 @@ fn test_auth_config_save_load_roundtrip() {
         require_tls: true,
         rate_limit_per_second: 10,
         rate_limit_burst: 20,
+        trusted_proxies: Vec::new(),
     };
     store.save_auth_config(&config).unwrap();
 
@@ -651,6 +652,7 @@ fn test_auth_config_survives_restart() {
             require_tls: false,
             rate_limit_per_second: 5,
             rate_limit_burst: 10,
+            trusted_proxies: Vec::new(),
         };
         store.save_auth_config(&config).unwrap();
     }

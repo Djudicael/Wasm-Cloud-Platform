@@ -228,6 +228,38 @@ fn ensure_authorized_peer(
     }
 }
 
+fn ensure_authorized_peer_read(
+    peer_addr: SocketAddr,
+    headers: &HeaderMap,
+    manifest_authority: Option<&ArtifactTransferAuthority>,
+    used_transfer_ids: &Mutex<HashMap<String, u64>>,
+    sha256: &str,
+) -> Result<(), StatusCode> {
+    if peer_addr.ip().is_loopback() {
+        return Ok(());
+    }
+
+    let now_ms = now_unix_ms();
+    if authorize_signed_manifest(
+        peer_addr,
+        headers,
+        manifest_authority,
+        used_transfer_ids,
+        ArtifactRequestAction::Read,
+        sha256,
+        now_ms,
+    )? {
+        return Ok(());
+    }
+
+    tracing::warn!(
+        peer = %peer_addr,
+        sha256,
+        "rejected non-loopback artifact GET without valid signed transfer manifest"
+    );
+    Err(StatusCode::FORBIDDEN)
+}
+
 #[derive(Clone)]
 struct ArtifactServerState {
     store: Store,
@@ -245,13 +277,11 @@ async fn get_artifact(
     ConnectInfo(peer_addr): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
 ) -> Result<Bytes, StatusCode> {
-    ensure_authorized_peer(
+    ensure_authorized_peer_read(
         peer_addr,
         &headers,
-        &s.peer_tokens,
         s.manifest_authority.as_ref(),
         &s.used_transfer_ids,
-        ArtifactRequestAction::Read,
         &sha256,
     )?;
 
@@ -511,7 +541,7 @@ mod tests {
     }
 
     #[test]
-    fn test_ensure_authorized_peer_accepts_valid_bearer_token() {
+    fn test_ensure_authorized_peer_write_accepts_valid_bearer_token() {
         let loopback: SocketAddr = "127.0.0.1:8080".parse().unwrap();
         let remote: SocketAddr = "10.0.0.5:8080".parse().unwrap();
         let mut headers = HeaderMap::new();
@@ -561,6 +591,29 @@ mod tests {
             "abc123"
         )
         .is_ok());
+    }
+
+    #[test]
+    fn test_ensure_authorized_peer_read_rejects_bearer_without_manifest() {
+        let remote: SocketAddr = "10.0.0.5:8080".parse().unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            "Bearer peer-token".parse().unwrap(),
+        );
+        let used_transfer_ids = Mutex::new(HashMap::new());
+
+        assert_eq!(
+            ensure_authorized_peer_read(
+                remote,
+                &headers,
+                Some(&authority()),
+                &used_transfer_ids,
+                "abc123"
+            )
+            .unwrap_err(),
+            StatusCode::FORBIDDEN
+        );
     }
 
     #[test]
