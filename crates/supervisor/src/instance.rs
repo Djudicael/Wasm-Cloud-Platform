@@ -2,7 +2,10 @@
 use common::error::PlatformError;
 use common::types::{AppId, InstanceId, InstanceState};
 use runtime::executor::ExecutionStats;
+use runtime::policy_tracker::PolicyCounters;
 use std::net::SocketAddr;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use std::time::Instant;
 use tokio::net::TcpStream;
 use tokio::sync::oneshot;
@@ -22,6 +25,43 @@ pub struct BillingInfo {
     pub tenant_id: String,
     pub fuel_quota: u64,
     pub ram_bytes: u64,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct PolicyCounterSnapshot {
+    pub connection_denied_total: u64,
+    pub egress_denied_total: u64,
+    pub fd_denied_total: u64,
+    pub fs_write_denied_total: u64,
+    pub bind_denied_total: u64,
+    pub dns_denied_total: u64,
+    pub memory_growth_denied_total: u64,
+    pub table_growth_denied_total: u64,
+    pub active_outbound_connections: u32,
+    pub open_fds: u32,
+    pub current_memory_bytes: u64,
+    pub current_table_elements: u32,
+}
+
+impl PolicyCounterSnapshot {
+    pub(crate) fn from_counters(counters: &PolicyCounters) -> Self {
+        Self {
+            connection_denied_total: counters.connection_denied_total.load(Ordering::Relaxed),
+            egress_denied_total: counters.egress_denied_total.load(Ordering::Relaxed),
+            fd_denied_total: counters.fd_denied_total.load(Ordering::Relaxed),
+            fs_write_denied_total: counters.fs_write_denied_total.load(Ordering::Relaxed),
+            bind_denied_total: counters.bind_denied_total.load(Ordering::Relaxed),
+            dns_denied_total: counters.dns_denied_total.load(Ordering::Relaxed),
+            memory_growth_denied_total: counters.memory_growth_denied_total.load(Ordering::Relaxed),
+            table_growth_denied_total: counters.table_growth_denied_total.load(Ordering::Relaxed),
+            active_outbound_connections: counters
+                .outbound_connections_active
+                .load(Ordering::Relaxed),
+            open_fds: counters.open_fds.load(Ordering::Relaxed),
+            current_memory_bytes: counters.current_memory_bytes.load(Ordering::Relaxed),
+            current_table_elements: counters.current_table_elements.load(Ordering::Relaxed),
+        }
+    }
 }
 
 /// A live Wasm instance managed by the Supervisor.
@@ -47,6 +87,12 @@ pub struct ManagedInstance {
     /// Set from inside the spawn_blocking closure via gettid().
     /// None if TID registration failed or eBPF is not active.
     pub tid: Option<u32>,
+
+    /// Live runtime policy counters for this instance, if available.
+    pub(crate) policy_counters: Option<Arc<PolicyCounters>>,
+
+    /// Last exported snapshot used to publish Prometheus deltas exactly once.
+    pub(crate) last_policy_export: PolicyCounterSnapshot,
 }
 
 impl ManagedInstance {
@@ -188,6 +234,8 @@ mod tests {
                 ram_bytes: 2048,
             },
             tid: None,
+            policy_counters: None,
+            last_policy_export: PolicyCounterSnapshot::default(),
         };
 
         instance.begin_shutdown().await;

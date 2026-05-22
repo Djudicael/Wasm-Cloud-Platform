@@ -5,6 +5,24 @@ This document tracks the gaps between the Step 33 spec
 Each limitation is classified by root cause so it is clear what must change
 before the gap can be closed.
 
+## Current authoritative boundary
+
+The active runtime policy boundary is a combination model built on top of
+Wasmtime, not a plan to replace the engine:
+
+- TCP bind/connect address policy is enforced in `WasiCtxBuilder::socket_addr_check(...)`
+- DNS is enforced only as a coarse on/off switch through `allow_ip_name_lookup(...)`
+- filesystem visibility is enforced through `preopened_dir(...)`
+- memory/table growth is enforced through `ResourceLimiter` and counted through `PolicyEnforcer`
+- per-instance namespace and loopback restrictions can be tightened further by the supervisor's extra socket gate
+- eBPF remains the outer layer for cross-checking and future finer-grained enforcement where Wasmtime does not expose hooks
+
+This means the authoritative question is capability-specific:
+
+- some capabilities are already authoritatively enforced in-process,
+- some are enforced and authoritatively counted through the existing Wasmtime hooks,
+- some remain future work because Wasmtime does not expose the required write/stream hooks yet.
+
 ## Root Cause Classification
 
 | Tag | Meaning |
@@ -17,8 +35,8 @@ before the gap can be closed.
 
 ## 1. Per-Connection CIDR Filtering
 
-**Status:** Not enforced at the WASI layer
-**Root cause:** `library` — Wasmtime 43.x
+**Status:** Enforced in the runtime socket hook
+**Root cause:** `complexity` closed, broader host-wrapping still `design`
 **Spec reference:** §4 — `check_tcp_connect_policy()` should filter by destination IP
 **Code location:** `crates/runtime/src/executor.rs` — `WasiCtxBuilder` setup
 
@@ -30,39 +48,32 @@ return `EACCES` if the IP is not permitted.
 
 ### What actually happens
 
-`WasiCtxBuilder` only exposes coarse on/off switches:
+The runtime uses:
 
 ```rust
-builder.allow_tcp(true);          // all TCP allowed or none
-builder.allow_udp(false);         // all UDP blocked or none
-builder.allow_ip_name_lookup(true); // DNS on or off
+builder.socket_addr_check(...)
 ```
 
-There is **no hook** to intercept an individual `connect()` call, inspect the
-destination IP, and reject it before the kernel socket is created. The
-`PolicyEnforcer::check_outbound_tcp_connect()` method exists and performs the
-CIDR check correctly, but nothing in the Wasmtime runtime calls it
-automatically — it can only be called manually from host code.
+and routes TCP connect decisions through `PolicyEnforcer::check_outbound_tcp_connect()`.
+That means destination-IP / CIDR filtering and outbound connection-count
+reservation happen on the live runtime path before the optional supervisor gate.
+
+What still does **not** exist is deeper per-resource host wrapping for every
+network capability. The current solution is built on Wasmtime's socket callback
+hook, not on wrapped `TcpSocket` resources.
 
 ### Defense in depth
 
-The two-layer defense still works:
-
-1. **WASI layer** — coarse `allow_tcp(bool)` blocks all TCP if the policy says
-   no outbound TCP at all.
-2. **eBPF layer** (Step 30) — can inspect individual `connect()` syscalls at the
-   kernel level and kill the process if the destination is not in `allowed_cidrs`.
+1. **WASI runtime socket hook** — enforces per-connect allow/deny and counters.
+2. **Supervisor extra socket gate** — can apply namespace / local-service rules on top.
+3. **eBPF layer** — remains available for kernel-level cross-checking and future enforcement.
 
 ### Fix path
 
-- **Short term:** Document that CIDR enforcement relies on eBPF (Layer 8) for
-  per-connection granularity. The WASI layer provides the coarse switch.
-- **Medium term:** Monitor Wasmtime releases for socket-level interception
-  hooks. The Component Model's resource-based architecture may eventually
-  allow host-side wrappers around `TcpSocket` resources.
-- **Alternative:** Replace `inherit_network()` with a custom network provider
-  that wraps each socket in a policy-checking layer. This is a large
-  undertaking and would need to track Wasmtime's internal WASI implementation.
+- **Current state:** closed for TCP connect CIDR enforcement on the runtime socket path.
+- **Remaining future work:** if the project wants every network operation to go
+  through deeper custom policy-aware host/resource wrappers instead of only
+  Wasmtime's existing callback hooks, that is a larger design/integration task.
 
 ---
 
@@ -102,8 +113,8 @@ must be called explicitly from host code. There is no automatic per-write hook.
 
 ## 3. Preopened Directories from `allowed_paths`
 
-**Status:** Not wired up
-**Root cause:** `complexity`
+**Status:** Implemented
+**Root cause:** closed
 **Spec reference:** §3 — `WasiCtxBuilder` configured from `InstancePolicy`
 **Code location:** `crates/runtime/src/executor.rs` — after `builder.env("PORT", ...)`
 
@@ -115,32 +126,22 @@ directories. Paths not in the list should be invisible to the module.
 
 ### What actually happens
 
-The builder calls `inherit_stdout()` and `inherit_stderr()` but never calls
-`preopened_dir()`. The Wasm module currently inherits the host's full
-filesystem with no restrictions at the WASI layer.
+The runtime now maps `policy.filesystem.allowed_paths` into
+`WasiCtxBuilder::preopened_dir(...)` calls and derives read-only vs read-write
+permissions from the existing filesystem policy flags.
 
 ### Fix path
 
-This is straightforward integration work:
+Closed in the current runtime. The remaining filesystem gap is not path
+visibility; it is the lack of authoritative per-open/per-write host-call
+accounting for all guest file activity.
 
-```rust
-// Pseudocode for the fix
-for path in &policy.filesystem.allowed_paths {
-    let dir = std::fs::File::open(path)?;
-    let permissions = if policy.filesystem.allow_file_create {
-        wasmtime_wasi::DirPerms::all()
-    } else {
-        wasmtime_wasi::DirPerms::READ
-    };
-    builder.preopened_dir(dir, path, permissions, wasmtime_wasi::FilePerms::all())?;
-}
-```
+The operational default is now stricter than before:
 
-The API exists in `wasmtime-wasi`. The work is mapping `allowed_paths` to
-`preopened_dir()` calls with the correct permissions derived from
-`allow_file_create` and `allow_file_delete`.
-
-**Estimated effort:** Small (1–2 hours of coding + testing).
+- no host filesystem writes are permitted unless the app config grants at least
+  one explicit absolute `allowed_path`
+- a positive write budget without such a writable path is rejected during policy
+  resolution instead of being silently accepted as misleading no-op config
 
 ---
 

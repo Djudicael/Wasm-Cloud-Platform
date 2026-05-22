@@ -4,6 +4,7 @@
 //! which are enforced at the WASI host layer.
 
 use serde::{Deserialize, Serialize};
+use std::path::Path;
 
 /// Network policy for a single Wasm app instance.
 /// Enforced at the WASI host layer before any network operation.
@@ -84,8 +85,8 @@ impl Default for FilesystemPolicy {
     fn default() -> Self {
         FilesystemPolicy {
             max_open_fds: 64,
-            max_fs_write_bytes: 50 * 1024 * 1024, // 50 MB
-            max_fs_read_bytes: 0,                 // unlimited
+            max_fs_write_bytes: 0,
+            max_fs_read_bytes: 0, // unlimited
             allow_file_create: false,
             allow_file_delete: false,
             allowed_paths: Vec::new(), // no filesystem by default
@@ -198,7 +199,7 @@ impl PolicyConfig {
                         return Err("max_open_fds must be > 0".to_string());
                     }
                 }
-                FilesystemPolicy {
+                let filesystem = FilesystemPolicy {
                     max_open_fds: cfg.max_open_fds.unwrap_or(fs_default.max_open_fds),
                     max_fs_write_bytes: cfg
                         .max_fs_write_bytes
@@ -216,9 +217,14 @@ impl PolicyConfig {
                         .allowed_paths
                         .clone()
                         .unwrap_or(fs_default.allowed_paths),
-                }
+                };
+                validate_filesystem_policy(&filesystem)?;
+                filesystem
             }
-            None => fs_default,
+            None => {
+                validate_filesystem_policy(&fs_default)?;
+                fs_default
+            }
         };
 
         Ok(InstancePolicy {
@@ -226,6 +232,32 @@ impl PolicyConfig {
             filesystem,
         })
     }
+}
+
+fn validate_filesystem_policy(filesystem: &FilesystemPolicy) -> Result<(), String> {
+    for path in &filesystem.allowed_paths {
+        let trimmed = path.trim();
+        if trimmed.is_empty() {
+            return Err("allowed_paths cannot contain empty entries".to_string());
+        }
+        if !Path::new(trimmed).is_absolute() {
+            return Err(format!(
+                "allowed_paths must use absolute host paths: {:?}",
+                path
+            ));
+        }
+    }
+
+    let has_writable_preopen = !filesystem.allowed_paths.is_empty()
+        && (filesystem.allow_file_create || filesystem.allow_file_delete);
+    if filesystem.max_fs_write_bytes > 0 && !has_writable_preopen {
+        return Err(
+            "max_fs_write_bytes requires at least one writable allowed_path; host filesystem writes are opt-in only"
+                .to_string(),
+        );
+    }
+
+    Ok(())
 }
 
 /// Validate that all strings in a CIDR list are parseable.
@@ -291,7 +323,7 @@ impl PolicyProfile {
                 }),
                 filesystem: Some(FilesystemPolicyConfig {
                     max_open_fds: Some(32),
-                    max_fs_write_bytes: Some(10 * 1024 * 1024), // 10 MB
+                    max_fs_write_bytes: Some(0),
                     max_fs_read_bytes: Some(0),
                     allow_file_create: Some(false),
                     allow_file_delete: Some(false),
@@ -476,7 +508,7 @@ mod tests {
     fn test_filesystem_policy_default() {
         let policy = FilesystemPolicy::default();
         assert_eq!(policy.max_open_fds, 64);
-        assert_eq!(policy.max_fs_write_bytes, 50 * 1024 * 1024);
+        assert_eq!(policy.max_fs_write_bytes, 0);
         assert_eq!(policy.max_fs_read_bytes, 0);
         assert!(!policy.allow_file_create);
         assert!(!policy.allow_file_delete);
@@ -582,7 +614,66 @@ mod tests {
         assert_eq!(network.allow_inbound, Some(false));
         let filesystem = config.filesystem.unwrap();
         assert_eq!(filesystem.max_open_fds, Some(32));
-        assert_eq!(filesystem.max_fs_write_bytes, Some(10 * 1024 * 1024));
+        assert_eq!(filesystem.max_fs_write_bytes, Some(0));
+    }
+
+    #[test]
+    fn test_resolve_rejects_write_budget_without_writable_path() {
+        let config = PolicyConfig {
+            network: None,
+            filesystem: Some(FilesystemPolicyConfig {
+                max_open_fds: None,
+                max_fs_write_bytes: Some(1024),
+                max_fs_read_bytes: None,
+                allow_file_create: Some(false),
+                allow_file_delete: Some(false),
+                allowed_paths: Some(vec!["/tmp".to_string()]),
+            }),
+        };
+
+        let err = config.resolve(8080).unwrap_err();
+        assert!(err.contains("max_fs_write_bytes requires at least one writable allowed_path"));
+    }
+
+    #[test]
+    fn test_resolve_rejects_relative_allowed_path() {
+        let config = PolicyConfig {
+            network: None,
+            filesystem: Some(FilesystemPolicyConfig {
+                max_open_fds: None,
+                max_fs_write_bytes: Some(0),
+                max_fs_read_bytes: Some(0),
+                allow_file_create: Some(false),
+                allow_file_delete: Some(false),
+                allowed_paths: Some(vec!["tmp/cache".to_string()]),
+            }),
+        };
+
+        let err = config.resolve(8080).unwrap_err();
+        assert!(err.contains("allowed_paths must use absolute host paths"));
+    }
+
+    #[test]
+    fn test_resolve_accepts_explicit_writable_absolute_path() {
+        let config = PolicyConfig {
+            network: None,
+            filesystem: Some(FilesystemPolicyConfig {
+                max_open_fds: Some(8),
+                max_fs_write_bytes: Some(4096),
+                max_fs_read_bytes: Some(0),
+                allow_file_create: Some(true),
+                allow_file_delete: Some(false),
+                allowed_paths: Some(vec!["/tmp/wcp-scratch".to_string()]),
+            }),
+        };
+
+        let policy = config.resolve(8080).unwrap();
+        assert_eq!(policy.filesystem.max_fs_write_bytes, 4096);
+        assert_eq!(
+            policy.filesystem.allowed_paths,
+            vec!["/tmp/wcp-scratch".to_string()]
+        );
+        assert!(policy.filesystem.allow_file_create);
     }
 
     #[test]

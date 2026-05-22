@@ -162,7 +162,8 @@ pub fn metrics_router(metrics: Arc<Metrics>) -> Router {
 /// Prometheus metrics for WASI policy enforcement violations.
 ///
 /// Tracks how many times each policy type was denied across all instances,
-/// plus gauges for current active outbound connections and open FDs.
+/// plus gauges for current active outbound connections, open FDs,
+/// linear memory usage, and table elements.
 /// These feed the alerting rules in `deploy/prometheus/wasi_policy_alerts.yml`.
 #[derive(Clone)]
 pub struct PolicyMetrics {
@@ -184,11 +185,23 @@ pub struct PolicyMetrics {
     /// Total DNS lookups denied by policy.
     pub dns_denied_total: IntCounter,
 
+    /// Total denied memory growth requests.
+    pub memory_growth_denied_total: IntCounter,
+
+    /// Total denied table growth requests.
+    pub table_growth_denied_total: IntCounter,
+
     /// Current active outbound connections across all instances.
     pub active_outbound_connections: IntGauge,
 
     /// Current open FDs across all instances.
     pub open_fds: IntGauge,
+
+    /// Current guest linear memory bytes across all instances.
+    pub current_memory_bytes: IntGauge,
+
+    /// Current guest table elements across all instances.
+    pub current_table_elements: IntGauge,
 }
 
 impl PolicyMetrics {
@@ -247,6 +260,24 @@ impl PolicyMetrics {
             .register(Box::new(dns_denied_total.clone()))
             .unwrap();
 
+        let memory_growth_denied_total = IntCounter::with_opts(Opts::new(
+            "wasm_policy_memory_growth_denied_total",
+            "Linear memory growth requests denied by the Wasmtime resource limiter",
+        ))
+        .unwrap();
+        registry
+            .register(Box::new(memory_growth_denied_total.clone()))
+            .unwrap();
+
+        let table_growth_denied_total = IntCounter::with_opts(Opts::new(
+            "wasm_policy_table_growth_denied_total",
+            "Table growth requests denied by the Wasmtime resource limiter",
+        ))
+        .unwrap();
+        registry
+            .register(Box::new(table_growth_denied_total.clone()))
+            .unwrap();
+
         let active_outbound_connections = IntGauge::with_opts(Opts::new(
             "wasm_policy_active_outbound_connections",
             "Current active outbound connections across all instances",
@@ -263,6 +294,24 @@ impl PolicyMetrics {
         .unwrap();
         registry.register(Box::new(open_fds.clone())).unwrap();
 
+        let current_memory_bytes = IntGauge::with_opts(Opts::new(
+            "wasm_policy_current_memory_bytes",
+            "Current guest linear memory bytes across all instances",
+        ))
+        .unwrap();
+        registry
+            .register(Box::new(current_memory_bytes.clone()))
+            .unwrap();
+
+        let current_table_elements = IntGauge::with_opts(Opts::new(
+            "wasm_policy_current_table_elements",
+            "Current guest table elements across all instances",
+        ))
+        .unwrap();
+        registry
+            .register(Box::new(current_table_elements.clone()))
+            .unwrap();
+
         PolicyMetrics {
             connection_denied_total,
             egress_denied_total,
@@ -270,8 +319,12 @@ impl PolicyMetrics {
             fs_write_denied_total,
             bind_denied_total,
             dns_denied_total,
+            memory_growth_denied_total,
+            table_growth_denied_total,
             active_outbound_connections,
             open_fds,
+            current_memory_bytes,
+            current_table_elements,
         }
     }
 }

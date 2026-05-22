@@ -22,6 +22,12 @@ pub struct PolicyCounters {
     pub dns_lookups_total: AtomicU64,
     pub inbound_connections_active: AtomicU32,
 
+    // Runtime resource limiter counters
+    pub current_memory_bytes: AtomicU64,
+    pub memory_bytes_peak: AtomicU64,
+    pub current_table_elements: AtomicU32,
+    pub table_elements_peak: AtomicU32,
+
     // Filesystem counters
     pub open_fds: AtomicU32,
     pub open_fds_peak: AtomicU32,
@@ -38,6 +44,8 @@ pub struct PolicyCounters {
     pub fs_write_denied_total: AtomicU64,
     pub bind_denied_total: AtomicU64,
     pub dns_denied_total: AtomicU64,
+    pub memory_growth_denied_total: AtomicU64,
+    pub table_growth_denied_total: AtomicU64,
 }
 
 impl PolicyCounters {
@@ -48,6 +56,10 @@ impl PolicyCounters {
             egress_bytes: AtomicU64::new(0),
             dns_lookups_total: AtomicU64::new(0),
             inbound_connections_active: AtomicU32::new(0),
+            current_memory_bytes: AtomicU64::new(0),
+            memory_bytes_peak: AtomicU64::new(0),
+            current_table_elements: AtomicU32::new(0),
+            table_elements_peak: AtomicU32::new(0),
             open_fds: AtomicU32::new(0),
             open_fds_peak: AtomicU32::new(0),
             fd_open_total: AtomicU64::new(0),
@@ -61,12 +73,15 @@ impl PolicyCounters {
             fs_write_denied_total: AtomicU64::new(0),
             bind_denied_total: AtomicU64::new(0),
             dns_denied_total: AtomicU64::new(0),
+            memory_growth_denied_total: AtomicU64::new(0),
+            table_growth_denied_total: AtomicU64::new(0),
         }
     }
 }
 
 /// The policy enforcement engine. Lives in StoreState.
 /// Called by custom WASI host functions before delegating to the real implementation.
+#[derive(Clone)]
 pub struct PolicyEnforcer {
     pub policy: InstancePolicy,
     pub counters: Arc<PolicyCounters>,
@@ -109,6 +124,36 @@ impl PolicyEnforcer {
                 })
             })
             .collect()
+    }
+
+    pub(crate) fn update_peak_u64(peak: &AtomicU64, candidate: u64) {
+        loop {
+            let current_peak = peak.load(Ordering::Acquire);
+            if candidate <= current_peak {
+                return;
+            }
+            if peak
+                .compare_exchange(current_peak, candidate, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                return;
+            }
+        }
+    }
+
+    pub(crate) fn update_peak_u32(peak: &AtomicU32, candidate: u32) {
+        loop {
+            let current_peak = peak.load(Ordering::Acquire);
+            if candidate <= current_peak {
+                return;
+            }
+            if peak
+                .compare_exchange(current_peak, candidate, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                return;
+            }
+        }
     }
 
     /// Check if an outbound TCP connection is allowed and atomically reserve a slot.
@@ -296,6 +341,18 @@ impl PolicyEnforcer {
         Ok(())
     }
 
+    pub fn check_tcp_bind(&self, port: u16) -> Result<(), PolicyDenied> {
+        if !self.policy.network.allow_inbound {
+            self.counters
+                .bind_denied_total
+                .fetch_add(1, Ordering::Relaxed);
+            return Err(PolicyDenied::NetworkDisabled {
+                protocol: "tcp_bind",
+            });
+        }
+        self.check_bind(port)
+    }
+
     /// Check if binding to a specific port is allowed.
     pub fn check_bind(&self, port: u16) -> Result<(), PolicyDenied> {
         if self.policy.network.allowed_bind_ports.contains(&port) {
@@ -456,18 +513,7 @@ impl PolicyEnforcer {
     }
 
     fn update_peak(peak: &AtomicU32, candidate: u32) {
-        loop {
-            let current_peak = peak.load(Ordering::Acquire);
-            if candidate <= current_peak {
-                return;
-            }
-            if peak
-                .compare_exchange(current_peak, candidate, Ordering::AcqRel, Ordering::Acquire)
-                .is_ok()
-            {
-                return;
-            }
-        }
+        Self::update_peak_u32(peak, candidate);
     }
 }
 

@@ -113,6 +113,9 @@ pub struct Supervisor {
     /// Channel to send log records
     log_tx: Option<mpsc::Sender<metrics::WasmLogRecord>>,
 
+    /// Prometheus policy metrics sink. Set after Metrics initialization in node startup.
+    policy_metrics: std::sync::RwLock<Option<Arc<metrics::exporter::PolicyMetrics>>>,
+
     /// Channel to send billing records
     billing_tx: Option<mpsc::Sender<billing::BillingInput>>,
 
@@ -164,6 +167,7 @@ impl Supervisor {
             pools: Arc::new(RwLock::new(HashMap::new())),
             event_tx,
             log_tx: None,
+            policy_metrics: std::sync::RwLock::new(None),
             billing_tx,
             command_rx: std::sync::Mutex::new(Some(command_rx)),
             command_tx,
@@ -189,6 +193,181 @@ impl Supervisor {
 
     pub fn set_log_dispatcher(&mut self, log_tx: mpsc::Sender<metrics::WasmLogRecord>) {
         self.log_tx = Some(log_tx);
+    }
+
+    pub fn set_policy_metrics(&self, policy_metrics: Arc<metrics::exporter::PolicyMetrics>) {
+        if let Ok(mut slot) = self.policy_metrics.write() {
+            *slot = Some(policy_metrics);
+        }
+    }
+
+    fn export_policy_metrics(
+        policy_metrics: &metrics::exporter::PolicyMetrics,
+        instances: &mut [ManagedInstance],
+    ) -> (i64, i64, i64, i64) {
+        let mut active_outbound_connections = 0_i64;
+        let mut open_fds = 0_i64;
+        let mut current_memory_bytes = 0_i64;
+        let mut current_table_elements = 0_i64;
+
+        for instance in instances {
+            let Some(counters) = instance.policy_counters.as_ref() else {
+                continue;
+            };
+
+            let snapshot = crate::instance::PolicyCounterSnapshot::from_counters(counters);
+            let last = instance.last_policy_export;
+
+            policy_metrics.connection_denied_total.inc_by(
+                snapshot
+                    .connection_denied_total
+                    .saturating_sub(last.connection_denied_total),
+            );
+            policy_metrics.egress_denied_total.inc_by(
+                snapshot
+                    .egress_denied_total
+                    .saturating_sub(last.egress_denied_total),
+            );
+            policy_metrics.fd_denied_total.inc_by(
+                snapshot
+                    .fd_denied_total
+                    .saturating_sub(last.fd_denied_total),
+            );
+            policy_metrics.fs_write_denied_total.inc_by(
+                snapshot
+                    .fs_write_denied_total
+                    .saturating_sub(last.fs_write_denied_total),
+            );
+            policy_metrics.bind_denied_total.inc_by(
+                snapshot
+                    .bind_denied_total
+                    .saturating_sub(last.bind_denied_total),
+            );
+            policy_metrics.dns_denied_total.inc_by(
+                snapshot
+                    .dns_denied_total
+                    .saturating_sub(last.dns_denied_total),
+            );
+            policy_metrics.memory_growth_denied_total.inc_by(
+                snapshot
+                    .memory_growth_denied_total
+                    .saturating_sub(last.memory_growth_denied_total),
+            );
+            policy_metrics.table_growth_denied_total.inc_by(
+                snapshot
+                    .table_growth_denied_total
+                    .saturating_sub(last.table_growth_denied_total),
+            );
+
+            active_outbound_connections += i64::from(snapshot.active_outbound_connections);
+            open_fds += i64::from(snapshot.open_fds);
+            current_memory_bytes += snapshot.current_memory_bytes as i64;
+            current_table_elements += i64::from(snapshot.current_table_elements);
+            instance.last_policy_export = snapshot;
+        }
+
+        policy_metrics
+            .active_outbound_connections
+            .set(active_outbound_connections);
+        policy_metrics.open_fds.set(open_fds);
+        policy_metrics
+            .current_memory_bytes
+            .set(current_memory_bytes);
+        policy_metrics
+            .current_table_elements
+            .set(current_table_elements);
+
+        (
+            active_outbound_connections,
+            open_fds,
+            current_memory_bytes,
+            current_table_elements,
+        )
+    }
+
+    fn flush_policy_metrics_for_instance(&self, instance: &mut ManagedInstance) {
+        let policy_metrics = self
+            .policy_metrics
+            .read()
+            .ok()
+            .and_then(|slot| slot.as_ref().cloned());
+        if let Some(policy_metrics) = policy_metrics {
+            Self::export_policy_metrics(&policy_metrics, std::slice::from_mut(instance));
+        }
+    }
+
+    fn export_policy_metrics_from_pools(
+        policy_metrics: &metrics::exporter::PolicyMetrics,
+        pools: &mut HashMap<String, InstancePool>,
+    ) {
+        let mut active_outbound_connections = 0_i64;
+        let mut open_fds = 0_i64;
+        let mut current_memory_bytes = 0_i64;
+        let mut current_table_elements = 0_i64;
+
+        for pool in pools.values_mut() {
+            let (
+                pool_active_outbound,
+                pool_open_fds,
+                pool_current_memory_bytes,
+                pool_current_table_elements,
+            ) = Self::export_policy_metrics(policy_metrics, &mut pool.instances);
+            active_outbound_connections += pool_active_outbound;
+            open_fds += pool_open_fds;
+            current_memory_bytes += pool_current_memory_bytes;
+            current_table_elements += pool_current_table_elements;
+        }
+
+        policy_metrics
+            .active_outbound_connections
+            .set(active_outbound_connections);
+        policy_metrics.open_fds.set(open_fds);
+        policy_metrics
+            .current_memory_bytes
+            .set(current_memory_bytes);
+        policy_metrics
+            .current_table_elements
+            .set(current_table_elements);
+    }
+
+    async fn refresh_policy_metric_gauges(&self) {
+        let policy_metrics = self
+            .policy_metrics
+            .read()
+            .ok()
+            .and_then(|slot| slot.as_ref().cloned());
+        let Some(policy_metrics) = policy_metrics else {
+            return;
+        };
+
+        let pools = self.pools.read().await;
+        let mut active_outbound_connections = 0_i64;
+        let mut open_fds = 0_i64;
+        let mut current_memory_bytes = 0_i64;
+        let mut current_table_elements = 0_i64;
+        for pool in pools.values() {
+            for instance in &pool.instances {
+                let Some(counters) = instance.policy_counters.as_ref() else {
+                    continue;
+                };
+                let snapshot = crate::instance::PolicyCounterSnapshot::from_counters(counters);
+                active_outbound_connections += i64::from(snapshot.active_outbound_connections);
+                open_fds += i64::from(snapshot.open_fds);
+                current_memory_bytes += snapshot.current_memory_bytes as i64;
+                current_table_elements += i64::from(snapshot.current_table_elements);
+            }
+        }
+
+        policy_metrics
+            .active_outbound_connections
+            .set(active_outbound_connections);
+        policy_metrics.open_fds.set(open_fds);
+        policy_metrics
+            .current_memory_bytes
+            .set(current_memory_bytes);
+        policy_metrics
+            .current_table_elements
+            .set(current_table_elements);
     }
 
     /// Get a sender for the supervisor command channel.
@@ -379,7 +558,7 @@ impl Supervisor {
         let source_app = qualified_app_id.clone();
         let internal_gateway_port = self.internal_gateway_port;
         let instance_bind_ip = addr.ip();
-        let socket_addr_check: runtime::executor::SocketAddrCheckFn = Box::new(
+        let socket_addr_check: runtime::executor::SocketAddrCheckFn = Arc::new(
             move |dest: std::net::SocketAddr, use_type: runtime::executor::SocketAddrUse| {
                 let allowed = allowed_ports.clone();
                 let registry = registry.clone();
@@ -513,6 +692,7 @@ impl Supervisor {
         let namespace_map_for_spawn = self.namespace_map.clone();
         let qualified_app_id_for_spawn = qualified_app_id.clone();
         let (tid_tx, tid_rx) = tokio::sync::oneshot::channel::<u32>();
+        let (policy_counters_tx, policy_counters_rx) = tokio::sync::oneshot::channel();
 
         let task = tokio::task::spawn_blocking(move || {
             // Get the OS Thread ID for this blocking task
@@ -568,6 +748,8 @@ impl Supervisor {
                         };
                     }
                 };
+
+            let _ = policy_counters_tx.send(instance.policy_counters());
 
             // Signal that spawn succeeded — the caller can now wait for TCP readiness.
             let _ = spawn_result_tx.send(Ok(()));
@@ -654,6 +836,7 @@ impl Supervisor {
 
         // Receive the TID from the blocking task (may fail if task panicked early)
         let instance_tid = tid_rx.await.ok();
+        let instance_policy_counters = policy_counters_rx.await.ok();
 
         let managed = ManagedInstance {
             id: instance_id.clone(),
@@ -671,6 +854,8 @@ impl Supervisor {
                 ram_bytes,
             },
             tid: instance_tid,
+            policy_counters: instance_policy_counters,
+            last_policy_export: crate::instance::PolicyCounterSnapshot::default(),
         };
 
         {
@@ -758,6 +943,16 @@ impl Supervisor {
     }
 
     async fn health_tick(&self) -> Result<(), PlatformError> {
+        if let Some(policy_metrics) = self
+            .policy_metrics
+            .read()
+            .ok()
+            .and_then(|slot| slot.as_ref().cloned())
+        {
+            let mut pools = self.pools.write().await;
+            Self::export_policy_metrics_from_pools(&policy_metrics, &mut pools);
+        }
+
         // ── Stale TID cleanup ──
         if let Some(ref ns_map) = self.namespace_map {
             let removed = ns_map.cleanup_stale_tids();
@@ -891,6 +1086,7 @@ impl Supervisor {
         mut instance: ManagedInstance,
         stats: Option<ExecutionStats>,
     ) {
+        self.flush_policy_metrics_for_instance(&mut instance);
         instance.state = InstanceState::Stopped;
 
         let wall_clock_ms = instance.spawned_at.elapsed().as_millis() as u64;
@@ -937,6 +1133,8 @@ impl Supervisor {
                 node_id: self.node_id().to_string(),
             })
             .await;
+
+        self.refresh_policy_metric_gauges().await;
     }
 
     async fn handle_shutdown_outcome(

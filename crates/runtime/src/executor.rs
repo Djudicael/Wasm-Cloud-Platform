@@ -30,7 +30,7 @@ pub enum SocketAddrUse {
 
 /// Async callback for validating outbound socket addresses.
 /// Returns `true` to allow the operation, `false` to deny.
-pub type SocketAddrCheckFn = Box<
+pub type SocketAddrCheckFn = Arc<
     dyn Fn(SocketAddr, SocketAddrUse) -> Pin<Box<dyn Future<Output = bool> + Send + Sync>>
         + Send
         + Sync,
@@ -123,19 +123,76 @@ impl SocketPolicyCheck {
 
 pub(crate) fn compose_socket_addr_check(
     policy_check: SocketPolicyCheck,
+    policy_enforcer: PolicyEnforcer,
     extra_check: Option<SocketAddrCheckFn>,
 ) -> SocketAddrCheckFn {
-    Box::new(move |addr, use_type| {
-        if let Err(reason) = policy_check.check(addr, use_type) {
-            tracing::warn!(dest = %addr, use_type = ?use_type, reason, "socket operation denied by runtime policy");
-            return Box::pin(async { false });
-        }
+    Arc::new(move |addr, use_type| {
+        let policy_enforcer = policy_enforcer.clone();
+        let snapshot_check = policy_check.clone();
+        let extra_check = extra_check.clone();
+        Box::pin(async move {
+            let reserved_outbound_slot = match use_type {
+                SocketAddrUse::TcpBind => match policy_enforcer.check_tcp_bind(addr.port()) {
+                    Ok(()) => false,
+                    Err(err) => {
+                        tracing::warn!(
+                            dest = %addr,
+                            use_type = ?use_type,
+                            error = ?err,
+                            "socket operation denied by runtime policy"
+                        );
+                        return false;
+                    }
+                },
+                SocketAddrUse::TcpConnect => {
+                    match policy_enforcer.check_outbound_tcp_connect(addr.ip(), addr.port()) {
+                        Ok(()) => true,
+                        Err(err) => {
+                            tracing::warn!(
+                                dest = %addr,
+                                use_type = ?use_type,
+                                error = ?err,
+                                "socket operation denied by runtime policy"
+                            );
+                            return false;
+                        }
+                    }
+                }
+                SocketAddrUse::UdpBind
+                | SocketAddrUse::UdpConnect
+                | SocketAddrUse::UdpOutgoingDatagram => {
+                    if let Err(reason) = snapshot_check.check(addr, use_type) {
+                        tracing::warn!(
+                            dest = %addr,
+                            use_type = ?use_type,
+                            reason,
+                            "socket operation denied by runtime policy"
+                        );
+                        return false;
+                    }
+                    false
+                }
+            };
 
-        if let Some(check) = extra_check.as_ref() {
-            check(addr, use_type)
-        } else {
-            Box::pin(async { true })
-        }
+            let extra_allowed = if let Some(check) = extra_check.as_ref() {
+                check(addr, use_type).await
+            } else {
+                true
+            };
+
+            if !extra_allowed {
+                if reserved_outbound_slot {
+                    policy_enforcer.record_outbound_disconnect();
+                }
+                return false;
+            }
+
+            if reserved_outbound_slot {
+                policy_enforcer.record_outbound_connect();
+            }
+
+            true
+        })
     })
 }
 
@@ -282,8 +339,12 @@ impl PreparedModule {
         builder.allow_ip_name_lookup(policy.network.allow_dns);
 
         let policy_socket_check = SocketPolicyCheck::from_instance_policy(&policy);
-        let combined_socket_check =
-            compose_socket_addr_check(policy_socket_check, socket_addr_check);
+        let policy_enforcer = PolicyEnforcer::new(policy.clone());
+        let combined_socket_check = compose_socket_addr_check(
+            policy_socket_check,
+            policy_enforcer.clone(),
+            socket_addr_check,
+        );
         builder.socket_addr_check(move |addr, use_type| {
             let use_enum = match use_type {
                 wasmtime_wasi::sockets::SocketAddrUse::TcpBind => SocketAddrUse::TcpBind,
@@ -332,8 +393,12 @@ impl PreparedModule {
         let state = StoreState {
             ctx: builder.build(),
             table: ResourceTable::new(),
-            limiter: MemoryLimiter::new(self.config.memory_limit, extended_limits),
-            policy_enforcer: PolicyEnforcer::new(policy),
+            limiter: MemoryLimiter::new(
+                self.config.memory_limit,
+                extended_limits,
+                Some(policy_enforcer.counters.clone()),
+            ),
+            policy_enforcer,
         };
         let policy_counters = state.policy_enforcer.counters.clone();
 
@@ -395,8 +460,7 @@ impl Drop for RunningInstance {
 }
 
 impl RunningInstance {
-    #[cfg(test)]
-    pub(crate) fn policy_counters(&self) -> Arc<PolicyCounters> {
+    pub fn policy_counters(&self) -> Arc<PolicyCounters> {
         self.policy_counters.clone()
     }
 

@@ -1,9 +1,11 @@
 use crate::{
+    current_policy_boundary,
     executor::{
         compose_socket_addr_check, top_level_entry_point_candidates, SocketAddrUse,
         SocketPolicyCheck,
     },
-    WasmRuntime,
+    policy_tracker::PolicyEnforcer,
+    PolicyEnforcementLayer, WasmRuntime,
 };
 use common::{
     policy::{
@@ -202,6 +204,79 @@ fn test_runtime_initialization() {
 }
 
 #[test]
+fn test_policy_boundary_declares_runtime_socket_gate_as_authoritative_for_tcp() {
+    let boundary = current_policy_boundary();
+
+    let tcp_bind = boundary
+        .iter()
+        .find(|cap| cap.capability == "tcp_bind")
+        .expect("tcp_bind capability should be declared");
+    assert_eq!(
+        tcp_bind.primary_layer,
+        PolicyEnforcementLayer::WasmtimeSocketAddrCheck
+    );
+    assert!(tcp_bind.authoritative_enforcement);
+    assert!(tcp_bind.authoritative_counters);
+
+    let tcp_connect = boundary
+        .iter()
+        .find(|cap| cap.capability == "tcp_connect")
+        .expect("tcp_connect capability should be declared");
+    assert_eq!(
+        tcp_connect.primary_layer,
+        PolicyEnforcementLayer::WasmtimeSocketAddrCheck
+    );
+    assert!(tcp_connect.authoritative_enforcement);
+    assert!(tcp_connect.authoritative_counters);
+}
+
+#[test]
+fn test_policy_boundary_declares_remaining_non_authoritative_gaps_explicitly() {
+    let boundary = current_policy_boundary();
+
+    let dns = boundary
+        .iter()
+        .find(|cap| cap.capability == "dns_lookup")
+        .expect("dns_lookup capability should be declared");
+    assert_eq!(
+        dns.primary_layer,
+        PolicyEnforcementLayer::WasmtimeNetworkToggle
+    );
+    assert!(dns.authoritative_enforcement);
+    assert!(!dns.authoritative_counters);
+
+    let fs_write = boundary
+        .iter()
+        .find(|cap| cap.capability == "filesystem_write_bytes")
+        .expect("filesystem_write_bytes capability should be declared");
+    assert_eq!(fs_write.primary_layer, PolicyEnforcementLayer::ExternalEbpf);
+    assert!(!fs_write.authoritative_enforcement);
+    assert!(!fs_write.authoritative_counters);
+
+    let net_egress = boundary
+        .iter()
+        .find(|cap| cap.capability == "network_egress_bytes")
+        .expect("network_egress_bytes capability should be declared");
+    assert_eq!(
+        net_egress.primary_layer,
+        PolicyEnforcementLayer::ExternalEbpf
+    );
+    assert!(!net_egress.authoritative_enforcement);
+    assert!(!net_egress.authoritative_counters);
+
+    let resource_limits = boundary
+        .iter()
+        .find(|cap| cap.capability == "memory_and_table_growth")
+        .expect("memory_and_table_growth capability should be declared");
+    assert_eq!(
+        resource_limits.primary_layer,
+        PolicyEnforcementLayer::WasmtimeResourceLimiter
+    );
+    assert!(resource_limits.authoritative_enforcement);
+    assert!(resource_limits.authoritative_counters);
+}
+
+#[test]
 fn test_runtime_initialization_with_code_cache_directory() {
     let temp_dir = TempDir::new().unwrap();
     let runtime_cfg = common::config::RuntimeSection {
@@ -375,7 +450,8 @@ async fn test_composed_socket_addr_check_denies_policy_before_extra_allow() {
 
     let composed = compose_socket_addr_check(
         SocketPolicyCheck::from_instance_policy(&policy),
-        Some(Box::new(|_, _| Box::pin(async { true }))),
+        PolicyEnforcer::new(policy.clone()),
+        Some(Arc::new(|_, _| Box::pin(async { true }))),
     );
 
     assert!(
@@ -386,6 +462,96 @@ async fn test_composed_socket_addr_check_denies_policy_before_extra_allow() {
         .await
     );
     assert!((composed)("127.0.0.1:8080".parse().unwrap(), SocketAddrUse::TcpBind).await);
+}
+
+#[tokio::test]
+async fn test_composed_socket_addr_check_records_policy_tracked_tcp_connects() {
+    let mut policy = base_instance_policy();
+    policy.network.allow_outbound_tcp = true;
+
+    let enforcer = PolicyEnforcer::new(policy.clone());
+    let composed = compose_socket_addr_check(
+        SocketPolicyCheck::from_instance_policy(&policy),
+        enforcer.clone(),
+        Some(Arc::new(|_, _| Box::pin(async { true }))),
+    );
+
+    assert!(
+        (composed)(
+            "93.184.216.34:443".parse().unwrap(),
+            SocketAddrUse::TcpConnect,
+        )
+        .await
+    );
+    assert_eq!(
+        enforcer
+            .counters
+            .outbound_connections_active
+            .load(Ordering::Relaxed),
+        1
+    );
+    assert_eq!(
+        enforcer
+            .counters
+            .outbound_connections_total
+            .load(Ordering::Relaxed),
+        1
+    );
+}
+
+#[tokio::test]
+async fn test_composed_socket_addr_check_rolls_back_reserved_slot_when_extra_check_denies() {
+    let mut policy = base_instance_policy();
+    policy.network.allow_outbound_tcp = true;
+
+    let enforcer = PolicyEnforcer::new(policy.clone());
+    let composed = compose_socket_addr_check(
+        SocketPolicyCheck::from_instance_policy(&policy),
+        enforcer.clone(),
+        Some(Arc::new(|_, _| Box::pin(async { false }))),
+    );
+
+    assert!(
+        !(composed)(
+            "93.184.216.34:443".parse().unwrap(),
+            SocketAddrUse::TcpConnect,
+        )
+        .await
+    );
+    assert_eq!(
+        enforcer
+            .counters
+            .outbound_connections_active
+            .load(Ordering::Relaxed),
+        0
+    );
+    assert_eq!(
+        enforcer
+            .counters
+            .outbound_connections_total
+            .load(Ordering::Relaxed),
+        0
+    );
+}
+
+#[tokio::test]
+async fn test_composed_socket_addr_check_uses_policy_enforcer_bind_denial_counters() {
+    let policy = PolicyProfile::BackgroundWorker
+        .to_config()
+        .resolve(8080)
+        .unwrap();
+    let enforcer = PolicyEnforcer::new(policy.clone());
+    let composed = compose_socket_addr_check(
+        SocketPolicyCheck::from_instance_policy(&policy),
+        enforcer.clone(),
+        None,
+    );
+
+    assert!(!(composed)("127.0.0.1:8080".parse().unwrap(), SocketAddrUse::TcpBind).await);
+    assert_eq!(
+        enforcer.counters.bind_denied_total.load(Ordering::Relaxed),
+        1
+    );
 }
 
 #[test]

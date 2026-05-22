@@ -1346,6 +1346,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Initialize Prometheus metrics
     let prom_metrics = Arc::new(metrics::exporter::Metrics::new());
+    supervisor.set_policy_metrics(Arc::new(prom_metrics.policy.clone()));
     prom_metrics.set_platform_info(
         &config.node.node_id,
         common::protocol::BINARY_VERSION,

@@ -1,15 +1,20 @@
 use crate::instance::wait_for_ready;
+use crate::instance::{BillingInfo, ManagedInstance, PolicyCounterSnapshot};
 use crate::is_instance_bind_allowed;
 use crate::network::LocalServiceRegistry;
 use crate::port_alloc::PortAllocator;
 use common::types::AppId;
+use runtime::policy_tracker::PolicyCounters;
 use std::net::{IpAddr, Ipv4Addr};
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
+use std::time::Instant;
 use tokio::net::TcpListener;
 
 use crate::deployment::RollbackPolicy;
+use crate::Supervisor;
 
 #[tokio::test]
 async fn test_deployment_hot_swap_basics() {
@@ -324,6 +329,106 @@ async fn test_supervisor_command_channel_backpressure() {
         reason: "3".to_string(),
     });
     assert!(result.is_err());
+}
+
+fn dummy_managed_instance_with_counters(counters: Arc<PolicyCounters>) -> ManagedInstance {
+    ManagedInstance {
+        id: common::types::InstanceId::new(),
+        app_id: AppId("test-app:v1".to_string()),
+        addr: "127.0.0.1:1".parse().unwrap(),
+        state: common::types::InstanceState::Ready {
+            addr: "127.0.0.1:1".parse().unwrap(),
+        },
+        spawned_at: Instant::now(),
+        last_request_at: Instant::now(),
+        request_count: 0,
+        task: None,
+        shutdown_tx: None,
+        billing_info: BillingInfo {
+            tenant_id: "tenant-a".to_string(),
+            fuel_quota: 100,
+            ram_bytes: 2048,
+        },
+        tid: None,
+        policy_counters: Some(counters),
+        last_policy_export: PolicyCounterSnapshot::default(),
+    }
+}
+
+#[test]
+fn test_policy_metrics_export_flushes_deltas_once() {
+    let policy_metrics = metrics::exporter::Metrics::new().policy;
+    let counters = Arc::new(PolicyCounters::new());
+    counters.connection_denied_total.store(2, Ordering::Relaxed);
+    counters.egress_denied_total.store(3, Ordering::Relaxed);
+    counters.fd_denied_total.store(5, Ordering::Relaxed);
+    counters.fs_write_denied_total.store(7, Ordering::Relaxed);
+    counters.bind_denied_total.store(11, Ordering::Relaxed);
+    counters.dns_denied_total.store(13, Ordering::Relaxed);
+    counters
+        .outbound_connections_active
+        .store(17, Ordering::Relaxed);
+    counters.open_fds.store(19, Ordering::Relaxed);
+    counters.current_memory_bytes.store(23, Ordering::Relaxed);
+    counters.current_table_elements.store(29, Ordering::Relaxed);
+    counters
+        .memory_growth_denied_total
+        .store(31, Ordering::Relaxed);
+    counters
+        .table_growth_denied_total
+        .store(37, Ordering::Relaxed);
+
+    let mut instances = vec![dummy_managed_instance_with_counters(counters.clone())];
+    Supervisor::export_policy_metrics(&policy_metrics, &mut instances);
+    Supervisor::export_policy_metrics(&policy_metrics, &mut instances);
+
+    assert_eq!(policy_metrics.connection_denied_total.get(), 2);
+    assert_eq!(policy_metrics.egress_denied_total.get(), 3);
+    assert_eq!(policy_metrics.fd_denied_total.get(), 5);
+    assert_eq!(policy_metrics.fs_write_denied_total.get(), 7);
+    assert_eq!(policy_metrics.bind_denied_total.get(), 11);
+    assert_eq!(policy_metrics.dns_denied_total.get(), 13);
+    assert_eq!(policy_metrics.memory_growth_denied_total.get(), 31);
+    assert_eq!(policy_metrics.table_growth_denied_total.get(), 37);
+    assert_eq!(policy_metrics.active_outbound_connections.get(), 17);
+    assert_eq!(policy_metrics.open_fds.get(), 19);
+    assert_eq!(policy_metrics.current_memory_bytes.get(), 23);
+    assert_eq!(policy_metrics.current_table_elements.get(), 29);
+}
+
+#[test]
+fn test_policy_metrics_export_aggregates_live_gauges_across_instances() {
+    let policy_metrics = metrics::exporter::Metrics::new().policy;
+    let counters_a = Arc::new(PolicyCounters::new());
+    counters_a
+        .outbound_connections_active
+        .store(2, Ordering::Relaxed);
+    counters_a.open_fds.store(3, Ordering::Relaxed);
+    counters_a.current_memory_bytes.store(5, Ordering::Relaxed);
+    counters_a
+        .current_table_elements
+        .store(7, Ordering::Relaxed);
+
+    let counters_b = Arc::new(PolicyCounters::new());
+    counters_b
+        .outbound_connections_active
+        .store(5, Ordering::Relaxed);
+    counters_b.open_fds.store(7, Ordering::Relaxed);
+    counters_b.current_memory_bytes.store(11, Ordering::Relaxed);
+    counters_b
+        .current_table_elements
+        .store(13, Ordering::Relaxed);
+
+    let mut instances = vec![
+        dummy_managed_instance_with_counters(counters_a),
+        dummy_managed_instance_with_counters(counters_b),
+    ];
+    Supervisor::export_policy_metrics(&policy_metrics, &mut instances);
+
+    assert_eq!(policy_metrics.active_outbound_connections.get(), 7);
+    assert_eq!(policy_metrics.open_fds.get(), 10);
+    assert_eq!(policy_metrics.current_memory_bytes.get(), 16);
+    assert_eq!(policy_metrics.current_table_elements.get(), 20);
 }
 
 #[tokio::test]
