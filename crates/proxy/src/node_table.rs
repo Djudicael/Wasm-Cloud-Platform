@@ -63,6 +63,25 @@ impl NodeLoadTable {
             .cloned()
     }
 
+    /// Find the least-loaded node excluding the local node.
+    pub async fn least_loaded_other_node(&self, local_node_id: &str) -> Option<NodeEntry> {
+        let nodes = self.nodes.read().await;
+        let unhealthy = self.unhealthy.read().await;
+        nodes
+            .values()
+            .filter(|n| {
+                n.node_id != local_node_id
+                    && !n.is_stale()
+                    && !unhealthy.contains(&n.node_id)
+                    && n.health_status != common::health::NodeHealthStatus::Unhealthy
+            })
+            .min_by(|a, b| {
+                let cmp = a.fuel_used_percent.partial_cmp(&b.fuel_used_percent);
+                cmp.unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .cloned()
+    }
+
     /// Update a node's health status from a NATS health event.
     pub async fn update_health(&self, node_id: &str, status: common::health::NodeHealthStatus) {
         let mut table = self.nodes.write().await;
@@ -179,6 +198,9 @@ mod tests {
         let least = table.least_loaded_node().await.unwrap();
         assert_eq!(least.node_id, "node-1");
 
+        let least_other = table.least_loaded_other_node("node-2").await.unwrap();
+        assert_eq!(least_other.node_id, "node-1");
+
         // Mark node-1 as unhealthy
         table.mark_unhealthy("node-1").await;
         assert!(table.is_unhealthy("node-1").await);
@@ -188,6 +210,11 @@ mod tests {
         let least = table.least_loaded_node().await.unwrap();
         assert_eq!(least.node_id, "node-2");
 
+        assert!(
+            table.least_loaded_other_node("node-2").await.is_none(),
+            "excluding the local node should leave no eligible remote nodes here"
+        );
+
         // Mark node-1 as healthy again
         table.mark_healthy("node-1").await;
         assert!(!table.is_unhealthy("node-1").await);
@@ -195,6 +222,39 @@ mod tests {
         // node-1 is back in the routing table
         let least = table.least_loaded_node().await.unwrap();
         assert_eq!(least.node_id, "node-1");
+    }
+
+    #[tokio::test]
+    async fn test_least_loaded_other_node_excludes_local_node() {
+        let table = NodeLoadTable::default();
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        table
+            .update(NodeEntry {
+                node_id: "node-local".to_string(),
+                proxy_address: "127.0.0.1:9000".to_string(),
+                fuel_used_percent: 1.0,
+                active_instances: 1,
+                last_seen: now,
+                health_status: common::health::NodeHealthStatus::Healthy,
+            })
+            .await;
+        table
+            .update(NodeEntry {
+                node_id: "node-remote".to_string(),
+                proxy_address: "127.0.0.1:9001".to_string(),
+                fuel_used_percent: 25.0,
+                active_instances: 1,
+                last_seen: now,
+                health_status: common::health::NodeHealthStatus::Healthy,
+            })
+            .await;
+
+        let least_other = table.least_loaded_other_node("node-local").await.unwrap();
+        assert_eq!(least_other.node_id, "node-remote");
     }
 
     #[tokio::test]

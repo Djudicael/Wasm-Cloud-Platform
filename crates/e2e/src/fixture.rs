@@ -279,6 +279,7 @@ check_interval_secs = 2
                 "RUST_LOG",
                 std::env::var("RUST_LOG").unwrap_or_else(|_| "info".into()),
             )
+            .env("NODE_ID", node_id)
             // stdout=null avoids pipe-buffer backpressure deadlock when
             // RUST_LOG=debug produces high log volume. stderr is inherited
             // so panics and eprintln! still appear in test output.
@@ -423,6 +424,7 @@ check_interval_secs = 2
                 "RUST_LOG",
                 std::env::var("RUST_LOG").unwrap_or_else(|_| "info".into()),
             )
+            .env("NODE_ID", &self.node_id)
             .stdout(Stdio::null())
             .stderr(Stdio::inherit())
             .spawn()

@@ -13,6 +13,7 @@ use std::sync::Arc;
 /// Default maximum request body size in bytes (10 MB).
 /// Requests with `Content-Length` exceeding this limit are rejected with 413.
 pub const DEFAULT_MAX_BODY_SIZE_BYTES: usize = 10 * 1024 * 1024;
+const REMOTE_STEER_FUEL_THRESHOLD_PERCENT: f32 = 80.0;
 
 fn strip_uri_prefix(path: &str, query: Option<&str>, prefix: &str) -> Option<String> {
     let stripped = path.strip_prefix(prefix)?;
@@ -55,6 +56,7 @@ pub struct WasmProxy {
     pub rate_limiter: Arc<RateLimiter>,
     pub backpressure: BackpressureSignal,
     pub node_table: Arc<NodeLoadTable>,
+    pub local_node_id: String,
     pub metrics: Option<Arc<RateLimitMetrics>>,
 
     // ── New gateway field ───────────────────────────────────────
@@ -85,7 +87,11 @@ impl WasmProxy {
         // 2. Check if local node is overloaded
         if self.node_is_overloaded().await {
             // 3. Find a remote node with capacity
-            if let Some(node) = self.node_table.least_loaded_node().await {
+            if let Some(node) = self
+                .node_table
+                .least_loaded_other_node(&self.local_node_id)
+                .await
+            {
                 match tokio::net::lookup_host(&node.proxy_address).await {
                     Ok(mut addrs) => {
                         if let Some(addr) = addrs.next() {
@@ -117,16 +123,18 @@ impl WasmProxy {
     /// Check whether the local node is overloaded and should shed traffic
     /// to other nodes in the cluster.
     ///
-    /// TODO: Implement proper overload detection:
-    /// 1. Check `fuel_budget_used_percent` from the node load table against a
-    ///    threshold (e.g., 80%).
-    /// 2. Integrate with eBPF pressure signals (`NodeUnderPressure` events)
-    ///    to detect memory/I/O pressure in real time.
-    /// 3. Consider active instance count relative to a configured per-node limit.
-    /// 4. Factor in OS-level metrics (CPU usage via sysinfo, memory pressure,
-    ///    file descriptor exhaustion) as additional signals.
     async fn node_is_overloaded(&self) -> bool {
-        false
+        let unhealthy = self.node_table.is_unhealthy(&self.local_node_id).await;
+        if unhealthy {
+            return true;
+        }
+
+        let nodes = self.node_table.nodes.read().await;
+        let Some(local) = nodes.get(&self.local_node_id) else {
+            return false;
+        };
+        local.health_status == common::health::NodeHealthStatus::Unhealthy
+            || local.fuel_used_percent >= REMOTE_STEER_FUEL_THRESHOLD_PERCENT
     }
 }
 
@@ -652,6 +660,7 @@ mod tests {
             rate_limiter,
             backpressure: crate::backpressure::BackpressureSignal::new(),
             node_table: Arc::new(crate::node_table::NodeLoadTable::default()),
+            local_node_id: "node-0".to_string(),
             metrics: None,
             gateway: Arc::new(Gateway::new(None)),
             cold_start,
@@ -668,6 +677,74 @@ mod tests {
         assert!(
             cold_start_triggered.load(Ordering::SeqCst),
             "Cold start should be triggered when the pool is empty"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_select_upstream_prefers_remote_proxy_when_local_node_is_overloaded() {
+        use crate::node_table::NodeEntry;
+        use crate::rate_limiter::RateLimitConfig;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let router = Arc::new(HostRouter::default());
+        let upstream = Arc::new(UpstreamRegistry::default());
+        let rate_limiter = Arc::new(RateLimiter::new(RateLimitConfig::default()));
+        let node_table = Arc::new(crate::node_table::NodeLoadTable::default());
+        let cold_start_triggered = Arc::new(AtomicBool::new(false));
+        let cold_start_triggered_clone = cold_start_triggered.clone();
+
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        node_table
+            .update(NodeEntry {
+                node_id: "node-local".to_string(),
+                proxy_address: "127.0.0.1:18080".to_string(),
+                fuel_used_percent: 95.0,
+                active_instances: 0,
+                last_seen: now,
+                health_status: common::health::NodeHealthStatus::Healthy,
+            })
+            .await;
+        node_table
+            .update(NodeEntry {
+                node_id: "node-remote".to_string(),
+                proxy_address: "127.0.0.1:28080".to_string(),
+                fuel_used_percent: 10.0,
+                active_instances: 0,
+                last_seen: now,
+                health_status: common::health::NodeHealthStatus::Healthy,
+            })
+            .await;
+
+        let cold_start = Arc::new(move |_app_id: AppId| {
+            let trigger = cold_start_triggered_clone.clone();
+            Box::pin(async move {
+                trigger.store(true, Ordering::SeqCst);
+                Some("127.0.0.1:8080".parse().unwrap())
+            }) as futures::future::BoxFuture<'static, Option<std::net::SocketAddr>>
+        });
+
+        let proxy = WasmProxy {
+            router,
+            upstream,
+            rate_limiter,
+            backpressure: crate::backpressure::BackpressureSignal::new(),
+            node_table,
+            local_node_id: "node-local".to_string(),
+            metrics: None,
+            gateway: Arc::new(Gateway::new(None)),
+            cold_start,
+            max_body_size_bytes: super::DEFAULT_MAX_BODY_SIZE_BYTES,
+        };
+
+        let app_id = AppId("test-app".to_string());
+        let addr = proxy.select_upstream(&app_id).await.unwrap();
+        assert_eq!(addr, "127.0.0.1:28080".parse().unwrap());
+        assert!(
+            !cold_start_triggered.load(Ordering::SeqCst),
+            "local cold start should not run when an eligible remote node exists"
         );
     }
 }

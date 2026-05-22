@@ -16,6 +16,33 @@ fn admin_url(port: u16, path: &str) -> String {
     format!("http://127.0.0.1:{port}{path}")
 }
 
+fn encode_app_id(app_id: &str) -> String {
+    app_id.replace(':', "%3A")
+}
+
+async fn instance_count(
+    http: &reqwest::Client,
+    admin_port: u16,
+    app_id: &str,
+) -> Result<u64, String> {
+    let url = admin_url(
+        admin_port,
+        &format!("/admin/instances/{}", encode_app_id(app_id)),
+    );
+    let body: serde_json::Value = http
+        .get(url)
+        .send()
+        .await
+        .map_err(|e| format!("instance count request failed: {e}"))?
+        .json()
+        .await
+        .map_err(|e| format!("failed to decode instance count response: {e}"))?;
+    Ok(body
+        .get("count")
+        .and_then(|value| value.as_u64())
+        .unwrap_or(0))
+}
+
 async fn wait_for_registry(
     http: &reqwest::Client,
     admin_port: u16,
@@ -100,6 +127,16 @@ async fn test_live_cluster_registry_drives_artifact_authorize_audience_set() {
         2,
         "node 1 registry should contain both live nodes"
     );
+    assert!(
+        registry0.iter().any(|node| node.node_id == node1.node_id
+            && node.proxy_address.as_deref() == Some(node1.proxy_addr_str().as_str())),
+        "node 0 registry should carry node 1's routable proxy address"
+    );
+    assert!(
+        registry1.iter().any(|node| node.node_id == node0.node_id
+            && node.proxy_address.as_deref() == Some(node0.proxy_addr_str().as_str())),
+        "node 1 registry should carry node 0's routable proxy address"
+    );
 
     let wasm_path = helpers::find_echo_service_wasm().expect("echo-service.wasm not found");
     let sha256 = helpers::sha256_file(&wasm_path).expect("failed to hash wasm artifact");
@@ -145,5 +182,138 @@ async fn test_live_cluster_registry_drives_artifact_authorize_audience_set() {
             .audience
             .as_deref(),
         Some(node1.node_id.as_str())
+    );
+}
+
+#[tokio::test]
+#[ignore = "live cluster regression; run explicitly or via CI E2E lane"]
+async fn test_live_overloaded_node_routes_first_request_to_remote_proxy() {
+    let _guard = NODE_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+
+    let cluster = ClusterFixture::dual()
+        .await
+        .expect("failed to start two-node cluster fixture");
+    let http = reqwest::Client::new();
+    let bus = cluster
+        .connect_bus()
+        .await
+        .expect("failed to connect test bus");
+
+    let node0 = cluster.node(0);
+    let node1 = cluster.node(1);
+    let expected_ids = [node0.node_id.as_str(), node1.node_id.as_str()];
+
+    let registry0 = wait_for_registry(
+        &http,
+        node0.admin_port,
+        &expected_ids,
+        Duration::from_secs(45),
+    )
+    .await
+    .expect("node 0 registry did not converge");
+    assert!(
+        registry0.iter().any(|node| {
+            node.node_id == node1.node_id
+                && node.proxy_address.as_deref() == Some(node1.proxy_addr_str().as_str())
+        }),
+        "node 0 should learn node 1's routable proxy address"
+    );
+
+    let app_id = "hello-remote:v1";
+    let host = "hello-remote.local";
+    let wasm_path = helpers::find_hello_axum_wasm().expect("hello-axum.wasm not found");
+    let sha256 = helpers::sha256_file(&wasm_path).expect("failed to hash hello app");
+    let size_bytes = std::fs::metadata(&wasm_path)
+        .expect("failed to stat hello app")
+        .len();
+    let config = helpers::build_app_config(app_id, 100_000_000, 100, 1);
+
+    // Seed the artifact on both nodes so this test isolates cross-node routing
+    // rather than artifact audience-manifest fan-out policy.
+    helpers::upload_artifact(node0.artifact_port, &wasm_path, &sha256)
+        .await
+        .expect("failed to upload artifact to node 0");
+    helpers::upload_artifact(node1.artifact_port, &wasm_path, &sha256)
+        .await
+        .expect("failed to upload artifact to node 1");
+    helpers::deploy_app(
+        &bus,
+        app_id,
+        admin_url(node0.artifact_port, &format!("/artifacts/{sha256}")),
+        sha256.clone(),
+        size_bytes,
+        config.clone(),
+    )
+    .await
+    .expect("failed to deploy hello app on node 0");
+    helpers::deploy_app(
+        &bus,
+        app_id,
+        admin_url(node1.artifact_port, &format!("/artifacts/{sha256}")),
+        sha256.clone(),
+        size_bytes,
+        config,
+    )
+    .await
+    .expect("failed to deploy hello app on node 1");
+    cluster
+        .add_route(host, app_id)
+        .await
+        .expect("failed to add hello route");
+
+    assert_eq!(
+        instance_count(&http, node0.admin_port, app_id)
+            .await
+            .expect("node 0 instance count"),
+        0
+    );
+    assert_eq!(
+        instance_count(&http, node1.admin_port, app_id)
+            .await
+            .expect("node 1 instance count"),
+        0
+    );
+
+    bus.publish(&messaging::events::Event::NodeUnderPressure {
+        node_id: node0.node_id.clone(),
+        pressure_level: 2,
+    })
+    .await
+    .expect("failed to publish overloaded local pressure event");
+    bus.publish(&messaging::events::Event::NodeLoad {
+        node_id: node1.node_id.clone(),
+        cpu_percent: 5.0,
+        fuel_budget_used_percent: 5.0,
+        active_instances: 0,
+        proxy_address: node1.proxy_addr_str(),
+    })
+    .await
+    .expect("failed to publish remote load");
+
+    tokio::time::sleep(Duration::from_millis(750)).await;
+
+    let (status, body) = helpers::send_request_text(node0.proxy_port, host, "/")
+        .await
+        .expect("request through overloaded node 0 failed");
+    assert_eq!(status, 200, "expected successful remote-routed response");
+    assert!(
+        body.contains("Hello"),
+        "expected hello-axum response body, got: {body}"
+    );
+
+    let node0_instances = instance_count(&http, node0.admin_port, app_id)
+        .await
+        .expect("node 0 instance count after request");
+    let node1_instances = instance_count(&http, node1.admin_port, app_id)
+        .await
+        .expect("node 1 instance count after request");
+
+    assert_eq!(
+        node0_instances, 0,
+        "overloaded node 0 should proxy to node 1 instead of cold-starting locally"
+    );
+    assert_eq!(
+        node1_instances, 1,
+        "remote node 1 should cold-start the app behind the routed request"
     );
 }

@@ -23,6 +23,7 @@ async fn create_test_supervisor() -> Arc<supervisor::Supervisor> {
 
     supervisor::Supervisor::new(
         store,
+        "test-node".to_string(),
         runtime,
         port_alloc,
         upstream,

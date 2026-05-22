@@ -1025,6 +1025,7 @@ async fn main() -> anyhow::Result<()> {
 
     let mut supervisor = supervisor::Supervisor::new(
         store.clone(),
+        config.node.node_id.clone(),
         runtime.clone(),
         port_alloc.clone(),
         upstream_registry.clone(),
@@ -1458,6 +1459,7 @@ async fn main() -> anyhow::Result<()> {
         upstream: upstream_registry.clone(),
         rate_limiter,
         node_table: node_load_table.clone(),
+        local_node_id: config.node.node_id.clone(),
         cold_start,
         backpressure: backpressure.clone(),
         metrics: Some(rate_limit_metrics),

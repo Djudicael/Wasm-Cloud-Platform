@@ -139,6 +139,7 @@ impl Supervisor {
     #[allow(clippy::too_many_arguments, clippy::type_complexity)]
     pub fn new(
         store: Store,
+        node_id: String,
         runtime: WasmRuntime,
         port_alloc: Arc<PortAllocator>,
         upstream_registry: Arc<UpstreamRegistry>,
@@ -152,7 +153,7 @@ impl Supervisor {
         let (command_tx, command_rx) = mpsc::channel::<SupervisorCommand>(256);
         Arc::new(Self {
             store,
-            node_id: std::env::var("NODE_ID").unwrap_or_else(|_| "node-0".to_string()),
+            node_id,
             runtime,
             port_alloc,
             upstream_registry,

@@ -434,7 +434,13 @@ impl EventDispatcher {
             } => {
                 if node_id == self.node_id {
                     // Our own pressure events are handled directly by the
-                    // eBPF ActionDispatcher — no additional action needed here.
+                    // eBPF ActionDispatcher. Also mark ourselves unhealthy in
+                    // the routing table so the local proxy can shed traffic.
+                    warn!(
+                        pressure_level,
+                        "local node under pressure — excluding self from least-loaded routing"
+                    );
+                    self.node_table.mark_unhealthy(&node_id).await;
                 } else {
                     // A peer node is under pressure — stop steering traffic to it.
                     warn!(
@@ -457,6 +463,7 @@ impl EventDispatcher {
             Event::NodePressureRecovered { node_id } => {
                 if node_id == self.node_id {
                     info!("our node pressure recovered");
+                    self.node_table.mark_healthy(&node_id).await;
                 } else {
                     info!(node = %node_id, "peer node pressure recovered — restoring in routing");
                     self.node_table.mark_healthy(&node_id).await;
@@ -1224,6 +1231,7 @@ mod tests {
     async fn build_test_dispatcher(
         store: Store,
         bootstrap_session: Option<Arc<Mutex<BootstrapSessionState>>>,
+        dns_webhook: Option<proxy::dns_webhook::DnsWebhookManager>,
     ) -> EventDispatcher {
         let runtime = runtime::WasmRuntime::new().unwrap();
         let upstream = Arc::new(proxy::upstream::UpstreamRegistry::new());
@@ -1237,6 +1245,7 @@ mod tests {
         let (event_tx, _event_rx) = mpsc::channel(8);
         let supervisor = Supervisor::new(
             store.clone(),
+            "node-under-test".to_string(),
             runtime.clone(),
             port_alloc,
             upstream.clone(),
@@ -1267,7 +1276,7 @@ mod tests {
             secret_provider: Arc::new(LocalSecretProvider::new(store, SymmetricKey::generate())),
             bootstrap_session,
             bus,
-            dns_webhook: None,
+            dns_webhook,
             node_table: Arc::new(proxy::node_table::NodeLoadTable::default()),
             cluster_node_stale_after_secs: 120,
             gateway: None,
@@ -1474,7 +1483,7 @@ mod tests {
             applied: false,
         }));
         let dispatcher =
-            build_test_dispatcher(store.clone(), Some(bootstrap_session.clone())).await;
+            build_test_dispatcher(store.clone(), Some(bootstrap_session.clone()), None).await;
 
         let stale_config = common::types::AppConfig {
             id: AppId("stale-app:v1".to_string()),
@@ -1561,5 +1570,101 @@ mod tests {
 
         let bootstrap_state = bootstrap_session.lock().await;
         assert!(bootstrap_state.applied);
+    }
+
+    #[tokio::test]
+    async fn test_route_webhook_uses_peer_ips_from_node_load_updates() {
+        use axum::{
+            extract::{Json, State},
+            http::{HeaderMap, StatusCode},
+            routing::post,
+            Router,
+        };
+        use proxy::dns_webhook::RouteChangeWebhook;
+        use std::sync::Arc as StdArc;
+        use tokio::sync::oneshot;
+
+        #[derive(Clone)]
+        struct WebhookState {
+            sender:
+                StdArc<std::sync::Mutex<Option<oneshot::Sender<(HeaderMap, RouteChangeWebhook)>>>>,
+        }
+
+        let (tx, rx) = oneshot::channel();
+        let state = WebhookState {
+            sender: StdArc::new(std::sync::Mutex::new(Some(tx))),
+        };
+
+        let app = Router::new()
+            .route(
+                "/dns",
+                post(
+                    |State(state): State<WebhookState>,
+                     headers: HeaderMap,
+                     Json(payload): Json<RouteChangeWebhook>| async move {
+                        if let Some(tx) = state.sender.lock().unwrap().take() {
+                            let _ = tx.send((headers, payload));
+                        }
+                        StatusCode::OK
+                    },
+                ),
+            )
+            .with_state(state);
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let temp = NamedTempFile::new().unwrap();
+        let store = Store::open(temp.path()).unwrap();
+        let webhook = proxy::dns_webhook::DnsWebhookManager::new(
+            Some(format!("http://{addr}/dns")),
+            Some("test-token".to_string()),
+        )
+        .unwrap();
+        let dispatcher = build_test_dispatcher(store, None, Some(webhook)).await;
+
+        dispatcher
+            .handle(Event::NodeLoad {
+                node_id: "node-remote".to_string(),
+                cpu_percent: 10.0,
+                fuel_budget_used_percent: 25.0,
+                active_instances: 2,
+                proxy_address: "10.0.0.42:8080".to_string(),
+            })
+            .await
+            .unwrap();
+
+        dispatcher
+            .handle(Event::RouteAdd {
+                route: common::types::Route {
+                    host: "hello.example.com".to_string(),
+                    app_id: AppId("hello:v1".to_string()),
+                    path_prefix: "/".to_string(),
+                    strip_prefix: false,
+                    created_at: 1,
+                    updated_at: 1,
+                },
+            })
+            .await
+            .unwrap();
+
+        let (headers, payload) = tokio::time::timeout(std::time::Duration::from_secs(5), rx)
+            .await
+            .expect("timed out waiting for DNS webhook")
+            .expect("DNS webhook sender dropped");
+
+        assert_eq!(
+            headers
+                .get(axum::http::header::AUTHORIZATION)
+                .and_then(|value| value.to_str().ok()),
+            Some("Bearer test-token")
+        );
+        assert_eq!(payload.action, "add");
+        assert_eq!(payload.hostname, "hello.example.com");
+        assert_eq!(payload.app_id, "hello:v1");
+        assert_eq!(payload.node_ips, vec!["10.0.0.42".to_string()]);
     }
 }
