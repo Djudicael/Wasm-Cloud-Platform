@@ -14,6 +14,20 @@ use std::sync::Arc;
 /// Requests with `Content-Length` exceeding this limit are rejected with 413.
 pub const DEFAULT_MAX_BODY_SIZE_BYTES: usize = 10 * 1024 * 1024;
 
+fn strip_uri_prefix(path: &str, query: Option<&str>, prefix: &str) -> Option<String> {
+    let stripped = path.strip_prefix(prefix)?;
+    let new_path = if stripped.starts_with('/') || stripped.is_empty() {
+        stripped.to_string()
+    } else {
+        format!("/{}", stripped)
+    };
+
+    Some(match query {
+        Some(query) => format!("{new_path}?{query}"),
+        None => new_path,
+    })
+}
+
 /// Context passed through the Pingora request pipeline.
 pub struct RequestCtx {
     pub app_id: Option<AppId>,
@@ -480,23 +494,17 @@ impl ProxyHttp for WasmProxy {
         if ctx.strip_prefix {
             if let Some(ref prefix) = ctx.matched_prefix {
                 let original_uri = upstream_request.uri.to_string();
-                if let Some(stripped) = original_uri.strip_prefix(prefix) {
-                    let new_path = if stripped.starts_with('/') || stripped.is_empty() {
-                        stripped.to_string()
-                    } else {
-                        format!("/{}", stripped)
-                    };
+                let path = upstream_request.uri.path().to_string();
+                let query = upstream_request.uri.query().map(str::to_string);
+                if let Some(new_uri) =
+                    strip_uri_prefix(&path, query.as_deref(), prefix)
+                {
                     let _ = upstream_request
                         .insert_header("X-Forwarded-Prefix", prefix.as_str())
                         .map(|_| ());
                     let _ = upstream_request
                         .insert_header("X-Original-Uri", &original_uri)
                         .map(|_| ());
-                    let new_uri = if let Some(query) = upstream_request.uri.query() {
-                        format!("{}?{}", new_path, query)
-                    } else {
-                        new_path
-                    };
                     if let Ok(parsed) = new_uri.parse() {
                         upstream_request.uri = parsed;
                     }
@@ -588,6 +596,28 @@ mod tests {
     use super::*;
     use crate::rate_limiter::RateLimiter;
     use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[test]
+    fn strip_uri_prefix_handles_path_and_query_independently() {
+        let cases = [
+            ("/api", "/api/health", None, Some("/health")),
+            ("/api", "/api/health", Some("x=1"), Some("/health?x=1")),
+            (
+                "/api",
+                "/api/health",
+                Some("x=1&y=2"),
+                Some("/health?x=1&y=2"),
+            ),
+            ("/api", "/api", None, Some("")),
+            ("/api", "/api", Some("x=1"), Some("?x=1")),
+            ("/api", "/other", Some("x=1"), None),
+        ];
+
+        for (prefix, path, query, expected) in cases {
+            let actual = strip_uri_prefix(path, query, prefix);
+            assert_eq!(actual.as_deref(), expected);
+        }
+    }
 
     #[tokio::test]
     async fn test_unknown_host_returns_502_behavior() {

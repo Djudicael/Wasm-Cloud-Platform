@@ -363,6 +363,7 @@ pub async fn init(
     });
 
     let namespace_map = Arc::new(NamespaceMap::new_fallback());
+    dispatcher.set_namespace_map(namespace_map.clone());
 
     MonitorHandle {
         shutdown_tx,
@@ -455,6 +456,8 @@ pub fn noop_dispatcher(metrics: Arc<EbpfMetrics>, node_id: String) -> Arc<Action
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::actions::MonitorEvent;
+    use crate::common::TidIdentity;
     use prometheus::Registry;
 
     fn make_test_metrics() -> Arc<EbpfMetrics> {
@@ -491,6 +494,41 @@ mod tests {
 
         // Disabled config should always be in fallback mode
         assert!(!handle.is_ebpf_active());
+    }
+
+    #[tokio::test]
+    async fn test_fallback_dispatcher_updates_namespace_map_port_bindings() {
+        let metrics = make_test_metrics();
+        let dispatcher = noop_dispatcher(metrics.clone(), "test-node".to_string());
+        let handle = init(MonitorConfig::default(), metrics, dispatcher, std::process::id()).await;
+
+        handle
+            .namespace_map
+            .register_tid(4242, TidIdentity::new("prod", "payments:v1"))
+            .unwrap();
+
+        handle.dispatcher.dispatch(MonitorEvent::TidConnection {
+            tid: 4242,
+            namespace: "prod".to_string(),
+            app_id: "payments:v1".to_string(),
+            source_port: 18080,
+        });
+
+        let identity = handle
+            .namespace_map
+            .resolve_identity(18080)
+            .expect("port binding should resolve after fallback TidConnection");
+        assert_eq!(identity.tid, 4242);
+        assert_eq!(identity.namespace, "prod");
+        assert_eq!(identity.app_id, "payments:v1");
+
+        handle.dispatcher.dispatch(MonitorEvent::TidDisconnection {
+            tid: 4242,
+            source_port: 18080,
+        });
+        assert!(handle.namespace_map.resolve_identity(18080).is_none());
+
+        handle.shutdown();
     }
 
     #[tokio::test]

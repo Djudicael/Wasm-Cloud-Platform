@@ -15,6 +15,25 @@ struct JwksCache {
     fetched_at: std::time::Instant,
 }
 
+#[derive(serde::Deserialize)]
+struct OpenIdConfiguration {
+    jwks_uri: String,
+}
+
+#[derive(serde::Deserialize)]
+struct JsonWebKeySet {
+    #[serde(default)]
+    keys: Vec<JsonWebKey>,
+}
+
+#[derive(serde::Deserialize)]
+struct JsonWebKey {
+    kid: Option<String>,
+    kty: Option<String>,
+    n: Option<String>,
+    e: Option<String>,
+}
+
 /// Cached OIDC provider state.
 pub struct OidcProvider {
     config: OidcConfig,
@@ -56,16 +75,30 @@ impl OidcProvider {
         });
     }
 
-    /// Fetch the JWKS from the OIDC provider.
-    pub async fn refresh_jwks(&self) -> Result<(), GatewayError> {
-        // TODO: Use OIDC discovery endpoint (`{issuer_url}/.well-known/openid-configuration`)
-        // to fetch the JWKS URI dynamically instead of hardcoding the Keycloak-specific
-        // `/protocol/openid-connect/certs` path. This would make the provider compatible
-        // with any standards-compliant OIDC identity provider (Auth0, Okta, etc.).
-        let jwks_url = format!(
-            "{}/protocol/openid-connect/certs",
+    async fn discover_jwks_uri(&self) -> Result<String, GatewayError> {
+        let discovery_url = format!(
+            "{}/.well-known/openid-configuration",
             self.config.issuer_url.trim_end_matches('/')
         );
+        let resp = self
+            .http_client
+            .get(&discovery_url)
+            .send()
+            .await
+            .map_err(|e| GatewayError::Oidc(format!("OIDC discovery fetch failed: {e}")))?;
+        let resp = resp.error_for_status().map_err(|e| {
+            GatewayError::Oidc(format!("OIDC discovery returned error status: {e}"))
+        })?;
+        let discovery: OpenIdConfiguration = resp
+            .json()
+            .await
+            .map_err(|e| GatewayError::Oidc(format!("OIDC discovery parse failed: {e}")))?;
+        Ok(discovery.jwks_uri)
+    }
+
+    /// Fetch the JWKS from the OIDC provider.
+    pub async fn refresh_jwks(&self) -> Result<(), GatewayError> {
+        let jwks_url = self.discover_jwks_uri().await?;
 
         let resp = self
             .http_client
@@ -73,27 +106,27 @@ impl OidcProvider {
             .send()
             .await
             .map_err(|e| GatewayError::Oidc(format!("JWKS fetch failed: {e}")))?;
+        let resp = resp
+            .error_for_status()
+            .map_err(|e| GatewayError::Oidc(format!("JWKS returned error status: {e}")))?;
 
-        let jwks_json: serde_json::Value = resp
+        let jwks: JsonWebKeySet = resp
             .json()
             .await
             .map_err(|e| GatewayError::Oidc(format!("JWKS parse failed: {e}")))?;
 
         let mut keys = HashMap::new();
-        if let Some(key_array) = jwks_json.get("keys").and_then(|k| k.as_array()) {
-            for key_json in key_array {
-                if let (Some(kid), Some(kty), Some(n), Some(e)) = (
-                    key_json.get("kid").and_then(|v| v.as_str()),
-                    key_json.get("kty").and_then(|v| v.as_str()),
-                    key_json.get("n").and_then(|v| v.as_str()),
-                    key_json.get("e").and_then(|v| v.as_str()),
-                ) {
-                    if kty == "RSA" {
-                        if let Ok(decoding_key) =
-                            jsonwebtoken::DecodingKey::from_rsa_components(n, e)
-                        {
-                            keys.insert(kid.to_string(), decoding_key);
-                        }
+        for key in jwks.keys {
+            if let (Some(kid), Some(kty), Some(n), Some(e)) = (
+                key.kid.as_deref(),
+                key.kty.as_deref(),
+                key.n.as_deref(),
+                key.e.as_deref(),
+            ) {
+                if kty == "RSA" {
+                    if let Ok(decoding_key) = jsonwebtoken::DecodingKey::from_rsa_components(n, e)
+                    {
+                        keys.insert(kid.to_string(), decoding_key);
                     }
                 }
             }
@@ -253,6 +286,9 @@ impl UserIdentity {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::{extract::State, routing::get, Json, Router};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::net::TcpListener;
 
     #[test]
     fn test_oidc_config_defaults() {
@@ -281,5 +317,80 @@ mod tests {
         let decoded: OidcConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded.jwks_refresh_secs, 1800);
         assert_eq!(decoded.clock_skew_secs, 60);
+    }
+
+    #[tokio::test]
+    async fn test_refresh_jwks_uses_discovered_jwks_uri() {
+        #[derive(Clone)]
+        struct TestState {
+            discovery_hits: Arc<AtomicUsize>,
+            jwks_hits: Arc<AtomicUsize>,
+        }
+
+        let state = TestState {
+            discovery_hits: Arc::new(AtomicUsize::new(0)),
+            jwks_hits: Arc::new(AtomicUsize::new(0)),
+        };
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let base_url = format!("http://{}", addr);
+        let discovery_url = format!("{}/issuer/.well-known/openid-configuration", base_url);
+        let jwks_url = format!("{}/custom/jwks.json", base_url);
+
+        let app = Router::new()
+            .route(
+                "/issuer/.well-known/openid-configuration",
+                get({
+                    let jwks_url = jwks_url.clone();
+                    move |State(state): State<TestState>| {
+                        let jwks_url = jwks_url.clone();
+                        async move {
+                            state.discovery_hits.fetch_add(1, Ordering::SeqCst);
+                            Json(serde_json::json!({ "jwks_uri": jwks_url }))
+                        }
+                    }
+                }),
+            )
+            .route(
+                "/custom/jwks.json",
+                get(|State(state): State<TestState>| async move {
+                    state.jwks_hits.fetch_add(1, Ordering::SeqCst);
+                    Json(serde_json::json!({
+                        "keys": [{
+                            "kid": "test-key",
+                            "kty": "RSA",
+                            "n": "sXchK4A8mZLrN8qQxY2d9jN0l2dYxwL1J2m2fH5eP7hM4vK6aR8uQw3cT1bN6pF4zRj8hP7kY2mL1sQ9dV3xZ5cW7bN4pR8tQ6mH2kL9vD3xC5bF7nP1qR4tV6wX8yZ0aB2cD4eF6gH8jK0mN2pQ4rS6tU8vW0xY2zA4bC6dE8fG0hJ2kL4mN6pQ8rS0tU2vW4xY6z",
+                            "e": "AQAB"
+                        }]
+                    }))
+                }),
+            )
+            .with_state(state.clone());
+
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let provider = OidcProvider::new(OidcConfig {
+            issuer_url: format!("{}/issuer", base_url),
+            audience: "my-app".to_string(),
+            jwks_refresh_secs: 3600,
+            clock_skew_secs: 30,
+        });
+
+        provider.refresh_jwks().await.unwrap();
+
+        let cache = provider.jwks.read().await;
+        assert!(cache.fetched_at.elapsed().as_secs() < 5);
+        drop(cache);
+        assert_eq!(state.discovery_hits.load(Ordering::SeqCst), 1);
+        assert_eq!(state.jwks_hits.load(Ordering::SeqCst), 1);
+        assert_ne!(
+            discovery_url.replace("/.well-known/openid-configuration", "/protocol/openid-connect/certs"),
+            jwks_url
+        );
+
+        server.abort();
     }
 }

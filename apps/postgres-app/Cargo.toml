@@ -9,8 +9,3 @@ url = { workspace = true }
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
 axum = { workspace = true }
 tokio = { workspace = true }
-
-[profile.release]
-opt-level = "s"
-lto = true
-strip = "symbols"

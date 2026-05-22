@@ -12,8 +12,3 @@ tokio = { workspace = true }
 
 [target.'cfg(target_family = "wasm")'.dependencies]
 url = "2"
-
-[profile.release]
-opt-level = "s"
-lto = true
-strip = "symbols"

@@ -983,7 +983,7 @@ mod tests {
     #[tokio::test]
     async fn test_integration_auth_disabled_allows_all() {
         let config = AuthConfig::default(); // enabled = false
-        let _app = test_auth_router(config);
+        let app = test_auth_router(config);
 
         // GET without token should work
         let req = Request::builder()
@@ -1006,14 +1006,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_integration_public_endpoints_no_auth() {
-        let config = AuthConfig {
-            enabled: true,
-            write_token: Some("write_token_1234567890".to_string()),
-            read_token: Some("read_token_1234567890".to_string()),
-            ..Default::default()
-        };
-        let app = test_auth_router(config);
-
         // All public endpoints should work without any token
         for path in &[
             "/health",
@@ -1192,12 +1184,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_integration_rate_limit_returns_429() {
-        let config = AuthConfig {
-            enabled: true,
-            write_token: Some("write_token_1234567890".to_string()),
-            ..Default::default()
-        };
-
         // Create a very restrictive rate limiter
         // Use a shared rate limiter across all requests in this test
         let shared_limiter = Arc::new(AdminRateLimiter::new(1, 2)); // 1/s, burst 2

@@ -75,10 +75,11 @@ async fn main() {
         .route("/echo", get(|| async { "Echo from native!" }))
         .route("/health", get(|| async { r#"{"status":"healthy"}"# }));
 
+    let port = std::env::var("PORT").unwrap_or_else(|_| "8081".to_string());
     let bind_addr = std::env::var("BIND_ADDR")
         .or_else(|_| std::env::var("HOST"))
         .unwrap_or_else(|_| "127.0.0.1".to_string());
-    let addr: SocketAddr = format!("{bind_addr}:8081").parse().unwrap();
+    let addr: SocketAddr = format!("{bind_addr}:{port}").parse().unwrap();
     let listener = TcpListener::bind(addr).await.unwrap();
     println!("Echo service listening on {}", addr);
 
