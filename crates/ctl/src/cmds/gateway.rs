@@ -40,7 +40,7 @@ pub enum GatewayAction {
         rps: u32,
         #[arg(long)]
         burst: u32,
-        #[arg(long, default_value = "true")]
+        #[arg(long)]
         distributed: bool,
     },
     /// Set circuit breaker config for a route
@@ -55,6 +55,61 @@ pub enum GatewayAction {
     Show { app_id: String },
     /// Remove gateway config for a route (revert to public)
     Reset { app_id: String },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{GatewayAction, GatewayArgs};
+    use clap::Parser;
+
+    #[derive(Parser)]
+    struct GatewayCliTestHarness {
+        #[command(flatten)]
+        args: GatewayArgs,
+    }
+
+    #[test]
+    fn test_set_rate_limit_defaults_to_node_local() {
+        let parsed = GatewayCliTestHarness::parse_from([
+            "wasm-ctl",
+            "set-rate-limit",
+            "api:v1",
+            "--rps",
+            "100",
+            "--burst",
+            "20",
+        ]);
+
+        match parsed.args.action {
+            GatewayAction::SetRateLimit { distributed, .. } => assert!(!distributed),
+            other => panic!(
+                "expected SetRateLimit, got {:?}",
+                std::mem::discriminant(&other)
+            ),
+        }
+    }
+
+    #[test]
+    fn test_set_rate_limit_requires_explicit_distributed_opt_in() {
+        let parsed = GatewayCliTestHarness::parse_from([
+            "wasm-ctl",
+            "set-rate-limit",
+            "api:v1",
+            "--rps",
+            "100",
+            "--burst",
+            "20",
+            "--distributed",
+        ]);
+
+        match parsed.args.action {
+            GatewayAction::SetRateLimit { distributed, .. } => assert!(distributed),
+            other => panic!(
+                "expected SetRateLimit, got {:?}",
+                std::mem::discriminant(&other)
+            ),
+        }
+    }
 }
 
 pub async fn run(

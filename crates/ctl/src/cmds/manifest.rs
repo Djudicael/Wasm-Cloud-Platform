@@ -449,7 +449,7 @@ allowed_roles = ["admin"]
                 rate_limit: Some(common::types::RouteRateLimit {
                     requests_per_second: 100,
                     burst_capacity: 20,
-                    distributed: true,
+                    distributed: false,
                 }),
                 circuit_breaker: None,
                 transform: None,
@@ -470,6 +470,29 @@ allowed_roles = ["admin"]
         let gw = manifest.to_gateway_config().unwrap();
         assert_eq!(gw.auth, common::types::AuthPolicy::Authenticated);
         assert_eq!(gw.rate_limit.as_ref().unwrap().requests_per_second, 100);
+        assert!(!gw.rate_limit.as_ref().unwrap().distributed);
         assert_eq!(gw.endpoints.len(), 1);
+    }
+
+    #[test]
+    fn test_manifest_rate_limit_defaults_to_node_local_when_distributed_is_omitted() {
+        let toml = r#"
+[app]
+name = "api-users"
+version = "v1"
+wasm_artifact = "./api.wasm"
+
+[gateway.rate_limit]
+requests_per_second = 100
+burst_capacity = 20
+"#;
+
+        let manifest: DeployManifest = toml::from_str(toml).unwrap();
+        let rate_limit = manifest
+            .gateway
+            .as_ref()
+            .and_then(|gateway| gateway.rate_limit.as_ref())
+            .unwrap();
+        assert!(!rate_limit.distributed);
     }
 }

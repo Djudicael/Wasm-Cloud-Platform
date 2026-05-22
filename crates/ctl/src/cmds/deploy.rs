@@ -643,12 +643,16 @@ pub async fn remove(app_id_str: &str, bus: &NatsBus) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{load_cluster_node_registry, request_per_node_manifests, select_target_node_ids};
+    use super::{
+        build_gateway_config, load_cluster_node_registry, request_per_node_manifests,
+        select_target_node_ids, DeployArgs,
+    };
     use axum::{
         extract::State,
         routing::{get, post},
         Json, Router,
     };
+    use clap::Parser;
     use common::{
         artifact_transfer::{
             ArtifactManifestBatchRequest, ArtifactManifestBatchResponse, ArtifactTransferAuthority,
@@ -686,6 +690,49 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0)
+    }
+
+    #[derive(Parser)]
+    struct DeployCliTestHarness {
+        #[command(flatten)]
+        args: DeployArgs,
+    }
+
+    #[test]
+    fn test_deploy_gateway_rate_limit_defaults_to_node_local() {
+        let parsed = DeployCliTestHarness::parse_from([
+            "wasm-ctl",
+            "--app",
+            "api",
+            "--wasm",
+            "./test.wasm",
+            "--gateway-rps",
+            "100",
+            "--gateway-rps-burst",
+            "20",
+        ]);
+
+        let gateway = build_gateway_config(&parsed.args).unwrap();
+        assert_eq!(gateway.rate_limit.unwrap().distributed, false);
+    }
+
+    #[test]
+    fn test_deploy_gateway_rate_limit_supports_explicit_distributed_opt_in() {
+        let parsed = DeployCliTestHarness::parse_from([
+            "wasm-ctl",
+            "--app",
+            "api",
+            "--wasm",
+            "./test.wasm",
+            "--gateway-rps",
+            "100",
+            "--gateway-rps-burst",
+            "20",
+            "--gateway-rps-distributed",
+        ]);
+
+        let gateway = build_gateway_config(&parsed.args).unwrap();
+        assert_eq!(gateway.rate_limit.unwrap().distributed, true);
     }
 
     #[tokio::test]

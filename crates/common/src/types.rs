@@ -491,13 +491,9 @@ pub struct RouteRateLimit {
     pub burst_capacity: u32,
 
     /// Whether this route's rate limit is shared across all nodes (distributed)
-    /// or node-local only. Default: distributed.
-    #[serde(default = "default_true")]
+    /// or node-local only. Default: node-local.
+    #[serde(default)]
     pub distributed: bool,
-}
-
-pub fn default_true() -> bool {
-    true
 }
 
 /// Circuit breaker configuration per upstream app.

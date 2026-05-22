@@ -4,8 +4,6 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-use crate::types::default_true;
-
 /// Top-level configuration for a wasm-node.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NodeConfig {
@@ -64,6 +62,10 @@ impl Default for NodeConfig {
             gateway: GatewaySection::default(),
         }
     }
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
