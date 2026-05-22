@@ -160,23 +160,8 @@ pub fn check_environment() -> Result<(), String> {
         ));
     }
 
-    // Check that a container runtime is available
-    let podman_available = std::process::Command::new("podman")
-        .arg("--version")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
-
-    let docker_available = std::process::Command::new("docker")
-        .arg("--version")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
-
-    if !podman_available && !docker_available {
-        return Err(
-            "no container runtime found. Install Podman or Docker for testcontainers.".to_string(),
-        );
+    if crate::fixture::detect_host_container_runtime().is_none() {
+        return Err("no supported container runtime found. Install Podman or Docker for the E2E NATS harness.".to_string());
     }
 
     // Check that tc is available (needed for L5 NATS partition)

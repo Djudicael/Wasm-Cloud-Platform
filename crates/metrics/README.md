@@ -88,7 +88,6 @@ The `metrics` crate provides a unified observability layer combining Prometheus 
 
 - **nats.rs: reconnect_count increments on first connection** — The counter treats the initial connection as a reconnection, inflating metrics
 - **Per-app health metrics only record last app's values** — Should use `IntGaugeVec` to track multiple apps simultaneously
-- **collector.rs: drain() flushes ALL buckets including current minute** — Partial data for the in-progress minute is emitted, causing data loss on the trailing edge
 - **Fragile string parsing for disk/memory metrics** — Parsing `DependencyHealth` messages via string splitting is brittle and error-prone
 
 ### Reliability

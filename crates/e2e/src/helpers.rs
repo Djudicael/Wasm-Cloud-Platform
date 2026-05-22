@@ -12,6 +12,7 @@
 use messaging::NatsBus;
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::time::Duration;
 use tracing::{info, warn};
 
@@ -448,6 +449,7 @@ pub async fn wait_for_gateway_config(
 /// Returns `true` if the entry was added or already present.
 /// Returns `false` only if the file doesn't exist (non-Unix).
 pub fn ensure_hosts_entry(hostname: &str) -> Result<bool, String> {
+    validate_hosts_hostname(hostname)?;
     let entry = format!("127.0.0.1 {}\n", hostname);
     let hosts_path = std::path::Path::new("/etc/hosts");
 
@@ -467,76 +469,27 @@ pub fn ensure_hosts_entry(hostname: &str) -> Result<bool, String> {
         return Ok(true);
     }
 
-    // Strategy 2: WSL — escalate via `wsl -u root`
-    if is_wsl() {
-        let cmd = format!("echo '127.0.0.1 {}' >> /etc/hosts", hostname);
-        match std::process::Command::new("wsl")
-            .args(["-u", "root", "sh", "-c", &cmd])
-            .output()
-        {
-            Ok(output) if output.status.success() => {
-                info!(hostname, "added to /etc/hosts via WSL root");
-                return Ok(true);
-            }
-            Ok(output) => {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                info!(hostname, stderr = %stderr, "WSL root write failed");
-            }
-            Err(e) => info!(hostname, error = %e, "WSL root command failed"),
-        }
+    // Strategy 2: WSL/Unix passwordless sudo (preferred elevated path)
+    if let Ok(()) = try_append_hosts_via_command("sudo", &["-n", "tee", "-a", "/etc/hosts"], &entry)
+    {
+        info!(hostname, "added to /etc/hosts via sudo");
+        return Ok(true);
     }
 
-    // Strategy 3: passwordless sudo (dev machines with NOPASSWD)
-    match std::process::Command::new("sudo")
-        .args(["-n", "tee", "-a", "/etc/hosts"])
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-    {
-        Ok(mut child) => {
-            if let Some(ref mut stdin) = child.stdin {
-                use std::io::Write;
-                let _ = stdin.write_all(entry.as_bytes());
-            }
-            match child.wait() {
-                Ok(status) if status.success() => {
-                    info!(hostname, "added to /etc/hosts via sudo");
-                    return Ok(true);
-                }
-                Ok(_) => info!(
-                    hostname,
-                    "sudo tee failed (wrong password or no sudo access)"
-                ),
-                Err(e) => info!(hostname, error = %e, "sudo tee command failed"),
-            }
+    // Strategy 3: WSL launched from Windows host — escalate via `wsl -u root`
+    if is_wsl() || cfg!(windows) {
+        if let Ok(()) =
+            try_append_hosts_via_command("wsl", &["-u", "root", "tee", "-a", "/etc/hosts"], &entry)
+        {
+            info!(hostname, "added to /etc/hosts via WSL root");
+            return Ok(true);
         }
-        Err(e) => info!(hostname, error = %e, "sudo command spawn failed"),
     }
 
     // Strategy 4: pkexec (GUI privilege escalation, Linux desktops)
-    match std::process::Command::new("pkexec")
-        .args(["tee", "-a", "/etc/hosts"])
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-    {
-        Ok(mut child) => {
-            if let Some(ref mut stdin) = child.stdin {
-                use std::io::Write;
-                let _ = stdin.write_all(entry.as_bytes());
-            }
-            match child.wait() {
-                Ok(status) if status.success() => {
-                    info!(hostname, "added to /etc/hosts via pkexec");
-                    return Ok(true);
-                }
-                Ok(_) => info!(hostname, "pkexec tee failed (cancelled or no polkit)"),
-                Err(e) => info!(hostname, error = %e, "pkexec tee command failed"),
-            }
-        }
-        Err(e) => info!(hostname, error = %e, "pkexec command spawn failed"),
+    if let Ok(()) = try_append_hosts_via_command("pkexec", &["tee", "-a", "/etc/hosts"], &entry) {
+        info!(hostname, "added to /etc/hosts via pkexec");
+        return Ok(true);
     }
 
     // All strategies exhausted — warn the user
@@ -560,10 +513,73 @@ fn try_append_hosts(entry: &str) -> Result<(), std::io::Error> {
     file.write_all(entry.as_bytes())
 }
 
+fn try_append_hosts_via_command(program: &str, args: &[&str], entry: &str) -> Result<(), String> {
+    let mut child = Command::new(program)
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("{program} spawn failed: {e}"))?;
+
+    if let Some(ref mut stdin) = child.stdin {
+        use std::io::Write;
+        stdin
+            .write_all(entry.as_bytes())
+            .map_err(|e| format!("{program} stdin write failed: {e}"))?;
+    }
+
+    let output = child
+        .wait_with_output()
+        .map_err(|e| format!("{program} wait failed: {e}"))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(String::from_utf8_lossy(&output.stderr).trim().to_string())
+    }
+}
+
+fn validate_hosts_hostname(hostname: &str) -> Result<(), String> {
+    if hostname.is_empty() {
+        return Err("hostname for /etc/hosts entry must not be empty".to_string());
+    }
+    if hostname.len() > 253 {
+        return Err("hostname for /etc/hosts entry is too long".to_string());
+    }
+    if !hostname
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-')
+    {
+        return Err(format!(
+            "hostname '{}' contains unsupported characters for /etc/hosts helper",
+            hostname
+        ));
+    }
+    Ok(())
+}
+
 /// Detect if we're running inside WSL (Windows Subsystem for Linux).
 fn is_wsl() -> bool {
     // WSL sets these env vars; checking both covers WSL1 and WSL2.
     std::env::var("WSL_DISTRO_NAME").is_ok() || std::env::var("WSLENV").is_ok()
+}
+
+#[cfg(test)]
+mod hostname_tests {
+    use super::validate_hosts_hostname;
+
+    #[test]
+    fn test_validate_hosts_hostname_accepts_internal_names() {
+        assert!(validate_hosts_hostname("echo-service.default.internal").is_ok());
+        assert!(validate_hosts_hostname("api-v1.internal").is_ok());
+    }
+
+    #[test]
+    fn test_validate_hosts_hostname_rejects_shell_metacharacters() {
+        assert!(validate_hosts_hostname("bad host").is_err());
+        assert!(validate_hosts_hostname("bad'host").is_err());
+        assert!(validate_hosts_hostname("bad\nhost").is_err());
+    }
 }
 
 // ── WASM Binary Discovery ────────────────────────────────────────────

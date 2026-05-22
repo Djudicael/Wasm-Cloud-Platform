@@ -21,6 +21,50 @@ use testcontainers::{
 use tokio::time::sleep;
 use tracing::{info, warn};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HostContainerRuntime {
+    Podman,
+    Docker,
+}
+
+fn select_host_container_runtime(
+    docker_host: Option<&str>,
+    podman_available: bool,
+    docker_available: bool,
+) -> Option<HostContainerRuntime> {
+    if docker_host.is_some_and(|host| host.contains("podman.sock")) {
+        return podman_available.then_some(HostContainerRuntime::Podman);
+    }
+    if docker_host.is_some_and(|host| host.contains("docker.sock")) {
+        return docker_available.then_some(HostContainerRuntime::Docker);
+    }
+    if podman_available {
+        Some(HostContainerRuntime::Podman)
+    } else if docker_available {
+        Some(HostContainerRuntime::Docker)
+    } else {
+        None
+    }
+}
+
+pub(crate) fn detect_host_container_runtime() -> Option<HostContainerRuntime> {
+    let podman_available = Command::new("podman")
+        .arg("--version")
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false);
+    let docker_available = Command::new("docker")
+        .arg("--version")
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false);
+    select_host_container_runtime(
+        std::env::var("DOCKER_HOST").ok().as_deref(),
+        podman_available,
+        docker_available,
+    )
+}
+
 /// Configure Podman socket if available (for WSL users).
 ///
 /// Detects the current UID dynamically so it works for any user,
@@ -486,24 +530,15 @@ impl NatsContainer {
     }
 
     async fn start_with_host_runtime(port: u16) -> Result<Self, String> {
-        let runtime = if Command::new("podman")
-            .arg("--version")
-            .output()
-            .map(|output| output.status.success())
-            .unwrap_or(false)
-        {
-            "podman"
-        } else if Command::new("docker")
-            .arg("--version")
-            .output()
-            .map(|output| output.status.success())
-            .unwrap_or(false)
-        {
-            "docker"
-        } else {
-            return Err(
-                "neither podman nor docker is available for host-network NATS fallback".to_string(),
-            );
+        let runtime = match detect_host_container_runtime() {
+            Some(HostContainerRuntime::Podman) => "podman",
+            Some(HostContainerRuntime::Docker) => "docker",
+            None => {
+                return Err(
+                    "neither podman nor docker is available for host-network NATS fallback"
+                        .to_string(),
+                )
+            }
         };
 
         info!(port, runtime, "starting NATS container on host port");
@@ -595,6 +630,39 @@ impl NatsContainer {
             .await
             .map_err(|e| format!("failed to connect to NATS: {e}"))?;
         Ok(bus)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{select_host_container_runtime, HostContainerRuntime};
+
+    #[test]
+    fn test_select_host_container_runtime_prefers_podman_socket_hint() {
+        assert_eq!(
+            select_host_container_runtime(
+                Some("unix:///run/user/1000/podman/podman.sock"),
+                true,
+                true
+            ),
+            Some(HostContainerRuntime::Podman)
+        );
+    }
+
+    #[test]
+    fn test_select_host_container_runtime_prefers_available_podman_without_hint() {
+        assert_eq!(
+            select_host_container_runtime(None, true, true),
+            Some(HostContainerRuntime::Podman)
+        );
+    }
+
+    #[test]
+    fn test_select_host_container_runtime_falls_back_to_docker() {
+        assert_eq!(
+            select_host_container_runtime(None, false, true),
+            Some(HostContainerRuntime::Docker)
+        );
     }
 }
 
