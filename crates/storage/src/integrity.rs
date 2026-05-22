@@ -360,6 +360,10 @@ mod tests {
         protocol::MessageEnvelope,
         types::{AppId, Route},
     };
+    use messaging::{events::Event, NatsBus};
+    use std::{net::TcpListener, time::Duration};
+    use tempfile::NamedTempFile;
+    use testcontainers::{core::ContainerPort, runners::AsyncRunner, GenericImage, ImageExt};
 
     fn sample_route() -> Route {
         Route {
@@ -369,6 +373,52 @@ mod tests {
             strip_prefix: false,
             created_at: 1,
             updated_at: 1,
+        }
+    }
+
+    fn setup_container_runtime() {
+        if std::env::var("DOCKER_HOST").is_ok() {
+            return;
+        }
+
+        let podman_socket = std::path::Path::new("/run/user/1000/podman/podman.sock");
+        if podman_socket.exists() {
+            std::env::set_var("DOCKER_HOST", "unix:///run/user/1000/podman/podman.sock");
+        }
+
+        if std::env::var("TESTCONTAINERS_RYUK_DISABLED").is_err() {
+            std::env::set_var("TESTCONTAINERS_RYUK_DISABLED", "true");
+        }
+    }
+
+    fn reserve_host_port() -> u16 {
+        TcpListener::bind("127.0.0.1:0")
+            .expect("bind ephemeral test port")
+            .local_addr()
+            .expect("read ephemeral test port")
+            .port()
+    }
+
+    async fn start_test_nats() -> (testcontainers::ContainerAsync<GenericImage>, String) {
+        setup_container_runtime();
+
+        let host_port = reserve_host_port();
+        let image = GenericImage::new("nats", "latest")
+            .with_mapped_port(host_port, ContainerPort::Tcp(4222))
+            .with_cmd(vec!["-js"]);
+        let container = image.start().await.expect("Failed to start NATS container");
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        (container, format!("nats://127.0.0.1:{host_port}"))
+    }
+
+    fn route(host: &str, app_id: &str, updated_at: u64) -> Route {
+        Route {
+            host: host.to_string(),
+            app_id: AppId(app_id.to_string()),
+            path_prefix: "/".to_string(),
+            strip_prefix: false,
+            created_at: updated_at,
+            updated_at,
         }
     }
 
@@ -401,5 +451,106 @@ mod tests {
             ReplayRouteEvent::Remove(host) => assert_eq!(host, "example.com"),
             ReplayRouteEvent::Add(_) => panic!("expected route_remove"),
         }
+    }
+
+    #[tokio::test]
+    async fn test_replay_routes_from_jetstream_restores_final_route_state() {
+        let (_container, url) = start_test_nats().await;
+        let mut bus = NatsBus::connect(&url).await.unwrap();
+        bus.set_node_id("replay-test".to_string());
+        bus.setup_jetstream().await.unwrap();
+
+        let route_a_v1 = route("a.example.com", "app-a:v1", 10);
+        let route_b_v1 = route("b.example.com", "app-b:v1", 20);
+        let route_a_v2 = Route {
+            updated_at: 30,
+            ..route_a_v1.clone()
+        };
+
+        bus.publish(&Event::RouteAdd {
+            route: route_a_v1.clone(),
+        })
+        .await
+        .unwrap();
+        bus.publish(&Event::RouteAdd {
+            route: route_b_v1.clone(),
+        })
+        .await
+        .unwrap();
+        bus.publish(&Event::RouteRemove {
+            host: route_a_v1.host.clone(),
+        })
+        .await
+        .unwrap();
+        bus.publish(&Event::RouteAdd {
+            route: route_a_v2.clone(),
+        })
+        .await
+        .unwrap();
+        tokio::time::sleep(Duration::from_millis(150)).await;
+
+        let temp_file = NamedTempFile::new().unwrap();
+        let store = crate::Store::open(temp_file.path()).unwrap();
+        store
+            .save_route(&route("stale.example.com", "stale:v1", 1))
+            .unwrap();
+
+        store.recreate_table_routes().unwrap();
+        crate::Store::replay_routes_from_jetstream(bus.client(), store.clone())
+            .await
+            .unwrap();
+
+        let mut routes = store.list_routes().unwrap();
+        routes.sort_by(|a, b| a.host.cmp(&b.host));
+
+        assert_eq!(routes.len(), 2);
+        assert_eq!(routes[0].host, "a.example.com");
+        assert_eq!(routes[0].app_id.0, "app-a:v1");
+        assert_eq!(routes[0].updated_at, 30);
+        assert_eq!(routes[1].host, "b.example.com");
+        assert_eq!(routes[1].app_id.0, "app-b:v1");
+        assert!(store.load_route("stale.example.com").unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_replay_routes_from_jetstream_is_repeatable() {
+        let (_container, url) = start_test_nats().await;
+        let mut bus = NatsBus::connect(&url).await.unwrap();
+        bus.set_node_id("replay-repeat-test".to_string());
+        bus.setup_jetstream().await.unwrap();
+
+        let route_a = route("repeat-a.example.com", "repeat-a:v1", 100);
+        let route_b = route("repeat-b.example.com", "repeat-b:v1", 200);
+
+        bus.publish(&Event::RouteAdd {
+            route: route_a.clone(),
+        })
+        .await
+        .unwrap();
+        bus.publish(&Event::RouteAdd {
+            route: route_b.clone(),
+        })
+        .await
+        .unwrap();
+        tokio::time::sleep(Duration::from_millis(150)).await;
+
+        let temp_file = NamedTempFile::new().unwrap();
+        let store = crate::Store::open(temp_file.path()).unwrap();
+
+        store.recreate_table_routes().unwrap();
+        crate::Store::replay_routes_from_jetstream(bus.client(), store.clone())
+            .await
+            .unwrap();
+        let mut first = store.list_routes().unwrap();
+        first.sort_by(|a, b| a.host.cmp(&b.host));
+
+        store.recreate_table_routes().unwrap();
+        crate::Store::replay_routes_from_jetstream(bus.client(), store.clone())
+            .await
+            .unwrap();
+        let mut second = store.list_routes().unwrap();
+        second.sort_by(|a, b| a.host.cmp(&b.host));
+
+        assert_eq!(first, second);
     }
 }
