@@ -13,6 +13,11 @@ url = "nats://127.0.0.1:4222"
 [logging]
 level = "debug"
 
+[runtime]
+# Bind local app instances to loopback so gateway/proxy behavior matches
+# hardened environments during development.
+instance_bind_address = "127.0.0.1"
+
 [health]
 # Treat cluster-node registry entries as stale after this many seconds without
 # a fresh event. Used by deploy peer selection and rolling upgrades.

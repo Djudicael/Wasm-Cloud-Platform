@@ -1,4 +1,5 @@
 use crate::instance::wait_for_ready;
+use crate::is_instance_bind_allowed;
 use crate::network::LocalServiceRegistry;
 use crate::port_alloc::PortAllocator;
 use common::types::AppId;
@@ -117,6 +118,54 @@ async fn test_wait_for_ready_timeout() {
 
     let err_msg = result.unwrap_err().to_string();
     assert!(err_msg.contains("did not become ready"));
+}
+
+#[test]
+fn test_instance_bind_policy_allows_expected_loopback_port() {
+    let mut allowed_ports = std::collections::HashSet::new();
+    allowed_ports.insert(18080);
+
+    assert!(is_instance_bind_allowed(
+        "127.0.0.1:18080".parse().unwrap(),
+        &allowed_ports,
+        "127.0.0.1".parse().unwrap(),
+    ));
+}
+
+#[test]
+fn test_instance_bind_policy_rejects_wildcard_bind_even_on_allowed_port() {
+    let mut allowed_ports = std::collections::HashSet::new();
+    allowed_ports.insert(18080);
+
+    assert!(!is_instance_bind_allowed(
+        "0.0.0.0:18080".parse().unwrap(),
+        &allowed_ports,
+        "127.0.0.1".parse().unwrap(),
+    ));
+}
+
+#[test]
+fn test_instance_bind_policy_rejects_disallowed_port() {
+    let mut allowed_ports = std::collections::HashSet::new();
+    allowed_ports.insert(18080);
+
+    assert!(!is_instance_bind_allowed(
+        "127.0.0.1:18081".parse().unwrap(),
+        &allowed_ports,
+        "127.0.0.1".parse().unwrap(),
+    ));
+}
+
+#[test]
+fn test_instance_bind_policy_supports_ipv6_loopback() {
+    let mut allowed_ports = std::collections::HashSet::new();
+    allowed_ports.insert(18080);
+
+    assert!(is_instance_bind_allowed(
+        "[::1]:18080".parse().unwrap(),
+        &allowed_ports,
+        "::1".parse().unwrap(),
+    ));
 }
 
 // ── SupervisorCommand Channel Tests ──────────────────────────────────────────

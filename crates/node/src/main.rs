@@ -892,7 +892,11 @@ async fn main() -> anyhow::Result<()> {
         .expect("Failed to create WasmRuntime");
     info!("Wasm runtime initialized (Cranelift AOT)");
 
-    let bind_addr: IpAddr = "0.0.0.0".parse().unwrap();
+    let bind_addr: IpAddr = config
+        .runtime
+        .instance_bind_address
+        .parse()
+        .map_err(|e| anyhow::anyhow!("invalid runtime.instance_bind_address: {e}"))?;
     let port_alloc = Arc::new(supervisor::port_alloc::PortAllocator::new(
         bind_addr,
         config.runtime.port_start,
@@ -945,10 +949,17 @@ async fn main() -> anyhow::Result<()> {
     let db_manager = db_config::DatabaseManager::new(db_config.clone());
     db_manager.initialize().await?;
 
+    let instance_bind_address = config.runtime.instance_bind_address.clone();
     let env_resolver = Arc::new(move |config: &common::types::AppConfig, _host_port: u16| {
         let mut vars = Vec::new();
         for (k, v) in &config.env_vars {
             vars.push((k.clone(), v.clone()));
+        }
+        if !config.env_vars.contains_key("BIND_ADDR") {
+            vars.push(("BIND_ADDR".to_string(), instance_bind_address.clone()));
+        }
+        if !config.env_vars.contains_key("HOST") {
+            vars.push(("HOST".to_string(), instance_bind_address.clone()));
         }
         // Inject DATABASE_URL if not already provided in env_vars
         if !config.env_vars.contains_key("DATABASE_URL") {

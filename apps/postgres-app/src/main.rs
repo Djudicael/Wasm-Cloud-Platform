@@ -100,7 +100,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/health", get(|| async { r#"{"status":"healthy"}"# }))
         .route("/query", get(query_db));
 
-    let addr = SocketAddr::from(([0, 0, 0, 0], 8080));
+    let bind_addr = std::env::var("BIND_ADDR")
+        .or_else(|_| std::env::var("HOST"))
+        .unwrap_or_else(|_| "127.0.0.1".to_string());
+    let addr: SocketAddr = format!("{bind_addr}:8080").parse().unwrap();
     let listener = TcpListener::bind(addr).await.unwrap();
     println!("PostgreSQL app listening on {}", addr);
 

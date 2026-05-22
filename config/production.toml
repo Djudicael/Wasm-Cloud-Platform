@@ -83,6 +83,9 @@ rate_limit_burst = 20
 # 10 000 ports supports up to ~100 apps with 100 instances each.
 port_start = 10000
 port_end = 19999
+# Bind app instances to loopback so north-south traffic must flow through the
+# platform proxy/gateway rather than reaching instance ports directly.
+instance_bind_address = "127.0.0.1"
 # Key source: "generate" (ephemeral), "file" (from key_file), "env:VAR_NAME"
 # Use "file" in production so secrets survive restarts.
 key_source = "file"

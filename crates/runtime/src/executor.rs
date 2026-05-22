@@ -310,7 +310,9 @@ impl PreparedModule {
         for (k, v) in env_vars {
             builder.env(&k, &v);
         }
-        // The app will bind to 0.0.0.0:<port>; the Supervisor maps this port.
+        // The app is expected to bind to the injected runtime bind address on
+        // the allocated host port; the Supervisor enforces the allowed bind IP
+        // and port via the WASI socket address checker.
         let port_str = port.to_string();
         builder.env("PORT", &port_str);
 

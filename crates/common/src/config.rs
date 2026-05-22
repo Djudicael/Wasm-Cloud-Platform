@@ -368,6 +368,8 @@ pub struct RuntimeSection {
     pub port_start: u16,
     #[serde(default = "default_port_end")]
     pub port_end: u16,
+    #[serde(default = "default_instance_bind_address")]
+    pub instance_bind_address: String,
     #[serde(default = "default_key_source")]
     pub key_source: String,
     #[serde(default)]
@@ -405,6 +407,10 @@ fn default_port_end() -> u16 {
     19999
 }
 
+fn default_instance_bind_address() -> String {
+    "127.0.0.1".to_string()
+}
+
 fn default_key_source() -> String {
     "generate".to_string()
 }
@@ -418,6 +424,7 @@ impl Default for RuntimeSection {
         RuntimeSection {
             port_start: default_port_start(),
             port_end: default_port_end(),
+            instance_bind_address: default_instance_bind_address(),
             key_source: default_key_source(),
             key_file: None,
             cache_directory: None,

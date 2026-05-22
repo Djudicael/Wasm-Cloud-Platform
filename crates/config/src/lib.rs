@@ -179,6 +179,11 @@ fn merge_config(base: NodeConfig, overlay: NodeConfig) -> NodeConfig {
         runtime: RuntimeSection {
             port_start: overlay.runtime.port_start,
             port_end: overlay.runtime.port_end,
+            instance_bind_address: if overlay.runtime.instance_bind_address.is_empty() {
+                base.runtime.instance_bind_address.clone()
+            } else {
+                overlay.runtime.instance_bind_address
+            },
             key_source: overlay.runtime.key_source,
             key_file: overlay.runtime.key_file.or(base.runtime.key_file),
             cache_directory: overlay
@@ -474,6 +479,9 @@ fn apply_env_overrides(mut config: NodeConfig) -> NodeConfig {
             config.runtime.pooling_allocator = enabled;
         }
     }
+    if let Ok(v) = std::env::var("WASM_NODE_RUNTIME_INSTANCE_BIND_ADDRESS") {
+        config.runtime.instance_bind_address = v;
+    }
     if let Ok(v) = std::env::var("WASM_NODE_RUNTIME_POOLING_TOTAL_COMPONENT_INSTANCES") {
         if let Ok(count) = v.parse() {
             config.runtime.pooling_total_component_instances = count;
@@ -658,6 +666,17 @@ fn bind_address_is_loopback(host: &str) -> bool {
     !trimmed.is_empty() && is_loopback_host(trimmed)
 }
 
+fn validate_ip_literal(label: &str, value: &str, errors: &mut Vec<String>) {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        errors.push(format!("{label} must not be empty"));
+        return;
+    }
+    if trimmed.parse::<IpAddr>().is_err() {
+        errors.push(format!("{label} must be an IP address literal"));
+    }
+}
+
 fn effective_write_auth_token(config: &NodeConfig) -> Option<&str> {
     config
         .auth
@@ -832,6 +851,11 @@ fn validate_config(config: &NodeConfig) -> Result<(), PlatformError> {
     validate_bind_address(
         "admin.artifact_bind_address",
         &config.admin.artifact_bind_address,
+        &mut errors,
+    );
+    validate_ip_literal(
+        "runtime.instance_bind_address",
+        &config.runtime.instance_bind_address,
         &mut errors,
     );
     validate_admin_advertisement(config, &mut errors);
@@ -1765,6 +1789,23 @@ default_memory_pages = 4096
         config.admin.artifact_bind_address = "10.0.0.5".to_string();
         config.auth.write_token = Some("valid_write_token_1234567890".to_string());
         assert!(validate_config(&config).is_ok());
+    }
+
+    #[test]
+    fn test_runtime_instance_bind_address_defaults_to_loopback() {
+        let config = NodeConfig::default();
+        assert_eq!(config.runtime.instance_bind_address, "127.0.0.1");
+    }
+
+    #[test]
+    fn test_validation_rejects_invalid_runtime_instance_bind_address() {
+        let mut config = NodeConfig::default();
+        config.runtime.instance_bind_address = "not-an-ip".to_string();
+        let result = validate_config(&config);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("runtime.instance_bind_address"));
+        assert!(msg.contains("IP address literal"));
     }
 
     /// eBPF fd_soft_limit >= fd_hard_limit is rejected.

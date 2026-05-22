@@ -7,7 +7,10 @@ fn main() {
     use std::net::TcpListener;
 
     let port = std::env::var("PORT").unwrap_or_else(|_| "8081".to_string());
-    let addr = format!("0.0.0.0:{}", port);
+    let bind_addr = std::env::var("BIND_ADDR")
+        .or_else(|_| std::env::var("HOST"))
+        .unwrap_or_else(|_| "127.0.0.1".to_string());
+    let addr = format!("{}:{}", bind_addr, port);
     let listener = TcpListener::bind(&addr).expect("failed to bind");
 
     for stream in listener.incoming() {
@@ -72,7 +75,10 @@ async fn main() {
         .route("/echo", get(|| async { "Echo from native!" }))
         .route("/health", get(|| async { r#"{"status":"healthy"}"# }));
 
-    let addr = SocketAddr::from(([0, 0, 0, 0], 8081));
+    let bind_addr = std::env::var("BIND_ADDR")
+        .or_else(|_| std::env::var("HOST"))
+        .unwrap_or_else(|_| "127.0.0.1".to_string());
+    let addr: SocketAddr = format!("{bind_addr}:8081").parse().unwrap();
     let listener = TcpListener::bind(addr).await.unwrap();
     println!("Echo service listening on {}", addr);
 

@@ -38,6 +38,14 @@ use storage::Store;
 use tokio::sync::{mpsc, RwLock};
 use tracing::{error, info, warn};
 
+pub(crate) fn is_instance_bind_allowed(
+    dest: std::net::SocketAddr,
+    allowed_ports: &std::collections::HashSet<u16>,
+    instance_bind_ip: std::net::IpAddr,
+) -> bool {
+    allowed_ports.contains(&dest.port()) && dest.ip() == instance_bind_ip
+}
+
 /// Get the OS Thread ID (TID) of the current thread.
 /// This is used for eBPF namespace enforcement registration.
 #[cfg(target_os = "linux")]
@@ -369,11 +377,13 @@ impl Supervisor {
         let registry = self.service_registry.clone();
         let source_app = qualified_app_id.clone();
         let internal_gateway_port = self.internal_gateway_port;
+        let instance_bind_ip = addr.ip();
         let socket_addr_check: runtime::executor::SocketAddrCheckFn = Box::new(
             move |dest: std::net::SocketAddr, use_type: runtime::executor::SocketAddrUse| {
                 let allowed = allowed_ports.clone();
                 let registry = registry.clone();
                 let source_app = source_app.clone();
+                let instance_bind_ip = instance_bind_ip;
                 Box::pin(async move {
                     tracing::info!(
                         source_app = %source_app.0,
@@ -446,9 +456,10 @@ impl Supervisor {
                         }
                         runtime::executor::SocketAddrUse::TcpBind
                         | runtime::executor::SocketAddrUse::UdpBind => {
-                            let ok = allowed.contains(&dest.port());
+                            let ok = is_instance_bind_allowed(dest, &allowed, instance_bind_ip);
                             tracing::info!(
                                 dest = %dest,
+                                expected_bind_ip = %instance_bind_ip,
                                 allowed = ok,
                                 "[SOCKET DEBUG] bind check"
                             );
