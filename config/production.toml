@@ -74,6 +74,9 @@ write_token = "CHANGE-ME-USE-A-STRONG-RANDOM-WRITE-TOKEN"
 require_tls = true
 rate_limit_per_second = 10
 rate_limit_burst = 20
+# Only trust forwarded client IP headers from explicitly trusted proxies.
+# Leave empty unless the admin API is actually behind one.
+# trusted_proxies = ["10.0.0.0/8", "192.168.1.10"]
 
 [runtime]
 # Port range for Wasm instance binding.

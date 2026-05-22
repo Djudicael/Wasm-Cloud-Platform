@@ -14,7 +14,11 @@
 //! Tokens are 32-byte (64-character) hex strings generated with `OsRng`.
 //! Minimum accepted length is 16 characters for operator convenience.
 
+use ipnet::IpNet;
 use serde::{Deserialize, Serialize};
+use std::net::IpAddr;
+
+pub use ipnet::IpNet as TrustedProxyNet;
 
 /// Authentication configuration for the admin API.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -49,6 +53,12 @@ pub struct AuthConfig {
     /// Maximum burst for admin API rate limiting.
     #[serde(default = "default_admin_burst")]
     pub rate_limit_burst: u32,
+
+    /// Trusted proxy IPs/CIDR ranges allowed to supply forwarded client IP
+    /// headers for the admin API. When empty, `X-Forwarded-For` and
+    /// `X-Real-IP` are ignored and the direct peer socket address is used.
+    #[serde(default)]
+    pub trusted_proxies: Vec<String>,
 }
 
 fn default_require_tls() -> bool {
@@ -70,6 +80,7 @@ impl Default for AuthConfig {
             require_tls: true,
             rate_limit_per_second: default_admin_rate_limit(),
             rate_limit_burst: default_admin_burst(),
+            trusted_proxies: Vec::new(),
         }
     }
 }
@@ -111,6 +122,13 @@ impl std::fmt::Display for TokenType {
 }
 
 impl AuthConfig {
+    pub fn trusted_proxy_nets(&self) -> Result<Vec<TrustedProxyNet>, String> {
+        self.trusted_proxies
+            .iter()
+            .map(|entry| parse_trusted_proxy_entry(entry))
+            .collect()
+    }
+
     /// Authenticate a request's Authorization header.
     ///
     /// Returns the granted permission level and which token type was matched.
@@ -235,6 +253,8 @@ impl AuthConfig {
             // burst set but rate is 0 (disabled) — warn but allow
         }
 
+        self.trusted_proxy_nets()?;
+
         Ok(())
     }
 
@@ -259,6 +279,7 @@ impl AuthConfig {
             require_tls: true,
             rate_limit_per_second: 10,
             rate_limit_burst: 20,
+            trusted_proxies: Vec::new(),
         }
     }
 
@@ -278,8 +299,21 @@ impl AuthConfig {
             require_tls: false, // Legacy mode: don't enforce TLS
             rate_limit_per_second: 10,
             rate_limit_burst: 20,
+            trusted_proxies: Vec::new(),
         }
     }
+}
+
+fn parse_trusted_proxy_entry(entry: &str) -> Result<IpNet, String> {
+    let trimmed = entry.trim();
+    if trimmed.is_empty() {
+        return Err("auth.trusted_proxies entries must not be empty".to_string());
+    }
+
+    trimmed
+        .parse::<IpNet>()
+        .or_else(|_| trimmed.parse::<IpAddr>().map(IpNet::from).map_err(|_| ()))
+        .map_err(|_| format!("auth.trusted_proxies entry '{trimmed}' is not a valid IP or CIDR"))
 }
 
 #[cfg(test)]
@@ -493,6 +527,31 @@ mod tests {
     }
 
     #[test]
+    fn test_validate_trusted_proxies_accepts_ip_and_cidr() {
+        let config = AuthConfig {
+            enabled: true,
+            write_token: Some("a_valid_write_token_5678".to_string()),
+            trusted_proxies: vec!["10.0.0.0/8".to_string(), "192.168.1.10".to_string()],
+            ..Default::default()
+        };
+        assert!(config.validate().is_ok());
+        let nets = config.trusted_proxy_nets().unwrap();
+        assert_eq!(nets.len(), 2);
+    }
+
+    #[test]
+    fn test_validate_trusted_proxies_rejects_invalid_entry() {
+        let config = AuthConfig {
+            enabled: true,
+            write_token: Some("a_valid_write_token_5678".to_string()),
+            trusted_proxies: vec!["not-a-cidr".to_string()],
+            ..Default::default()
+        };
+        let err = config.validate().unwrap_err();
+        assert!(err.contains("auth.trusted_proxies"));
+    }
+
+    #[test]
     fn test_generate_token_length() {
         let token = AuthConfig::generate_token();
         // 32 bytes = 64 hex characters
@@ -521,6 +580,7 @@ mod tests {
         assert!(config.require_tls);
         assert_eq!(config.rate_limit_per_second, 10);
         assert_eq!(config.rate_limit_burst, 20);
+        assert!(config.trusted_proxies.is_empty());
         assert_ne!(config.read_token, config.write_token);
     }
 
@@ -534,6 +594,7 @@ mod tests {
             Some("my-admin-token-1234567890".to_string())
         );
         assert!(!config.require_tls);
+        assert!(config.trusted_proxies.is_empty());
     }
 
     #[test]

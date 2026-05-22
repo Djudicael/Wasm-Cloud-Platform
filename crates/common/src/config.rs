@@ -275,6 +275,7 @@ impl Default for AdminSection {
 /// require_tls = true
 /// rate_limit_per_second = 10
 /// rate_limit_burst = 20
+/// trusted_proxies = ["10.0.0.0/8", "192.168.1.10"]
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuthSection {
@@ -302,6 +303,11 @@ pub struct AuthSection {
     /// Maximum burst for admin API rate limiting.
     #[serde(default = "default_auth_burst")]
     pub rate_limit_burst: u32,
+
+    /// Trusted proxy IPs/CIDR ranges allowed to supply forwarded client IP
+    /// headers for the admin API.
+    #[serde(default)]
+    pub trusted_proxies: Vec<String>,
 }
 
 fn default_auth_require_tls() -> bool {
@@ -323,6 +329,7 @@ impl Default for AuthSection {
             require_tls: default_auth_require_tls(),
             rate_limit_per_second: default_auth_rate_limit(),
             rate_limit_burst: default_auth_burst(),
+            trusted_proxies: Vec::new(),
         }
     }
 }
@@ -336,6 +343,7 @@ impl From<AuthSection> for crate::auth::AuthConfig {
             require_tls: section.require_tls,
             rate_limit_per_second: section.rate_limit_per_second,
             rate_limit_burst: section.rate_limit_burst,
+            trusted_proxies: section.trusted_proxies,
         }
     }
 }
@@ -349,6 +357,7 @@ impl From<crate::auth::AuthConfig> for AuthSection {
             require_tls: config.require_tls,
             rate_limit_per_second: config.rate_limit_per_second,
             rate_limit_burst: config.rate_limit_burst,
+            trusted_proxies: config.trusted_proxies,
         }
     }
 }

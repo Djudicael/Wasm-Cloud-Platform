@@ -60,6 +60,9 @@ write_token = "staging-write-token-change-me"
 require_tls = false
 rate_limit_per_second = 10
 rate_limit_burst = 20
+# If you expose the admin API behind a staging proxy, list only that proxy's
+# source IP/CIDR here so spoofed forwarded headers are ignored.
+# trusted_proxies = ["10.20.0.0/16"]
 
 [runtime]
 # Port range for Wasm instance binding.

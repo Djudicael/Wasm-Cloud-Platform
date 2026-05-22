@@ -191,7 +191,7 @@ async fn serve_admin_app(
                 .map_err(|e| anyhow::anyhow!("invalid admin bind address: {e}"))?,
             rustls_config,
         )
-        .serve(admin_app.into_make_service())
+        .serve(admin_app.into_make_service_with_connect_info::<std::net::SocketAddr>())
         .await
         .map_err(|e| anyhow::anyhow!("admin HTTPS server error: {e}"))?;
     } else {
@@ -199,9 +199,12 @@ async fn serve_admin_app(
             .await
             .map_err(|e| anyhow::anyhow!("admin API bind failed: {e}"))?;
         info!(addr = %admin_addr, "admin API listening");
-        axum::serve(listener, admin_app)
-            .await
-            .map_err(|e| anyhow::anyhow!("admin HTTP server error: {e}"))?;
+        axum::serve(
+            listener,
+            admin_app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("admin HTTP server error: {e}"))?;
     }
     Ok(())
 }
@@ -1688,6 +1691,11 @@ async fn main() -> anyhow::Result<()> {
         config: auth_config_shared.clone(),
         metrics: auth_metrics,
         rate_limiter: admin_rate_limiter.clone(),
+        trusted_proxies: Arc::new(
+            effective_auth_config
+                .trusted_proxy_nets()
+                .map_err(anyhow::Error::msg)?,
+        ),
         audit_fn: Some(audit_fn),
         node_id: config.node.node_id.clone(),
     };

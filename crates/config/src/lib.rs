@@ -170,6 +170,11 @@ fn merge_config(base: NodeConfig, overlay: NodeConfig) -> NodeConfig {
             require_tls: overlay.auth.require_tls,
             rate_limit_per_second: overlay.auth.rate_limit_per_second,
             rate_limit_burst: overlay.auth.rate_limit_burst,
+            trusted_proxies: if overlay.auth.trusted_proxies.is_empty() {
+                base.auth.trusted_proxies.clone()
+            } else {
+                overlay.auth.trusted_proxies.clone()
+            },
         },
         runtime: RuntimeSection {
             port_start: overlay.runtime.port_start,
@@ -450,6 +455,14 @@ fn apply_env_overrides(mut config: NodeConfig) -> NodeConfig {
             config.auth.rate_limit_burst = burst;
         }
     }
+    if let Ok(v) = std::env::var("WASM_NODE_AUTH_TRUSTED_PROXIES") {
+        config.auth.trusted_proxies = v
+            .split(',')
+            .map(str::trim)
+            .filter(|entry| !entry.is_empty())
+            .map(ToOwned::to_owned)
+            .collect();
+    }
     if let Ok(v) = std::env::var("WASM_NODE_RUNTIME_CACHE_DIRECTORY") {
         config.runtime.cache_directory = Some(v);
     }
@@ -640,6 +653,11 @@ fn is_loopback_host(host: &str) -> bool {
             .unwrap_or(false)
 }
 
+fn bind_address_is_loopback(host: &str) -> bool {
+    let trimmed = host.trim().trim_start_matches('[').trim_end_matches(']');
+    !trimmed.is_empty() && is_loopback_host(trimmed)
+}
+
 fn validate_bind_address(label: &str, host: &str, errors: &mut Vec<String>) {
     let host = host.trim();
     let host_without_brackets = host.trim_start_matches('[').trim_end_matches(']');
@@ -813,6 +831,17 @@ fn validate_config(config: &NodeConfig) -> Result<(), PlatformError> {
     if config.auth.enabled && config.auth.require_tls && !admin_tls_material_configured(config) {
         errors.push(
             "auth.require_tls = true requires either admin.tls_cert/admin.tls_key or proxy.tls_cert/proxy.tls_key"
+                .to_string(),
+        );
+    }
+
+    if config.auth.enabled
+        && !config.auth.require_tls
+        && !bind_address_is_loopback(&config.admin.bind_address)
+        && config.auth.trusted_proxies.is_empty()
+    {
+        errors.push(
+            "auth.require_tls = false with a non-loopback admin.bind_address requires auth.trusted_proxies so forwarded client IP headers are only trusted from explicit peers"
                 .to_string(),
         );
     }
@@ -1994,9 +2023,73 @@ rate_limit_burst = 40
             auth_enabled: Some(true),
             auth_write_token: Some("valid_write_token_1234567890".to_string()),
             auth_read_token: Some("valid_read_token_1234567890".to_string()),
+            auth_require_tls: Some(false),
             ..Default::default()
         };
         let result = load_config(None, &cli);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_auth_validation_rejects_invalid_trusted_proxy() {
+        let toml = r#"
+[auth]
+enabled = true
+write_token = "valid_write_token_1234567890"
+trusted_proxies = ["not-a-cidr"]
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("invalid_trusted_proxy.toml");
+        std::fs::write(&path, toml).unwrap();
+
+        let result = load_config(Some(&path), &CliOverrides::default());
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("auth.trusted_proxies"));
+    }
+
+    #[test]
+    fn test_auth_validation_requires_trusted_proxy_when_admin_exposed_without_tls() {
+        let toml = r#"
+[admin]
+bind_address = "10.0.0.5"
+
+[auth]
+enabled = true
+write_token = "valid_write_token_1234567890"
+require_tls = false
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("admin_exposed_without_trusted_proxy.toml");
+        std::fs::write(&path, toml).unwrap();
+
+        let result = load_config(Some(&path), &CliOverrides::default());
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("auth.trusted_proxies"));
+    }
+
+    #[test]
+    fn test_auth_validation_accepts_exposed_admin_without_tls_when_trusted_proxy_configured() {
+        let toml = r#"
+[admin]
+bind_address = "10.0.0.5"
+
+[auth]
+enabled = true
+write_token = "valid_write_token_1234567890"
+require_tls = false
+trusted_proxies = ["10.0.0.0/8"]
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("admin_exposed_with_trusted_proxy.toml");
+        std::fs::write(&path, toml).unwrap();
+
+        let result = load_config(Some(&path), &CliOverrides::default());
         assert!(result.is_ok());
     }
 
@@ -2116,6 +2209,7 @@ write_token = "toml_write_token_1234567890"
         let cli = CliOverrides {
             auth_enabled: Some(true),
             auth_write_token: Some("cli_write_token_abcdef1234".to_string()),
+            auth_require_tls: Some(false),
             ..Default::default()
         };
         let result = load_config(Some(&path), &cli);
@@ -2136,6 +2230,7 @@ write_token = "toml_write_token_1234567890"
             require_tls: false,
             rate_limit_per_second: 15,
             rate_limit_burst: 30,
+            trusted_proxies: vec!["10.0.0.0/8".to_string(), "192.168.1.10".to_string()],
         };
 
         let auth_config: common::auth::AuthConfig = section.clone().into();
@@ -2148,6 +2243,7 @@ write_token = "toml_write_token_1234567890"
             section.rate_limit_per_second
         );
         assert_eq!(auth_config.rate_limit_burst, section.rate_limit_burst);
+        assert_eq!(auth_config.trusted_proxies, section.trusted_proxies);
 
         // Round-trip back
         let back: common::config::AuthSection = auth_config.into();
@@ -2157,5 +2253,6 @@ write_token = "toml_write_token_1234567890"
         assert_eq!(back.require_tls, section.require_tls);
         assert_eq!(back.rate_limit_per_second, section.rate_limit_per_second);
         assert_eq!(back.rate_limit_burst, section.rate_limit_burst);
+        assert_eq!(back.trusted_proxies, section.trusted_proxies);
     }
 }

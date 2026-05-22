@@ -16,16 +16,17 @@
 //! so that load balancers and Prometheus can probe the node without credentials.
 
 use axum::{
+    extract::ConnectInfo,
     extract::{Request, State},
     http::{HeaderMap, StatusCode},
     middleware::Next,
     response::{IntoResponse, Response},
     Json,
 };
-use common::auth::{AuthConfig, Permission, TokenType};
+use common::auth::{AuthConfig, Permission, TokenType, TrustedProxyNet};
 use prometheus::{IntCounter, Opts, Registry};
 use std::collections::HashMap;
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
@@ -67,6 +68,9 @@ pub struct AuthState {
     /// Admin API rate limiter (per IP).
     pub rate_limiter: Arc<AdminRateLimiter>,
 
+    /// Immediate peer IPs/CIDRs allowed to supply forwarded client IP headers.
+    pub trusted_proxies: Arc<Vec<TrustedProxyNet>>,
+
     /// Optional audit callback. When set, successful admin API calls are logged.
     pub audit_fn: Option<AuditCallback>,
 
@@ -100,7 +104,14 @@ pub async fn auth_middleware(
     }
 
     // 2. Rate limit check (before auth to prevent brute-force)
-    let client_ip = extract_client_ip(&headers);
+    let client_ip = extract_client_ip(
+        &headers,
+        request
+            .extensions()
+            .get::<ConnectInfo<SocketAddr>>()
+            .map(|info| info.0),
+        state.trusted_proxies.as_ref(),
+    );
     if !state.rate_limiter.allow(client_ip) {
         state.metrics.rate_limited_total.inc();
         tracing::warn!(
@@ -252,12 +263,7 @@ pub fn required_permission(method: &axum::http::Method, _path: &str) -> Permissi
 // Re-export axum::http for use in this module's public API
 pub use axum::http;
 
-/// Extract the client IP from request headers.
-///
-/// Checks `X-Forwarded-For` (first IP) and `X-Real-IP` headers.
-/// Returns `None` if no IP header is found (the rate limiter will
-/// allow requests without IP info to avoid blocking legitimate traffic).
-pub fn extract_client_ip(headers: &HeaderMap) -> Option<IpAddr> {
+fn extract_forwarded_client_ip(headers: &HeaderMap) -> Option<IpAddr> {
     // Check X-Forwarded-For (first IP in the list)
     if let Some(xff) = headers.get("X-Forwarded-For") {
         if let Ok(val) = xff.to_str() {
@@ -279,6 +285,36 @@ pub fn extract_client_ip(headers: &HeaderMap) -> Option<IpAddr> {
     }
 
     None
+}
+
+fn peer_is_trusted(peer_ip: IpAddr, trusted_proxies: &[TrustedProxyNet]) -> bool {
+    trusted_proxies.iter().any(|net| net.contains(&peer_ip))
+}
+
+/// Extract the client IP for admin API auth/rate limiting.
+///
+/// Forwarded headers are only honored when the immediate peer socket address
+/// is in `trusted_proxies`. Otherwise the direct peer IP is used and spoofed
+/// `X-Forwarded-For` / `X-Real-IP` headers are ignored.
+pub fn extract_client_ip(
+    headers: &HeaderMap,
+    peer_addr: Option<SocketAddr>,
+    trusted_proxies: &[TrustedProxyNet],
+) -> Option<IpAddr> {
+    let peer_ip = peer_addr.map(|addr| addr.ip());
+
+    match peer_ip {
+        Some(ip) if peer_is_trusted(ip, trusted_proxies) => {
+            extract_forwarded_client_ip(headers).or(Some(ip))
+        }
+        Some(ip) => {
+            if headers.contains_key("X-Forwarded-For") || headers.contains_key("X-Real-IP") {
+                tracing::debug!(peer = %ip, "ignoring forwarded client IP headers from untrusted admin peer");
+            }
+            Some(ip)
+        }
+        None => None,
+    }
 }
 
 // ── Admin API Rate Limiter ────────────────────────────────────────────────────
@@ -653,7 +689,11 @@ mod tests {
     fn test_extract_client_ip_xff() {
         let mut headers = HeaderMap::new();
         headers.insert("X-Forwarded-For", "192.168.1.1, 10.0.0.1".parse().unwrap());
-        let ip = extract_client_ip(&headers);
+        let ip = extract_client_ip(
+            &headers,
+            Some("127.0.0.1:1234".parse().unwrap()),
+            &["127.0.0.1/32".parse().unwrap()],
+        );
         assert_eq!(ip, Some("192.168.1.1".parse::<IpAddr>().unwrap()));
     }
 
@@ -661,7 +701,11 @@ mod tests {
     fn test_extract_client_ip_x_real_ip() {
         let mut headers = HeaderMap::new();
         headers.insert("X-Real-IP", "10.0.0.1".parse().unwrap());
-        let ip = extract_client_ip(&headers);
+        let ip = extract_client_ip(
+            &headers,
+            Some("127.0.0.1:1234".parse().unwrap()),
+            &["127.0.0.1/32".parse().unwrap()],
+        );
         assert_eq!(ip, Some("10.0.0.1".parse::<IpAddr>().unwrap()));
     }
 
@@ -670,7 +714,11 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert("X-Forwarded-For", "192.168.1.1".parse().unwrap());
         headers.insert("X-Real-IP", "10.0.0.1".parse().unwrap());
-        let ip = extract_client_ip(&headers);
+        let ip = extract_client_ip(
+            &headers,
+            Some("127.0.0.1:1234".parse().unwrap()),
+            &["127.0.0.1/32".parse().unwrap()],
+        );
         // X-Forwarded-For takes priority
         assert_eq!(ip, Some("192.168.1.1".parse::<IpAddr>().unwrap()));
     }
@@ -678,7 +726,7 @@ mod tests {
     #[test]
     fn test_extract_client_ip_none() {
         let headers = HeaderMap::new();
-        let ip = extract_client_ip(&headers);
+        let ip = extract_client_ip(&headers, None, &[]);
         assert!(ip.is_none());
     }
 
@@ -686,8 +734,25 @@ mod tests {
     fn test_extract_client_ip_ipv6() {
         let mut headers = HeaderMap::new();
         headers.insert("X-Real-IP", "::1".parse().unwrap());
-        let ip = extract_client_ip(&headers);
+        let ip = extract_client_ip(
+            &headers,
+            Some("[::1]:1234".parse().unwrap()),
+            &["::1/128".parse().unwrap()],
+        );
         assert_eq!(ip, Some("::1".parse::<IpAddr>().unwrap()));
+    }
+
+    #[test]
+    fn test_extract_client_ip_untrusted_peer_ignores_forwarded_headers() {
+        let mut headers = HeaderMap::new();
+        headers.insert("X-Forwarded-For", "192.168.1.1".parse().unwrap());
+        headers.insert("X-Real-IP", "10.0.0.1".parse().unwrap());
+        let ip = extract_client_ip(
+            &headers,
+            Some("172.16.0.9:1234".parse().unwrap()),
+            &["127.0.0.1/32".parse().unwrap()],
+        );
+        assert_eq!(ip, Some("172.16.0.9".parse::<IpAddr>().unwrap()));
     }
 
     // ── Rate Limiter Tests ─────────────────────────────────────────────
@@ -894,6 +959,7 @@ mod tests {
             config: Arc::new(RwLock::new(config)),
             metrics: Arc::new(AuthMetrics::new_unregistered()),
             rate_limiter: Arc::new(AdminRateLimiter::new(1000, 2000)), // generous for tests
+            trusted_proxies: Arc::new(Vec::new()),
             audit_fn: None,
             node_id: "test-node".to_string(),
         };
@@ -917,7 +983,7 @@ mod tests {
     #[tokio::test]
     async fn test_integration_auth_disabled_allows_all() {
         let config = AuthConfig::default(); // enabled = false
-        let app = test_auth_router(config);
+        let _app = test_auth_router(config);
 
         // GET without token should work
         let req = Request::builder()
@@ -1133,14 +1199,6 @@ mod tests {
         };
 
         // Create a very restrictive rate limiter
-        let state = AuthState {
-            config: Arc::new(RwLock::new(config)),
-            metrics: Arc::new(AuthMetrics::new_unregistered()),
-            rate_limiter: Arc::new(AdminRateLimiter::new(1, 2)), // 1/s, burst 2
-            audit_fn: None,
-            node_id: "test-node".to_string(),
-        };
-
         // Use a shared rate limiter across all requests in this test
         let shared_limiter = Arc::new(AdminRateLimiter::new(1, 2)); // 1/s, burst 2
 
@@ -1152,6 +1210,7 @@ mod tests {
             })),
             metrics: Arc::new(AuthMetrics::new_unregistered()),
             rate_limiter: shared_limiter.clone(),
+            trusted_proxies: Arc::new(vec!["127.0.0.1/32".parse().unwrap()]),
             audit_fn: None,
             node_id: "test-node".to_string(),
         };
@@ -1170,6 +1229,9 @@ mod tests {
                 .header("X-Real-IP", "10.0.0.1")
                 .body(Body::empty())
                 .unwrap();
+            let mut req = req;
+            req.extensions_mut()
+                .insert(ConnectInfo("127.0.0.1:4321".parse::<SocketAddr>().unwrap()));
             let resp = app.oneshot(req).await.unwrap();
             assert_eq!(resp.status(), StatusCode::OK);
         }
@@ -1187,6 +1249,9 @@ mod tests {
             .header("X-Real-IP", "10.0.0.1")
             .body(Body::empty())
             .unwrap();
+        let mut req = req;
+        req.extensions_mut()
+            .insert(ConnectInfo("127.0.0.1:4321".parse::<SocketAddr>().unwrap()));
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
     }
@@ -1205,6 +1270,7 @@ mod tests {
             config: shared_config.clone(),
             metrics: Arc::new(AuthMetrics::new_unregistered()),
             rate_limiter: Arc::new(AdminRateLimiter::new(1000, 2000)),
+            trusted_proxies: Arc::new(Vec::new()),
             audit_fn: None,
             node_id: "test-node".to_string(),
         };
@@ -1236,6 +1302,7 @@ mod tests {
                     config: shared_config.clone(),
                     metrics: Arc::new(AuthMetrics::new_unregistered()),
                     rate_limiter: Arc::new(AdminRateLimiter::new(1000, 2000)),
+                    trusted_proxies: Arc::new(Vec::new()),
                     audit_fn: None,
                     node_id: "test-node".to_string(),
                 },
@@ -1257,6 +1324,7 @@ mod tests {
                     config: shared_config.clone(),
                     metrics: Arc::new(AuthMetrics::new_unregistered()),
                     rate_limiter: Arc::new(AdminRateLimiter::new(1000, 2000)),
+                    trusted_proxies: Arc::new(Vec::new()),
                     audit_fn: None,
                     node_id: "test-node".to_string(),
                 },
@@ -1278,6 +1346,7 @@ mod tests {
                     config: shared_config,
                     metrics: Arc::new(AuthMetrics::new_unregistered()),
                     rate_limiter: Arc::new(AdminRateLimiter::new(1000, 2000)),
+                    trusted_proxies: Arc::new(Vec::new()),
                     audit_fn: None,
                     node_id: "test-node".to_string(),
                 },
