@@ -15,8 +15,41 @@ use events::Event;
 use tokio_stream::StreamExt;
 
 const DURABLE_MAX_DELIVER: i64 = 3;
-const QUARANTINE_STREAM: &str = "QUARANTINE";
+pub const QUARANTINE_STREAM: &str = "QUARANTINE";
 const QUARANTINE_SUBJECT_PREFIX: &str = "quarantine";
+pub const DEPLOY_STREAM_SUBJECTS: &[&str] = &["deploy.>", "routes.>"];
+pub const CONTROL_STREAM_SUBJECTS: &[&str] = &[
+    "instance.ready.>",
+    "instance.dead.>",
+    "secrets.update.>",
+    "config.update.>",
+    "gateway.config.>",
+];
+pub const NODE_STREAM_SUBJECTS: &[&str] =
+    &["node.load.>", "cluster.node_joined.>", "cluster.snapshot.>"];
+pub const HEALTH_STREAM_SUBJECTS: &[&str] =
+    &["cluster.health.changed.>", "cluster.health.snapshot.>"];
+pub const PLATFORM_STREAM_SUBJECTS: &[&str] = &[
+    "platform.upgrade.>",
+    "platform.upgrade_complete.>",
+    "platform.draining.>",
+    "config.hot_reload.>",
+];
+pub const EBPF_STREAM_SUBJECTS: &[&str] = &[
+    "ebpf.pressure.*",
+    "ebpf.pressure.recovered.*",
+    "ebpf.security.incident.*",
+];
+pub const QUARANTINE_STREAM_SUBJECTS: &[&str] = &["quarantine.>"];
+pub const JETSTREAM_STREAM_SUBJECT_SPECS: &[(&str, &[&str])] = &[
+    ("DEPLOY", DEPLOY_STREAM_SUBJECTS),
+    ("CONTROL", CONTROL_STREAM_SUBJECTS),
+    ("NODE", NODE_STREAM_SUBJECTS),
+    ("HEALTH", HEALTH_STREAM_SUBJECTS),
+    ("PLATFORM", PLATFORM_STREAM_SUBJECTS),
+    ("EBPF", EBPF_STREAM_SUBJECTS),
+    (QUARANTINE_STREAM, QUARANTINE_STREAM_SUBJECTS),
+];
 
 #[derive(Debug, serde::Serialize)]
 struct QuarantinedJetStreamMessage {
@@ -141,7 +174,10 @@ impl NatsBus {
         // Create the "DEPLOY" stream that retains deploy events
         js.get_or_create_stream(StreamConfig {
             name: "DEPLOY".to_string(),
-            subjects: vec!["deploy.>".to_string(), "routes.>".to_string()],
+            subjects: DEPLOY_STREAM_SUBJECTS
+                .iter()
+                .map(|subject| subject.to_string())
+                .collect(),
             max_messages: 10_000,
             ..Default::default()
         })
@@ -151,13 +187,10 @@ impl NatsBus {
         // Create "CONTROL" stream for instance, secrets, config, and gateway events
         js.get_or_create_stream(StreamConfig {
             name: "CONTROL".to_string(),
-            subjects: vec![
-                "instance.ready.>".to_string(),
-                "instance.dead.>".to_string(),
-                "secrets.update.>".to_string(),
-                "config.update.>".to_string(),
-                "gateway.config.>".to_string(),
-            ],
+            subjects: CONTROL_STREAM_SUBJECTS
+                .iter()
+                .map(|subject| subject.to_string())
+                .collect(),
             max_messages: 10_000,
             ..Default::default()
         })
@@ -167,11 +200,10 @@ impl NatsBus {
         // Create "NODE" stream for node load and cluster events
         js.get_or_create_stream(StreamConfig {
             name: "NODE".to_string(),
-            subjects: vec![
-                "node.load.>".to_string(),
-                "cluster.node_joined.>".to_string(),
-                "cluster.snapshot.>".to_string(),
-            ],
+            subjects: NODE_STREAM_SUBJECTS
+                .iter()
+                .map(|subject| subject.to_string())
+                .collect(),
             max_messages: 10_000,
             ..Default::default()
         })
@@ -181,10 +213,10 @@ impl NatsBus {
         // Create "HEALTH" stream for health events
         js.get_or_create_stream(StreamConfig {
             name: "HEALTH".to_string(),
-            subjects: vec![
-                "cluster.health.changed.>".to_string(),
-                "cluster.health.snapshot.>".to_string(),
-            ],
+            subjects: HEALTH_STREAM_SUBJECTS
+                .iter()
+                .map(|subject| subject.to_string())
+                .collect(),
             max_messages: 10_000,
             ..Default::default()
         })
@@ -194,12 +226,10 @@ impl NatsBus {
         // Create "PLATFORM" stream for platform upgrade and hot-reload events
         js.get_or_create_stream(StreamConfig {
             name: "PLATFORM".to_string(),
-            subjects: vec![
-                "platform.upgrade.>".to_string(),
-                "platform.upgrade_complete.>".to_string(),
-                "platform.draining.>".to_string(),
-                "config.hot_reload.>".to_string(),
-            ],
+            subjects: PLATFORM_STREAM_SUBJECTS
+                .iter()
+                .map(|subject| subject.to_string())
+                .collect(),
             max_messages: 10_000,
             ..Default::default()
         })
@@ -211,11 +241,10 @@ impl NatsBus {
         // overlap: `ebpf.pressure.*` must not match `ebpf.pressure.recovered.*`.
         js.get_or_create_stream(StreamConfig {
             name: "EBPF".to_string(),
-            subjects: vec![
-                "ebpf.pressure.*".to_string(),
-                "ebpf.pressure.recovered.*".to_string(),
-                "ebpf.security.incident.*".to_string(),
-            ],
+            subjects: EBPF_STREAM_SUBJECTS
+                .iter()
+                .map(|subject| subject.to_string())
+                .collect(),
             max_messages: 10_000,
             ..Default::default()
         })
@@ -224,7 +253,10 @@ impl NatsBus {
 
         js.get_or_create_stream(StreamConfig {
             name: QUARANTINE_STREAM.to_string(),
-            subjects: vec![format!("{QUARANTINE_SUBJECT_PREFIX}.>")],
+            subjects: QUARANTINE_STREAM_SUBJECTS
+                .iter()
+                .map(|subject| subject.to_string())
+                .collect(),
             max_messages: 10_000,
             ..Default::default()
         })

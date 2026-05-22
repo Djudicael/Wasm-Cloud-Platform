@@ -136,6 +136,91 @@ fn sanitize_subject(subject: &str) -> String {
         .replace('*', "one")
 }
 
+fn subject_matches_filter(subject: &str, filter: &str) -> bool {
+    let subject_tokens: Vec<&str> = subject.split('.').collect();
+    let filter_tokens: Vec<&str> = filter.split('.').collect();
+
+    let mut subject_index = 0usize;
+    for token in filter_tokens {
+        match token {
+            ">" => return true,
+            "*" => {
+                if subject_index >= subject_tokens.len() {
+                    return false;
+                }
+                subject_index += 1;
+            }
+            literal => {
+                if subject_tokens.get(subject_index) != Some(&literal) {
+                    return false;
+                }
+                subject_index += 1;
+            }
+        }
+    }
+
+    subject_index == subject_tokens.len()
+}
+
+fn collect_missing_node_stream_subscriptions() -> Vec<(&'static str, &'static str)> {
+    messaging::JETSTREAM_STREAM_SUBJECT_SPECS
+        .iter()
+        .filter(|(stream, _)| *stream != messaging::QUARANTINE_STREAM)
+        .flat_map(|(stream, subjects)| {
+            subjects
+                .iter()
+                .copied()
+                .filter(move |subject| {
+                    !NODE_SUBSCRIPTION_SPECS
+                        .iter()
+                        .any(|(subscription_stream, filter)| {
+                            subscription_stream == stream && subject_matches_filter(subject, filter)
+                        })
+                })
+                .map(move |subject| (*stream, subject))
+        })
+        .collect()
+}
+
+fn collect_unbacked_node_subscriptions() -> Vec<(&'static str, &'static str)> {
+    NODE_SUBSCRIPTION_SPECS
+        .iter()
+        .copied()
+        .filter(|(subscription_stream, filter)| {
+            !messaging::JETSTREAM_STREAM_SUBJECT_SPECS
+                .iter()
+                .filter(|(stream, _)| *stream == *subscription_stream)
+                .flat_map(|(_, subjects)| subjects.iter().copied())
+                .any(|subject| subject_matches_filter(subject, filter))
+        })
+        .collect()
+}
+
+fn log_node_subscription_diagnostics() {
+    let missing = collect_missing_node_stream_subscriptions();
+    let unbacked = collect_unbacked_node_subscriptions();
+
+    for (stream, subject) in &missing {
+        warn!(
+            stream = *stream,
+            subject = *subject,
+            "JetStream stream subject has no matching node durable subscription"
+        );
+    }
+
+    for (stream, subject) in &unbacked {
+        warn!(
+            stream = *stream,
+            subject = *subject,
+            "node durable subscription is not backed by a declared JetStream stream subject"
+        );
+    }
+
+    if missing.is_empty() && unbacked.is_empty() {
+        info!("node subscription diagnostics: declared stream subjects are fully covered");
+    }
+}
+
 fn bind_socket_address(host: &str, port: u16) -> anyhow::Result<String> {
     let trimmed = host.trim();
     if trimmed.is_empty() {
@@ -1186,6 +1271,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Subscribe to control-plane streams with subject-filtered durable consumers.
     // This avoids duplicate delivery when a stream carries multiple event classes.
+    log_node_subscription_diagnostics();
     for (stream, subject) in NODE_SUBSCRIPTION_SPECS {
         let d = dispatcher.clone();
         let consumer = format!("node-{}-{}", config.node.node_id, sanitize_subject(subject));
@@ -2960,8 +3046,9 @@ mod tests {
     use super::{
         admin_tls_is_configured, admin_tls_material, artifact_server_url_is_loopback,
         bind_socket_address, build_artifact_server_url, build_proxy_advertised_address,
+        collect_missing_node_stream_subscriptions, collect_unbacked_node_subscriptions,
         load_kek_from_config, load_kek_from_env_spec, sanitize_subject, serve_admin_app,
-        NODE_SUBSCRIPTION_SPECS,
+        subject_matches_filter, NODE_SUBSCRIPTION_SPECS,
     };
     use common::config::{AdminSection, NodeConfig, ProxySection, RuntimeSection};
     use common::types::{AppConfig, AppId, FuelQuota, GatewayRouteConfig, MemoryPages};
@@ -3021,32 +3108,6 @@ uoKQp7o8ET+CcFRg9vEG/uA=
 "#;
 
     static ENV_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    fn subject_matches_filter(subject: &str, filter: &str) -> bool {
-        let subject_tokens: Vec<&str> = subject.split('.').collect();
-        let filter_tokens: Vec<&str> = filter.split('.').collect();
-
-        let mut subject_index = 0usize;
-        for token in filter_tokens {
-            match token {
-                ">" => return true,
-                "*" => {
-                    if subject_index >= subject_tokens.len() {
-                        return false;
-                    }
-                    subject_index += 1;
-                }
-                literal => {
-                    if subject_tokens.get(subject_index) != Some(&literal) {
-                        return false;
-                    }
-                    subject_index += 1;
-                }
-            }
-        }
-
-        subject_index == subject_tokens.len()
-    }
 
     fn test_app_config(app_id: &str) -> AppConfig {
         AppConfig {
@@ -3496,6 +3557,24 @@ uoKQp7o8ET+CcFRg9vEG/uA=
     fn test_sanitize_subject_stabilizes_consumer_suffixes() {
         assert_eq!(sanitize_subject("gateway.config.>"), "gateway-config-all");
         assert_eq!(sanitize_subject("ebpf.pressure.*"), "ebpf-pressure-one");
+    }
+
+    #[test]
+    fn test_node_subscription_specs_cover_all_declared_stream_subjects() {
+        let missing = collect_missing_node_stream_subscriptions();
+        assert!(
+            missing.is_empty(),
+            "declared JetStream subjects without node subscriptions: {missing:?}"
+        );
+    }
+
+    #[test]
+    fn test_node_subscription_specs_only_reference_declared_stream_subjects() {
+        let unbacked = collect_unbacked_node_subscriptions();
+        assert!(
+            unbacked.is_empty(),
+            "node subscriptions without declared JetStream stream subjects: {unbacked:?}"
+        );
     }
 
     #[test]
