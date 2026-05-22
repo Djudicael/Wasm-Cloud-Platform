@@ -1186,6 +1186,7 @@ async fn fetch_artifact(
 mod tests {
     use super::{
         apply_secret_update, fetch_artifact, is_loopback_artifact_url, validate_peer_artifact_url,
+        BootstrapSessionState, EventDispatcher,
     };
     use common::{
         artifact_transfer::{
@@ -1200,11 +1201,14 @@ mod tests {
         crypto::SymmetricKey, LocalSecretProvider, SecretProvider, SecretTransportEnvelope,
     };
     use sha2::Digest;
+    use std::net::IpAddr;
     use std::sync::atomic::{AtomicU16, Ordering};
+    use std::sync::Arc;
     use storage::Store;
+    use supervisor::{network::NamespaceRegistry, port_alloc::PortAllocator, Supervisor};
     use tempfile::NamedTempFile;
     use tokio::net::TcpListener;
-    use tokio::sync::oneshot;
+    use tokio::sync::{mpsc, oneshot, Mutex};
 
     static NATS_PORT_COUNTER: AtomicU16 = AtomicU16::new(0);
 
@@ -1215,6 +1219,59 @@ mod tests {
 
     async fn start_test_nats() -> Result<NatsContainer, String> {
         NatsContainer::start(allocate_nats_port()).await
+    }
+
+    async fn build_test_dispatcher(
+        store: Store,
+        bootstrap_session: Option<Arc<Mutex<BootstrapSessionState>>>,
+    ) -> EventDispatcher {
+        let runtime = runtime::WasmRuntime::new().unwrap();
+        let upstream = Arc::new(proxy::upstream::UpstreamRegistry::new());
+        let host_router = Arc::new(proxy::router::HostRouter::default());
+        let service_registry = Arc::new(NamespaceRegistry::default());
+        let port_alloc = Arc::new(PortAllocator::new(
+            IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+            20000,
+            20010,
+        ));
+        let (event_tx, _event_rx) = mpsc::channel(8);
+        let supervisor = Supervisor::new(
+            store.clone(),
+            runtime.clone(),
+            port_alloc,
+            upstream.clone(),
+            host_router.clone(),
+            service_registry,
+            0,
+            Arc::new(|_, _| Vec::new()),
+            event_tx,
+            None,
+        );
+        let nats = start_test_nats().await.unwrap();
+        let mut bus = NatsBus::connect(&nats.url).await.unwrap();
+        bus.set_node_id("node-under-test".to_string());
+
+        EventDispatcher {
+            supervisor,
+            upstream,
+            host_router,
+            store: store.clone(),
+            runtime,
+            node_id: "node-under-test".to_string(),
+            artifact_server_url: "http://node-under-test.internal:9091".to_string(),
+            artifact_transfer_authority: ArtifactTransferAuthority::derive(
+                "node-under-test",
+                &[9u8; 32],
+            ),
+            upgrade_signing_public_key: None,
+            secret_provider: Arc::new(LocalSecretProvider::new(store, SymmetricKey::generate())),
+            bootstrap_session,
+            bus,
+            dns_webhook: None,
+            node_table: Arc::new(proxy::node_table::NodeLoadTable::default()),
+            cluster_node_stale_after_secs: 120,
+            gateway: None,
+        }
     }
 
     #[test]
@@ -1404,5 +1461,105 @@ mod tests {
             .to_string()
             .contains("unexpected secret payload variant"));
         assert!(store.load_secrets(&app_id).unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_handle_state_snapshot_accepts_first_matching_session_only() {
+        let temp = NamedTempFile::new().unwrap();
+        let store = Store::open(temp.path()).unwrap();
+        let bootstrap_session = Arc::new(Mutex::new(BootstrapSessionState {
+            session_id: "session-1".to_string(),
+            nonce: "nonce-1".to_string(),
+            keypair: secrets::BootstrapKeyPair::generate(),
+            applied: false,
+        }));
+        let dispatcher =
+            build_test_dispatcher(store.clone(), Some(bootstrap_session.clone())).await;
+
+        let stale_config = common::types::AppConfig {
+            id: AppId("stale-app:v1".to_string()),
+            fuel_quota: common::types::FuelQuota(1000),
+            memory_limit: common::types::MemoryPages(4),
+            max_instances: 1,
+            idle_timeout_secs: 30,
+            wasm_bind_port: 8080,
+            env_vars: std::collections::HashMap::new(),
+            secret_keys: vec![],
+            extended_limits: None,
+            health_check_path: None,
+            db_max_connections: None,
+            rate_limit: None,
+            tenant_id: None,
+            policy: None,
+            namespace: "default".to_string(),
+        };
+        let accepted_config = common::types::AppConfig {
+            id: AppId("accepted-app:v1".to_string()),
+            ..stale_config.clone()
+        };
+        let duplicate_config = common::types::AppConfig {
+            id: AppId("duplicate-app:v1".to_string()),
+            ..stale_config.clone()
+        };
+
+        dispatcher
+            .handle_state_snapshot(
+                "stale-session".to_string(),
+                "stale-nonce".to_string(),
+                vec![stale_config.clone()],
+                vec![],
+                vec![],
+                vec![],
+                vec![],
+                vec![],
+                vec![],
+            )
+            .await
+            .unwrap();
+        assert!(
+            store.load_config(&stale_config.id).unwrap().is_none(),
+            "mismatched session/nonce snapshot must be ignored"
+        );
+
+        dispatcher
+            .handle_state_snapshot(
+                "session-1".to_string(),
+                "nonce-1".to_string(),
+                vec![accepted_config.clone()],
+                vec![],
+                vec![],
+                vec![],
+                vec![],
+                vec![],
+                vec![],
+            )
+            .await
+            .unwrap();
+        assert!(
+            store.load_config(&accepted_config.id).unwrap().is_some(),
+            "first matching snapshot should be applied"
+        );
+
+        dispatcher
+            .handle_state_snapshot(
+                "session-1".to_string(),
+                "nonce-1".to_string(),
+                vec![duplicate_config.clone()],
+                vec![],
+                vec![],
+                vec![],
+                vec![],
+                vec![],
+                vec![],
+            )
+            .await
+            .unwrap();
+        assert!(
+            store.load_config(&duplicate_config.id).unwrap().is_none(),
+            "duplicate matching snapshot after apply must be ignored"
+        );
+
+        let bootstrap_state = bootstrap_session.lock().await;
+        assert!(bootstrap_state.applied);
     }
 }

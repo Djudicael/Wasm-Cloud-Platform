@@ -107,6 +107,35 @@ fn host_for_socket_address(host: &str) -> String {
     }
 }
 
+const NODE_SUBSCRIPTION_SPECS: &[(&str, &str)] = &[
+    ("DEPLOY", "deploy.>"),
+    ("DEPLOY", "routes.>"),
+    ("CONTROL", "instance.ready.>"),
+    ("CONTROL", "instance.dead.>"),
+    ("CONTROL", "secrets.update.>"),
+    ("CONTROL", "config.update.>"),
+    ("CONTROL", "gateway.config.>"),
+    ("NODE", "node.load.>"),
+    ("NODE", "cluster.node_joined.>"),
+    ("NODE", "cluster.snapshot.>"),
+    ("HEALTH", "cluster.health.changed.>"),
+    ("HEALTH", "cluster.health.snapshot.>"),
+    ("PLATFORM", "platform.upgrade.>"),
+    ("PLATFORM", "platform.upgrade_complete.>"),
+    ("PLATFORM", "platform.draining.>"),
+    ("PLATFORM", "config.hot_reload.>"),
+    ("EBPF", "ebpf.pressure.*"),
+    ("EBPF", "ebpf.pressure.recovered.*"),
+    ("EBPF", "ebpf.security.incident.*"),
+];
+
+fn sanitize_subject(subject: &str) -> String {
+    subject
+        .replace('.', "-")
+        .replace('>', "all")
+        .replace('*', "one")
+}
+
 fn bind_socket_address(host: &str, port: u16) -> anyhow::Result<String> {
     let trimmed = host.trim();
     if trimmed.is_empty() {
@@ -1156,36 +1185,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Subscribe to control-plane streams with subject-filtered durable consumers.
     // This avoids duplicate delivery when a stream carries multiple event classes.
-    let subscription_specs = vec![
-        ("DEPLOY", "deploy.>"),
-        ("DEPLOY", "routes.>"),
-        ("CONTROL", "instance.ready.>"),
-        ("CONTROL", "instance.dead.>"),
-        ("CONTROL", "secrets.update.>"),
-        ("CONTROL", "config.update.>"),
-        ("CONTROL", "gateway.config.>"),
-        ("NODE", "node.load.>"),
-        ("NODE", "cluster.node_joined.>"),
-        ("NODE", "cluster.snapshot.>"),
-        ("HEALTH", "cluster.health.changed.>"),
-        ("HEALTH", "cluster.health.snapshot.>"),
-        ("PLATFORM", "platform.upgrade.>"),
-        ("PLATFORM", "platform.upgrade_complete.>"),
-        ("PLATFORM", "platform.draining.>"),
-        ("PLATFORM", "config.hot_reload.>"),
-        ("EBPF", "ebpf.pressure.*"),
-        ("EBPF", "ebpf.pressure.recovered.*"),
-        ("EBPF", "ebpf.security.incident.*"),
-    ];
-
-    let sanitize_subject = |subject: &str| {
-        subject
-            .replace('.', "-")
-            .replace('>', "all")
-            .replace('*', "one")
-    };
-
-    for (stream, subject) in subscription_specs {
+    for (stream, subject) in NODE_SUBSCRIPTION_SPECS {
         let d = dispatcher.clone();
         let consumer = format!("node-{}-{}", config.node.node_id, sanitize_subject(subject));
         tracing::info!(stream, subject, consumer = %consumer, "subscribing durable consumer");
@@ -2958,9 +2958,12 @@ mod tests {
     use super::{
         admin_tls_is_configured, admin_tls_material, artifact_server_url_is_loopback,
         bind_socket_address, build_artifact_server_url, build_proxy_advertised_address,
-        load_kek_from_config, load_kek_from_env_spec, serve_admin_app,
+        load_kek_from_config, load_kek_from_env_spec, sanitize_subject, serve_admin_app,
+        NODE_SUBSCRIPTION_SPECS,
     };
     use common::config::{AdminSection, NodeConfig, ProxySection, RuntimeSection};
+    use common::types::{AppConfig, AppId, FuelQuota, GatewayRouteConfig, MemoryPages};
+    use messaging::events::Event;
     use storage::Store;
     use tempfile::{NamedTempFile, TempDir};
 
@@ -3016,6 +3019,52 @@ uoKQp7o8ET+CcFRg9vEG/uA=
 "#;
 
     static ENV_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn subject_matches_filter(subject: &str, filter: &str) -> bool {
+        let subject_tokens: Vec<&str> = subject.split('.').collect();
+        let filter_tokens: Vec<&str> = filter.split('.').collect();
+
+        let mut subject_index = 0usize;
+        for token in filter_tokens {
+            match token {
+                ">" => return true,
+                "*" => {
+                    if subject_index >= subject_tokens.len() {
+                        return false;
+                    }
+                    subject_index += 1;
+                }
+                literal => {
+                    if subject_tokens.get(subject_index) != Some(&literal) {
+                        return false;
+                    }
+                    subject_index += 1;
+                }
+            }
+        }
+
+        subject_index == subject_tokens.len()
+    }
+
+    fn test_app_config(app_id: &str) -> AppConfig {
+        AppConfig {
+            id: AppId(app_id.to_string()),
+            fuel_quota: FuelQuota(1_000_000),
+            memory_limit: MemoryPages(4),
+            max_instances: 1,
+            idle_timeout_secs: 30,
+            wasm_bind_port: 8080,
+            env_vars: std::collections::HashMap::new(),
+            secret_keys: vec![],
+            extended_limits: None,
+            health_check_path: None,
+            db_max_connections: None,
+            rate_limit: None,
+            tenant_id: None,
+            policy: None,
+            namespace: "default".to_string(),
+        }
+    }
 
     #[test]
     fn test_bind_socket_address_formats_ipv6() {
@@ -3179,6 +3228,272 @@ uoKQp7o8ET+CcFRg9vEG/uA=
         let url = build_artifact_server_url(&admin).unwrap();
         assert_eq!(url, "https://artifacts.node-1.internal/base");
         assert!(!artifact_server_url_is_loopback(&url));
+    }
+
+    #[test]
+    fn test_subscription_matrix_covers_each_event_type_exactly_once() {
+        let route = common::types::Route {
+            host: "example.com".to_string(),
+            path_prefix: "/".to_string(),
+            app_id: AppId("demo:v1".to_string()),
+            strip_prefix: false,
+            created_at: 0,
+            updated_at: 0,
+        };
+        let gateway_config = GatewayRouteConfig::default();
+        let config = test_app_config("demo:v1");
+        let event_cases = vec![
+            (
+                "deploy_app",
+                "DEPLOY",
+                Event::DeployApp {
+                    app_id: config.id.clone(),
+                    config: config.clone(),
+                    artifact_url: "http://node.internal/artifacts/abc".to_string(),
+                    artifact_transfer_manifests: vec![],
+                    expected_hash: Some("abc".to_string()),
+                    size_bytes: 123,
+                },
+            ),
+            (
+                "remove_app",
+                "DEPLOY",
+                Event::RemoveApp {
+                    app_id: config.id.clone(),
+                },
+            ),
+            (
+                "route_add",
+                "DEPLOY",
+                Event::RouteAdd {
+                    route: route.clone(),
+                },
+            ),
+            (
+                "route_remove",
+                "DEPLOY",
+                Event::RouteRemove {
+                    host: route.host.clone(),
+                },
+            ),
+            (
+                "instance_ready",
+                "CONTROL",
+                Event::InstanceReady {
+                    app_id: config.id.clone(),
+                    addr: "127.0.0.1:18080".parse().unwrap(),
+                    node_id: "node-a".to_string(),
+                },
+            ),
+            (
+                "instance_dead",
+                "CONTROL",
+                Event::InstanceDead {
+                    app_id: config.id.clone(),
+                    addr: "127.0.0.1:18080".parse().unwrap(),
+                    node_id: "node-a".to_string(),
+                },
+            ),
+            (
+                "secret_update",
+                "CONTROL",
+                Event::SecretUpdate {
+                    app_id: config.id.clone(),
+                    key: "API_KEY".to_string(),
+                    secret: secrets::SecretTransportEnvelope::plaintext_utf8("value"),
+                },
+            ),
+            (
+                "config_update",
+                "CONTROL",
+                Event::ConfigUpdate {
+                    app_id: config.id.clone(),
+                    config: config.clone(),
+                },
+            ),
+            (
+                "gateway_config_update",
+                "CONTROL",
+                Event::GatewayConfigUpdate {
+                    app_id: config.id.clone(),
+                    config: gateway_config.clone(),
+                },
+            ),
+            (
+                "gateway_config_remove",
+                "CONTROL",
+                Event::GatewayConfigRemove {
+                    app_id: config.id.clone(),
+                },
+            ),
+            (
+                "node_load",
+                "NODE",
+                Event::NodeLoad {
+                    node_id: "node-a".to_string(),
+                    cpu_percent: 10.0,
+                    fuel_budget_used_percent: 20.0,
+                    active_instances: 1,
+                    proxy_address: "node-a.internal:8080".to_string(),
+                },
+            ),
+            (
+                "node_joined",
+                "NODE",
+                Event::NodeJoined {
+                    node_id: "node-b".to_string(),
+                    bootstrap_session_id: "session-1".to_string(),
+                    bootstrap_nonce: "nonce-1".to_string(),
+                    artifact_server_url: "http://node-b.internal:9091".to_string(),
+                    public_key_bytes: vec![7u8; 32],
+                    protocol_version: common::protocol::PROTOCOL_VERSION,
+                    binary_version: common::protocol::BINARY_VERSION.to_string(),
+                },
+            ),
+            (
+                "state_snapshot",
+                "NODE",
+                Event::StateSnapshot {
+                    for_node_id: "node-b".to_string(),
+                    bootstrap_session_id: "session-1".to_string(),
+                    bootstrap_nonce: "nonce-1".to_string(),
+                    configs: vec![],
+                    routes: vec![],
+                    encrypted_secrets: vec![],
+                    gateway_configs: vec![],
+                    api_keys: vec![],
+                    artifact_fetches: vec![],
+                    artifact_hashes: vec![],
+                },
+            ),
+            (
+                "health_changed",
+                "HEALTH",
+                Event::NodeHealthChanged {
+                    node_id: "node-a".to_string(),
+                    status: "healthy".to_string(),
+                    cause: None,
+                    timestamp: "2026-01-01T00:00:00Z".to_string(),
+                    active_instances: 1,
+                    accepting_requests: true,
+                },
+            ),
+            (
+                "health_snapshot",
+                "HEALTH",
+                Event::NodeHealthSnapshot {
+                    node_id: "node-a".to_string(),
+                    status: "healthy".to_string(),
+                    active_instances: 1,
+                    deployed_apps: 1,
+                    nats_connected: true,
+                    disk_free_mb: 100,
+                    memory_used_mb: 50,
+                    timestamp: "2026-01-01T00:00:00Z".to_string(),
+                },
+            ),
+            (
+                "node_upgrade_targeted",
+                "PLATFORM",
+                Event::NodeUpgrade {
+                    target_node: "node-a".to_string(),
+                    binary_url: "https://example.com/node".to_string(),
+                    binary_sha256: "deadbeef".to_string(),
+                    signature_ed25519: None,
+                    new_protocol_version: common::protocol::PROTOCOL_VERSION,
+                    new_binary_version: "1.2.3".to_string(),
+                },
+            ),
+            (
+                "node_upgrade_rolling",
+                "PLATFORM",
+                Event::NodeUpgrade {
+                    target_node: "*".to_string(),
+                    binary_url: "https://example.com/node".to_string(),
+                    binary_sha256: "deadbeef".to_string(),
+                    signature_ed25519: None,
+                    new_protocol_version: common::protocol::PROTOCOL_VERSION,
+                    new_binary_version: "1.2.3".to_string(),
+                },
+            ),
+            (
+                "node_upgrade_complete",
+                "PLATFORM",
+                Event::NodeUpgradeComplete {
+                    node_id: "node-a".to_string(),
+                    new_binary_version: "1.2.3".to_string(),
+                    new_protocol_version: common::protocol::PROTOCOL_VERSION,
+                },
+            ),
+            (
+                "node_draining",
+                "PLATFORM",
+                Event::NodeDraining {
+                    node_id: "node-a".to_string(),
+                    drain_timeout_secs: 30,
+                },
+            ),
+            (
+                "config_hot_reload",
+                "PLATFORM",
+                Event::ConfigHotReload {
+                    node_id: "node-a".to_string(),
+                    changes: serde_json::json!({"health": {"check_interval_secs": 5}}),
+                },
+            ),
+            (
+                "node_under_pressure",
+                "EBPF",
+                Event::NodeUnderPressure {
+                    node_id: "node-a".to_string(),
+                    pressure_level: 2,
+                },
+            ),
+            (
+                "node_pressure_recovered",
+                "EBPF",
+                Event::NodePressureRecovered {
+                    node_id: "node-a".to_string(),
+                },
+            ),
+            (
+                "security_incident",
+                "EBPF",
+                Event::SecurityIncident {
+                    node_id: "node-a".to_string(),
+                    app_id: config.id.0.clone(),
+                    pid: 42,
+                    syscall_nr: 31337,
+                    category: "PrivilegeEscalation".to_string(),
+                },
+            ),
+        ];
+
+        for (label, expected_stream, event) in event_cases {
+            let subject = event.subject();
+            let matches: Vec<_> = NODE_SUBSCRIPTION_SPECS
+                .iter()
+                .copied()
+                .filter(|(_, filter)| subject_matches_filter(&subject, filter))
+                .collect();
+
+            assert_eq!(
+                matches.len(),
+                1,
+                "{label} with subject {subject} should map to exactly one subscription filter, got {matches:?}"
+            );
+            assert_eq!(
+                matches[0].0, expected_stream,
+                "{label} with subject {subject} mapped to wrong stream/filter {:?}",
+                matches[0]
+            );
+        }
+    }
+
+    #[test]
+    fn test_sanitize_subject_stabilizes_consumer_suffixes() {
+        assert_eq!(sanitize_subject("gateway.config.>"), "gateway-config-all");
+        assert_eq!(sanitize_subject("ebpf.pressure.*"), "ebpf-pressure-one");
     }
 
     #[test]
