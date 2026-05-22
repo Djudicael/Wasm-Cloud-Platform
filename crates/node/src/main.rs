@@ -3050,6 +3050,7 @@ mod tests {
         load_kek_from_config, load_kek_from_env_spec, sanitize_subject, serve_admin_app,
         subject_matches_filter, NODE_SUBSCRIPTION_SPECS,
     };
+    use common::auth::AuthConfig;
     use common::config::{AdminSection, NodeConfig, ProxySection, RuntimeSection};
     use common::types::{AppConfig, AppId, FuelQuota, GatewayRouteConfig, MemoryPages};
     use messaging::events::Event;
@@ -3162,6 +3163,43 @@ uoKQp7o8ET+CcFRg9vEG/uA=
         let material = admin_tls_material(&config).expect("admin TLS material should exist");
         assert_eq!(material.0, "/tmp/admin.crt");
         assert_eq!(material.1, "/tmp/admin.key");
+    }
+
+    #[test]
+    fn test_startup_tls_requirement_rejects_auth_without_any_tls_material() {
+        let mut config = NodeConfig::default();
+        config.auth.enabled = true;
+        config.auth.require_tls = true;
+        config.auth.write_token = Some("valid_write_token_1234567890".to_string());
+
+        let auth_config: AuthConfig = config.auth.clone().into();
+        let err = proxy::auth_middleware::check_admin_tls_requirement(
+            &auth_config,
+            admin_tls_is_configured(&config),
+        )
+        .expect_err("auth.require_tls=true without TLS material should fail startup");
+
+        assert!(err.contains("admin.tls_cert / admin.tls_key"));
+    }
+
+    #[test]
+    fn test_startup_tls_requirement_accepts_proxy_tls_fallback() {
+        let mut config = NodeConfig::default();
+        config.auth.enabled = true;
+        config.auth.require_tls = true;
+        config.auth.write_token = Some("valid_write_token_1234567890".to_string());
+        config.proxy = ProxySection {
+            tls_cert: Some("/tmp/proxy.crt".to_string()),
+            tls_key: Some("/tmp/proxy.key".to_string()),
+            ..ProxySection::default()
+        };
+
+        let auth_config: AuthConfig = config.auth.clone().into();
+        proxy::auth_middleware::check_admin_tls_requirement(
+            &auth_config,
+            admin_tls_is_configured(&config),
+        )
+        .expect("shared proxy TLS material should satisfy admin auth TLS startup checks");
     }
 
     fn install_test_rustls_provider() {

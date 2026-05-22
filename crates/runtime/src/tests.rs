@@ -13,6 +13,7 @@ use common::{
     types::{AppConfig, AppId, FuelQuota, MemoryPages},
 };
 use std::path::PathBuf;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::thread;
 use tempfile::TempDir;
@@ -422,6 +423,61 @@ fn test_background_worker_profile_denies_tcp_bind() {
             SocketAddrUse::TcpConnect
         )
         .is_ok());
+}
+
+#[test]
+fn test_execution_stats_export_authoritative_policy_counters() {
+    let runtime = WasmRuntime::new().expect("Failed to create WasmRuntime");
+    let wasm_bytes = wat::parse_str(no_op_component_with_wasi_cli_run_interface()).unwrap();
+    let artifact = runtime.compile(&wasm_bytes).unwrap();
+    let prepared = runtime.prepare(&artifact, base_config()).unwrap();
+
+    let mut instance = prepared
+        .spawn_instance(vec![], 8080, None)
+        .expect("Spawn failed");
+    let counters = instance.policy_counters();
+    counters.open_fds.store(1, Ordering::Relaxed);
+    counters.open_fds_peak.store(3, Ordering::Relaxed);
+    counters.fs_write_bytes.store(4096, Ordering::Relaxed);
+    counters.egress_bytes.store(2048, Ordering::Relaxed);
+    counters
+        .outbound_connections_total
+        .store(2, Ordering::Relaxed);
+
+    let stats = instance.run();
+    assert!(stats.trap.is_none(), "run should succeed: {:?}", stats.trap);
+    assert_eq!(stats.io_stats.open_fds_peak, 3);
+    assert_eq!(stats.io_stats.fs_bytes_written, 4096);
+    assert_eq!(stats.io_stats.net_egress_bytes, 2048);
+    assert_eq!(stats.io_stats.outbound_connections, 2);
+}
+
+#[test]
+fn test_running_instance_drop_resets_active_policy_counters() {
+    let runtime = WasmRuntime::new().expect("Failed to create WasmRuntime");
+    let wasm_bytes = wat::parse_str(no_op_component_with_wasi_cli_run_interface()).unwrap();
+    let artifact = runtime.compile(&wasm_bytes).unwrap();
+    let prepared = runtime.prepare(&artifact, base_config()).unwrap();
+
+    let counters = {
+        let instance = prepared
+            .spawn_instance(vec![], 8080, None)
+            .expect("Spawn failed");
+        let counters = instance.policy_counters();
+        counters.open_fds.store(2, Ordering::Relaxed);
+        counters.open_fds_peak.store(2, Ordering::Relaxed);
+        counters
+            .outbound_connections_active
+            .store(1, Ordering::Relaxed);
+        counters
+    };
+
+    assert_eq!(counters.open_fds.load(Ordering::Relaxed), 0);
+    assert_eq!(
+        counters.outbound_connections_active.load(Ordering::Relaxed),
+        0
+    );
+    assert_eq!(counters.open_fds_peak.load(Ordering::Relaxed), 2);
 }
 
 #[test]

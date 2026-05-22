@@ -24,6 +24,7 @@ pub struct PolicyCounters {
 
     // Filesystem counters
     pub open_fds: AtomicU32,
+    pub open_fds_peak: AtomicU32,
     pub fd_open_total: AtomicU64,
     pub fs_write_bytes: AtomicU64,
     pub fs_read_bytes: AtomicU64,
@@ -48,6 +49,7 @@ impl PolicyCounters {
             dns_lookups_total: AtomicU64::new(0),
             inbound_connections_active: AtomicU32::new(0),
             open_fds: AtomicU32::new(0),
+            open_fds_peak: AtomicU32::new(0),
             fd_open_total: AtomicU64::new(0),
             fs_write_bytes: AtomicU64::new(0),
             fs_read_bytes: AtomicU64::new(0),
@@ -196,6 +198,16 @@ impl PolicyEnforcer {
         }
     }
 
+    pub fn reset_active_counters(&self) {
+        self.counters
+            .outbound_connections_active
+            .store(0, Ordering::Release);
+        self.counters
+            .inbound_connections_active
+            .store(0, Ordering::Release);
+        self.counters.open_fds.store(0, Ordering::Release);
+    }
+
     /// Check if egress data is allowed (before sending).
     #[deprecated(
         since = "0.2.0",
@@ -318,6 +330,7 @@ impl PolicyEnforcer {
                 .compare_exchange(current, current + 1, Ordering::AcqRel, Ordering::Acquire)
                 .is_ok()
             {
+                Self::update_peak(&self.counters.open_fds_peak, current + 1);
                 break;
             }
         }
@@ -440,6 +453,21 @@ impl PolicyEnforcer {
     /// Check if an IP address falls within any of the given pre-parsed CIDRs.
     fn ip_in_cidrs(ip: IpAddr, cidrs: &[ipnet::IpNet]) -> bool {
         cidrs.iter().any(|cidr| cidr.contains(&ip))
+    }
+
+    fn update_peak(peak: &AtomicU32, candidate: u32) {
+        loop {
+            let current_peak = peak.load(Ordering::Acquire);
+            if candidate <= current_peak {
+                return;
+            }
+            if peak
+                .compare_exchange(current_peak, candidate, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                return;
+            }
+        }
     }
 }
 
@@ -578,6 +606,7 @@ mod tests {
             0
         );
         assert_eq!(counters.open_fds.load(Ordering::Relaxed), 0);
+        assert_eq!(counters.open_fds_peak.load(Ordering::Relaxed), 0);
         assert_eq!(counters.fd_open_total.load(Ordering::Relaxed), 0);
         assert_eq!(counters.fs_write_bytes.load(Ordering::Relaxed), 0);
         assert_eq!(counters.fs_read_bytes.load(Ordering::Relaxed), 0);
@@ -923,15 +952,23 @@ mod tests {
         // check_fd_open atomically increments open_fds
         assert!(enforcer.check_fd_open().is_ok());
         assert_eq!(enforcer.counters.open_fds.load(Ordering::Relaxed), 1);
+        assert_eq!(enforcer.counters.open_fds_peak.load(Ordering::Relaxed), 1);
 
         // record_fd_open only increments total
         enforcer.record_fd_open();
         assert_eq!(enforcer.counters.open_fds.load(Ordering::Relaxed), 1);
+        assert_eq!(enforcer.counters.open_fds_peak.load(Ordering::Relaxed), 1);
         assert_eq!(enforcer.counters.fd_open_total.load(Ordering::Relaxed), 1);
+
+        assert!(enforcer.check_fd_open().is_ok());
+        assert_eq!(enforcer.counters.open_fds.load(Ordering::Relaxed), 2);
+        assert_eq!(enforcer.counters.open_fds_peak.load(Ordering::Relaxed), 2);
 
         // Close
         enforcer.record_fd_close();
+        enforcer.record_fd_close();
         assert_eq!(enforcer.counters.open_fds.load(Ordering::Relaxed), 0);
+        assert_eq!(enforcer.counters.open_fds_peak.load(Ordering::Relaxed), 2);
     }
 
     #[test]
@@ -940,6 +977,37 @@ mod tests {
         // Calling close when open_fds is 0 should not underflow
         enforcer.record_fd_close();
         assert_eq!(enforcer.counters.open_fds.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn test_reset_active_counters_clears_only_live_resource_counts() {
+        let enforcer = PolicyEnforcer::new(make_policy());
+        enforcer
+            .check_outbound_tcp_connect("93.184.216.34".parse().unwrap(), 443)
+            .unwrap();
+        enforcer.check_fd_open().unwrap();
+        enforcer.record_outbound_connect();
+        enforcer.record_fd_open();
+
+        enforcer.reset_active_counters();
+
+        assert_eq!(
+            enforcer
+                .counters
+                .outbound_connections_active
+                .load(Ordering::Relaxed),
+            0
+        );
+        assert_eq!(enforcer.counters.open_fds.load(Ordering::Relaxed), 0);
+        assert_eq!(enforcer.counters.open_fds_peak.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            enforcer
+                .counters
+                .outbound_connections_total
+                .load(Ordering::Relaxed),
+            1
+        );
+        assert_eq!(enforcer.counters.fd_open_total.load(Ordering::Relaxed), 1);
     }
 
     #[test]

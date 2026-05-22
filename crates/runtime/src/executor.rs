@@ -1,6 +1,6 @@
 // crates/runtime/src/executor.rs
 use crate::limits::{configure_store, read_fuel_remaining, IoStats, MemoryLimiter};
-use crate::policy_tracker::PolicyEnforcer;
+use crate::policy_tracker::{PolicyCounters, PolicyEnforcer};
 use common::{
     error::PlatformError,
     policy::InstancePolicy,
@@ -335,6 +335,7 @@ impl PreparedModule {
             limiter: MemoryLimiter::new(self.config.memory_limit, extended_limits),
             policy_enforcer: PolicyEnforcer::new(policy),
         };
+        let policy_counters = state.policy_enforcer.counters.clone();
 
         let mut store = Store::new(&*self.engine, state);
 
@@ -362,6 +363,7 @@ impl PreparedModule {
             instance,
             store,
             config: self.config.clone(),
+            policy_counters,
             started_at: Instant::now(),
         })
     }
@@ -373,6 +375,9 @@ pub struct RunningInstance {
     instance: Instance,
     store: Store<StoreState>,
     config: AppConfig,
+    #[cfg_attr(not(test), allow(dead_code))]
+    policy_counters: Arc<PolicyCounters>,
+    #[allow(dead_code)]
     started_at: Instant,
 }
 
@@ -384,18 +389,17 @@ struct ResolvedEntryPoint {
 
 impl Drop for RunningInstance {
     fn drop(&mut self) {
-        // NOTE: We cannot easily decrement policy counters (outbound_connections_active,
-        // open_fds, etc.) here because the counters live inside StoreState which is owned
-        // by self.store. During Drop, self.store is also being dropped, so accessing its
-        // data is not safe. A proper fix would require the counters to be held in an
-        // Arc separate from the Store, or a pre-drop hook called explicitly before the
-        // instance is dropped. For now, counters are approximate and may over-count
-        // active resources until the Store is fully collected.
+        self.store.data().policy_enforcer.reset_active_counters();
         tracing::debug!(instance_id = %self.id.0, "Dropping RunningInstance");
     }
 }
 
 impl RunningInstance {
+    #[cfg(test)]
+    pub(crate) fn policy_counters(&self) -> Arc<PolicyCounters> {
+        self.policy_counters.clone()
+    }
+
     fn resolve_entry_point(&mut self) -> Option<ResolvedEntryPoint> {
         // WASI Preview 2 components typically export `wasi:cli/run@0.2.x` as an interface
         // containing `run`. For compatibility with older/minimal components and tests, also
@@ -558,7 +562,9 @@ impl RunningInstance {
         // Populate io_stats from policy counters
         let counters = &self.store.data().policy_enforcer.counters;
         let io_stats = IoStats {
-            open_fds_peak: counters.open_fds.load(std::sync::atomic::Ordering::Relaxed),
+            open_fds_peak: counters
+                .open_fds_peak
+                .load(std::sync::atomic::Ordering::Relaxed),
             fs_bytes_written: counters
                 .fs_write_bytes
                 .load(std::sync::atomic::Ordering::Relaxed),
