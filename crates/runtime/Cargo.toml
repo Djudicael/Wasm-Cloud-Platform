@@ -23,5 +23,5 @@ hyper-util = { version = "0.1", features = ["server-auto", "http1", "http2", "to
 futures = "0.3"
 
 [dev-dependencies]
-wat = "1.246.2"
+wat = "1.250.0"
 tempfile = "3"
