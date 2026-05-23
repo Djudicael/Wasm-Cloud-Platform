@@ -50,6 +50,7 @@ async fn test_single_node_deploy() {
         vcpus: 2,
         ip: "172.20.0.2".to_string(),
         gateway: "172.20.0.1".to_string(),
+        bridge_name: "br-wasm".to_string(),
         tap_device: "tap-test-node-0".to_string(),
         mmds_data: Some(serde_json::json!({
             "node_config": {

@@ -5,7 +5,13 @@ edition = "2021"
 
 [dependencies]
 url = { workspace = true }
+serde_json = { workspace = true }
 
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
 axum = { workspace = true }
 tokio = { workspace = true }
+wasi-pg-client = { version = "0.1.2", features = ["tokio-transport"] }
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+wasi-pg-client = "0.1.2"
+wstd = "0.6"

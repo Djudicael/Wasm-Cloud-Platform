@@ -95,15 +95,23 @@ sudo cargo test -p vm-testbed --test vm_chaos -- --nocapture --test-threads=1
 ### 4. Use the CLI
 
 ```bash
-# Spawn a cluster with 3 nodes
-cargo run --bin vm-testbed-cli -- spawn-cluster --nodes 3
+# Bring up a detached single-node manual topology
+cargo run --bin vm-testbed-cli -- up --profile single-node --name dev-lab
 
-# Check health
-cargo run --bin vm-testbed-cli -- health --ip 172.20.0.2
+# Show running state from the saved file
+cargo run --bin vm-testbed-cli -- status
 
-# Teardown
-cargo run --bin vm-testbed-cli -- teardown
+# Tear it down later
+cargo run --bin vm-testbed-cli -- down
 ```
+
+Available profiles in this first CLI pass:
+
+- `single-node`
+- `multi-node`
+- `chaos-ready`
+
+The CLI now persists cluster state to `.vm-testbed-state.json` by default so you can bring a topology up, validate it manually, and destroy it later.
 
 ## Module Overview
 

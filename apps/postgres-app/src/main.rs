@@ -1,8 +1,11 @@
-// postgres-app: a sample application that talks to PostgreSQL over raw TCP.
-// Both the native and wasm targets expose the same basic HTTP surface:
+// postgres-app: a sample application that talks to PostgreSQL through
+// `wasi-pg-client` on both native and Wasm targets.
+// Both targets expose the same basic HTTP surface:
 //   GET /         -> readiness banner
 //   GET /health   -> static health JSON
-//   GET /query    -> performs a minimal PostgreSQL wire-protocol roundtrip
+//   GET /query    -> performs a simple PostgreSQL roundtrip
+
+use wasi_pg_client::{Config, Connection};
 
 fn database_url() -> String {
     std::env::var("DATABASE_URL")
@@ -19,72 +22,24 @@ fn listen_port(default_port: &str) -> String {
     std::env::var("PORT").unwrap_or_else(|_| default_port.to_string())
 }
 
-fn execute_query_sync(database_url: &str) -> Result<String, String> {
-    use std::io::{Read, Write};
-    use std::net::TcpStream;
-    use url::Url;
+async fn execute_query(database_url: &str) -> Result<String, String> {
+    let config = Config::from_uri(database_url).map_err(|e| format!("parse: {e}"))?;
+    let mut conn = Connection::connect(&config)
+        .await
+        .map_err(|e| format!("connect: {e}"))?;
+    let result = conn
+        .query("SELECT 1::INT4")
+        .await
+        .map_err(|e| format!("query: {e}"))?;
 
-    let parsed = Url::parse(database_url).map_err(|e| format!("parse: {e}"))?;
-    let host = parsed.host_str().ok_or("no host")?;
-    let port = parsed.port().unwrap_or(5432);
-    let user = parsed.username();
-    let password = parsed.password().unwrap_or("");
-    let db = parsed
-        .path_segments()
-        .map(|mut s| s.next().unwrap_or("postgres"))
-        .unwrap_or("postgres");
-
-    let mut stream =
-        TcpStream::connect(format!("{host}:{port}")).map_err(|e| format!("connect: {e}"))?;
-
-    let mut packet = vec![0u8; 4];
-    packet.extend_from_slice(b"\x00\x03\x00\x00");
-
-    let params = vec![("user", user), ("database", db), ("password", password)];
-    let mut param_data = Vec::new();
-    for (key, value) in params {
-        param_data.extend_from_slice(key.as_bytes());
-        param_data.push(0);
-        param_data.extend_from_slice(value.as_bytes());
-        param_data.push(0);
-    }
-    param_data.push(0);
-
-    let len = (4 + param_data.len()) as i32;
-    packet[0..4].copy_from_slice(&len.to_be_bytes());
-    packet.extend_from_slice(&param_data);
-
-    stream.write_all(&packet).map_err(|e| e.to_string())?;
-    stream.flush().map_err(|e| e.to_string())?;
-
-    let mut auth = [0u8; 8];
-    stream.read_exact(&mut auth).map_err(|e| e.to_string())?;
-
-    let query = "SELECT 1";
-    let mut q = vec![b'Q'];
-    let len: i32 = (1 + query.len() + 1).try_into().unwrap();
-    q.extend_from_slice(&len.to_be_bytes());
-    q.extend_from_slice(query.as_bytes());
-    q.push(0);
-
-    stream.write_all(&q).map_err(|e| e.to_string())?;
-    stream.flush().map_err(|e| e.to_string())?;
-
-    let mut resp = Vec::new();
-    let mut buf = [0u8; 256];
-    loop {
-        match stream.read(&mut buf) {
-            Ok(0) => break,
-            Ok(n) => resp.extend_from_slice(&buf[..n]),
-            Err(_) => break,
-        }
+    let mut rows = Vec::new();
+    for row in result.iter() {
+        let value: i32 = row.get(0).map_err(|e| format!("decode: {e}"))?;
+        rows.push(value);
     }
 
-    if resp.first().map(|&b| b == b'E').unwrap_or(false) {
-        return Err("error".to_string());
-    }
-
-    Ok(r#"["ok"]"#.to_string())
+    conn.close().await.map_err(|e| format!("close: {e}"))?;
+    serde_json::to_string(&rows).map_err(|e| format!("encode: {e}"))
 }
 
 fn route_response(path: &str) -> (u16, &'static str, String) {
@@ -95,16 +50,13 @@ fn route_response(path: &str) -> (u16, &'static str, String) {
             "application/json",
             r#"{"status":"healthy"}"#.to_string(),
         ),
-        "/query" => match execute_query_sync(&database_url()) {
-            Ok(body) => (200, "application/json", body),
-            Err(error) => (
-                500,
-                "application/json",
-                format!(r#"{{"error":"{}"}}"#, error.replace('"', "\\\"")),
-            ),
-        },
         _ => (404, "text/plain", "Not Found".to_string()),
     }
+}
+
+#[cfg(target_family = "wasm")]
+fn run_query() -> Result<String, String> {
+    wstd::runtime::block_on(execute_query(&database_url()))
 }
 
 #[cfg(not(target_family = "wasm"))]
@@ -123,7 +75,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     async fn query_db() -> String {
-        route_response("/query").2
+        match execute_query(&database_url()).await {
+            Ok(body) => body,
+            Err(error) => format!(r#"{{"error":"{}"}}"#, error.replace('"', "\\\"")),
+        }
     }
 
     let app = Router::new()
@@ -172,7 +127,18 @@ fn main() {
             .and_then(|line| line.split_whitespace().nth(1))
             .unwrap_or("/");
 
-        let (status, content_type, body) = route_response(path);
+        let (status, content_type, body) = if path == "/query" {
+            match run_query() {
+                Ok(body) => (200, "application/json", body),
+                Err(error) => (
+                    500,
+                    "application/json",
+                    format!(r#"{{"error":"{}"}}"#, error.replace('"', "\\\"")),
+                ),
+            }
+        } else {
+            route_response(path)
+        };
         let status_text = if status == 200 {
             "OK"
         } else if status == 404 {

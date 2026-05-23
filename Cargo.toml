@@ -19,7 +19,8 @@ members = [
     "crates/internal_gateway",
     "apps/hello-axum",
     "apps/echo-service",
-    "apps/postgres-app"
+    "apps/postgres-app",
+    "apps/grpc-echo"
 ]
 
 [workspace.dependencies]

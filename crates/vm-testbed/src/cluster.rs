@@ -144,6 +144,7 @@ impl ClusterFixture {
             vcpus,
             ip: ip.clone(),
             gateway: self.gateway.clone(),
+            bridge_name: self.bridge_name.clone(),
             tap_device: tap,
             mmds_data: Some(json!({
                 "nats_config": {
@@ -195,6 +196,7 @@ impl ClusterFixture {
             vcpus,
             ip: ip.clone(),
             gateway: self.gateway.clone(),
+            bridge_name: self.bridge_name.clone(),
             tap_device: tap,
             mmds_data: Some(json!({
                 "node_config": {

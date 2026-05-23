@@ -25,6 +25,7 @@
 //!         vcpus: 2,
 //!         ip: "172.20.0.2".to_string(),
 //!         gateway: "172.20.0.1".to_string(),
+//!         bridge_name: "br-wasm".to_string(),
 //!         tap_device: "tap-node1".to_string(),
 //!         mmds_data: None,
 //!     };
@@ -68,6 +69,8 @@ pub struct VmConfig {
     pub ip: String,
     /// Gateway IP (the bridge IP on the host).
     pub gateway: String,
+    /// Bridge name on the host that this VM should attach its TAP to.
+    pub bridge_name: String,
     /// TAP device name on the host.
     pub tap_device: String,
     /// Optional MMDS metadata to pass to the guest.
@@ -85,6 +88,7 @@ pub struct MicroVm {
     pub api_socket: PathBuf,
     pub firecracker_log: PathBuf,
     pub firecracker_metrics: PathBuf,
+    cleanup_on_drop: bool,
 }
 
 /// Error type for microVM operations.
@@ -123,7 +127,7 @@ impl MicroVm {
         info!(vm_id = %config.id, "Spawning microVM");
 
         // 1. Create TAP device
-        create_tap(&config.tap_device, "br-wasm")
+        create_tap(&config.tap_device, &config.bridge_name)
             .map_err(|e| VmError::Network(format!("failed to create TAP: {e}")))?;
 
         // 2. Prepare paths
@@ -227,6 +231,7 @@ impl MicroVm {
             api_socket,
             firecracker_log,
             firecracker_metrics,
+            cleanup_on_drop: true,
         })
     }
 
@@ -357,6 +362,16 @@ impl MicroVm {
         }
     }
 
+    /// Return the Firecracker process ID.
+    pub fn pid(&self) -> u32 {
+        self.vmm_process.id()
+    }
+
+    /// Leave the VMM process and TAP lifecycle to external teardown logic.
+    pub fn disable_cleanup_on_drop(&mut self) {
+        self.cleanup_on_drop = false;
+    }
+
     /// Get the admin API address for this VM.
     pub fn admin_addr(&self) -> String {
         format!("{}:9090", self.config.ip)
@@ -380,12 +395,14 @@ impl MicroVm {
 
 impl Drop for MicroVm {
     fn drop(&mut self) {
-        if self.is_running() {
-            let _ = self.vmm_process.kill();
-            let _ = self.vmm_process.wait();
+        if self.cleanup_on_drop {
+            if self.is_running() {
+                let _ = self.vmm_process.kill();
+                let _ = self.vmm_process.wait();
+            }
+            let _ = std::fs::remove_file(&self.api_socket);
+            let _ = remove_tap(&self.config.tap_device);
         }
-        let _ = std::fs::remove_file(&self.api_socket);
-        let _ = remove_tap(&self.config.tap_device);
     }
 }
 
