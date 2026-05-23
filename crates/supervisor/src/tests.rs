@@ -582,7 +582,15 @@ async fn test_shutdown_timeout_keeps_stale_listener_fenced_until_reap() {
         dummy_stats()
     });
 
-    upstream_registry.add(&app_id, addr).await;
+    upstream_registry
+        .add(
+            &app_id,
+            proxy::upstream::UpstreamEndpoint {
+                addr,
+                h2c: false,
+            },
+        )
+        .await;
     service_registry.register(&app_id, addr).await;
     service_registry
         .bind_source_port(port, app_id.clone())

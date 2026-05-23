@@ -802,7 +802,18 @@ impl Supervisor {
         }
 
         // 7. Register with the proxy upstream table
-        self.upstream_registry.add(app_id, addr).await;
+        self.upstream_registry
+            .add(
+                app_id,
+                proxy::upstream::UpstreamEndpoint {
+                    addr,
+                    h2c: matches!(
+                        prepared.execution_model(),
+                        ComponentExecutionModel::WasiHttpIncomingHandler
+                    ),
+                },
+            )
+            .await;
 
         // 8. Register with local service registry (using qualified AppId)
         self.service_registry

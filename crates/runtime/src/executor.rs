@@ -7,9 +7,9 @@ use common::{
     types::{AppConfig, InstanceId},
 };
 use axum::body::Body as AxumBody;
-use hyper_util::rt::TokioExecutor;
-use hyper_util::server::conn::auto;
 use hyper::service::service_fn;
+use hyper_util::server::conn::auto;
+use hyper_util::rt::TokioExecutor;
 use std::collections::HashSet;
 use std::future::Future;
 use std::net::{IpAddr, SocketAddr};
@@ -223,7 +223,6 @@ const WASI_HTTP_INCOMING_HANDLER_INTERFACES: &[&str] = &[
     "wasi:http/incoming-handler@0.2.0",
 ];
 const TOP_LEVEL_ENTRY_POINT_FALLBACKS: &[&str] = &["run", "_start"];
-
 pub(crate) fn top_level_entry_point_candidates() -> &'static [&'static str] {
     TOP_LEVEL_ENTRY_POINT_FALLBACKS
 }
@@ -679,11 +678,17 @@ impl PreparedModule {
                                         }
                                     });
 
-                                    if let Err(err) = auto::Builder::new(TokioExecutor::new())
-                                        .serve_connection(TokioIo::new(client), service)
-                                        .await
-                                    {
-                                        tracing::warn!(app = %app_id_for_service.0, error = %err, "wasi:http adapter connection failed");
+                                    let io = TokioIo::new(client);
+                                    let mut builder = auto::Builder::new(TokioExecutor::new());
+                                    builder.http1().keep_alive(true);
+                                    let result = builder.serve_connection(io, service).await;
+
+                                    if let Err(err) = result {
+                                        tracing::warn!(
+                                            app = %app_id_for_service.0,
+                                            error = %err,
+                                            "wasi:http adapter connection failed"
+                                        );
                                     }
                                 });
                             }

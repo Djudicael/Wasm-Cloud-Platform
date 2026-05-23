@@ -10,7 +10,19 @@ use std::{
 };
 use tokio::sync::RwLock;
 
-type UpstreamMap = HashMap<String, (AtomicUsize, Vec<SocketAddr>)>;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UpstreamEndpoint {
+    pub addr: SocketAddr,
+    pub h2c: bool,
+}
+
+impl std::fmt::Display for UpstreamEndpoint {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.addr.fmt(f)
+    }
+}
+
+type UpstreamMap = HashMap<String, (AtomicUsize, Vec<UpstreamEndpoint>)>;
 
 /// Per-app health check configuration.
 #[derive(Debug, Clone)]
@@ -81,14 +93,19 @@ impl UpstreamRegistry {
     }
 
     /// Add a new upstream instance address for the given app.
-    pub async fn add(&self, app_id: &AppId, addr: SocketAddr) {
+    pub async fn add(&self, app_id: &AppId, endpoint: UpstreamEndpoint) {
         let mut map = self.inner.write().await;
         let entry = map
             .entry(app_id.0.clone())
             .or_insert_with(|| (AtomicUsize::new(0), Vec::new()));
-        if !entry.1.contains(&addr) {
-            entry.1.push(addr);
-            tracing::info!(app = %app_id.0, %addr, "upstream added");
+        if !entry.1.iter().any(|existing| existing.addr == endpoint.addr) {
+            entry.1.push(endpoint);
+            tracing::info!(
+                app = %app_id.0,
+                addr = %endpoint.addr,
+                h2c = endpoint.h2c,
+                "upstream added"
+            );
         }
     }
 
@@ -97,7 +114,7 @@ impl UpstreamRegistry {
     pub async fn remove(&self, app_id: &AppId, addr: &SocketAddr) {
         let mut map = self.inner.write().await;
         if let Some(entry) = map.get_mut(&app_id.0) {
-            entry.1.retain(|a| a != addr);
+            entry.1.retain(|endpoint| endpoint.addr != *addr);
             tracing::info!(app = %app_id.0, %addr, "upstream removed");
             // Remove the app entry entirely if no addresses remain
             if entry.1.is_empty() {
@@ -109,7 +126,7 @@ impl UpstreamRegistry {
 
     /// Get the next upstream address using round-robin.
     /// Returns None if no instances are available (cold start needed).
-    pub async fn next(&self, app_id: &AppId) -> Option<SocketAddr> {
+    pub async fn next(&self, app_id: &AppId) -> Option<UpstreamEndpoint> {
         let map = self.inner.read().await;
         let (counter, addrs) = map.get(&app_id.0)?;
         if addrs.is_empty() {
@@ -187,7 +204,7 @@ impl UpstreamRegistry {
 
     /// Get the next healthy upstream address for an app.
     /// Skips instances that have failed health checks.
-    pub async fn next_healthy(&self, app_id: &AppId) -> Option<SocketAddr> {
+    pub async fn next_healthy(&self, app_id: &AppId) -> Option<UpstreamEndpoint> {
         // If no health check is configured, use round-robin as before
         if !self.health_configs.read().await.contains_key(&app_id.0) {
             return self.next(app_id).await;

@@ -309,7 +309,15 @@ impl EventDispatcher {
                 // Only register if it's from a DIFFERENT node
                 // (our own instances are registered directly by the Supervisor)
                 if node_id != self.our_node_id() {
-                    self.upstream.add(&app_id, addr).await;
+                    self.upstream
+                        .add(
+                            &app_id,
+                            proxy::upstream::UpstreamEndpoint {
+                                addr,
+                                h2c: false,
+                            },
+                        )
+                        .await;
                     info!(app = %app_id.0, %addr, from_node = %node_id, "remote instance registered");
                 }
                 Ok(())

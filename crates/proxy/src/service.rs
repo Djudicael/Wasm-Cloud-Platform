@@ -78,10 +78,10 @@ pub struct WasmProxy {
 }
 
 impl WasmProxy {
-    async fn select_upstream(&self, app_id: &AppId) -> Option<std::net::SocketAddr> {
+    async fn select_upstream(&self, app_id: &AppId) -> Option<crate::upstream::UpstreamEndpoint> {
         // 1. Try local instances first (fastest path)
-        if let Some(addr) = self.upstream.next(app_id).await {
-            return Some(addr);
+        if let Some(endpoint) = self.upstream.next(app_id).await {
+            return Some(endpoint);
         }
 
         // 2. Check if local node is overloaded
@@ -95,7 +95,10 @@ impl WasmProxy {
                 match tokio::net::lookup_host(&node.proxy_address).await {
                     Ok(mut addrs) => {
                         if let Some(addr) = addrs.next() {
-                            return Some(addr);
+                            return Some(crate::upstream::UpstreamEndpoint {
+                                addr,
+                                h2c: false,
+                            });
                         }
                         tracing::warn!(
                             node = %node.node_id,
@@ -117,7 +120,11 @@ impl WasmProxy {
 
         // 4. Cold start on local node (last resort)
         tracing::info!(app_id = %app_id.0, "cold start on local node");
-        (self.cold_start)(app_id.clone()).await
+        (self.cold_start)(app_id.clone()).await?;
+        self.upstream.next(app_id).await.or_else(|| {
+            tracing::warn!(app_id = %app_id.0, "cold start returned no registered upstream");
+            None
+        })
     }
 
     /// Check whether the local node is overloaded and should shed traffic
@@ -490,17 +497,21 @@ impl ProxyHttp for WasmProxy {
             .as_ref()
             .ok_or_else(|| pingora_core::Error::new_str("no app for this host"))?;
 
-        let addr = self
+        let endpoint = self
             .select_upstream(app_id)
             .await
             .ok_or_else(|| pingora_core::Error::new_str("failed to select upstream"))?;
 
-        ctx.upstream_addr = Some(addr);
-        Ok(Box::new(HttpPeer::new(
-            addr,
+        ctx.upstream_addr = Some(endpoint.addr);
+        let mut peer = HttpPeer::new(
+            endpoint.addr,
             false, // not TLS to upstream (internal)
             app_id.0.clone(),
-        )))
+        );
+        if endpoint.h2c {
+            peer.options.set_http_version(2, 2);
+        }
+        Ok(Box::new(peer))
     }
 
     /// Step 3 (optional): Modify request headers before forwarding.
@@ -801,8 +812,9 @@ mod tests {
         };
 
         let app_id = AppId("test-app".to_string());
-        let addr = proxy.select_upstream(&app_id).await.unwrap();
-        assert_eq!(addr, "127.0.0.1:28080".parse().unwrap());
+        let endpoint = proxy.select_upstream(&app_id).await.unwrap();
+        assert_eq!(endpoint.addr, "127.0.0.1:28080".parse().unwrap());
+        assert!(!endpoint.h2c);
         assert!(
             !cold_start_triggered.load(Ordering::SeqCst),
             "local cold start should not run when an eligible remote node exists"
