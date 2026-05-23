@@ -3,6 +3,7 @@ use common::artifact_transfer::{
     ArtifactManifestAudienceBinding, BootstrapArtifactFetchAuthorization,
 };
 use common::types::{ApiKeyRecord, AppConfig, AppId, GatewayRouteConfig};
+use common::upgrade_provenance::SignedNodeBinaryReleaseProvenance;
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 
@@ -154,6 +155,10 @@ pub enum Event {
         /// Optional Ed25519 signature over the upgrade metadata.
         #[serde(default)]
         signature_ed25519: Option<String>,
+        /// Optional stronger release provenance bundle: a root-signed delegation
+        /// plus a delegated signed release manifest bound to the artifact and version.
+        #[serde(default)]
+        release_provenance: Option<SignedNodeBinaryReleaseProvenance>,
         /// The new binary's protocol version. Used for compatibility checks.
         new_protocol_version: u32,
         /// The new binary version string (e.g., "0.5.0").

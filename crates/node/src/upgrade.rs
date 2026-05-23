@@ -1,6 +1,7 @@
 // crates/node/src/upgrade.rs
 use common::error::PlatformError;
 use common::protocol::{MIN_COMPATIBLE_PROTOCOL, PROTOCOL_VERSION};
+use common::upgrade_provenance::SignedNodeBinaryReleaseProvenance;
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use messaging::events::{node_upgrade_signature_payload, Event};
 use sha2::{Digest, Sha256};
@@ -84,6 +85,13 @@ fn parse_signature_hex(signature_hex: &str) -> Result<Signature, PlatformError> 
     Ok(Signature::from_bytes(&sig_bytes))
 }
 
+fn now_unix_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
 pub fn verify_upgrade_signature(
     event: &Event,
     configured_public_key_hex: Option<&str>,
@@ -97,6 +105,7 @@ pub fn verify_upgrade_signature(
         binary_url,
         binary_sha256,
         signature_ed25519,
+        release_provenance,
         new_protocol_version,
         new_binary_version,
     ) = match event {
@@ -105,6 +114,7 @@ pub fn verify_upgrade_signature(
             binary_url,
             binary_sha256,
             signature_ed25519,
+            release_provenance,
             new_protocol_version,
             new_binary_version,
         } => (
@@ -112,11 +122,25 @@ pub fn verify_upgrade_signature(
             binary_url,
             binary_sha256,
             signature_ed25519,
+            release_provenance,
             *new_protocol_version,
             new_binary_version,
         ),
         _ => return Ok(()),
     };
+
+    if let Some(provenance) = release_provenance.as_ref() {
+        return verify_release_provenance(
+            provenance,
+            public_key_hex,
+            binary_url,
+            binary_sha256,
+            new_protocol_version,
+            new_binary_version,
+            now_unix_ms(),
+        )
+        .map_err(PlatformError::security);
+    }
 
     let signature_hex = signature_ed25519.as_deref().ok_or_else(|| {
         PlatformError::security(
@@ -138,6 +162,25 @@ pub fn verify_upgrade_signature(
     verifying_key
         .verify(&payload, &signature)
         .map_err(|e| PlatformError::security(format!("upgrade signature verification failed: {e}")))
+}
+
+fn verify_release_provenance(
+    provenance: &SignedNodeBinaryReleaseProvenance,
+    configured_public_key_hex: &str,
+    binary_url: &str,
+    binary_sha256: &str,
+    new_protocol_version: u32,
+    new_binary_version: &str,
+    now_ms: u64,
+) -> Result<(), String> {
+    provenance.verify(
+        configured_public_key_hex,
+        binary_url,
+        binary_sha256,
+        new_protocol_version,
+        new_binary_version,
+        now_ms,
+    )
 }
 
 /// Download the new binary, verify its hash, and write it to disk.
@@ -305,6 +348,10 @@ pub enum UpgradeAction {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use common::upgrade_provenance::{
+        NodeBinaryReleaseProvenance, ReleaseKeyDelegation, SignedNodeBinaryReleaseProvenance,
+        SignedReleaseKeyDelegation, UPGRADE_PROVENANCE_SCOPE_NODE_BINARY,
+    };
     use ed25519_dalek::{Signer, SigningKey};
     use messaging::events::{node_upgrade_signature_payload, Event};
     use tempfile::TempDir;
@@ -319,6 +366,7 @@ mod tests {
             binary_url: "http://example.com/binary".to_string(),
             binary_sha256: "abc123".to_string(),
             signature_ed25519: None,
+            release_provenance: None,
             new_protocol_version: 1,
             new_binary_version: "0.2.0".to_string(),
         };
@@ -334,6 +382,7 @@ mod tests {
             binary_url: "http://example.com/binary".to_string(),
             binary_sha256: "abc123".to_string(),
             signature_ed25519: None,
+            release_provenance: None,
             new_protocol_version: 1,
             new_binary_version: "0.2.0".to_string(),
         };
@@ -349,6 +398,7 @@ mod tests {
             binary_url: "http://example.com/binary".to_string(),
             binary_sha256: "abc123".to_string(),
             signature_ed25519: None,
+            release_provenance: None,
             new_protocol_version: 1,
             new_binary_version: "0.2.0".to_string(),
         };
@@ -371,6 +421,7 @@ mod tests {
             binary_url: "http://example.com/binary".to_string(),
             binary_sha256: "abc123".to_string(),
             signature_ed25519: None,
+            release_provenance: None,
             new_protocol_version: 1,
             new_binary_version: "0.2.0".to_string(),
         };
@@ -407,6 +458,7 @@ mod tests {
             binary_url: "http://example.com/binary".to_string(),
             binary_sha256: "abc123".to_string(),
             signature_ed25519: None,
+            release_provenance: None,
             new_protocol_version: PROTOCOL_VERSION + 2,
             new_binary_version: "0.2.0".to_string(),
         };
@@ -422,6 +474,7 @@ mod tests {
             binary_url: "http://example.com/binary".to_string(),
             binary_sha256: "abc123".to_string(),
             signature_ed25519: None,
+            release_provenance: None,
             new_protocol_version: PROTOCOL_VERSION + 1,
             new_binary_version: "0.2.0".to_string(),
         };
@@ -449,6 +502,7 @@ mod tests {
             binary_url: "http://example.com/binary".to_string(),
             binary_sha256: "abc123".to_string(),
             signature_ed25519: Some(signature),
+            release_provenance: None,
             new_protocol_version: 1,
             new_binary_version: "0.2.0".to_string(),
         };
@@ -467,6 +521,7 @@ mod tests {
             binary_url: "http://example.com/binary".to_string(),
             binary_sha256: "abc123".to_string(),
             signature_ed25519: None,
+            release_provenance: None,
             new_protocol_version: 1,
             new_binary_version: "0.2.0".to_string(),
         };
@@ -486,6 +541,7 @@ mod tests {
             binary_url: "http://example.com/binary".to_string(),
             binary_sha256: "abc123".to_string(),
             signature_ed25519: Some("00".repeat(64)),
+            release_provenance: None,
             new_protocol_version: 1,
             new_binary_version: "0.2.0".to_string(),
         };
@@ -494,6 +550,89 @@ mod tests {
         assert!(
             err.to_string().contains("verification failed") || err.to_string().contains("invalid")
         );
+    }
+
+    fn make_signed_release_provenance(
+        binary_url: &str,
+        binary_sha256: &str,
+        protocol_version: u32,
+        binary_version: &str,
+    ) -> (String, SignedNodeBinaryReleaseProvenance) {
+        let root = SigningKey::from_bytes(
+            &hex::decode(TEST_UPGRADE_SIGNING_KEY_HEX)
+                .unwrap()
+                .try_into()
+                .unwrap(),
+        );
+        let leaf = SigningKey::from_bytes(&[0x22; 32]);
+        let delegation = SignedReleaseKeyDelegation::sign(
+            ReleaseKeyDelegation {
+                version: 1,
+                key_id: "release-key-1".to_string(),
+                public_key_ed25519: hex::encode(leaf.verifying_key().to_bytes()),
+                scope: UPGRADE_PROVENANCE_SCOPE_NODE_BINARY.to_string(),
+                issuer: "release-root".to_string(),
+                issued_at_ms: now_unix_ms().saturating_sub(1_000),
+                expires_at_ms: now_unix_ms().saturating_add(60_000),
+            },
+            &root,
+        );
+        let provenance = SignedNodeBinaryReleaseProvenance::sign(
+            NodeBinaryReleaseProvenance {
+                version: 1,
+                delegation_key_id: "release-key-1".to_string(),
+                binary_url: binary_url.to_string(),
+                binary_sha256: binary_sha256.to_string(),
+                new_protocol_version: protocol_version,
+                new_binary_version: binary_version.to_string(),
+                source_repository: Some("https://github.com/example/repo".to_string()),
+                source_commit_sha: Some("abc123".to_string()),
+                build_workflow_ref: Some("release.yml".to_string()),
+                build_run_id: Some("42".to_string()),
+                issued_at_ms: now_unix_ms().saturating_sub(500),
+                expires_at_ms: now_unix_ms().saturating_add(60_000),
+            },
+            delegation,
+            &leaf,
+        );
+        (hex::encode(root.verifying_key().to_bytes()), provenance)
+    }
+
+    #[test]
+    fn test_verify_upgrade_signature_accepts_release_provenance_bundle() {
+        let (verifying_key_hex, release_provenance) =
+            make_signed_release_provenance("http://example.com/binary", "abc123", 1, "0.2.0");
+
+        let event = Event::NodeUpgrade {
+            target_node: "node-0".to_string(),
+            binary_url: "http://example.com/binary".to_string(),
+            binary_sha256: "abc123".to_string(),
+            signature_ed25519: None,
+            release_provenance: Some(release_provenance),
+            new_protocol_version: 1,
+            new_binary_version: "0.2.0".to_string(),
+        };
+
+        verify_upgrade_signature(&event, Some(&verifying_key_hex)).unwrap();
+    }
+
+    #[test]
+    fn test_verify_upgrade_signature_rejects_mismatched_release_provenance() {
+        let (verifying_key_hex, release_provenance) =
+            make_signed_release_provenance("http://example.com/binary", "abc123", 1, "0.2.0");
+
+        let event = Event::NodeUpgrade {
+            target_node: "node-0".to_string(),
+            binary_url: "http://example.com/other-binary".to_string(),
+            binary_sha256: "abc123".to_string(),
+            signature_ed25519: None,
+            release_provenance: Some(release_provenance),
+            new_protocol_version: 1,
+            new_binary_version: "0.2.0".to_string(),
+        };
+
+        let err = verify_upgrade_signature(&event, Some(&verifying_key_hex)).unwrap_err();
+        assert!(err.to_string().contains("binary_url mismatch"));
     }
 
     #[test]

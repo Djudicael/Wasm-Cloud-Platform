@@ -1,5 +1,8 @@
 // crates/ctl/src/cmds/platform.rs
 use clap::Subcommand;
+use common::upgrade_provenance::{
+    NodeBinaryReleaseProvenance, SignedNodeBinaryReleaseProvenance, SignedReleaseKeyDelegation,
+};
 use ed25519_dalek::{Signer, SigningKey};
 use hex;
 use messaging::events::{node_upgrade_signature_payload, Event};
@@ -57,6 +60,32 @@ pub enum PlatformCommands {
         /// Optional path to a 32-byte Ed25519 signing key encoded as hex.
         #[arg(long)]
         signing_key_file: Option<String>,
+
+        /// Optional path to a root-signed release-key delegation JSON file.
+        /// When provided with `--signing-key-file`, ctl emits delegated release provenance
+        /// instead of only a detached event signature.
+        #[arg(long)]
+        provenance_delegation_file: Option<String>,
+
+        /// Optional repository URL included in release provenance metadata.
+        #[arg(long)]
+        provenance_source_repository: Option<String>,
+
+        /// Optional source commit SHA included in release provenance metadata.
+        #[arg(long)]
+        provenance_source_commit_sha: Option<String>,
+
+        /// Optional workflow reference included in release provenance metadata.
+        #[arg(long)]
+        provenance_build_workflow_ref: Option<String>,
+
+        /// Optional build/run identifier included in release provenance metadata.
+        #[arg(long)]
+        provenance_build_run_id: Option<String>,
+
+        /// Release provenance TTL in seconds.
+        #[arg(long, default_value_t = 86400)]
+        provenance_ttl_secs: u64,
     },
 
     /// Check cluster upgrade status
@@ -99,6 +128,12 @@ pub async fn run(
             binary_version,
             target_node,
             signing_key_file,
+            provenance_delegation_file,
+            provenance_source_repository,
+            provenance_source_commit_sha,
+            provenance_build_workflow_ref,
+            provenance_build_run_id,
+            provenance_ttl_secs,
         } => {
             initiate_upgrade(
                 &binary_url,
@@ -107,6 +142,12 @@ pub async fn run(
                 &binary_version,
                 target_node,
                 signing_key_file.as_deref(),
+                provenance_delegation_file.as_deref(),
+                provenance_source_repository,
+                provenance_source_commit_sha,
+                provenance_build_workflow_ref,
+                provenance_build_run_id,
+                provenance_ttl_secs,
                 bus,
             )
             .await?;
@@ -163,6 +204,13 @@ async fn upload_binary(
     Ok(())
 }
 
+fn now_unix_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
 fn load_upgrade_signing_key(path: &str) -> anyhow::Result<SigningKey> {
     let raw = std::fs::read_to_string(path)?;
     let decoded = hex::decode(raw.trim())?;
@@ -172,6 +220,11 @@ fn load_upgrade_signing_key(path: &str) -> anyhow::Result<SigningKey> {
     Ok(SigningKey::from_bytes(&key_bytes))
 }
 
+fn load_signed_release_key_delegation(path: &str) -> anyhow::Result<SignedReleaseKeyDelegation> {
+    let raw = std::fs::read_to_string(path)?;
+    serde_json::from_str(&raw).map_err(Into::into)
+}
+
 async fn initiate_upgrade(
     binary_url: &str,
     sha256: &str,
@@ -179,6 +232,12 @@ async fn initiate_upgrade(
     binary_version: &str,
     target_node: Option<String>,
     signing_key_file: Option<&str>,
+    provenance_delegation_file: Option<&str>,
+    provenance_source_repository: Option<String>,
+    provenance_source_commit_sha: Option<String>,
+    provenance_build_workflow_ref: Option<String>,
+    provenance_build_run_id: Option<String>,
+    provenance_ttl_secs: u64,
     bus: &NatsBus,
 ) -> anyhow::Result<()> {
     println!("🚀 Initiating platform upgrade");
@@ -194,25 +253,69 @@ async fn initiate_upgrade(
     }
 
     let target_node = target_node.unwrap_or_else(|| "*".to_string());
-    let signature_ed25519 = if let Some(path) = signing_key_file {
-        let signing_key = load_upgrade_signing_key(path)?;
-        let payload = node_upgrade_signature_payload(
-            &target_node,
-            binary_url,
-            sha256,
-            protocol_version,
-            binary_version,
-        );
-        Some(hex::encode(signing_key.sign(&payload).to_bytes()))
-    } else {
-        None
-    };
+    let (signature_ed25519, release_provenance) =
+        match (signing_key_file, provenance_delegation_file) {
+            (Some(signing_key_path), Some(delegation_path)) => {
+                let signing_key = load_upgrade_signing_key(signing_key_path)?;
+                let delegation = load_signed_release_key_delegation(delegation_path)?;
+                let delegated_public_key = hex::encode(signing_key.verifying_key().to_bytes());
+                if delegation.delegation.public_key_ed25519.trim() != delegated_public_key {
+                    anyhow::bail!(
+                        "delegation public key does not match the provided provenance signing key"
+                    );
+                }
+
+                let issued_at_ms = now_unix_ms();
+                let provenance = NodeBinaryReleaseProvenance {
+                    version: 1,
+                    delegation_key_id: delegation.delegation.key_id.clone(),
+                    binary_url: binary_url.to_string(),
+                    binary_sha256: sha256.to_string(),
+                    new_protocol_version: protocol_version,
+                    new_binary_version: binary_version.to_string(),
+                    source_repository: provenance_source_repository,
+                    source_commit_sha: provenance_source_commit_sha,
+                    build_workflow_ref: provenance_build_workflow_ref,
+                    build_run_id: provenance_build_run_id,
+                    issued_at_ms,
+                    expires_at_ms: issued_at_ms
+                        .saturating_add(provenance_ttl_secs.saturating_mul(1000)),
+                };
+                (
+                    None,
+                    Some(SignedNodeBinaryReleaseProvenance::sign(
+                        provenance,
+                        delegation,
+                        &signing_key,
+                    )),
+                )
+            }
+            (Some(signing_key_path), None) => {
+                let signing_key = load_upgrade_signing_key(signing_key_path)?;
+                let payload = node_upgrade_signature_payload(
+                    &target_node,
+                    binary_url,
+                    sha256,
+                    protocol_version,
+                    binary_version,
+                );
+                (
+                    Some(hex::encode(signing_key.sign(&payload).to_bytes())),
+                    None,
+                )
+            }
+            (None, Some(_)) => {
+                anyhow::bail!("--provenance-delegation-file requires --signing-key-file");
+            }
+            (None, None) => (None, None),
+        };
 
     let event = Event::NodeUpgrade {
         target_node,
         binary_url: binary_url.to_string(),
         binary_sha256: sha256.to_string(),
         signature_ed25519,
+        release_provenance,
         new_protocol_version: protocol_version,
         new_binary_version: binary_version.to_string(),
     };

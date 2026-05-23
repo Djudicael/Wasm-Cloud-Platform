@@ -11,6 +11,7 @@ pub mod logging;
 pub mod policy;
 pub mod protocol;
 pub mod types;
+pub mod upgrade_provenance;
 
 /// The internal gateway port for East-West traffic on the loopback interface.
 ///
