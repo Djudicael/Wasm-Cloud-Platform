@@ -57,7 +57,7 @@ pingora-core          = "0.8"
 redb = "4.0"
 
 # Messaging
-async-nats = "0.47"
+async-nats = "0.48"
 
 # Encryption
 aes-gcm          = "0.10"
