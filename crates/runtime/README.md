@@ -54,6 +54,22 @@ The runtime is built on top of [Wasmtime](https://wasmtime.dev/) and provides se
 | `MemoryLimiter` | Limits memory allocation for Wasm instances |
 | `IoResourceTracker` | Tracks I/O resources used by Wasm instances |
 
+## Sustained Load Review
+
+The runtime now includes a repeatable Wasmtime load-review path for WSL/Linux:
+
+- probe: `cargo run -p runtime --example wasmtime_load_probe -- --scenario baseline`
+- full review: `bash scripts/run_wasmtime_load_review.sh`
+
+The review uses the real `hello-axum` component, compares baseline vs cache vs pooling allocator scenarios, and records:
+
+- cold vs warm compile latency
+- repeated instantiation latency
+- peak-live instance spawn latency
+- process RSS after compile and after holding multiple live instances
+
+The production template keeps pooling disabled by default. Enable it only if this review shows a material instantiation gain without unacceptable RSS growth for the workload you actually expect to run.
+
 ## Known Issues & Improvements
 
 ### Concurrency Bugs
