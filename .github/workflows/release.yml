@@ -1,0 +1,91 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      release_ref:
+        description: "Git ref to build"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  CARGO_INCREMENTAL: 0
+  SOURCE_DATE_EPOCH: 0
+
+jobs:
+  release-artifacts:
+    name: Build Reproducible Release Artifacts
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ inputs.release_ref || github.ref }}
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9
+        with:
+          targets: wasm32-wasip2
+
+      - name: Cache dependencies
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-release-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Verify lockfile
+        run: cargo metadata --locked --format-version 1 > /dev/null
+
+      - name: Build release artifacts with frozen lockfile
+        run: |
+          cargo build --locked --frozen --release --bin wasm-node
+          cargo build --locked --frozen --release --manifest-path apps/hello-axum/Cargo.toml --target wasm32-wasip2
+
+      - name: Stage deterministic artifact set
+        run: |
+          rm -rf release-artifacts
+          mkdir -p release-artifacts
+          cp target/release/wasm-node release-artifacts/wasm-node
+          cp target/wasm32-wasip2/release/hello-axum.wasm release-artifacts/hello-axum.wasm
+          chmod 0755 release-artifacts/wasm-node
+
+      - name: Generate checksums and release manifest
+        run: |
+          sha256sum release-artifacts/wasm-node release-artifacts/hello-axum.wasm > release-artifacts/SHA256SUMS
+          bash scripts/create_release_manifest.sh release-artifacts "${GITHUB_SHA}" release-artifacts/RELEASE-MANIFEST.json
+
+      - name: Package deterministic tarball
+        run: |
+          tar \
+            --sort=name \
+            --mtime='UTC 1970-01-01' \
+            --owner=0 \
+            --group=0 \
+            --numeric-owner \
+            -czf wasm-cloud-platform-release.tar.gz \
+            -C release-artifacts .
+
+      - name: Upload release bundle
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: wasm-cloud-platform-release-${{ github.sha }}
+          path: |
+            wasm-cloud-platform-release.tar.gz
+            release-artifacts/SHA256SUMS
+            release-artifacts/RELEASE-MANIFEST.json

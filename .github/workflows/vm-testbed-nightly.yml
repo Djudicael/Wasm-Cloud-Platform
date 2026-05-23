@@ -1,0 +1,44 @@
+name: VM Testbed Nightly
+
+on:
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: vm-testbed-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  vm-testbed:
+    name: VM Testbed Integration (Nightly / Manual)
+    runs-on: [self-hosted, linux, x64, kvm]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9
+        with:
+          targets: wasm32-wasip2
+
+      - name: Cache dependencies
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-vm-testbed-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Run single-node VM deploy test
+        run: cargo test -p vm-testbed --features firecracker --test single_node_deploy
+        timeout-minutes: 20
+
+      - name: Run VM chaos test suite
+        run: cargo test -p vm-testbed --features chaos --test vm_chaos
+        timeout-minutes: 30
