@@ -43,7 +43,7 @@ tracing               = "0.1"
 tracing-subscriber    = { version = "0.3", features = ["env-filter", "json"] }
 
 # Wasm runtime
-wasmtime              = "43.0.1"
+wasmtime              = "44.0.2"
 wasmtime-wasi         = "43.0.1"
 wasmtime-wasi-http    = "43.0.1"
 
