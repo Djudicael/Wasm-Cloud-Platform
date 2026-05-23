@@ -21,7 +21,8 @@ members = [
     "apps/echo-service",
     "apps/postgres-app",
     "apps/grpc-echo",
-    "apps/http-hello-component"
+    "apps/http-hello-component",
+    "apps/wasi-grpc-echo"
 ]
 
 [workspace.dependencies]

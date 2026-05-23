@@ -7,7 +7,8 @@ use common::{
     types::{AppConfig, InstanceId},
 };
 use axum::body::Body as AxumBody;
-use hyper::server::conn::http1;
+use hyper_util::rt::TokioExecutor;
+use hyper_util::server::conn::auto;
 use hyper::service::service_fn;
 use std::collections::HashSet;
 use std::future::Future;
@@ -678,8 +679,7 @@ impl PreparedModule {
                                         }
                                     });
 
-                                    if let Err(err) = http1::Builder::new()
-                                        .keep_alive(true)
+                                    if let Err(err) = auto::Builder::new(TokioExecutor::new())
                                         .serve_connection(TokioIo::new(client), service)
                                         .await
                                     {

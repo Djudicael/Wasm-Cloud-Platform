@@ -16,8 +16,9 @@ pub mod upstream;
 pub mod upstream_health;
 
 use config::ProxyTimeouts;
+use pingora::apps::HttpServerOptions;
 use pingora::server::Server;
-use pingora_proxy::http_proxy_service;
+use pingora_proxy::ProxyServiceBuilder;
 use service::WasmProxy;
 
 pub struct ProxyServer {
@@ -51,7 +52,11 @@ impl ProxyServer {
         let mut server = Server::new(None).expect("Pingora server init failed");
         server.bootstrap();
 
-        let mut svc = http_proxy_service(&server.configuration, proxy);
+        let mut server_options = HttpServerOptions::default();
+        server_options.h2c = true;
+        let mut svc = ProxyServiceBuilder::new(&server.configuration, proxy)
+            .server_options(server_options)
+            .build();
 
         // HTTP listener
         svc.add_tcp(&format!("0.0.0.0:{http_port}"));

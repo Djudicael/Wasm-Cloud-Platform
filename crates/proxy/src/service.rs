@@ -138,6 +138,42 @@ impl WasmProxy {
     }
 }
 
+fn canonical_host(host: &str) -> &str {
+    if let Some(stripped) = host.strip_prefix('[') {
+        if let Some(end) = stripped.find(']') {
+            return &stripped[..end];
+        }
+    }
+
+    if let Some((name, port)) = host.rsplit_once(':') {
+        if !name.contains(':') && !port.is_empty() && port.chars().all(|ch| ch.is_ascii_digit()) {
+            return name;
+        }
+    }
+
+    host
+}
+
+fn extract_request_host(session: &Session) -> String {
+    let raw_host = session
+        .req_header()
+        .headers
+        .get("host")
+        .and_then(|v| v.to_str().ok())
+        .filter(|v| !v.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            session
+                .req_header()
+                .uri
+                .authority()
+                .map(|authority| authority.as_str().to_string())
+        })
+        .unwrap_or_default();
+
+    canonical_host(&raw_host).to_string()
+}
+
 #[async_trait]
 impl ProxyHttp for WasmProxy {
     type CTX = RequestCtx;
@@ -168,9 +204,10 @@ impl ProxyHttp for WasmProxy {
             .and_then(|v| v.to_str().ok())
             .unwrap_or("")
             .to_string();
+        let normalized_host = extract_request_host(session);
 
         // Health check bypass
-        if host.is_empty() || session.req_header().uri.path() == "/_platform/health" {
+        if normalized_host.is_empty() || session.req_header().uri.path() == "/_platform/health" {
             return Ok(false); // Continue without routing
         }
 
@@ -210,7 +247,7 @@ impl ProxyHttp for WasmProxy {
         ctx.trace_id = trace_id.clone();
 
         let path = session.req_header().uri.path().to_string();
-        let resolved = self.router.resolve(&host, &path).await;
+        let resolved = self.router.resolve(&normalized_host, &path).await;
 
         let route_config = match &resolved {
             Some(r) => self.gateway.get_route_config(&r.app_id).await,
@@ -225,7 +262,7 @@ impl ProxyHttp for WasmProxy {
         ctx.route_config = route_config.clone();
 
         if ctx.app_id.is_none() {
-            tracing::warn!(host, path, "no route found for host+path");
+            tracing::warn!(host, normalized_host, path, "no route found for host+path");
             session.respond_error(502).await?;
             return Ok(true);
         }
@@ -632,6 +669,30 @@ mod tests {
         assert!(
             resolved.is_none(),
             "Unknown host should not resolve, leading to 502"
+        );
+    }
+
+    #[test]
+    fn test_canonical_host_strips_port_suffix() {
+        assert_eq!(canonical_host("wasi-grpc.local:8380"), "wasi-grpc.local");
+        assert_eq!(canonical_host("example.com"), "example.com");
+        assert_eq!(canonical_host("[::1]:8443"), "::1");
+    }
+
+    #[test]
+    fn test_extract_request_host_prefers_host_header_value() {
+        use pingora::http::RequestHeader;
+
+        let mut req = RequestHeader::build("GET", b"/", None).unwrap();
+        req.insert_header("host", "wasi-grpc.local:8380").unwrap();
+        assert_eq!(
+            canonical_host(
+                req.headers
+                    .get("host")
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap()
+            ),
+            "wasi-grpc.local"
         );
     }
 

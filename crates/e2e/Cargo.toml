@@ -71,6 +71,15 @@ axum          = { workspace = true }
 # Runtime and billing for test-only direct access
 runtime       = { path = "../runtime" }
 billing       = { path = "../billing" }
+tonic = { version = "0.14.6", features = ["transport"] }
+tonic-prost = "0.14.2"
+prost = "0.14.1"
+tower = "0.5"
+hyper-util = { version = "0.1", features = ["tokio"] }
+
+[build-dependencies]
+tonic-prost-build = "0.14.2"
+protoc-bin-vendored = "3.1.0"
 
 [features]
 default = []

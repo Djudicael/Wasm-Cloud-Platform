@@ -619,6 +619,60 @@ pub fn find_http_hello_component_wasm() -> Result<PathBuf, Box<dyn std::error::E
     }
 }
 
+pub fn find_wasi_grpc_echo_wasm() -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let workspace_root = Path::new(manifest_dir).parent().unwrap().parent().unwrap();
+
+    let wasm_path = workspace_root.join("target/wasm32-wasip2/release/wasi_grpc_echo.wasm");
+
+    let needs_rebuild = if !wasm_path.exists() {
+        true
+    } else {
+        let wasm_modified = std::fs::metadata(&wasm_path)?.modified()?;
+        let source_files = [
+            workspace_root.join("apps/wasi-grpc-echo/src/lib.rs"),
+            workspace_root.join("apps/wasi-grpc-echo/proto/echo.proto"),
+            workspace_root.join("apps/wasi-grpc-echo/wit/world.wit"),
+        ];
+        let mut stale = false;
+        for path in source_files {
+            let modified = std::fs::metadata(path)?.modified()?;
+            if wasm_modified < modified {
+                stale = true;
+                break;
+            }
+        }
+        stale
+    };
+
+    if needs_rebuild {
+        eprintln!("Building wasi-grpc-echo.wasm...");
+
+        let output = std::process::Command::new("cargo")
+            .args([
+                "build",
+                "--release",
+                "--target",
+                "wasm32-wasip2",
+                "-p",
+                "wasi-grpc-echo",
+            ])
+            .current_dir(workspace_root)
+            .output()?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(format!("Failed to build wasi-grpc-echo: {}", stderr).into());
+        }
+    }
+
+    if wasm_path.exists() {
+        Ok(wasm_path)
+    } else {
+        Err("Build succeeded but wasi-grpc-echo.wasm not found".into())
+    }
+}
+
 /// Compute SHA-256 hash of a file
 pub fn compute_sha256(path: &Path) -> Result<String, Box<dyn std::error::Error>> {
     use sha2::{Digest, Sha256};
