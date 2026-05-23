@@ -679,6 +679,7 @@ mod tests {
             artifact_server_url: Some(format!("http://{node_id}.internal:9091")),
             protocol_version: Some(common::protocol::PROTOCOL_VERSION),
             binary_version: Some(common::protocol::BINARY_VERSION.to_string()),
+            secret_transport_public_key: None,
             accepting_requests: Some(true),
             active_instances: Some(1),
             deployed_apps: Some(1),

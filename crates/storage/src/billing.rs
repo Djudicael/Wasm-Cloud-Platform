@@ -5,6 +5,12 @@ use common::error::PlatformError;
 use redb::{ReadableDatabase, ReadableTable};
 
 impl Store {
+    fn parse_billing_key(key: &str) -> Option<(&str, u64)> {
+        let (node_id, seq_str) = key.rsplit_once(':')?;
+        let seq = seq_str.parse::<u64>().ok()?;
+        Some((node_id, seq))
+    }
+
     pub fn write_billing_record(&self, record: &BillingRecord) -> Result<(), PlatformError> {
         let key = format!("{}:{}", record.node_id, record.seq);
         let json = serde_json::to_string(record).map_err(PlatformError::storage_source)?;
@@ -37,16 +43,33 @@ impl Store {
         for entry in table.iter().map_err(PlatformError::storage_source)? {
             let (k, _) = entry.map_err(PlatformError::storage_source)?;
             let key_str = k.value();
-            if let Some(seq_str) = key_str.strip_prefix("node-") {
-                if let Some(seq) = seq_str
-                    .split(':')
-                    .last()
-                    .and_then(|s| s.parse::<u64>().ok())
-                {
+            if let Some((_, seq)) = Self::parse_billing_key(key_str) {
+                max_seq = max_seq.max(seq);
+            }
+        }
+        Ok(max_seq)
+    }
+
+    pub fn get_billing_sequence_for_node(&self, node_id: &str) -> Result<u64, PlatformError> {
+        let tx = self
+            .db
+            .begin_read()
+            .map_err(PlatformError::storage_source)?;
+        let table = tx
+            .open_table(BILLING)
+            .map_err(PlatformError::storage_source)?;
+
+        let mut max_seq = 0u64;
+        for entry in table.iter().map_err(PlatformError::storage_source)? {
+            let (k, _) = entry.map_err(PlatformError::storage_source)?;
+            let key_str = k.value();
+            if let Some((record_node_id, seq)) = Self::parse_billing_key(key_str) {
+                if record_node_id == node_id {
                     max_seq = max_seq.max(seq);
                 }
             }
         }
+
         Ok(max_seq)
     }
 
@@ -68,6 +91,32 @@ impl Store {
                 serde_json::from_str(v.value()).map_err(PlatformError::storage_source)?;
 
             if record.seq > max_seq {
+                max_seq = record.seq;
+                last_record = Some(record);
+            }
+        }
+
+        Ok(last_record.map(|r| r.record_hash).unwrap_or_default())
+    }
+
+    pub fn get_last_billing_hash_for_node(&self, node_id: &str) -> Result<String, PlatformError> {
+        let tx = self
+            .db
+            .begin_read()
+            .map_err(PlatformError::storage_source)?;
+        let table = tx
+            .open_table(BILLING)
+            .map_err(PlatformError::storage_source)?;
+
+        let mut last_record: Option<BillingRecord> = None;
+        let mut max_seq = 0u64;
+
+        for entry in table.iter().map_err(PlatformError::storage_source)? {
+            let (_, v) = entry.map_err(PlatformError::storage_source)?;
+            let record: BillingRecord =
+                serde_json::from_str(v.value()).map_err(PlatformError::storage_source)?;
+
+            if record.node_id == node_id && record.seq > max_seq {
                 max_seq = record.seq;
                 last_record = Some(record);
             }

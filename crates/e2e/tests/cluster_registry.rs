@@ -2,6 +2,7 @@ use common::artifact_transfer::{ArtifactManifestBatchRequest, ArtifactManifestBa
 use common::types::ClusterNodeRecord;
 use e2e::fixture::ClusterFixture;
 use e2e::helpers;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
 use std::time::{Duration, Instant};
 
 static NODE_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -84,6 +85,56 @@ async fn wait_for_registry(
 
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
+}
+
+async fn wait_for_instance_port(
+    node: &e2e::fixture::NodeProcess,
+    timeout: Duration,
+) -> Result<(u16, reqwest::Response), String> {
+    let deadline = Instant::now() + timeout;
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(2))
+        .build()
+        .map_err(|e| format!("failed to build instance-port probe client: {e}"))?;
+    loop {
+        for port in node.port_start()..=node.port_end() {
+            let url = format!("http://127.0.0.1:{port}/");
+            if let Ok(response) = client.get(&url).send().await {
+                if response.status().is_success() {
+                    return Ok((port, response));
+                }
+            }
+        }
+
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "no listening instance port found in {}-{} within {:?}",
+                node.port_start(),
+                node.port_end(),
+                timeout
+            ));
+        }
+
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+fn local_non_loopback_ip() -> Result<IpAddr, String> {
+    let socket = UdpSocket::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0))
+        .map_err(|e| format!("failed to bind UDP probe socket: {e}"))?;
+    socket
+        .connect(SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 80))
+        .map_err(|e| format!("failed to connect UDP probe socket: {e}"))?;
+    let ip = socket
+        .local_addr()
+        .map_err(|e| format!("failed to read UDP probe local addr: {e}"))?
+        .ip();
+    if ip.is_loopback() {
+        return Err(
+            "resolved local IP is loopback; cannot verify hardened non-loopback rejection".into(),
+        );
+    }
+    Ok(ip)
 }
 
 #[tokio::test]
@@ -315,5 +366,64 @@ async fn test_live_overloaded_node_routes_first_request_to_remote_proxy() {
     assert_eq!(
         node1_instances, 1,
         "remote node 1 should cold-start the app behind the routed request"
+    );
+}
+
+#[tokio::test]
+#[ignore = "live single-node regression; run explicitly or via CI E2E lane"]
+async fn test_live_hardened_instance_port_is_not_reachable_via_non_loopback_address() {
+    let _guard = NODE_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+
+    let cluster = ClusterFixture::single()
+        .await
+        .expect("failed to start single-node cluster fixture");
+    let node = cluster.node(0);
+
+    let app_id = "hello-hardened:v1";
+    let host = "hello-hardened.local";
+    let wasm_path = helpers::find_hello_axum_wasm().expect("hello-axum.wasm not found");
+
+    cluster
+        .deploy_app(app_id, &wasm_path)
+        .await
+        .expect("failed to deploy hello-axum");
+    cluster
+        .add_route(host, app_id)
+        .await
+        .expect("failed to add route");
+
+    helpers::wait_for_app_ready(node.proxy_port, host, 40)
+        .await
+        .expect("app did not become ready through proxy");
+
+    let (instance_port, direct_loopback) = wait_for_instance_port(node, Duration::from_secs(15))
+        .await
+        .expect("failed to find listening instance port");
+    assert!(
+        direct_loopback.status().is_success(),
+        "loopback direct instance request should confirm the app is actually listening"
+    );
+    let direct_loopback_body = direct_loopback
+        .text()
+        .await
+        .expect("failed to read direct loopback response body");
+    assert!(
+        direct_loopback_body.contains("Hello"),
+        "expected hello-axum body from direct loopback instance port, got: {direct_loopback_body}"
+    );
+
+    let non_loopback_ip =
+        local_non_loopback_ip().expect("failed to determine non-loopback local IP");
+    let direct_non_loopback = reqwest::Client::builder()
+        .timeout(Duration::from_secs(2))
+        .build()
+        .unwrap()
+        .get(format!("http://{non_loopback_ip}:{instance_port}/"))
+        .send()
+        .await;
+
+    assert!(
+        direct_non_loopback.is_err(),
+        "instance port {instance_port} should not be reachable via non-loopback address {non_loopback_ip}"
     );
 }

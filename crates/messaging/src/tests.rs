@@ -383,6 +383,7 @@ mod test_helpers {
         let secret_event = Event::SecretUpdate {
             app_id: AppId::new("good-app", "v1"),
             key: "API_KEY".to_string(),
+            target_node_id: None,
             secret: secrets::SecretTransportEnvelope::plaintext_utf8("super-secret"),
         };
         bus.publish(&secret_event).await.unwrap();
@@ -478,6 +479,7 @@ mod test_helpers {
         let event = Event::SecretUpdate {
             app_id: AppId::new("exact-control", "v1"),
             key: "TOKEN".to_string(),
+            target_node_id: None,
             secret: secrets::SecretTransportEnvelope::plaintext_utf8("value"),
         };
         bus.publish(&event).await.unwrap();
@@ -684,6 +686,7 @@ mod test_helpers {
                 Event::SecretUpdate {
                     app_id: AppId("a".to_string()),
                     key: "".to_string(),
+                    target_node_id: None,
                     secret: SecretTransportEnvelope::plaintext_utf8(""),
                 },
             ),

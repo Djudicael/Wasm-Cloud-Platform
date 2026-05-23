@@ -29,6 +29,12 @@ impl BootstrapKeyPair {
         BootstrapKeyPair { secret, public }
     }
 
+    pub fn from_secret_bytes(secret_bytes: [u8; 32]) -> Self {
+        let secret = StaticSecret::from(secret_bytes);
+        let public = PublicKey::from(&secret);
+        BootstrapKeyPair { secret, public }
+    }
+
     /// Decrypt ciphertext that was encrypted FOR our public key.
     /// The ciphertext format is: [ephemeral_pubkey(32) | nonce(12) | ciphertext]
     ///
@@ -61,6 +67,10 @@ impl BootstrapKeyPair {
     /// Get public key as bytes for transmission.
     pub fn public_bytes(&self) -> Vec<u8> {
         self.public.as_bytes().to_vec()
+    }
+
+    pub fn secret_bytes(&self) -> [u8; 32] {
+        self.secret.to_bytes()
     }
 }
 

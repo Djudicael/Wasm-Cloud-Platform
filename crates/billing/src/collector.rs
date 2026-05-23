@@ -76,26 +76,35 @@ const BATCH_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500)
 /// Key used to persist the billing cursor (seq, prev_hash) for crash recovery.
 const BILLING_CURSOR_KEY: &str = "billing_cursor";
 
+fn billing_cursor_key(node_id: &str) -> String {
+    format!("{BILLING_CURSOR_KEY}:{node_id}")
+}
+
 async fn billing_writer_loop(
     mut rx: mpsc::Receiver<BillingInput>,
     store: Store,
     node_id: String,
     mut shutdown_rx: tokio::sync::oneshot::Receiver<()>,
 ) {
+    let cursor_key = billing_cursor_key(&node_id);
+
     // Load seq and prev_hash from the persisted cursor for crash recovery.
     // Falls back to querying the store if no cursor is saved yet.
-    let (mut seq, mut prev_hash) = if let Ok(Some(data)) = store.load_meta(BILLING_CURSOR_KEY) {
-        serde_json::from_str::<(u64, String)>(&data).unwrap_or_else(|_| {
+    let (mut seq, mut prev_hash) = match store.load_meta(&cursor_key) {
+        Ok(Some(data)) => serde_json::from_str::<(u64, String)>(&data).unwrap_or_else(|_| {
             (
-                store.get_billing_sequence().unwrap_or(0),
-                store.get_last_billing_hash().unwrap_or_default(),
+                store.get_billing_sequence_for_node(&node_id).unwrap_or(0),
+                store
+                    .get_last_billing_hash_for_node(&node_id)
+                    .unwrap_or_default(),
             )
-        })
-    } else {
-        (
-            store.get_billing_sequence().unwrap_or(0),
-            store.get_last_billing_hash().unwrap_or_default(),
-        )
+        }),
+        _ => (
+            store.get_billing_sequence_for_node(&node_id).unwrap_or(0),
+            store
+                .get_last_billing_hash_for_node(&node_id)
+                .unwrap_or_default(),
+        ),
     };
 
     let mut batch: Vec<BillingRecord> = Vec::with_capacity(BATCH_SIZE);
@@ -106,7 +115,7 @@ async fn billing_writer_loop(
 
         // Flush conditions: batch full, timeout elapsed, or channel closed
         if batch.len() >= BATCH_SIZE || (deadline_hit && !batch.is_empty()) {
-            flush_batch(&store, &mut batch, &mut seq, &mut prev_hash);
+            flush_batch(&store, &node_id, &mut batch, &mut seq, &mut prev_hash);
             deadline = tokio::time::Instant::now() + BATCH_TIMEOUT;
         }
 
@@ -146,14 +155,14 @@ async fn billing_writer_loop(
 
                         // Flush immediately if batch is full
                         if batch.len() >= BATCH_SIZE {
-                            flush_batch(&store, &mut batch, &mut seq, &mut prev_hash);
+                            flush_batch(&store, &node_id, &mut batch, &mut seq, &mut prev_hash);
                             deadline = tokio::time::Instant::now() + BATCH_TIMEOUT;
                         }
                     }
                     Ok(None) => {
                         // Channel closed — flush any remaining records and exit
                         if !batch.is_empty() {
-                            flush_batch(&store, &mut batch, &mut seq, &mut prev_hash);
+                            flush_batch(&store, &node_id, &mut batch, &mut seq, &mut prev_hash);
                         }
                         break;
                     }
@@ -165,7 +174,7 @@ async fn billing_writer_loop(
             _ = &mut shutdown_rx => {
                 // Shutdown signal received — flush any remaining records and exit
                 if !batch.is_empty() {
-                    flush_batch(&store, &mut batch, &mut seq, &mut prev_hash);
+                    flush_batch(&store, &node_id, &mut batch, &mut seq, &mut prev_hash);
                 }
                 tracing::info!("billing writer loop shut down gracefully");
                 break;
@@ -185,6 +194,7 @@ async fn billing_writer_loop(
 /// store's meta table so they can be recovered after a crash.
 fn flush_batch(
     store: &Store,
+    node_id: &str,
     batch: &mut Vec<BillingRecord>,
     seq: &mut u64,
     prev_hash: &mut String,
@@ -209,7 +219,7 @@ fn flush_batch(
 
     // Persist seq and prev_hash for crash recovery
     if let Ok(data) = serde_json::to_string(&(*seq, prev_hash.clone())) {
-        if let Err(e) = store.save_meta(BILLING_CURSOR_KEY, &data) {
+        if let Err(e) = store.save_meta(&billing_cursor_key(node_id), &data) {
             tracing::warn!(error = %e, "failed to persist billing cursor");
         }
     }
@@ -430,5 +440,63 @@ mod tenant_cache_tests {
         // updated_at timestamp will be fresh)
         let tenants = cache.get().unwrap();
         assert!(tenants.is_empty());
+    }
+
+    fn billing_input(node_id: &str) -> BillingInput {
+        BillingInput {
+            tenant_id: "tenant-a".to_string(),
+            app_id: "app:v1".to_string(),
+            instance_id: "inst-1".to_string(),
+            node_id: node_id.to_string(),
+            fuel_consumed: 100,
+            fuel_quota: 1000,
+            ram_bytes: 1024,
+            wall_clock_ms: 5,
+            status_code: 200,
+            is_trap: false,
+        }
+    }
+
+    async fn assert_restart_continuity_for_node_id(node_id: &str) {
+        let temp = NamedTempFile::new().unwrap();
+        let store = Store::open(temp.path()).unwrap();
+
+        async fn run_writer_once(store: Store, node_id: &str, input: BillingInput) {
+            let (tx, rx) = mpsc::channel::<BillingInput>(8);
+            let (_shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+            let node_id = node_id.to_string();
+            let handle = tokio::spawn(async move {
+                billing_writer_loop(rx, store, node_id, shutdown_rx).await;
+            });
+            tx.send(input).await.unwrap();
+            drop(tx);
+            handle.await.unwrap();
+        }
+
+        run_writer_once(store.clone(), node_id, billing_input(node_id)).await;
+        run_writer_once(store.clone(), "node-foreign", billing_input("node-foreign")).await;
+        run_writer_once(store.clone(), node_id, billing_input(node_id)).await;
+
+        let mut records = store.get_billing_records_for_node(node_id).unwrap();
+        records.sort_by_key(|record| record.seq);
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].seq, 1);
+        assert_eq!(records[1].seq, 2);
+        assert_eq!(records[1].prev_hash, records[0].record_hash);
+    }
+
+    #[tokio::test]
+    async fn test_billing_restart_sequence_continuity_for_node_dash_number() {
+        assert_restart_continuity_for_node_id("node-1").await;
+    }
+
+    #[tokio::test]
+    async fn test_billing_restart_sequence_continuity_for_prod_style_node_id() {
+        assert_restart_continuity_for_node_id("prod-a").await;
+    }
+
+    #[tokio::test]
+    async fn test_billing_restart_sequence_continuity_for_edge_style_node_id() {
+        assert_restart_continuity_for_node_id("edge-17").await;
     }
 }

@@ -29,6 +29,13 @@ impl SecretTransportEnvelope {
             payload: SecretTransportPayload::BootstrapPeerCiphertextV1 { ciphertext },
         }
     }
+
+    pub fn node_transport_ciphertext(ciphertext: Vec<u8>) -> Self {
+        Self {
+            version: Self::VERSION_1,
+            payload: SecretTransportPayload::NodeTransportCiphertextV1 { ciphertext },
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -38,6 +45,9 @@ pub enum SecretTransportPayload {
     /// secret rotation until a stronger cluster secret-distribution design is
     /// introduced.
     PlaintextUtf8V1 { value: String },
+    /// Normal steady-state secret rotation encrypted for a specific node's
+    /// long-lived transport public key.
+    NodeTransportCiphertextV1 { ciphertext: Vec<u8> },
     /// Bootstrap secret transfer encrypted for a specific joining node using
     /// its one-time bootstrap public key.
     BootstrapPeerCiphertextV1 { ciphertext: Vec<u8> },
@@ -74,6 +84,17 @@ mod tests {
         assert_eq!(
             envelope.payload,
             SecretTransportPayload::BootstrapPeerCiphertextV1 { ciphertext }
+        );
+    }
+
+    #[test]
+    fn test_node_transport_ciphertext_constructor() {
+        let ciphertext = vec![9, 8, 7, 6];
+        let envelope = SecretTransportEnvelope::node_transport_ciphertext(ciphertext.clone());
+        assert_eq!(envelope.version, SecretTransportEnvelope::VERSION_1);
+        assert_eq!(
+            envelope.payload,
+            SecretTransportPayload::NodeTransportCiphertextV1 { ciphertext }
         );
     }
 }

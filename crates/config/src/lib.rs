@@ -48,6 +48,19 @@ pub struct CliOverrides {
     pub port_end: Option<u16>,
     pub key_source: Option<String>,
     pub key_file: Option<String>,
+    pub key_command: Option<Vec<String>>,
+    pub key_vault_url: Option<String>,
+    pub key_vault_token_env: Option<String>,
+    pub key_vault_mount: Option<String>,
+    pub key_vault_path: Option<String>,
+    pub key_vault_field: Option<String>,
+    pub key_vault_transit_mount: Option<String>,
+    pub key_vault_transit_key: Option<String>,
+    pub key_vault_transit_context: Option<String>,
+    pub key_aws_kms_region: Option<String>,
+    pub key_aws_kms_endpoint: Option<String>,
+    pub key_aws_kms_key_id: Option<String>,
+    pub key_aws_kms_context: Option<String>,
     pub runtime_cache_directory: Option<String>,
     pub runtime_upgrade_signing_public_key: Option<String>,
     pub runtime_pooling_allocator: Option<bool>,
@@ -186,6 +199,59 @@ fn merge_config(base: NodeConfig, overlay: NodeConfig) -> NodeConfig {
             },
             key_source: overlay.runtime.key_source,
             key_file: overlay.runtime.key_file.or(base.runtime.key_file),
+            key_command: if overlay.runtime.key_command.is_empty() {
+                base.runtime.key_command.clone()
+            } else {
+                overlay.runtime.key_command.clone()
+            },
+            key_vault_url: overlay.runtime.key_vault_url.or(base.runtime.key_vault_url),
+            key_vault_token_env: overlay
+                .runtime
+                .key_vault_token_env
+                .or(base.runtime.key_vault_token_env),
+            key_vault_mount: if overlay.runtime.key_vault_mount.is_empty() {
+                base.runtime.key_vault_mount.clone()
+            } else {
+                overlay.runtime.key_vault_mount
+            },
+            key_vault_path: overlay
+                .runtime
+                .key_vault_path
+                .or(base.runtime.key_vault_path),
+            key_vault_field: if overlay.runtime.key_vault_field.is_empty() {
+                base.runtime.key_vault_field.clone()
+            } else {
+                overlay.runtime.key_vault_field
+            },
+            key_vault_transit_mount: if overlay.runtime.key_vault_transit_mount.is_empty() {
+                base.runtime.key_vault_transit_mount.clone()
+            } else {
+                overlay.runtime.key_vault_transit_mount
+            },
+            key_vault_transit_key: overlay
+                .runtime
+                .key_vault_transit_key
+                .or(base.runtime.key_vault_transit_key),
+            key_vault_transit_context: overlay
+                .runtime
+                .key_vault_transit_context
+                .or(base.runtime.key_vault_transit_context),
+            key_aws_kms_region: overlay
+                .runtime
+                .key_aws_kms_region
+                .or(base.runtime.key_aws_kms_region),
+            key_aws_kms_endpoint: overlay
+                .runtime
+                .key_aws_kms_endpoint
+                .or(base.runtime.key_aws_kms_endpoint),
+            key_aws_kms_key_id: overlay
+                .runtime
+                .key_aws_kms_key_id
+                .or(base.runtime.key_aws_kms_key_id),
+            key_aws_kms_context: overlay
+                .runtime
+                .key_aws_kms_context
+                .or(base.runtime.key_aws_kms_context),
             cache_directory: overlay
                 .runtime
                 .cache_directory
@@ -471,6 +537,51 @@ fn apply_env_overrides(mut config: NodeConfig) -> NodeConfig {
     if let Ok(v) = std::env::var("WASM_NODE_RUNTIME_CACHE_DIRECTORY") {
         config.runtime.cache_directory = Some(v);
     }
+    if let Ok(v) = std::env::var("WASM_NODE_RUNTIME_KEY_COMMAND") {
+        match serde_json::from_str::<Vec<String>>(&v) {
+            Ok(argv) => config.runtime.key_command = argv,
+            Err(err) => tracing::warn!(
+                error = %err,
+                "ignoring invalid WASM_NODE_RUNTIME_KEY_COMMAND JSON array"
+            ),
+        }
+    }
+    if let Ok(v) = std::env::var("WASM_NODE_RUNTIME_KEY_VAULT_URL") {
+        config.runtime.key_vault_url = Some(v);
+    }
+    if let Ok(v) = std::env::var("WASM_NODE_RUNTIME_KEY_VAULT_TOKEN_ENV") {
+        config.runtime.key_vault_token_env = Some(v);
+    }
+    if let Ok(v) = std::env::var("WASM_NODE_RUNTIME_KEY_VAULT_MOUNT") {
+        config.runtime.key_vault_mount = v;
+    }
+    if let Ok(v) = std::env::var("WASM_NODE_RUNTIME_KEY_VAULT_PATH") {
+        config.runtime.key_vault_path = Some(v);
+    }
+    if let Ok(v) = std::env::var("WASM_NODE_RUNTIME_KEY_VAULT_FIELD") {
+        config.runtime.key_vault_field = v;
+    }
+    if let Ok(v) = std::env::var("WASM_NODE_RUNTIME_KEY_VAULT_TRANSIT_MOUNT") {
+        config.runtime.key_vault_transit_mount = v;
+    }
+    if let Ok(v) = std::env::var("WASM_NODE_RUNTIME_KEY_VAULT_TRANSIT_KEY") {
+        config.runtime.key_vault_transit_key = Some(v);
+    }
+    if let Ok(v) = std::env::var("WASM_NODE_RUNTIME_KEY_VAULT_TRANSIT_CONTEXT") {
+        config.runtime.key_vault_transit_context = Some(v);
+    }
+    if let Ok(v) = std::env::var("WASM_NODE_RUNTIME_KEY_AWS_KMS_REGION") {
+        config.runtime.key_aws_kms_region = Some(v);
+    }
+    if let Ok(v) = std::env::var("WASM_NODE_RUNTIME_KEY_AWS_KMS_ENDPOINT") {
+        config.runtime.key_aws_kms_endpoint = Some(v);
+    }
+    if let Ok(v) = std::env::var("WASM_NODE_RUNTIME_KEY_AWS_KMS_KEY_ID") {
+        config.runtime.key_aws_kms_key_id = Some(v);
+    }
+    if let Ok(v) = std::env::var("WASM_NODE_RUNTIME_KEY_AWS_KMS_CONTEXT") {
+        config.runtime.key_aws_kms_context = Some(v);
+    }
     if let Ok(v) = std::env::var("WASM_NODE_RUNTIME_UPGRADE_SIGNING_PUBLIC_KEY") {
         config.runtime.upgrade_signing_public_key = Some(v);
     }
@@ -566,6 +677,45 @@ fn apply_cli_overrides(mut config: NodeConfig, cli: &CliOverrides) -> NodeConfig
     }
     if let Some(v) = &cli.key_file {
         config.runtime.key_file = Some(v.clone());
+    }
+    if let Some(v) = &cli.key_command {
+        config.runtime.key_command = v.clone();
+    }
+    if let Some(v) = &cli.key_vault_url {
+        config.runtime.key_vault_url = Some(v.clone());
+    }
+    if let Some(v) = &cli.key_vault_token_env {
+        config.runtime.key_vault_token_env = Some(v.clone());
+    }
+    if let Some(v) = &cli.key_vault_mount {
+        config.runtime.key_vault_mount = v.clone();
+    }
+    if let Some(v) = &cli.key_vault_path {
+        config.runtime.key_vault_path = Some(v.clone());
+    }
+    if let Some(v) = &cli.key_vault_field {
+        config.runtime.key_vault_field = v.clone();
+    }
+    if let Some(v) = &cli.key_vault_transit_mount {
+        config.runtime.key_vault_transit_mount = v.clone();
+    }
+    if let Some(v) = &cli.key_vault_transit_key {
+        config.runtime.key_vault_transit_key = Some(v.clone());
+    }
+    if let Some(v) = &cli.key_vault_transit_context {
+        config.runtime.key_vault_transit_context = Some(v.clone());
+    }
+    if let Some(v) = &cli.key_aws_kms_region {
+        config.runtime.key_aws_kms_region = Some(v.clone());
+    }
+    if let Some(v) = &cli.key_aws_kms_endpoint {
+        config.runtime.key_aws_kms_endpoint = Some(v.clone());
+    }
+    if let Some(v) = &cli.key_aws_kms_key_id {
+        config.runtime.key_aws_kms_key_id = Some(v.clone());
+    }
+    if let Some(v) = &cli.key_aws_kms_context {
+        config.runtime.key_aws_kms_context = Some(v.clone());
     }
     if let Some(v) = &cli.runtime_cache_directory {
         config.runtime.cache_directory = Some(v.clone());
@@ -858,6 +1008,217 @@ fn validate_config(config: &NodeConfig) -> Result<(), PlatformError> {
         &config.runtime.instance_bind_address,
         &mut errors,
     );
+    match config.runtime.key_source.as_str() {
+        "file" => {
+            if config
+                .runtime
+                .key_file
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .is_none()
+            {
+                errors.push("runtime.key_source = \"file\" requires runtime.key_file".to_string());
+            }
+        }
+        "command" => {
+            if config.runtime.key_command.is_empty()
+                || config
+                    .runtime
+                    .key_command
+                    .iter()
+                    .any(|arg| arg.trim().is_empty())
+            {
+                errors.push(
+                    "runtime.key_source = \"command\" requires runtime.key_command with non-empty argv entries"
+                        .to_string(),
+                );
+            }
+        }
+        "vault-kv" => {
+            if config
+                .runtime
+                .key_vault_url
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .is_none()
+            {
+                errors.push(
+                    "runtime.key_source = \"vault-kv\" requires runtime.key_vault_url".to_string(),
+                );
+            } else if let Some(url) = config.runtime.key_vault_url.as_deref() {
+                match Url::parse(url.trim()) {
+                    Ok(parsed) if matches!(parsed.scheme(), "http" | "https") => {}
+                    Ok(_) => errors.push(
+                        "runtime.key_vault_url must use http or https".to_string(),
+                    ),
+                    Err(err) => errors.push(format!(
+                        "runtime.key_vault_url is not a valid URL: {}",
+                        err
+                    )),
+                }
+            }
+            if config
+                .runtime
+                .key_vault_token_env
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .is_none()
+            {
+                errors.push(
+                    "runtime.key_source = \"vault-kv\" requires runtime.key_vault_token_env"
+                        .to_string(),
+                );
+            }
+            if config
+                .runtime
+                .key_vault_path
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .is_none()
+            {
+                errors.push(
+                    "runtime.key_source = \"vault-kv\" requires runtime.key_vault_path".to_string(),
+                );
+            }
+            if config.runtime.key_vault_mount.trim().is_empty() {
+                errors.push("runtime.key_vault_mount must not be empty".to_string());
+            }
+            if config.runtime.key_vault_field.trim().is_empty() {
+                errors.push("runtime.key_vault_field must not be empty".to_string());
+            }
+        }
+        "vault-transit" => {
+            if config
+                .runtime
+                .key_vault_url
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .is_none()
+            {
+                errors.push(
+                    "runtime.key_source = \"vault-transit\" requires runtime.key_vault_url"
+                        .to_string(),
+                );
+            } else if let Some(url) = config.runtime.key_vault_url.as_deref() {
+                match Url::parse(url.trim()) {
+                    Ok(parsed) if matches!(parsed.scheme(), "http" | "https") => {}
+                    Ok(_) => errors.push(
+                        "runtime.key_vault_url must use http or https".to_string(),
+                    ),
+                    Err(err) => errors.push(format!(
+                        "runtime.key_vault_url is not a valid URL: {}",
+                        err
+                    )),
+                }
+            }
+            if config
+                .runtime
+                .key_vault_token_env
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .is_none()
+            {
+                errors.push(
+                    "runtime.key_source = \"vault-transit\" requires runtime.key_vault_token_env"
+                        .to_string(),
+                );
+            }
+            if config.runtime.key_vault_transit_mount.trim().is_empty() {
+                errors.push("runtime.key_vault_transit_mount must not be empty".to_string());
+            }
+            if config
+                .runtime
+                .key_vault_transit_key
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .is_none()
+            {
+                errors.push(
+                    "runtime.key_source = \"vault-transit\" requires runtime.key_vault_transit_key"
+                        .to_string(),
+                );
+            }
+            if config
+                .runtime
+                .key_vault_transit_context
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .is_none()
+            {
+                errors.push(
+                    "runtime.key_source = \"vault-transit\" requires runtime.key_vault_transit_context"
+                        .to_string(),
+                );
+            }
+        }
+        "aws-kms-hmac" => {
+            if config
+                .runtime
+                .key_aws_kms_region
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .is_none()
+            {
+                errors.push(
+                    "runtime.key_source = \"aws-kms-hmac\" requires runtime.key_aws_kms_region"
+                        .to_string(),
+                );
+            }
+            if let Some(endpoint) = config.runtime.key_aws_kms_endpoint.as_deref() {
+                match Url::parse(endpoint.trim()) {
+                    Ok(parsed) if matches!(parsed.scheme(), "http" | "https") => {}
+                    Ok(_) => errors.push(
+                        "runtime.key_aws_kms_endpoint must use http or https".to_string(),
+                    ),
+                    Err(err) => errors.push(format!(
+                        "runtime.key_aws_kms_endpoint is not a valid URL: {}",
+                        err
+                    )),
+                }
+            }
+            if config
+                .runtime
+                .key_aws_kms_key_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .is_none()
+            {
+                errors.push(
+                    "runtime.key_source = \"aws-kms-hmac\" requires runtime.key_aws_kms_key_id"
+                        .to_string(),
+                );
+            }
+            if config
+                .runtime
+                .key_aws_kms_context
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .is_none()
+            {
+                errors.push(
+                    "runtime.key_source = \"aws-kms-hmac\" requires runtime.key_aws_kms_context"
+                        .to_string(),
+                );
+            }
+        }
+        "generate" => {}
+        spec if spec.starts_with("env:") || spec.starts_with("passphrase-env:") => {}
+        other => errors.push(format!(
+            "runtime.key_source '{}' is unsupported; expected generate, file, command, vault-kv, vault-transit, aws-kms-hmac, env:VAR_NAME, or passphrase-env:VAR_NAME",
+            other
+        )),
+    }
     validate_admin_advertisement(config, &mut errors);
 
     if config.auth.enabled && config.auth.require_tls && !admin_tls_material_configured(config) {
@@ -1808,6 +2169,112 @@ default_memory_pages = 4096
         assert!(msg.contains("IP address literal"));
     }
 
+    #[test]
+    fn test_validation_rejects_command_key_source_without_argv() {
+        let mut config = NodeConfig::default();
+        config.runtime.key_source = "command".to_string();
+        config.runtime.key_command.clear();
+        let result = validate_config(&config);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("runtime.key_command"));
+    }
+
+    #[test]
+    fn test_validation_accepts_command_key_source_with_argv() {
+        let mut config = NodeConfig::default();
+        config.runtime.key_source = "command".to_string();
+        config.runtime.key_command = vec![
+            "/usr/local/bin/fetch-node-seal-key".to_string(),
+            "--node".to_string(),
+            "prod-node-0".to_string(),
+        ];
+        assert!(validate_config(&config).is_ok());
+    }
+
+    #[test]
+    fn test_validation_rejects_vault_kv_key_source_without_required_fields() {
+        let mut config = NodeConfig::default();
+        config.runtime.key_source = "vault-kv".to_string();
+        config.runtime.key_vault_url = None;
+        config.runtime.key_vault_token_env = None;
+        config.runtime.key_vault_path = None;
+        let result = validate_config(&config);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("runtime.key_vault_url"));
+        assert!(msg.contains("runtime.key_vault_token_env"));
+        assert!(msg.contains("runtime.key_vault_path"));
+    }
+
+    #[test]
+    fn test_validation_accepts_vault_kv_key_source_with_required_fields() {
+        let mut config = NodeConfig::default();
+        config.runtime.key_source = "vault-kv".to_string();
+        config.runtime.key_vault_url = Some("https://vault.service:8200".to_string());
+        config.runtime.key_vault_token_env = Some("VAULT_TOKEN".to_string());
+        config.runtime.key_vault_path = Some("wasm-node/seal-key".to_string());
+        config.runtime.key_vault_mount = "secret".to_string();
+        config.runtime.key_vault_field = "key".to_string();
+        assert!(validate_config(&config).is_ok());
+    }
+
+    #[test]
+    fn test_validation_rejects_vault_transit_key_source_without_required_fields() {
+        let mut config = NodeConfig::default();
+        config.runtime.key_source = "vault-transit".to_string();
+        config.runtime.key_vault_url = None;
+        config.runtime.key_vault_token_env = None;
+        config.runtime.key_vault_transit_key = None;
+        config.runtime.key_vault_transit_context = None;
+        let result = validate_config(&config);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("runtime.key_vault_url"));
+        assert!(msg.contains("runtime.key_vault_token_env"));
+        assert!(msg.contains("runtime.key_vault_transit_key"));
+        assert!(msg.contains("runtime.key_vault_transit_context"));
+    }
+
+    #[test]
+    fn test_validation_accepts_vault_transit_key_source_with_required_fields() {
+        let mut config = NodeConfig::default();
+        config.runtime.key_source = "vault-transit".to_string();
+        config.runtime.key_vault_url = Some("https://vault.service:8200".to_string());
+        config.runtime.key_vault_token_env = Some("VAULT_TOKEN".to_string());
+        config.runtime.key_vault_transit_mount = "transit".to_string();
+        config.runtime.key_vault_transit_key = Some("wasm-node-seal".to_string());
+        config.runtime.key_vault_transit_context = Some("prod-node-0".to_string());
+        assert!(validate_config(&config).is_ok());
+    }
+
+    #[test]
+    fn test_validation_rejects_aws_kms_hmac_key_source_without_required_fields() {
+        let mut config = NodeConfig::default();
+        config.runtime.key_source = "aws-kms-hmac".to_string();
+        config.runtime.key_aws_kms_region = None;
+        config.runtime.key_aws_kms_key_id = None;
+        config.runtime.key_aws_kms_context = None;
+        let result = validate_config(&config);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("runtime.key_aws_kms_region"));
+        assert!(msg.contains("runtime.key_aws_kms_key_id"));
+        assert!(msg.contains("runtime.key_aws_kms_context"));
+    }
+
+    #[test]
+    fn test_validation_accepts_aws_kms_hmac_key_source_with_required_fields() {
+        let mut config = NodeConfig::default();
+        config.runtime.key_source = "aws-kms-hmac".to_string();
+        config.runtime.key_aws_kms_region = Some("eu-west-3".to_string());
+        config.runtime.key_aws_kms_endpoint = Some("http://127.0.0.1:4566".to_string());
+        config.runtime.key_aws_kms_key_id =
+            Some("arn:aws:kms:eu-west-3:123456789012:key/test".to_string());
+        config.runtime.key_aws_kms_context = Some("prod-node-0".to_string());
+        assert!(validate_config(&config).is_ok());
+    }
+
     /// eBPF fd_soft_limit >= fd_hard_limit is rejected.
     #[test]
     fn test_validation_ebpf_fd_limits() {
@@ -1824,7 +2291,6 @@ default_memory_pages = 4096
     #[test]
     fn test_hot_config_update_partial() {
         let base = HotConfig::from_cold_config(&NodeConfig::default());
-        let original_rps = base.rate_limit.default_requests_per_second;
         let original_level = base.logging.level.clone();
 
         let update = HotConfigUpdate {
@@ -2170,6 +2636,124 @@ trusted_proxies = ["10.0.0.0/8"]
 
         let result = load_config(Some(&path), &CliOverrides::default());
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_admin_bind_auth_tls_validation_matrix() {
+        struct Case {
+            name: &'static str,
+            bind_address: &'static str,
+            auth_enabled: bool,
+            require_tls: bool,
+            trusted_proxies: &'static [&'static str],
+            admin_tls: bool,
+            proxy_tls: bool,
+            expect_ok: bool,
+        }
+
+        let cases = [
+            Case {
+                name: "disabled_auth_loopback_http_ok",
+                bind_address: "127.0.0.1",
+                auth_enabled: false,
+                require_tls: false,
+                trusted_proxies: &[],
+                admin_tls: false,
+                proxy_tls: false,
+                expect_ok: true,
+            },
+            Case {
+                name: "enabled_auth_loopback_http_ok",
+                bind_address: "127.0.0.1",
+                auth_enabled: true,
+                require_tls: false,
+                trusted_proxies: &[],
+                admin_tls: false,
+                proxy_tls: false,
+                expect_ok: true,
+            },
+            Case {
+                name: "enabled_auth_public_http_without_trusted_proxy_rejected",
+                bind_address: "10.0.0.5",
+                auth_enabled: true,
+                require_tls: false,
+                trusted_proxies: &[],
+                admin_tls: false,
+                proxy_tls: false,
+                expect_ok: false,
+            },
+            Case {
+                name: "enabled_auth_public_http_with_trusted_proxy_ok",
+                bind_address: "10.0.0.5",
+                auth_enabled: true,
+                require_tls: false,
+                trusted_proxies: &["10.0.0.0/8"],
+                admin_tls: false,
+                proxy_tls: false,
+                expect_ok: true,
+            },
+            Case {
+                name: "enabled_auth_public_tls_without_material_rejected",
+                bind_address: "10.0.0.5",
+                auth_enabled: true,
+                require_tls: true,
+                trusted_proxies: &[],
+                admin_tls: false,
+                proxy_tls: false,
+                expect_ok: false,
+            },
+            Case {
+                name: "enabled_auth_public_tls_with_admin_cert_ok",
+                bind_address: "10.0.0.5",
+                auth_enabled: true,
+                require_tls: true,
+                trusted_proxies: &[],
+                admin_tls: true,
+                proxy_tls: false,
+                expect_ok: true,
+            },
+            Case {
+                name: "enabled_auth_public_tls_with_proxy_fallback_ok",
+                bind_address: "10.0.0.5",
+                auth_enabled: true,
+                require_tls: true,
+                trusted_proxies: &[],
+                admin_tls: false,
+                proxy_tls: true,
+                expect_ok: true,
+            },
+        ];
+
+        for case in cases {
+            let mut config = NodeConfig::default();
+            config.admin.bind_address = case.bind_address.to_string();
+            config.auth.enabled = case.auth_enabled;
+            config.auth.require_tls = case.require_tls;
+            config.auth.write_token = Some("valid_write_token_1234567890".to_string());
+            config.auth.trusted_proxies = case
+                .trusted_proxies
+                .iter()
+                .map(|entry| entry.to_string())
+                .collect();
+
+            if case.admin_tls {
+                config.admin.tls_cert = Some("/tmp/admin.crt".to_string());
+                config.admin.tls_key = Some("/tmp/admin.key".to_string());
+            }
+            if case.proxy_tls {
+                config.proxy.tls_cert = Some("/tmp/proxy.crt".to_string());
+                config.proxy.tls_key = Some("/tmp/proxy.key".to_string());
+            }
+
+            let result = validate_config(&config);
+            assert_eq!(
+                result.is_ok(),
+                case.expect_ok,
+                "admin bind/auth/TLS matrix case failed: {} => {:?}",
+                case.name,
+                result.err().map(|e| e.to_string())
+            );
+        }
     }
 
     #[test]

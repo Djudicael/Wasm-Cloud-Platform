@@ -578,6 +578,7 @@ async fn proxy_handler(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::body::Body;
     use http::HeaderValue;
     use std::net::{IpAddr, Ipv4Addr};
 
@@ -664,6 +665,49 @@ mod tests {
             headers.get("host").and_then(|v| v.to_str().ok()),
             Some("target.default.internal")
         );
+    }
+
+    #[tokio::test]
+    async fn test_proxy_handler_rejects_forged_internal_identity_headers() {
+        let (base_gw, _app_id) = setup_gateway().await;
+        let namespace_map = Arc::new(ebpf_monitor::NamespaceMap::new_fallback());
+        namespace_map
+            .register_tid(
+                4242,
+                ebpf_monitor::common::TidIdentity::new("staging", "caller:v1"),
+            )
+            .unwrap();
+        namespace_map.bind_port(54321, 4242);
+
+        let gw = Arc::new(
+            InternalGateway::new(
+                base_gw.registry.clone(),
+                base_gw.rate_limiter.clone(),
+                base_gw.circuit_breaker.clone(),
+                base_gw.gateway_config.clone(),
+            )
+            .with_namespace_map(namespace_map)
+            .with_ebpf_active(true),
+        );
+
+        let req = Request::builder()
+            .method("GET")
+            .uri("/health")
+            .header("host", "target.default.internal")
+            .header("x-namespace", "default")
+            .header("x-source-app", "forged:v1")
+            .header("x-source-tid", "99999")
+            .body(Body::empty())
+            .unwrap();
+
+        let result = proxy_handler(
+            State(gw),
+            ConnectInfo(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 54321)),
+            req,
+        )
+        .await;
+
+        assert_eq!(result.unwrap_err(), StatusCode::FORBIDDEN);
     }
 
     #[test]

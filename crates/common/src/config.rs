@@ -339,10 +339,59 @@ pub struct RuntimeSection {
     pub port_end: u16,
     #[serde(default = "default_instance_bind_address")]
     pub instance_bind_address: String,
+    /// KEK/transport seal-key source:
+    /// - `generate` for ephemeral in-memory keys only
+    /// - `file` for a raw 32-byte key from `key_file`
+    /// - `command` for a raw 32-byte key or 64-hex-char key from `key_command`
+    /// - `vault-kv` for a seal key loaded from a Vault KV v2 secret
+    /// - `vault-transit` for a 32-byte seal key derived from a Vault transit HMAC
+    /// - `aws-kms-hmac` for a 32-byte seal key derived from AWS KMS GenerateMac
+    /// - `env:VAR_NAME` for a raw 32-byte or 64-hex-char key from env
+    /// - `passphrase-env:VAR_NAME` for an Argon2id-derived seal key from an env passphrase
     #[serde(default = "default_key_source")]
     pub key_source: String,
     #[serde(default)]
     pub key_file: Option<String>,
+    /// Optional command argv used when `key_source = "command"`.
+    /// The first element is the executable, remaining elements are arguments.
+    #[serde(default)]
+    pub key_command: Vec<String>,
+    /// Base URL for Vault when `key_source = "vault-kv"`, e.g. `https://vault.service:8200`.
+    #[serde(default)]
+    pub key_vault_url: Option<String>,
+    /// Environment variable containing the Vault token when `key_source = "vault-kv"`.
+    #[serde(default)]
+    pub key_vault_token_env: Option<String>,
+    /// KV v2 mount name when `key_source = "vault-kv"`.
+    #[serde(default = "default_key_vault_mount")]
+    pub key_vault_mount: String,
+    /// Secret path under the KV v2 mount when `key_source = "vault-kv"`.
+    #[serde(default)]
+    pub key_vault_path: Option<String>,
+    /// Secret field containing the seal key when `key_source = "vault-kv"`.
+    #[serde(default = "default_key_vault_field")]
+    pub key_vault_field: String,
+    /// Transit mount name when `key_source = "vault-transit"`.
+    #[serde(default = "default_key_vault_transit_mount")]
+    pub key_vault_transit_mount: String,
+    /// Transit key name when `key_source = "vault-transit"`.
+    #[serde(default)]
+    pub key_vault_transit_key: Option<String>,
+    /// Transit derivation context when `key_source = "vault-transit"`.
+    #[serde(default)]
+    pub key_vault_transit_context: Option<String>,
+    /// AWS region when `key_source = "aws-kms-hmac"`.
+    #[serde(default)]
+    pub key_aws_kms_region: Option<String>,
+    /// Optional endpoint override when `key_source = "aws-kms-hmac"`.
+    #[serde(default)]
+    pub key_aws_kms_endpoint: Option<String>,
+    /// AWS KMS HMAC key id/arn when `key_source = "aws-kms-hmac"`.
+    #[serde(default)]
+    pub key_aws_kms_key_id: Option<String>,
+    /// Stable derivation context when `key_source = "aws-kms-hmac"`.
+    #[serde(default)]
+    pub key_aws_kms_context: Option<String>,
     /// Optional directory for Wasmtime code cache artifacts.
     /// When set, the runtime enables Wasmtime's compilation cache.
     #[serde(default)]
@@ -384,6 +433,18 @@ fn default_key_source() -> String {
     "generate".to_string()
 }
 
+fn default_key_vault_mount() -> String {
+    "secret".to_string()
+}
+
+fn default_key_vault_field() -> String {
+    "key".to_string()
+}
+
+fn default_key_vault_transit_mount() -> String {
+    "transit".to_string()
+}
+
 fn default_pooling_total_component_instances() -> u32 {
     1000
 }
@@ -396,6 +457,19 @@ impl Default for RuntimeSection {
             instance_bind_address: default_instance_bind_address(),
             key_source: default_key_source(),
             key_file: None,
+            key_command: Vec::new(),
+            key_vault_url: None,
+            key_vault_token_env: None,
+            key_vault_mount: default_key_vault_mount(),
+            key_vault_path: None,
+            key_vault_field: default_key_vault_field(),
+            key_vault_transit_mount: default_key_vault_transit_mount(),
+            key_vault_transit_key: None,
+            key_vault_transit_context: None,
+            key_aws_kms_region: None,
+            key_aws_kms_endpoint: None,
+            key_aws_kms_key_id: None,
+            key_aws_kms_context: None,
             cache_directory: None,
             upgrade_signing_public_key: None,
             pooling_allocator: false,

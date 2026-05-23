@@ -116,6 +116,32 @@ fn decode_plaintext_secret(envelope: &SecretTransportEnvelope) -> Result<String,
     }
 }
 
+fn decrypt_node_transport_secret(
+    keypair: &BootstrapKeyPair,
+    envelope: &SecretTransportEnvelope,
+) -> Result<String, PlatformError> {
+    if envelope.version != SecretTransportEnvelope::VERSION_1 {
+        return Err(PlatformError::messaging(format!(
+            "unsupported secret transport version {}",
+            envelope.version
+        )));
+    }
+
+    let ciphertext = match &envelope.payload {
+        SecretTransportPayload::NodeTransportCiphertextV1 { ciphertext } => ciphertext,
+        other => {
+            return Err(PlatformError::messaging(format!(
+                "unexpected node transport secret payload variant: {:?}",
+                other
+            )))
+        }
+    };
+
+    let plaintext_bytes = keypair.decrypt(ciphertext)?;
+    String::from_utf8(plaintext_bytes)
+        .map_err(|e| PlatformError::encryption_with_msg("node transport secret not valid UTF-8", e))
+}
+
 fn decrypt_bootstrap_secret(
     keypair: &BootstrapKeyPair,
     envelope: &SecretTransportEnvelope,
@@ -144,11 +170,23 @@ fn decrypt_bootstrap_secret(
 
 async fn apply_secret_update<S: SecretProvider + ?Sized>(
     secret_provider: &S,
+    transport_keypair: &BootstrapKeyPair,
     app_id: &AppId,
     key: &str,
     secret: &SecretTransportEnvelope,
 ) -> Result<(), PlatformError> {
-    let plaintext = decode_plaintext_secret(secret)?;
+    let plaintext = match &secret.payload {
+        SecretTransportPayload::PlaintextUtf8V1 { .. } => decode_plaintext_secret(secret)?,
+        SecretTransportPayload::NodeTransportCiphertextV1 { .. } => {
+            decrypt_node_transport_secret(transport_keypair, secret)?
+        }
+        other => {
+            return Err(PlatformError::messaging(format!(
+                "unexpected secret payload variant for secret rotation: {:?}",
+                other
+            )))
+        }
+    };
     secret_provider.set(app_id, key, &plaintext).await
 }
 
@@ -185,6 +223,7 @@ pub struct EventDispatcher {
     pub artifact_transfer_authority: ArtifactTransferAuthority,
     pub upgrade_signing_public_key: Option<String>,
     pub secret_provider: Arc<dyn SecretProvider>,
+    pub secret_transport_keypair: Arc<BootstrapKeyPair>,
     pub(crate) bootstrap_session: Option<Arc<Mutex<BootstrapSessionState>>>,
     pub bus: messaging::NatsBus,
     pub dns_webhook: Option<DnsWebhookManager>,
@@ -289,10 +328,23 @@ impl EventDispatcher {
             Event::SecretUpdate {
                 app_id,
                 key,
+                target_node_id,
                 secret,
             } => {
+                if let Some(target_node_id) = target_node_id {
+                    if target_node_id != self.our_node_id() {
+                        return Ok(());
+                    }
+                }
                 info!(app = %app_id.0, key, "received secret rotation");
-                apply_secret_update(self.secret_provider.as_ref(), &app_id, &key, &secret).await?;
+                apply_secret_update(
+                    self.secret_provider.as_ref(),
+                    self.secret_transport_keypair.as_ref(),
+                    &app_id,
+                    &key,
+                    &secret,
+                )
+                .await?;
                 Ok(())
             }
             Event::ConfigUpdate { app_id, config } => {
@@ -1205,7 +1257,8 @@ mod tests {
     use e2e::NatsContainer;
     use messaging::{events::Event, NatsBus};
     use secrets::{
-        crypto::SymmetricKey, LocalSecretProvider, SecretProvider, SecretTransportEnvelope,
+        crypto::SymmetricKey, encrypt_for_peer, BootstrapKeyPair, LocalSecretProvider,
+        SecretProvider, SecretTransportEnvelope,
     };
     use sha2::Digest;
     use std::net::IpAddr;
@@ -1274,6 +1327,7 @@ mod tests {
             ),
             upgrade_signing_public_key: None,
             secret_provider: Arc::new(LocalSecretProvider::new(store, SymmetricKey::generate())),
+            secret_transport_keypair: Arc::new(BootstrapKeyPair::generate()),
             bootstrap_session,
             bus,
             dns_webhook,
@@ -1310,6 +1364,7 @@ mod tests {
 
         apply_secret_update(
             &provider,
+            &BootstrapKeyPair::generate(),
             &app_id,
             "API_KEY",
             &SecretTransportEnvelope::plaintext_utf8("super-secret-value"),
@@ -1355,14 +1410,22 @@ mod tests {
                 if let Event::SecretUpdate {
                     app_id,
                     key,
+                    target_node_id,
                     secret,
                 } = event
                 {
                     assert_eq!(app_id, expected_app_id);
                     assert_eq!(key, expected_key);
-                    apply_secret_update(provider.as_ref(), &app_id, &key, &secret)
-                        .await
-                        .unwrap();
+                    assert!(target_node_id.is_none());
+                    apply_secret_update(
+                        provider.as_ref(),
+                        &BootstrapKeyPair::generate(),
+                        &app_id,
+                        &key,
+                        &secret,
+                    )
+                    .await
+                    .unwrap();
                     if let Some(tx) = tx.lock().unwrap().take() {
                         let _ = tx.send(());
                     }
@@ -1375,6 +1438,7 @@ mod tests {
         bus.publish(&Event::SecretUpdate {
             app_id: app_id.clone(),
             key: key.clone(),
+            target_node_id: None,
             secret: SecretTransportEnvelope::plaintext_utf8(expected_value.clone()),
         })
         .await
@@ -1389,6 +1453,84 @@ mod tests {
         assert_eq!(plaintext, expected_value);
         let raw = store.load_secrets(&app_id).unwrap().unwrap();
         assert_ne!(raw, expected_value.as_bytes());
+    }
+
+    #[tokio::test]
+    async fn test_secret_update_event_roundtrip_persists_encrypted_targeted_secret_via_secret_provider(
+    ) {
+        let _nats = start_test_nats().await.unwrap();
+        let bus = NatsBus::connect(&_nats.url).await.unwrap();
+        bus.setup_jetstream().await.unwrap();
+
+        let temp = NamedTempFile::new().unwrap();
+        let store = Store::open(temp.path()).unwrap();
+        let provider = std::sync::Arc::new(LocalSecretProvider::new(
+            store.clone(),
+            SymmetricKey::generate(),
+        ));
+        let recipient = BootstrapKeyPair::generate();
+        let recipient_secret_bytes = recipient.secret_bytes();
+        let recipient_public_bytes = recipient.public_bytes();
+        let app_id = AppId("secret-app:v1".to_string());
+        let key = "API_KEY".to_string();
+        let expected_value = "super-secret-over-nats-encrypted".to_string();
+        let (tx, rx) = oneshot::channel();
+        let provider_for_handler = provider.clone();
+        let app_id_for_handler = app_id.clone();
+        let key_for_handler = key.clone();
+        let tx = std::sync::Arc::new(std::sync::Mutex::new(Some(tx)));
+        let tx_for_handler = tx.clone();
+
+        bus.subscribe(
+            &format!("secrets.update.{}.node-under-test", app_id.0),
+            move |event| {
+                let provider = provider_for_handler.clone();
+                let tx = tx_for_handler.clone();
+                let expected_app_id = app_id_for_handler.clone();
+                let expected_key = key_for_handler.clone();
+                let recipient = BootstrapKeyPair::from_secret_bytes(recipient_secret_bytes);
+                async move {
+                    if let Event::SecretUpdate {
+                        app_id,
+                        key,
+                        target_node_id,
+                        secret,
+                    } = event
+                    {
+                        assert_eq!(app_id, expected_app_id);
+                        assert_eq!(key, expected_key);
+                        assert_eq!(target_node_id.as_deref(), Some("node-under-test"));
+                        apply_secret_update(provider.as_ref(), &recipient, &app_id, &key, &secret)
+                            .await
+                            .unwrap();
+                        if let Some(tx) = tx.lock().unwrap().take() {
+                            let _ = tx.send(());
+                        }
+                    }
+                }
+            },
+        )
+        .await
+        .unwrap();
+
+        let ciphertext =
+            encrypt_for_peer(&recipient_public_bytes, expected_value.as_bytes()).unwrap();
+        bus.publish(&Event::SecretUpdate {
+            app_id: app_id.clone(),
+            key: key.clone(),
+            target_node_id: Some("node-under-test".to_string()),
+            secret: SecretTransportEnvelope::node_transport_ciphertext(ciphertext),
+        })
+        .await
+        .unwrap();
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), rx)
+            .await
+            .expect("timed out waiting for encrypted secret update event to be handled")
+            .expect("encrypted secret update handler dropped before acknowledging");
+
+        let plaintext = provider.get(&app_id, &key).await.unwrap();
+        assert_eq!(plaintext, expected_value);
     }
 
     #[tokio::test]
@@ -1460,6 +1602,7 @@ mod tests {
 
         let err = apply_secret_update(
             &provider,
+            &BootstrapKeyPair::generate(),
             &app_id,
             "API_KEY",
             &SecretTransportEnvelope::bootstrap_peer_ciphertext(vec![0xff, 0xfe, 0xfd]),

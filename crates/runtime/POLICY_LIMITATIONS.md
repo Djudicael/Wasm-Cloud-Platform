@@ -23,6 +23,26 @@ This means the authoritative question is capability-specific:
 - some are enforced and authoritatively counted through the existing Wasmtime hooks,
 - some remain future work because Wasmtime does not expose the required write/stream hooks yet.
 
+## Capability guarantee matrix
+
+This is the operator-facing boundary summary for the current runtime:
+
+| Capability | Primary layer today | Enforced on live path | Authoritative counters | Deferred / notes |
+|---|---|---:|---:|---|
+| TCP bind | Wasmtime `socket_addr_check` | Yes | Yes | Supervisor may apply stricter per-instance bind rules on top. |
+| TCP connect | Wasmtime `socket_addr_check` | Yes | Yes | CIDR filtering and outbound-connection reservation happen before the supervisor extra gate. |
+| UDP socket address allow/deny | Wasmtime `socket_addr_check` | Yes | No | Address policy is live; UDP byte / operation accounting is not yet exported authoritatively. |
+| DNS lookup enable/disable | Wasmtime network toggle | Yes | No | Only coarse on/off exists today; no hostname-level allowlist and no authoritative DNS counters. |
+| Filesystem path visibility | Wasmtime preopens | Yes | No | `allowed_paths` are authoritative for visibility; read/write byte accounting is not. |
+| Memory/table growth | Wasmtime `ResourceLimiter` | Yes | Yes | Current usage, peaks, and denied growth requests are exported through `PolicyEnforcer`. |
+| Filesystem write-byte limits | Outer layer / future host wrapping | No | No | Writable host paths are opt-in only; byte-accurate enforcement is still future work. |
+| TCP egress-byte limits | Outer layer / future host wrapping | No | No | The counter exists in policy code, but no per-write Wasmtime hook drives it today. |
+
+Practical reading:
+
+- If a policy relies on `tcp_bind`, `tcp_connect`, filesystem preopen visibility, or memory/table caps, the runtime itself is the primary enforcement boundary today.
+- If a policy relies on byte-accurate filesystem writes, byte-accurate TCP egress, or fine DNS controls, the runtime does not yet provide authoritative in-process enforcement. Those cases still rely on outer layers, operational constraints, or future host/resource wrapping on top of Wasmtime.
+
 ## Root Cause Classification
 
 | Tag | Meaning |

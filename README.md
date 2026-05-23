@@ -8,6 +8,8 @@ A multi-tenant, HTTP-serving cloud platform built on WebAssembly and WASI. Repla
 - A replacement architecture for container-based cloud platforms, optimized for low cold start latency, high density, and deterministic resource metering
 - A complete platform with built-in API Gateway, service mesh, observability stack, and eBPF kernel monitoring
 
+This project targets Linux production environments. Windows is not a production target because the platform depends on Linux kernel capabilities, including eBPF.
+
 ## Core platform goals
 
 - **Cold Start < 10ms** via AOT-compiled Wasm artifacts
@@ -51,6 +53,29 @@ wasm-ctl node health
 curl http://localhost:9090/metrics
 ```
 
+## Deployment Levels
+
+There is more than one valid way to be "production-ready" with this platform. The supported Linux deployment posture now scales from local development to a high-assurance production setup.
+
+For this codebase as it stands today, **Level 2** is the production baseline. Levels 3 and 4 add stronger operational and security posture for teams that need it.
+
+- local development: Level 0
+- internal single-node service: Level 1
+- first real Linux production rollout: Level 2
+- serious multi-node production: Level 3
+- strongest currently supported posture: Level 4
+
+Start with:
+
+- [`docs/deployment-levels.md`](docs/deployment-levels.md)
+- [`docs/deployment-level-0-local-development.md`](docs/deployment-level-0-local-development.md)
+- [`docs/deployment-level-1-single-node-private.md`](docs/deployment-level-1-single-node-private.md)
+- [`docs/deployment-level-2-production-baseline.md`](docs/deployment-level-2-production-baseline.md)
+- [`docs/deployment-level-3-hardened-production.md`](docs/deployment-level-3-hardened-production.md)
+- [`docs/deployment-level-4-high-assurance.md`](docs/deployment-level-4-high-assurance.md)
+
+The index routes to one operator guide per level, so each audience gets a concrete path from installation to configuration without being forced through controls they do not need yet.
+
 ## Documentation
 
 ### Getting Started
@@ -58,6 +83,7 @@ curl http://localhost:9090/metrics
 | Guide | Description |
 |-------|-------------|
 | [`docs/getting-started.md`](docs/getting-started.md) | Build, install, and run your first node |
+| [`docs/deployment-levels.md`](docs/deployment-levels.md) | Index for the graduated Linux deployment guides |
 | [`docs/deploying-applications.md`](docs/deploying-applications.md) | Deploy apps with manifests, security, and secrets |
 | [`docs/internal-mesh.md`](docs/internal-mesh.md) | East-West communication, namespaces, and service discovery |
 | [`docs/nats-setup.md`](docs/nats-setup.md) | NATS deployment, clustering, security, and monitoring |
@@ -116,6 +142,14 @@ Example configuration files are provided in the `config/` directory:
 - `config/dev.toml` — Minimal config for local development
 - `config/staging.toml` — Staging environment with moderate thresholds
 - `config/production.toml` — Production-ready config with security hardening
+
+Suggested mapping:
+
+- `config/dev.toml` -> Level 0
+- `config/staging.toml` -> Level 1
+- `config/production.toml` -> Levels 2 through 4
+
+Use [`docs/deployment-levels.md`](docs/deployment-levels.md) to choose the root-of-trust mode, admin/TLS posture, and peer-transfer posture that match your environment.
 
 ### Environment variables
 
@@ -310,3 +344,4 @@ See `INFRA_IMPL/39_API_GATEWAY.md` for the full specification.
 - The platform is optimized for **high-density multi-tenancy** and **fast startup**.
 - The NATS bus is the primary control plane; data plane traffic is handled by Pingora and the Supervisor.
 - On Linux 5.8+ with BTF, eBPF provides sub-millisecond failure detection. On other platforms, graceful fallback to userspace polling maintains full functionality.
+

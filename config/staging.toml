@@ -71,9 +71,24 @@ port_end = 19999
 # Bind app instances to loopback so staging traffic still goes through the
 # platform proxy/gateway by default.
 instance_bind_address = "127.0.0.1"
-# Key source: "generate" (ephemeral), "file" (from key_file), "env:VAR_NAME"
+# Key source: "generate" (ephemeral), "file" (from key_file), "command"
+# (from key_command argv), "vault-kv", "vault-transit", "aws-kms-hmac",
+# "env:VAR_NAME", or "passphrase-env:VAR_NAME"
 key_source = "generate"
 # key_file = "/etc/wasm-node/master.key"
+# key_command = ["/usr/local/bin/fetch-node-seal-key", "--node", "staging-node-0"]
+# key_vault_url = "https://vault.service:8200"
+# key_vault_token_env = "VAULT_TOKEN"
+# key_vault_mount = "secret"
+# key_vault_path = "wasm-node/seal-key"
+# key_vault_field = "key"
+# key_vault_transit_mount = "transit"
+# key_vault_transit_key = "wasm-node-seal"
+# key_vault_transit_context = "staging-node-0"
+# key_aws_kms_region = "eu-west-3"
+# key_aws_kms_endpoint = "http://127.0.0.1:4566" # optional local/mock override
+# key_aws_kms_key_id = "arn:aws:kms:eu-west-3:123456789012:key/..."
+# key_aws_kms_context = "staging-node-0"
 # Optional Wasmtime code cache directory for faster repeated compilation/startup.
 # cache_directory = "/var/cache/wasm-node/wasmtime"
 # Optional Ed25519 public key (32-byte hex) for signed upgrade metadata.

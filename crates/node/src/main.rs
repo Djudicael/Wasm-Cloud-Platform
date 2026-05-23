@@ -40,11 +40,369 @@ fn load_kek_from_env_spec(spec: &str) -> anyhow::Result<secrets::crypto::Symmetr
     symm_key_from_exact_32(raw.as_bytes(), &format!("environment variable {var_name}"))
 }
 
+fn load_passphrase_from_env_spec(spec: &str) -> anyhow::Result<String> {
+    let var_name = spec
+        .strip_prefix("passphrase-env:")
+        .ok_or_else(|| anyhow::anyhow!("invalid passphrase env key source: {spec}"))?;
+    let raw = std::env::var(var_name)
+        .map_err(|_| anyhow::anyhow!("environment variable {var_name} is not set"))?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        anyhow::bail!("environment variable {var_name} must not be empty");
+    }
+    Ok(raw)
+}
+
+fn load_kek_from_command(command: &[String]) -> anyhow::Result<secrets::crypto::SymmetricKey> {
+    if command.is_empty() {
+        anyhow::bail!("runtime.key_source=command requires runtime.key_command");
+    }
+    let mut process = std::process::Command::new(&command[0]);
+    if command.len() > 1 {
+        process.args(&command[1..]);
+    }
+    let output = process
+        .output()
+        .map_err(|e| anyhow::anyhow!("failed to run key command {}: {e}", command[0]))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!(
+            "key command {} failed with status {}: {}",
+            command[0],
+            output
+                .status
+                .code()
+                .map(|code| code.to_string())
+                .unwrap_or_else(|| "terminated by signal".to_string()),
+            stderr.trim()
+        );
+    }
+
+    if output.stdout.len() == 32 {
+        tracing::info!(command = %command[0], "loaded KEK seal key from command output");
+        return symm_key_from_exact_32(&output.stdout, &format!("key command {}", command[0]));
+    }
+
+    let stdout = String::from_utf8(output.stdout).map_err(|e| {
+        anyhow::anyhow!("key command {} produced non-UTF-8 output: {e}", command[0])
+    })?;
+    let trimmed = stdout.trim();
+    if trimmed.len() == 64 {
+        let decoded = hex::decode(trimmed).map_err(|e| {
+            anyhow::anyhow!(
+                "failed to decode hex KEK from key command {}: {e}",
+                command[0]
+            )
+        })?;
+        tracing::info!(command = %command[0], "loaded KEK seal key from hex command output");
+        return symm_key_from_exact_32(&decoded, &format!("key command {}", command[0]));
+    }
+
+    symm_key_from_exact_32(trimmed.as_bytes(), &format!("key command {}", command[0]))
+}
+
+fn load_kek_from_vault_kv(
+    runtime: &common::config::RuntimeSection,
+) -> anyhow::Result<secrets::crypto::SymmetricKey> {
+    let url = runtime
+        .key_vault_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            anyhow::anyhow!("runtime.key_source=vault-kv requires runtime.key_vault_url")
+        })?;
+    let token_env = runtime
+        .key_vault_token_env
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            anyhow::anyhow!("runtime.key_source=vault-kv requires runtime.key_vault_token_env")
+        })?;
+    let secret_path = runtime
+        .key_vault_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            anyhow::anyhow!("runtime.key_source=vault-kv requires runtime.key_vault_path")
+        })?;
+    let token = std::env::var(token_env)
+        .map_err(|_| anyhow::anyhow!("environment variable {token_env} is not set"))?;
+    let mount = runtime.key_vault_mount.trim();
+    let field = runtime.key_vault_field.trim();
+    let request_url = format!(
+        "{}/v1/{}/data/{}",
+        url.trim_end_matches('/'),
+        mount,
+        secret_path.trim_start_matches('/')
+    );
+    let response = ureq::get(&request_url)
+        .set("X-Vault-Token", token.trim())
+        .timeout(std::time::Duration::from_secs(5))
+        .call()
+        .map_err(|e| anyhow::anyhow!("failed to fetch seal key from Vault KV: {e}"))?;
+    let body = response
+        .into_string()
+        .map_err(|e| anyhow::anyhow!("failed to read Vault KV response body: {e}"))?;
+    let json: serde_json::Value = serde_json::from_str(&body)
+        .map_err(|e| anyhow::anyhow!("failed to parse Vault KV response JSON: {e}"))?;
+    let key_value = json
+        .get("data")
+        .and_then(|value| value.get("data"))
+        .and_then(|value| value.get(field))
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "Vault KV response did not contain string field '{}' under data.data",
+                field
+            )
+        })?;
+    if key_value.len() == 64 {
+        let decoded = hex::decode(key_value).map_err(|e| {
+            anyhow::anyhow!("failed to decode hex KEK from Vault KV field {field}: {e}")
+        })?;
+        tracing::info!(
+            mount = mount,
+            path = secret_path,
+            field = field,
+            "loaded KEK seal key from Vault KV"
+        );
+        return symm_key_from_exact_32(&decoded, &format!("Vault KV field {field}"));
+    }
+    tracing::info!(
+        mount = mount,
+        path = secret_path,
+        field = field,
+        "loaded KEK seal key from Vault KV"
+    );
+    symm_key_from_exact_32(key_value.as_bytes(), &format!("Vault KV field {field}"))
+}
+
+fn load_kek_from_vault_transit(
+    runtime: &common::config::RuntimeSection,
+) -> anyhow::Result<secrets::crypto::SymmetricKey> {
+    let url = runtime
+        .key_vault_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            anyhow::anyhow!("runtime.key_source=vault-transit requires runtime.key_vault_url")
+        })?;
+    let token_env = runtime
+        .key_vault_token_env
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            anyhow::anyhow!("runtime.key_source=vault-transit requires runtime.key_vault_token_env")
+        })?;
+    let transit_key = runtime
+        .key_vault_transit_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "runtime.key_source=vault-transit requires runtime.key_vault_transit_key"
+            )
+        })?;
+    let context = runtime
+        .key_vault_transit_context
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "runtime.key_source=vault-transit requires runtime.key_vault_transit_context"
+            )
+        })?;
+    let token = std::env::var(token_env)
+        .map_err(|_| anyhow::anyhow!("environment variable {token_env} is not set"))?;
+    let mount = runtime.key_vault_transit_mount.trim();
+    let request_url = format!(
+        "{}/v1/{}/hmac/{}/sha2-256",
+        url.trim_end_matches('/'),
+        mount,
+        transit_key
+    );
+    let input = {
+        use base64::Engine as _;
+        base64::engine::general_purpose::STANDARD.encode(context.as_bytes())
+    };
+    let response = ureq::post(&request_url)
+        .set("X-Vault-Token", token.trim())
+        .timeout(std::time::Duration::from_secs(5))
+        .send_json(serde_json::json!({ "input": input }))
+        .map_err(|e| anyhow::anyhow!("failed to derive seal key from Vault transit: {e}"))?;
+    let body = response
+        .into_string()
+        .map_err(|e| anyhow::anyhow!("failed to read Vault transit response body: {e}"))?;
+    let json: serde_json::Value = serde_json::from_str(&body)
+        .map_err(|e| anyhow::anyhow!("failed to parse Vault transit response JSON: {e}"))?;
+    let hmac = json
+        .get("data")
+        .and_then(|value| value.get("hmac"))
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| anyhow::anyhow!("Vault transit response did not contain data.hmac"))?;
+    let hex_hmac = hmac
+        .rsplit(':')
+        .next()
+        .filter(|value| value.len() == 64)
+        .ok_or_else(|| anyhow::anyhow!("Vault transit hmac must end with a 64-char hex digest"))?;
+    let derived = hex::decode(hex_hmac)
+        .map_err(|e| anyhow::anyhow!("failed to decode Vault transit hmac hex: {e}"))?;
+    tracing::info!(
+        mount = mount,
+        key = transit_key,
+        "derived KEK seal key from Vault transit"
+    );
+    symm_key_from_exact_32(&derived, "Vault transit hmac")
+}
+
+async fn derive_kek_from_aws_kms_hmac_async(
+    runtime: &common::config::RuntimeSection,
+) -> anyhow::Result<secrets::crypto::SymmetricKey> {
+    let region = runtime
+        .key_aws_kms_region
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            anyhow::anyhow!("runtime.key_source=aws-kms-hmac requires runtime.key_aws_kms_region")
+        })?;
+    let key_id = runtime
+        .key_aws_kms_key_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            anyhow::anyhow!("runtime.key_source=aws-kms-hmac requires runtime.key_aws_kms_key_id")
+        })?;
+    let context = runtime
+        .key_aws_kms_context
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            anyhow::anyhow!("runtime.key_source=aws-kms-hmac requires runtime.key_aws_kms_context")
+        })?;
+
+    let mut loader = aws_config::defaults(aws_config::BehaviorVersion::latest())
+        .region(aws_config::Region::new(region.to_string()));
+    if let Some(endpoint) = runtime.key_aws_kms_endpoint.as_deref() {
+        let endpoint = endpoint.trim();
+        if !endpoint.is_empty() {
+            loader = loader.endpoint_url(endpoint.to_string());
+        }
+    }
+    let config = loader.load().await;
+    let client = aws_sdk_kms::Client::new(&config);
+    let response = client
+        .generate_mac()
+        .key_id(key_id)
+        .mac_algorithm(aws_sdk_kms::types::MacAlgorithmSpec::HmacSha256)
+        .message(aws_sdk_kms::primitives::Blob::new(
+            context.as_bytes().to_vec(),
+        ))
+        .send()
+        .await
+        .map_err(|e| anyhow::anyhow!("failed to derive seal key from AWS KMS GenerateMac: {e}"))?;
+    let mac = response
+        .mac
+        .ok_or_else(|| anyhow::anyhow!("AWS KMS GenerateMac response did not contain mac bytes"))?;
+    tracing::info!(
+        region = region,
+        key_id = key_id,
+        "derived KEK seal key from AWS KMS HMAC"
+    );
+    symm_key_from_exact_32(mac.as_ref(), "AWS KMS GenerateMac")
+}
+
+fn load_kek_from_aws_kms_hmac(
+    runtime: &common::config::RuntimeSection,
+) -> anyhow::Result<secrets::crypto::SymmetricKey> {
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        tokio::task::block_in_place(|| handle.block_on(derive_kek_from_aws_kms_hmac_async(runtime)))
+    } else {
+        let runtime_handle = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| anyhow::anyhow!("failed to build tokio runtime for AWS KMS: {e}"))?;
+        runtime_handle.block_on(derive_kek_from_aws_kms_hmac_async(runtime))
+    }
+}
+
 fn seal_kek_blob(
     seal_key: &secrets::crypto::SymmetricKey,
     kek_bytes: &[u8],
 ) -> anyhow::Result<Vec<u8>> {
     Ok(secrets::crypto::encrypt(seal_key, kek_bytes)?.0)
+}
+
+const SECRET_TRANSPORT_KEY_META_KEY: &str = "secrets.transport_private_key";
+const SEAL_KEY_DERIVATION_SALT_META_KEY: &str = "secrets.seal_key_derivation_salt";
+
+fn load_or_create_seal_key_derivation_salt(store: &storage::Store) -> anyhow::Result<Vec<u8>> {
+    if let Some(existing) = store.load_meta(SEAL_KEY_DERIVATION_SALT_META_KEY)? {
+        return hex::decode(existing.trim())
+            .map_err(|e| anyhow::anyhow!("failed to decode persisted seal-key salt: {e}"));
+    }
+
+    let salt = common::auth::AuthConfig::generate_token().into_bytes();
+    store.save_meta(SEAL_KEY_DERIVATION_SALT_META_KEY, &hex::encode(&salt))?;
+    tracing::info!("initialized seal-key derivation salt in redb");
+    Ok(salt)
+}
+
+fn derive_seal_key_from_passphrase(
+    passphrase: &str,
+    salt: &[u8],
+) -> anyhow::Result<secrets::crypto::SymmetricKey> {
+    let mut derived = [0u8; 32];
+    argon2::Argon2::default()
+        .hash_password_into(passphrase.as_bytes(), salt, &mut derived)
+        .map_err(|e| anyhow::anyhow!("failed to derive seal key from passphrase: {e}"))?;
+    Ok(secrets::crypto::SymmetricKey::from_bytes(derived))
+}
+
+fn resolve_persisted_seal_key(
+    store: &storage::Store,
+    runtime: &common::config::RuntimeSection,
+) -> anyhow::Result<Option<secrets::crypto::SymmetricKey>> {
+    match runtime.key_source.as_str() {
+        "file" => {
+            let key_file = runtime
+                .key_file
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("runtime.key_source=file requires runtime.key_file"))?;
+
+            let bytes = std::fs::read(key_file)
+                .map_err(|e| anyhow::anyhow!("failed to read key file {}: {}", key_file, e))?;
+            tracing::info!(path = %key_file, "loaded KEK seal key from key file");
+            let seal_key = symm_key_from_exact_32(&bytes, &format!("key file {key_file}"))?;
+            Ok(Some(seal_key))
+        }
+        "command" => Ok(Some(load_kek_from_command(&runtime.key_command)?)),
+        "vault-kv" => Ok(Some(load_kek_from_vault_kv(runtime)?)),
+        "vault-transit" => Ok(Some(load_kek_from_vault_transit(runtime)?)),
+        "aws-kms-hmac" => Ok(Some(load_kek_from_aws_kms_hmac(runtime)?)),
+        spec if spec.starts_with("env:") => Ok(Some(load_kek_from_env_spec(spec)?)),
+        spec if spec.starts_with("passphrase-env:") => {
+            let passphrase = load_passphrase_from_env_spec(spec)?;
+            let salt = load_or_create_seal_key_derivation_salt(store)?;
+            let seal_key = derive_seal_key_from_passphrase(&passphrase, &salt)?;
+            tracing::info!("derived KEK seal key from operator-provided passphrase env source");
+            Ok(Some(seal_key))
+        }
+        "generate" => Ok(None),
+        other => anyhow::bail!(
+            "unsupported runtime.key_source '{}'; supported values are 'generate', 'file', 'command', 'vault-kv', 'vault-transit', 'aws-kms-hmac', 'env:VAR_NAME', or 'passphrase-env:VAR_NAME'",
+            other
+        ),
+    }
 }
 
 fn load_or_create_persisted_kek(
@@ -76,6 +434,38 @@ fn load_or_create_persisted_kek(
             store.save_kek(&sealed)?;
             tracing::info!("initialized sealed KEK in redb from configured key source");
             Ok(initial_kek)
+        }
+    }
+}
+
+fn load_or_create_persisted_secret_transport_keypair(
+    store: &storage::Store,
+    seal_key: &secrets::crypto::SymmetricKey,
+) -> anyhow::Result<secrets::BootstrapKeyPair> {
+    match store.load_meta(SECRET_TRANSPORT_KEY_META_KEY)? {
+        Some(sealed_hex) => {
+            let sealed_blob = hex::decode(sealed_hex.trim()).map_err(|e| {
+                anyhow::anyhow!("failed to decode sealed secret transport key from redb: {e}")
+            })?;
+            let plaintext =
+                secrets::crypto::decrypt(seal_key, &secrets::crypto::EncryptedBlob(sealed_blob))?;
+            if plaintext.len() != 32 {
+                anyhow::bail!(
+                    "persisted sealed secret transport key must contain exactly 32 bytes, found {} bytes",
+                    plaintext.len()
+                );
+            }
+            let mut secret_bytes = [0u8; 32];
+            secret_bytes.copy_from_slice(&plaintext);
+            tracing::info!("loaded sealed node secret transport key from redb");
+            Ok(secrets::BootstrapKeyPair::from_secret_bytes(secret_bytes))
+        }
+        None => {
+            let keypair = secrets::BootstrapKeyPair::generate();
+            let sealed_blob = secrets::crypto::encrypt(seal_key, &keypair.secret_bytes())?;
+            store.save_meta(SECRET_TRANSPORT_KEY_META_KEY, &hex::encode(sealed_blob.0))?;
+            tracing::info!("initialized sealed node secret transport key in redb");
+            Ok(keypair)
         }
     }
 }
@@ -327,27 +717,12 @@ fn load_kek_from_config(
     store: &storage::Store,
     runtime: &common::config::RuntimeSection,
 ) -> anyhow::Result<secrets::crypto::SymmetricKey> {
-    match runtime.key_source.as_str() {
-        "file" => {
-            let key_file = runtime
-                .key_file
-                .as_ref()
-                .ok_or_else(|| anyhow::anyhow!("runtime.key_source=file requires runtime.key_file"))?;
-
-            let bytes = std::fs::read(key_file)
-                .map_err(|e| anyhow::anyhow!("failed to read key file {}: {}", key_file, e))?;
-            tracing::info!(path = %key_file, "loaded KEK seal key from key file");
-            let seal_key = symm_key_from_exact_32(&bytes, &format!("key file {key_file}"))?;
-            load_or_create_persisted_kek(store, &seal_key)
-        }
-        spec if spec.starts_with("env:") => {
-            let seal_key = load_kek_from_env_spec(spec)?;
-            load_or_create_persisted_kek(store, &seal_key)
-        }
-        "generate" => {
+    match resolve_persisted_seal_key(store, runtime)? {
+        Some(seal_key) => load_or_create_persisted_kek(store, &seal_key),
+        None => {
             if let Ok(Some(_persisted_kek)) = store.load_kek() {
                 anyhow::bail!(
-                    "persisted KEK detected in redb; key_source=generate cannot unlock or replace persisted secret state safely. Configure runtime.key_source=file or env:VAR_NAME to keep existing secrets"
+                    "persisted KEK detected in redb; key_source=generate cannot unlock or replace persisted secret state safely. Configure runtime.key_source=file, command, vault-kv, vault-transit, aws-kms-hmac, env:VAR_NAME, or passphrase-env:VAR_NAME to keep existing secrets"
                 );
             }
             tracing::warn!(
@@ -355,10 +730,28 @@ fn load_kek_from_config(
             );
             Ok(secrets::crypto::SymmetricKey::generate())
         }
-        other => anyhow::bail!(
-            "unsupported runtime.key_source '{}'; supported values are 'generate', 'file', or 'env:VAR_NAME'",
-            other
-        ),
+    }
+}
+
+fn load_secret_transport_keypair_from_config(
+    store: &storage::Store,
+    runtime: &common::config::RuntimeSection,
+) -> anyhow::Result<secrets::BootstrapKeyPair> {
+    match resolve_persisted_seal_key(store, runtime)? {
+        Some(seal_key) => load_or_create_persisted_secret_transport_keypair(store, &seal_key),
+        None => {
+            if let Ok(Some(_persisted_transport_key)) =
+                store.load_meta(SECRET_TRANSPORT_KEY_META_KEY)
+            {
+                anyhow::bail!(
+                    "persisted secret transport key detected in redb; key_source=generate cannot unlock or replace transport identity safely. Configure runtime.key_source=file, command, vault-kv, vault-transit, aws-kms-hmac, env:VAR_NAME, or passphrase-env:VAR_NAME"
+                );
+            }
+            tracing::warn!(
+                "key_source=generate: using ephemeral node secret transport key; encrypted ctl-to-node secret rotation will require fresh cluster registry data after restart"
+            );
+            Ok(secrets::BootstrapKeyPair::generate())
+        }
     }
 }
 
@@ -593,6 +986,45 @@ struct Args {
     #[arg(long)]
     key_file: Option<String>,
 
+    #[arg(long)]
+    key_command: Vec<String>,
+
+    #[arg(long)]
+    key_vault_url: Option<String>,
+
+    #[arg(long)]
+    key_vault_token_env: Option<String>,
+
+    #[arg(long)]
+    key_vault_mount: Option<String>,
+
+    #[arg(long)]
+    key_vault_path: Option<String>,
+
+    #[arg(long)]
+    key_vault_field: Option<String>,
+
+    #[arg(long)]
+    key_vault_transit_mount: Option<String>,
+
+    #[arg(long)]
+    key_vault_transit_key: Option<String>,
+
+    #[arg(long)]
+    key_vault_transit_context: Option<String>,
+
+    #[arg(long)]
+    key_aws_kms_region: Option<String>,
+
+    #[arg(long)]
+    key_aws_kms_endpoint: Option<String>,
+
+    #[arg(long)]
+    key_aws_kms_key_id: Option<String>,
+
+    #[arg(long)]
+    key_aws_kms_context: Option<String>,
+
     #[arg(long, env = "WASM_NODE_RUNTIME_CACHE_DIRECTORY")]
     runtime_cache_directory: Option<String>,
 
@@ -797,6 +1229,23 @@ async fn main() -> anyhow::Result<()> {
         port_end: Some(args.port_end),
         key_source: Some(args.key_source.clone()),
         key_file: args.key_file.clone(),
+        key_command: if args.key_command.is_empty() {
+            None
+        } else {
+            Some(args.key_command.clone())
+        },
+        key_vault_url: args.key_vault_url.clone(),
+        key_vault_token_env: args.key_vault_token_env.clone(),
+        key_vault_mount: args.key_vault_mount.clone(),
+        key_vault_path: args.key_vault_path.clone(),
+        key_vault_field: args.key_vault_field.clone(),
+        key_vault_transit_mount: args.key_vault_transit_mount.clone(),
+        key_vault_transit_key: args.key_vault_transit_key.clone(),
+        key_vault_transit_context: args.key_vault_transit_context.clone(),
+        key_aws_kms_region: args.key_aws_kms_region.clone(),
+        key_aws_kms_endpoint: args.key_aws_kms_endpoint.clone(),
+        key_aws_kms_key_id: args.key_aws_kms_key_id.clone(),
+        key_aws_kms_context: args.key_aws_kms_context.clone(),
         runtime_cache_directory: args.runtime_cache_directory.clone(),
         runtime_upgrade_signing_public_key: args.runtime_upgrade_signing_public_key.clone(),
         runtime_pooling_allocator: args.runtime_pooling_allocator,
@@ -1146,6 +1595,7 @@ async fn main() -> anyhow::Result<()> {
     //
     // Hardened key-source behavior:
     //   - `file`: load the raw 32-byte KEK from `runtime.key_file`
+    //   - `command`: execute `runtime.key_command` and read a raw 32-byte or 64-hex-char seal key
     //   - `env:VAR_NAME`: load the KEK from an environment variable
     //   - `generate`: create an ephemeral KEK for this process only
     //
@@ -1153,6 +1603,10 @@ async fn main() -> anyhow::Result<()> {
     // A legacy persisted KEK can be migrated into `runtime.key_file` when
     // `key_source=file` is configured and the file does not yet exist.
     let kek = load_kek_from_config(&store, &config.runtime)?;
+    let secret_transport_keypair = Arc::new(load_secret_transport_keypair_from_config(
+        &store,
+        &config.runtime,
+    )?);
     let artifact_transfer_authority = common::artifact_transfer::ArtifactTransferAuthority::derive(
         &config.node.node_id,
         kek.as_bytes(),
@@ -1206,6 +1660,7 @@ async fn main() -> anyhow::Result<()> {
         artifact_server_url: Some(artifact_server_url.clone()),
         protocol_version: Some(common::protocol::PROTOCOL_VERSION),
         binary_version: Some(common::protocol::BINARY_VERSION.to_string()),
+        secret_transport_public_key: Some(hex::encode(secret_transport_keypair.public_bytes())),
         accepting_requests: None,
         active_instances: Some(0),
         deployed_apps: Some(0),
@@ -1258,6 +1713,7 @@ async fn main() -> anyhow::Result<()> {
         artifact_transfer_authority: artifact_transfer_authority.clone(),
         upgrade_signing_public_key: config.runtime.upgrade_signing_public_key.clone(),
         secret_provider: secret_provider.clone(),
+        secret_transport_keypair: secret_transport_keypair.clone(),
         bootstrap_session: bootstrap_session.clone(),
         bus: bus.clone(),
         dns_webhook: proxy::dns_webhook::DnsWebhookManager::new(
@@ -3048,8 +3504,10 @@ mod tests {
         admin_tls_is_configured, admin_tls_material, artifact_server_url_is_loopback,
         bind_socket_address, build_artifact_server_url, build_proxy_advertised_address,
         collect_missing_node_stream_subscriptions, collect_unbacked_node_subscriptions,
-        load_kek_from_config, load_kek_from_env_spec, sanitize_subject, serve_admin_app,
-        subject_matches_filter, NODE_SUBSCRIPTION_SPECS,
+        load_kek_from_config, load_kek_from_env_spec, load_passphrase_from_env_spec,
+        load_secret_transport_keypair_from_config, sanitize_subject, serve_admin_app,
+        subject_matches_filter, NODE_SUBSCRIPTION_SPECS, SEAL_KEY_DERIVATION_SALT_META_KEY,
+        SECRET_TRANSPORT_KEY_META_KEY,
     };
     use common::auth::AuthConfig;
     use common::config::{AdminSection, NodeConfig, ProxySection, RuntimeSection};
@@ -3057,6 +3515,219 @@ mod tests {
     use messaging::events::Event;
     use storage::Store;
     use tempfile::{NamedTempFile, TempDir};
+
+    #[cfg(unix)]
+    fn shell_hex_key_command(hex_key: &str) -> Vec<String> {
+        vec![
+            "/bin/sh".to_string(),
+            "-lc".to_string(),
+            format!("printf '%s\\n' '{hex_key}'"),
+        ]
+    }
+
+    fn spawn_mock_vault_kv_server(
+        expected_token: &'static str,
+        field_name: &'static str,
+        field_value: &'static str,
+    ) -> (String, std::thread::JoinHandle<()>) {
+        use std::io::{Read, Write};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let handle = std::thread::spawn(move || {
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = Vec::new();
+                let mut buffer = [0u8; 1024];
+                loop {
+                    let read = stream.read(&mut buffer).unwrap();
+                    if read == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&buffer[..read]);
+                    if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                let request_text = String::from_utf8_lossy(&request);
+                let ok = request_text.contains(&format!("X-Vault-Token: {expected_token}\r\n"));
+                let body = if ok {
+                    serde_json::json!({
+                        "request_id": "test",
+                        "data": {
+                            "data": {
+                                field_name: field_value
+                            }
+                        }
+                    })
+                    .to_string()
+                } else {
+                    serde_json::json!({
+                        "errors": ["forbidden"]
+                    })
+                    .to_string()
+                };
+                let status = if ok {
+                    "HTTP/1.1 200 OK"
+                } else {
+                    "HTTP/1.1 403 Forbidden"
+                };
+                let response = format!(
+                    "{status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                stream.write_all(response.as_bytes()).unwrap();
+                stream.flush().unwrap();
+            }
+        });
+        (format!("http://{}", address), handle)
+    }
+
+    fn spawn_mock_vault_transit_server(
+        expected_token: &'static str,
+        expected_input: &'static str,
+        hmac_hex: &'static str,
+    ) -> (String, std::thread::JoinHandle<()>) {
+        use std::io::{Read, Write};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let handle = std::thread::spawn(move || {
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = Vec::new();
+                let mut buffer = [0u8; 1024];
+                loop {
+                    let read = stream.read(&mut buffer).unwrap();
+                    if read == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&buffer[..read]);
+                    if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                let header_end = request
+                    .windows(4)
+                    .position(|window| window == b"\r\n\r\n")
+                    .map(|index| index + 4)
+                    .unwrap();
+                let header_text = String::from_utf8_lossy(&request[..header_end]);
+                let content_length = header_text
+                    .lines()
+                    .find_map(|line| {
+                        line.strip_prefix("Content-Length:")
+                            .map(str::trim)
+                            .and_then(|value| value.parse::<usize>().ok())
+                    })
+                    .unwrap_or(0);
+                while request.len() < header_end + content_length {
+                    let read = stream.read(&mut buffer).unwrap();
+                    if read == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&buffer[..read]);
+                }
+                let request_text = String::from_utf8_lossy(&request);
+                let ok = request_text.contains(&format!("X-Vault-Token: {expected_token}\r\n"))
+                    && request_text.contains(expected_input);
+                let body = if ok {
+                    serde_json::json!({
+                        "data": {
+                            "hmac": format!("vault:v1:{hmac_hex}")
+                        }
+                    })
+                    .to_string()
+                } else {
+                    serde_json::json!({
+                        "errors": ["forbidden"]
+                    })
+                    .to_string()
+                };
+                let status = if ok {
+                    "HTTP/1.1 200 OK"
+                } else {
+                    "HTTP/1.1 403 Forbidden"
+                };
+                let response = format!(
+                    "{status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                stream.write_all(response.as_bytes()).unwrap();
+                stream.flush().unwrap();
+            }
+        });
+        (format!("http://{}", address), handle)
+    }
+
+    fn spawn_mock_aws_kms_server(
+        _expected_target: &'static str,
+        expected_key_id: String,
+        _expected_message_b64: String,
+        mac_b64: String,
+    ) -> (String, std::thread::JoinHandle<()>) {
+        use std::io::{Read, Write};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let handle = std::thread::spawn(move || {
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = Vec::new();
+                let mut buffer = [0u8; 1024];
+                loop {
+                    let read = stream.read(&mut buffer).unwrap();
+                    if read == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&buffer[..read]);
+                    if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                let header_end = request
+                    .windows(4)
+                    .position(|window| window == b"\r\n\r\n")
+                    .map(|index| index + 4)
+                    .unwrap();
+                let header_text = String::from_utf8_lossy(&request[..header_end]);
+                let content_length = header_text
+                    .lines()
+                    .find_map(|line| {
+                        line.strip_prefix("content-length:")
+                            .or_else(|| line.strip_prefix("Content-Length:"))
+                            .map(str::trim)
+                            .and_then(|value| value.parse::<usize>().ok())
+                    })
+                    .unwrap_or(0);
+                while request.len() < header_end + content_length {
+                    let read = stream.read(&mut buffer).unwrap();
+                    if read == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&buffer[..read]);
+                }
+                let _request_text = String::from_utf8_lossy(&request);
+                let body = serde_json::json!({
+                    "KeyId": expected_key_id,
+                    "MacAlgorithm": "HMAC_SHA_256",
+                    "Mac": mac_b64
+                })
+                .to_string();
+                let status = "HTTP/1.1 200 OK";
+                let response = format!(
+                    "{status}\r\nContent-Type: application/x-amz-json-1.1\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                stream.write_all(response.as_bytes()).unwrap();
+                stream.flush().unwrap();
+            }
+        });
+        (format!("http://{}", address), handle)
+    }
 
     const TEST_ADMIN_TLS_CERT_PEM: &str = r#"-----BEGIN CERTIFICATE-----
 MIIDJTCCAg2gAwIBAgIUAt2GkIIjTn/cu46520UjbQSS8FowDQYJKoZIhvcNAQEL
@@ -3402,6 +4073,7 @@ uoKQp7o8ET+CcFRg9vEG/uA=
                 Event::SecretUpdate {
                     app_id: config.id.clone(),
                     key: "API_KEY".to_string(),
+                    target_node_id: None,
                     secret: secrets::SecretTransportEnvelope::plaintext_utf8("value"),
                 },
             ),
@@ -3662,6 +4334,16 @@ uoKQp7o8ET+CcFRg9vEG/uA=
     }
 
     #[test]
+    fn test_load_passphrase_from_env_spec_rejects_empty_value() {
+        let _guard = ENV_TEST_LOCK.lock().unwrap();
+        let var_name = "WASM_NODE_TEST_EMPTY_PASSPHRASE";
+        std::env::set_var(var_name, "   ");
+        let err = load_passphrase_from_env_spec(&format!("passphrase-env:{var_name}")).unwrap_err();
+        assert!(err.to_string().contains("must not be empty"));
+        std::env::remove_var(var_name);
+    }
+
+    #[test]
     fn test_file_key_source_initializes_sealed_kek_from_key_file() {
         let temp_db = NamedTempFile::new().unwrap();
         let store = Store::open(temp_db.path()).unwrap();
@@ -3704,6 +4386,354 @@ uoKQp7o8ET+CcFRg9vEG/uA=
         let first = load_kek_from_config(&store, &runtime).unwrap();
         let second = load_kek_from_config(&store, &runtime).unwrap();
         assert_eq!(first.as_bytes(), second.as_bytes());
+    }
+
+    #[test]
+    fn test_file_key_source_initializes_and_reloads_secret_transport_keypair() {
+        let temp_db = NamedTempFile::new().unwrap();
+        let store = Store::open(temp_db.path()).unwrap();
+
+        let temp_dir = TempDir::new().unwrap();
+        let key_path = temp_dir.path().join("master.key");
+        let seal_key = [0x77u8; 32];
+        std::fs::write(&key_path, seal_key).unwrap();
+
+        let runtime = RuntimeSection {
+            key_source: "file".to_string(),
+            key_file: Some(key_path.to_string_lossy().to_string()),
+            ..Default::default()
+        };
+
+        let first = load_secret_transport_keypair_from_config(&store, &runtime).unwrap();
+        let second = load_secret_transport_keypair_from_config(&store, &runtime).unwrap();
+
+        assert_eq!(first.public_bytes(), second.public_bytes());
+        let persisted = store
+            .load_meta(SECRET_TRANSPORT_KEY_META_KEY)
+            .unwrap()
+            .unwrap();
+        assert!(!persisted.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_command_key_source_initializes_and_reloads_sealed_kek() {
+        let temp_db = NamedTempFile::new().unwrap();
+        let store = Store::open(temp_db.path()).unwrap();
+
+        let runtime = RuntimeSection {
+            key_source: "command".to_string(),
+            key_command: shell_hex_key_command(
+                "1111111111111111111111111111111111111111111111111111111111111111",
+            ),
+            ..Default::default()
+        };
+
+        let first = load_kek_from_config(&store, &runtime).unwrap();
+        let second = load_kek_from_config(&store, &runtime).unwrap();
+        assert_eq!(first.as_bytes(), second.as_bytes());
+
+        let persisted = store.load_kek().unwrap().unwrap();
+        assert!(persisted.len() > 32);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_command_key_source_initializes_and_reloads_secret_transport_keypair() {
+        let temp_db = NamedTempFile::new().unwrap();
+        let store = Store::open(temp_db.path()).unwrap();
+
+        let runtime = RuntimeSection {
+            key_source: "command".to_string(),
+            key_command: shell_hex_key_command(
+                "2222222222222222222222222222222222222222222222222222222222222222",
+            ),
+            ..Default::default()
+        };
+
+        let first = load_secret_transport_keypair_from_config(&store, &runtime).unwrap();
+        let second = load_secret_transport_keypair_from_config(&store, &runtime).unwrap();
+        assert_eq!(first.public_bytes(), second.public_bytes());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_command_key_source_rejects_nonzero_exit() {
+        let temp_db = NamedTempFile::new().unwrap();
+        let store = Store::open(temp_db.path()).unwrap();
+
+        let runtime = RuntimeSection {
+            key_source: "command".to_string(),
+            key_command: vec![
+                "/bin/sh".to_string(),
+                "-lc".to_string(),
+                "echo boom >&2; exit 7".to_string(),
+            ],
+            ..Default::default()
+        };
+
+        let err = match load_kek_from_config(&store, &runtime) {
+            Ok(_) => panic!("expected command key source failure"),
+            Err(err) => err,
+        };
+        assert!(err.to_string().contains("failed with status 7"));
+    }
+
+    #[test]
+    fn test_vault_kv_key_source_initializes_and_reloads_sealed_kek() {
+        let _guard = ENV_TEST_LOCK.lock().unwrap();
+        let temp_db = NamedTempFile::new().unwrap();
+        let store = Store::open(temp_db.path()).unwrap();
+        let token_env = "WASM_NODE_TEST_VAULT_TOKEN";
+        std::env::set_var(token_env, "vault-token-123");
+        let (vault_url, server) = spawn_mock_vault_kv_server(
+            "vault-token-123",
+            "key",
+            "3333333333333333333333333333333333333333333333333333333333333333",
+        );
+
+        let runtime = RuntimeSection {
+            key_source: "vault-kv".to_string(),
+            key_vault_url: Some(vault_url),
+            key_vault_token_env: Some(token_env.to_string()),
+            key_vault_mount: "secret".to_string(),
+            key_vault_path: Some("wasm-node/seal-key".to_string()),
+            key_vault_field: "key".to_string(),
+            ..Default::default()
+        };
+
+        let first = load_kek_from_config(&store, &runtime).unwrap();
+        let second = load_kek_from_config(&store, &runtime).unwrap();
+        assert_eq!(first.as_bytes(), second.as_bytes());
+        assert!(store.load_kek().unwrap().unwrap().len() > 32);
+
+        server.join().unwrap();
+        std::env::remove_var(token_env);
+    }
+
+    #[test]
+    fn test_vault_kv_key_source_initializes_and_reloads_secret_transport_keypair() {
+        let _guard = ENV_TEST_LOCK.lock().unwrap();
+        let temp_db = NamedTempFile::new().unwrap();
+        let store = Store::open(temp_db.path()).unwrap();
+        let token_env = "WASM_NODE_TEST_VAULT_TRANSPORT_TOKEN";
+        std::env::set_var(token_env, "vault-token-456");
+        let (vault_url, server) = spawn_mock_vault_kv_server(
+            "vault-token-456",
+            "key",
+            "4444444444444444444444444444444444444444444444444444444444444444",
+        );
+
+        let runtime = RuntimeSection {
+            key_source: "vault-kv".to_string(),
+            key_vault_url: Some(vault_url),
+            key_vault_token_env: Some(token_env.to_string()),
+            key_vault_mount: "secret".to_string(),
+            key_vault_path: Some("wasm-node/transport-key".to_string()),
+            key_vault_field: "key".to_string(),
+            ..Default::default()
+        };
+
+        let first = load_secret_transport_keypair_from_config(&store, &runtime).unwrap();
+        let second = load_secret_transport_keypair_from_config(&store, &runtime).unwrap();
+        assert_eq!(first.public_bytes(), second.public_bytes());
+
+        server.join().unwrap();
+        std::env::remove_var(token_env);
+    }
+
+    #[test]
+    fn test_vault_transit_key_source_initializes_and_reloads_sealed_kek() {
+        let _guard = ENV_TEST_LOCK.lock().unwrap();
+        let temp_db = NamedTempFile::new().unwrap();
+        let store = Store::open(temp_db.path()).unwrap();
+        let token_env = "WASM_NODE_TEST_VAULT_TRANSIT_TOKEN";
+        std::env::set_var(token_env, "vault-transit-token-123");
+        let (vault_url, server) = spawn_mock_vault_transit_server(
+            "vault-transit-token-123",
+            "\"input\":\"cHJvZC1ub2RlLTA=\"",
+            "5555555555555555555555555555555555555555555555555555555555555555",
+        );
+
+        let runtime = RuntimeSection {
+            key_source: "vault-transit".to_string(),
+            key_vault_url: Some(vault_url),
+            key_vault_token_env: Some(token_env.to_string()),
+            key_vault_transit_mount: "transit".to_string(),
+            key_vault_transit_key: Some("wasm-node-seal".to_string()),
+            key_vault_transit_context: Some("prod-node-0".to_string()),
+            ..Default::default()
+        };
+
+        let first = load_kek_from_config(&store, &runtime).unwrap();
+        let second = load_kek_from_config(&store, &runtime).unwrap();
+        assert_eq!(first.as_bytes(), second.as_bytes());
+        assert!(store.load_kek().unwrap().unwrap().len() > 32);
+
+        server.join().unwrap();
+        std::env::remove_var(token_env);
+    }
+
+    #[test]
+    fn test_vault_transit_key_source_initializes_and_reloads_secret_transport_keypair() {
+        let _guard = ENV_TEST_LOCK.lock().unwrap();
+        let temp_db = NamedTempFile::new().unwrap();
+        let store = Store::open(temp_db.path()).unwrap();
+        let token_env = "WASM_NODE_TEST_VAULT_TRANSIT_TRANSPORT_TOKEN";
+        std::env::set_var(token_env, "vault-transit-token-456");
+        let (vault_url, server) = spawn_mock_vault_transit_server(
+            "vault-transit-token-456",
+            "\"input\":\"cHJvZC1ub2RlLTE=\"",
+            "6666666666666666666666666666666666666666666666666666666666666666",
+        );
+
+        let runtime = RuntimeSection {
+            key_source: "vault-transit".to_string(),
+            key_vault_url: Some(vault_url),
+            key_vault_token_env: Some(token_env.to_string()),
+            key_vault_transit_mount: "transit".to_string(),
+            key_vault_transit_key: Some("wasm-node-seal".to_string()),
+            key_vault_transit_context: Some("prod-node-1".to_string()),
+            ..Default::default()
+        };
+
+        let first = load_secret_transport_keypair_from_config(&store, &runtime).unwrap();
+        let second = load_secret_transport_keypair_from_config(&store, &runtime).unwrap();
+        assert_eq!(first.public_bytes(), second.public_bytes());
+
+        server.join().unwrap();
+        std::env::remove_var(token_env);
+    }
+
+    #[test]
+    fn test_aws_kms_hmac_key_source_initializes_and_reloads_sealed_kek() {
+        use base64::Engine as _;
+
+        let _guard = ENV_TEST_LOCK.lock().unwrap();
+        let temp_db = NamedTempFile::new().unwrap();
+        let store = Store::open(temp_db.path()).unwrap();
+        std::env::set_var("AWS_ACCESS_KEY_ID", "test");
+        std::env::set_var("AWS_SECRET_ACCESS_KEY", "test");
+        std::env::set_var("AWS_EC2_METADATA_DISABLED", "true");
+        let context = "prod-node-0";
+        let message_b64 = base64::engine::general_purpose::STANDARD.encode(context.as_bytes());
+        let mac_b64 = base64::engine::general_purpose::STANDARD.encode([0x77u8; 32]);
+        let key_id = "arn:aws:kms:eu-west-3:123456789012:key/test";
+        let (endpoint, server) = spawn_mock_aws_kms_server(
+            "TrentService.GenerateMac",
+            key_id.to_string(),
+            message_b64,
+            mac_b64,
+        );
+
+        let runtime = RuntimeSection {
+            key_source: "aws-kms-hmac".to_string(),
+            key_aws_kms_region: Some("eu-west-3".to_string()),
+            key_aws_kms_endpoint: Some(endpoint),
+            key_aws_kms_key_id: Some(key_id.to_string()),
+            key_aws_kms_context: Some(context.to_string()),
+            ..Default::default()
+        };
+
+        let first = load_kek_from_config(&store, &runtime).unwrap();
+        let second = load_kek_from_config(&store, &runtime).unwrap();
+        assert_eq!(first.as_bytes(), second.as_bytes());
+        assert!(store.load_kek().unwrap().unwrap().len() > 32);
+
+        server.join().unwrap();
+        std::env::remove_var("AWS_ACCESS_KEY_ID");
+        std::env::remove_var("AWS_SECRET_ACCESS_KEY");
+        std::env::remove_var("AWS_EC2_METADATA_DISABLED");
+    }
+
+    #[test]
+    fn test_aws_kms_hmac_key_source_initializes_and_reloads_secret_transport_keypair() {
+        use base64::Engine as _;
+
+        let _guard = ENV_TEST_LOCK.lock().unwrap();
+        let temp_db = NamedTempFile::new().unwrap();
+        let store = Store::open(temp_db.path()).unwrap();
+        std::env::set_var("AWS_ACCESS_KEY_ID", "test");
+        std::env::set_var("AWS_SECRET_ACCESS_KEY", "test");
+        std::env::set_var("AWS_EC2_METADATA_DISABLED", "true");
+        let context = "prod-node-1";
+        let message_b64 = base64::engine::general_purpose::STANDARD.encode(context.as_bytes());
+        let mac_b64 = base64::engine::general_purpose::STANDARD.encode([0x88u8; 32]);
+        let key_id = "arn:aws:kms:eu-west-3:123456789012:key/test";
+        let (endpoint, server) = spawn_mock_aws_kms_server(
+            "TrentService.GenerateMac",
+            key_id.to_string(),
+            message_b64,
+            mac_b64,
+        );
+
+        let runtime = RuntimeSection {
+            key_source: "aws-kms-hmac".to_string(),
+            key_aws_kms_region: Some("eu-west-3".to_string()),
+            key_aws_kms_endpoint: Some(endpoint),
+            key_aws_kms_key_id: Some(key_id.to_string()),
+            key_aws_kms_context: Some(context.to_string()),
+            ..Default::default()
+        };
+
+        let first = load_secret_transport_keypair_from_config(&store, &runtime).unwrap();
+        let second = load_secret_transport_keypair_from_config(&store, &runtime).unwrap();
+        assert_eq!(first.public_bytes(), second.public_bytes());
+
+        server.join().unwrap();
+        std::env::remove_var("AWS_ACCESS_KEY_ID");
+        std::env::remove_var("AWS_SECRET_ACCESS_KEY");
+        std::env::remove_var("AWS_EC2_METADATA_DISABLED");
+    }
+
+    #[test]
+    fn test_passphrase_env_key_source_initializes_and_reloads_sealed_kek() {
+        let _guard = ENV_TEST_LOCK.lock().unwrap();
+        let temp_db = NamedTempFile::new().unwrap();
+        let store = Store::open(temp_db.path()).unwrap();
+
+        let var_name = "WASM_NODE_TEST_PASSPHRASE";
+        std::env::set_var(var_name, "correct horse battery staple");
+        let runtime = RuntimeSection {
+            key_source: format!("passphrase-env:{var_name}"),
+            key_file: None,
+            ..Default::default()
+        };
+
+        let first = load_kek_from_config(&store, &runtime).unwrap();
+        let second = load_kek_from_config(&store, &runtime).unwrap();
+        assert_eq!(first.as_bytes(), second.as_bytes());
+
+        let persisted = store.load_kek().unwrap().unwrap();
+        assert!(persisted.len() > 32);
+        let salt = store
+            .load_meta(SEAL_KEY_DERIVATION_SALT_META_KEY)
+            .unwrap()
+            .unwrap();
+        assert!(!salt.is_empty());
+
+        std::env::remove_var(var_name);
+    }
+
+    #[test]
+    fn test_passphrase_env_key_source_initializes_and_reloads_secret_transport_keypair() {
+        let _guard = ENV_TEST_LOCK.lock().unwrap();
+        let temp_db = NamedTempFile::new().unwrap();
+        let store = Store::open(temp_db.path()).unwrap();
+
+        let var_name = "WASM_NODE_TEST_TRANSPORT_PASSPHRASE";
+        std::env::set_var(var_name, "node transport passphrase");
+        let runtime = RuntimeSection {
+            key_source: format!("passphrase-env:{var_name}"),
+            key_file: None,
+            ..Default::default()
+        };
+
+        let first = load_secret_transport_keypair_from_config(&store, &runtime).unwrap();
+        let second = load_secret_transport_keypair_from_config(&store, &runtime).unwrap();
+        assert_eq!(first.public_bytes(), second.public_bytes());
+
+        std::env::remove_var(var_name);
     }
 
     #[test]

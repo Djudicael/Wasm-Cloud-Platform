@@ -72,6 +72,10 @@ pub enum Event {
     SecretUpdate {
         app_id: AppId,
         key: String,
+        /// Optional target node for per-node encrypted secret rotation.
+        /// When set, non-target nodes must ignore the event.
+        #[serde(default)]
+        target_node_id: Option<String>,
         /// Canonical secret transport envelope for ctl -> NATS -> node.
         secret: secrets::SecretTransportEnvelope,
     },
@@ -261,9 +265,16 @@ impl Event {
             } => {
                 format!("instance.dead.{}.{}", app_id.0, node_id)
             }
-            Event::SecretUpdate { app_id, .. } => {
-                format!("secrets.update.{}", app_id.0)
-            }
+            Event::SecretUpdate {
+                app_id,
+                target_node_id,
+                ..
+            } => match target_node_id {
+                Some(target_node_id) => {
+                    format!("secrets.update.{}.{}", app_id.0, target_node_id)
+                }
+                None => format!("secrets.update.{}", app_id.0),
+            },
             Event::ConfigUpdate { app_id, .. } => {
                 format!("config.update.{}", app_id.0)
             }

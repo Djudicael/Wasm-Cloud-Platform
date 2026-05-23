@@ -1,4 +1,5 @@
 use crate::Store;
+use common::billing::BillingRecord;
 use common::types::{AppConfig, AppId, ClusterNodeRecord, FuelQuota, MemoryPages};
 use redb::ReadableDatabase;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -247,6 +248,83 @@ fn test_cluster_node_registry_roundtrip() {
 
     let listed = store.list_cluster_nodes().unwrap();
     assert_eq!(listed, vec![node]);
+}
+
+#[test]
+fn test_billing_sequence_recovery_is_exact_node_local() {
+    let (store, _f) = make_store();
+
+    let records = [
+        BillingRecord {
+            seq: 7,
+            prev_hash: String::new(),
+            tenant_id: "tenant".to_string(),
+            app_id: "app:v1".to_string(),
+            instance_id: "inst-1".to_string(),
+            node_id: "node-1".to_string(),
+            timestamp_ms: 1,
+            fuel_consumed: 1,
+            fuel_quota: 10,
+            ram_bytes: 1,
+            wall_clock_ms: 1,
+            status_code: 200,
+            is_trap: false,
+            record_hash: "hash-node-1-7".to_string(),
+        },
+        BillingRecord {
+            seq: 11,
+            prev_hash: String::new(),
+            tenant_id: "tenant".to_string(),
+            app_id: "app:v1".to_string(),
+            instance_id: "inst-2".to_string(),
+            node_id: "prod-a".to_string(),
+            timestamp_ms: 2,
+            fuel_consumed: 1,
+            fuel_quota: 10,
+            ram_bytes: 1,
+            wall_clock_ms: 1,
+            status_code: 200,
+            is_trap: false,
+            record_hash: "hash-prod-a-11".to_string(),
+        },
+        BillingRecord {
+            seq: 3,
+            prev_hash: String::new(),
+            tenant_id: "tenant".to_string(),
+            app_id: "app:v1".to_string(),
+            instance_id: "inst-3".to_string(),
+            node_id: "edge-17".to_string(),
+            timestamp_ms: 3,
+            fuel_consumed: 1,
+            fuel_quota: 10,
+            ram_bytes: 1,
+            wall_clock_ms: 1,
+            status_code: 200,
+            is_trap: false,
+            record_hash: "hash-edge-17-3".to_string(),
+        },
+    ];
+
+    for record in &records {
+        store.write_billing_record(record).unwrap();
+    }
+
+    assert_eq!(store.get_billing_sequence().unwrap(), 11);
+    assert_eq!(store.get_billing_sequence_for_node("node-1").unwrap(), 7);
+    assert_eq!(store.get_billing_sequence_for_node("prod-a").unwrap(), 11);
+    assert_eq!(store.get_billing_sequence_for_node("edge-17").unwrap(), 3);
+    assert_eq!(
+        store.get_last_billing_hash_for_node("node-1").unwrap(),
+        "hash-node-1-7"
+    );
+    assert_eq!(
+        store.get_last_billing_hash_for_node("prod-a").unwrap(),
+        "hash-prod-a-11"
+    );
+    assert_eq!(
+        store.get_last_billing_hash_for_node("edge-17").unwrap(),
+        "hash-edge-17-3"
+    );
 }
 
 // ── SCHEMA MIGRATION TESTS ────────────────────────────────────────────────────

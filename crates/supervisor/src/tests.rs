@@ -2,8 +2,11 @@ use crate::instance::wait_for_ready;
 use crate::instance::{BillingInfo, ManagedInstance, PolicyCounterSnapshot};
 use crate::is_instance_bind_allowed;
 use crate::network::LocalServiceRegistry;
+use crate::pool::InstancePool;
 use crate::port_alloc::PortAllocator;
 use common::types::AppId;
+use proxy::{router::HostRouter, upstream::UpstreamRegistry};
+use runtime::executor::{ExecutionStats, PreparedModule};
 use runtime::policy_tracker::PolicyCounters;
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::atomic::Ordering;
@@ -11,7 +14,10 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 use std::time::Instant;
+use storage::Store;
+use tempfile::NamedTempFile;
 use tokio::net::TcpListener;
+use tokio::sync::{mpsc, oneshot};
 
 use crate::deployment::RollbackPolicy;
 use crate::Supervisor;
@@ -355,6 +361,96 @@ fn dummy_managed_instance_with_counters(counters: Arc<PolicyCounters>) -> Manage
     }
 }
 
+fn dummy_stats() -> ExecutionStats {
+    ExecutionStats {
+        instance_id: common::types::InstanceId::new(),
+        fuel_limit: 10,
+        fuel_consumed: 5,
+        ram_bytes: 1024,
+        wall_clock_ms: 1,
+        trap: None,
+        io_stats: runtime::limits::IoStats {
+            open_fds_peak: 0,
+            fs_bytes_written: 0,
+            net_egress_bytes: 0,
+            outbound_connections: 0,
+        },
+    }
+}
+
+fn make_supervisor_test_store() -> (Store, NamedTempFile) {
+    let file = NamedTempFile::new().unwrap();
+    let store = Store::open(file.path()).unwrap();
+    (store, file)
+}
+
+fn minimal_prepared_module(runtime: &runtime::WasmRuntime, app_id: &AppId) -> Arc<PreparedModule> {
+    let wasm_bytes = wat::parse_str(
+        r#"
+        (component
+            (core module $m
+                (memory (export "memory") 1)
+                (func (export "run")
+                    nop
+                )
+            )
+            (core instance $i (instantiate $m))
+            (type $run-func (func))
+            (func $run (type $run-func) (canon lift (core func $i "run")))
+            (instance $cli-run
+                (export "run" (func $run))
+            )
+            (export "wasi:cli/run@0.2.6" (instance $cli-run))
+        )
+        "#,
+    )
+    .unwrap();
+    let artifact = runtime.compile(&wasm_bytes).unwrap();
+    Arc::new(
+        runtime
+            .prepare(
+                &artifact,
+                common::types::AppConfig::default_for(app_id.clone()),
+            )
+            .unwrap(),
+    )
+}
+
+async fn make_test_supervisor(
+    bind_addr: IpAddr,
+    port_start: u16,
+    port_end: u16,
+) -> (
+    Arc<Supervisor>,
+    Arc<PortAllocator>,
+    Arc<UpstreamRegistry>,
+    Arc<LocalServiceRegistry>,
+) {
+    let (store, _db) = make_supervisor_test_store();
+    let runtime = runtime::WasmRuntime::new().unwrap();
+    let port_alloc = Arc::new(PortAllocator::new(bind_addr, port_start, port_end));
+    let upstream_registry = Arc::new(UpstreamRegistry::new());
+    let service_registry = Arc::new(LocalServiceRegistry::default());
+    let host_router = Arc::new(HostRouter::default());
+    let (event_tx, _event_rx) = mpsc::channel(8);
+
+    let supervisor = Supervisor::new(
+        store,
+        "test-node".to_string(),
+        runtime,
+        port_alloc.clone(),
+        upstream_registry.clone(),
+        host_router,
+        service_registry.clone(),
+        9080,
+        Arc::new(|_, _| Vec::new()),
+        event_tx,
+        None,
+    );
+
+    (supervisor, port_alloc, upstream_registry, service_registry)
+}
+
 #[test]
 fn test_policy_metrics_export_flushes_deltas_once() {
     let policy_metrics = metrics::exporter::Metrics::new().policy;
@@ -458,4 +554,110 @@ fn test_supervisor_command_debug_format() {
     let debug_str = format!("{:?}", cmd);
     assert!(debug_str.contains("PruneIdleInstances"));
     assert!(debug_str.contains("60"));
+}
+
+#[tokio::test]
+async fn test_shutdown_timeout_keeps_stale_listener_fenced_until_reap() {
+    let bind_ip = IpAddr::V4(Ipv4Addr::LOCALHOST);
+    let port = 32123;
+    let addr = std::net::SocketAddr::new(bind_ip, port);
+    let app_id = AppId::new("test-app", "v1");
+    let instance_id = common::types::InstanceId::new();
+
+    let (supervisor, port_alloc, upstream_registry, service_registry) =
+        make_test_supervisor(bind_ip, port, port).await;
+
+    let runtime = runtime::WasmRuntime::new().unwrap();
+    let prepared = minimal_prepared_module(&runtime, &app_id);
+
+    let listener = TcpListener::bind(addr).await.unwrap();
+    let allocated_port = port_alloc.allocate().unwrap();
+    assert_eq!(allocated_port, port);
+
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    let task = tokio::spawn(async move {
+        let _listener = listener;
+        let _ = shutdown_rx.await;
+        tokio::time::sleep(Duration::from_millis(75)).await;
+        dummy_stats()
+    });
+
+    upstream_registry.add(&app_id, addr).await;
+    service_registry.register(&app_id, addr).await;
+    service_registry
+        .bind_source_port(port, app_id.clone())
+        .await;
+
+    {
+        let mut pools = supervisor.pools.write().await;
+        pools.insert(
+            app_id.0.clone(),
+            InstancePool {
+                config: common::types::AppConfig::default_for(app_id.clone()),
+                prepared,
+                instances: vec![ManagedInstance {
+                    id: instance_id.clone(),
+                    app_id: app_id.clone(),
+                    addr,
+                    state: common::types::InstanceState::Ready { addr },
+                    spawned_at: Instant::now(),
+                    last_request_at: Instant::now(),
+                    request_count: 0,
+                    task: Some(task),
+                    shutdown_tx: Some(shutdown_tx),
+                    billing_info: BillingInfo {
+                        tenant_id: "tenant-a".to_string(),
+                        fuel_quota: 100,
+                        ram_bytes: 2048,
+                    },
+                    tid: None,
+                    policy_counters: None,
+                    last_policy_export: PolicyCounterSnapshot::default(),
+                }],
+            },
+        );
+    }
+
+    let err = supervisor
+        .kill_instance_gracefully(
+            &app_id,
+            &instance_id,
+            Duration::ZERO,
+            Duration::from_millis(5),
+        )
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("shutdown timed out"));
+
+    assert_eq!(upstream_registry.count(&app_id).await, 0);
+    assert!(service_registry
+        .resolve("default", "test-app")
+        .await
+        .is_none());
+    assert!(tokio::net::TcpStream::connect(addr).await.is_ok());
+    assert!(port_alloc.allocate().is_err());
+
+    {
+        let pools = supervisor.pools.read().await;
+        let pool = pools.get(&app_id.0).unwrap();
+        assert_eq!(pool.active_count(), 0);
+        assert_eq!(pool.instance_count(), 1);
+        assert!(matches!(
+            pool.instances[0].state,
+            common::types::InstanceState::ExitTimedOut { .. }
+        ));
+    }
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    supervisor.reap_finished_shutdowns().await;
+
+    let reused_port = port_alloc.allocate().unwrap();
+    assert_eq!(reused_port, port);
+    assert!(tokio::net::TcpStream::connect(addr).await.is_err());
+
+    {
+        let pools = supervisor.pools.read().await;
+        let pool = pools.get(&app_id.0).unwrap();
+        assert_eq!(pool.instance_count(), 0);
+    }
 }

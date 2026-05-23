@@ -141,6 +141,14 @@ pub struct NodeProcess {
 }
 
 impl NodeProcess {
+    pub fn port_start(&self) -> u16 {
+        self.port_start
+    }
+
+    pub fn port_end(&self) -> u16 {
+        self.port_end
+    }
+
     /// Start a wasm-node process with the given configuration.
     ///
     /// The process is spawned with `Stdio::null()` for stdout to prevent

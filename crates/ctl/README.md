@@ -76,7 +76,7 @@ This crate produces the `wasm-ctl` binary. It is not intended to be used as a li
 
 ## Security Considerations
 
-- **Secrets sent in plaintext over NATS** — Secret values are transmitted unencrypted. The codebase includes a `TODO` to encrypt with the cluster key, but this has not been implemented. An attacker with NATS access can read all secrets.
+- **Secret rotation now uses per-node ciphertext, not plaintext fanout** — `wasm-ctl secrets set` fetches the authoritative cluster node registry and encrypts one `SecretUpdate` event per active node using that node's advertised X25519 transport public key. Operators should still protect NATS access because metadata such as app IDs, secret keys, and target node IDs remain visible.
 - **Auth token silently skipped on invalid characters** — If a token contains characters invalid for HTTP headers, the token is dropped without warning. This can cause requests to be sent without authentication, potentially exposing admin endpoints.
 - **No certificate pinning or TLS verification options** — The HTTP client does not expose options for custom CA certificates or certificate pinning, making it difficult to secure admin API communication in restricted environments.
 ```

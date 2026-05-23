@@ -6,6 +6,24 @@ Main binary crate for the Wasm Cloud Platform node.
 
 `wasm-node` is the core runtime of the Wasm Cloud Platform. It connects to NATS for cluster communication, deploys and manages Wasm applications, routes HTTP traffic via an embedded Pingora proxy, provides an Admin API built with Axum, runs an eBPF monitor for observability, handles cluster bootstrap and leader election, orchestrates rolling upgrades, manages database connectivity (PostgreSQL), supports hot-reloadable configuration, and coordinates graceful shutdown.
 
+This binary targets Linux production environments. Windows is not a production target for the platform.
+
+## Current Deployment Guidance
+
+For the current audited deployment posture, use the graded operator guide index:
+
+- [`docs/deployment-levels.md`](../../docs/deployment-levels.md)
+
+That index points to one separate operator file per level:
+
+- local development: Level 0
+- internal single-node deployment: Level 1
+- first real Linux production rollout: Level 2
+- serious multi-node production: Level 3
+- strongest currently supported posture: Level 4
+
+For current production guidance, prefer that document over older historical notes in this file.
+
 ## Architecture
 
 ```
@@ -57,7 +75,7 @@ This crate produces the `wasm-node` binary. It is not intended to be used as a l
 
 - **`main()`** — Single monolithic entry point (~2100 lines) handling all subsystem initialization and event loops.
 
-## Known Issues & Improvements
+## Historical Issues & Improvements
 
 ### Concurrency & Deadlocks
 
@@ -69,7 +87,7 @@ This crate produces the `wasm-node` binary. It is not intended to be used as a l
 - **Leader election logic inverted** — Multiple nodes respond as leader instead of just the smallest node ID, causing split-brain scenarios.
 - **Rolling upgrade cluster node list always returns only `self.node_id`** — The ordering/selection logic is broken, preventing proper upgrade orchestration.
 - **`WaitForPredecessor` upgrade action not handled** — The action is logged and dropped, leaving upgrades in an inconsistent state.
-- **`bootstrap_keypair` is `None` for existing nodes** — Nodes that rejoin the cluster cannot receive encrypted secrets.
+- **Steady-state secret transport key now persists separately from bootstrap state** — Existing nodes now advertise a dedicated X25519 secret-transport public key and can receive encrypted `SecretUpdate` events after restart.
 
 ### Shutdown & Lifecycle
 
@@ -84,7 +102,7 @@ This crate produces the `wasm-node` binary. It is not intended to be used as a l
 ### Configuration & Routing
 
 - **`NodeLoad` handler hardcodes supervisor address to `127.0.0.1:9000`** — The supervisor address should be configurable.
-- **`SecretUpdate` handler stores encrypted value without decryption** — Secrets are stored in their encrypted form, making them unreadable by applications.
+- **`SecretUpdate` now decrypts targeted node transport ciphertext before persistence** — Secret rotation no longer corrupts local secret storage by writing transport ciphertext directly into the bundle store.
 - **DNS stub resolves ALL `*.internal` domains to `127.0.0.1`** — No allowlist is enforced; any internal domain resolves to loopback.
 
 ### Code Quality
@@ -103,6 +121,6 @@ This crate produces the `wasm-node` binary. It is not intended to be used as a l
 - **`admin/rebuild` endpoint deletes database without confirmation** — A single API call can destroy all persistent state with no safeguard. Add a confirmation mechanism or two-step deletion.
 - **`admin/gc/force` kills instances for ALL apps** — Including currently deployed applications, causing unintended downtime. Scope to only orphaned or stopped instances.
 - **DNS stub resolves ALL `*.internal` domains to `127.0.0.1`** — Without an allowlist, this can be exploited for DNS rebinding or to redirect traffic to unintended destinations.
-- **`SecretUpdate` stores encrypted values without decryption** — This effectively corrupts secrets, making them unusable and potentially causing application failures that mask the real issue.
+- **Secret rotation ciphertext is now decrypted before `SecretProvider::set()`** — This avoids the earlier storage-format corruption bug while keeping ctl-to-node transport encrypted.
 - **eBPF threshold updates logged but not propagated** — Threshold changes are not applied to running eBPF programs, meaning security-relevant monitoring may be operating with stale thresholds.
-- **Missing keypair for existing nodes** — Nodes that have already bootstrapped have `bootstrap_keypair = None`, preventing them from receiving encrypted secrets. Keypair persistence should be implemented.
+- **Node secret transport key is now persisted and advertised through the cluster registry** — Existing nodes can receive encrypted secret rotation without relying on the one-time bootstrap keypair.

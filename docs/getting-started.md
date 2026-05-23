@@ -2,6 +2,8 @@
 
 This guide walks you through building, installing, and running the Wasm Cloud Platform from source.
 
+For deployment posture after your first successful startup, use [`docs/deployment-levels.md`](deployment-levels.md). It now acts as an index to one guide per deployment level, so you can follow the path that matches your environment instead of reading one mixed document.
+
 ## Table of Contents
 
 1. [Architecture Overview](#architecture-overview)
@@ -76,6 +78,11 @@ The Wasm Cloud Platform is a multi-tenant, Wasm-native application platform. Ins
 - **NATS Server** 2.10+ (with JetStream enabled)
 - **PostgreSQL** 14+ (for apps that need databases)
 - **Linux** with kernel 5.8+ (for eBPF monitoring; optional)
+
+Production note:
+
+- Linux is the intended production target.
+- Windows is not a production target for this project.
 
 ### Install Rust toolchain
 
@@ -195,7 +202,7 @@ wasm-node --generate-config > /tmp/wasm-node-config.toml
 cat /tmp/wasm-node-config.toml
 ```
 
-A minimal production config:
+A minimal starting config:
 
 ```toml
 [node]
@@ -344,6 +351,7 @@ NATS with JetStream is the messaging backbone:
 
 ## Next Steps
 
+- **[Deployment Levels](deployment-levels.md)** — Choose the right Linux posture, from local development to high-assurance production
 - **[Deploying Applications](deploying-applications.md)** — Deploy your first Wasm app with manifests
 - **[Internal Service Mesh](internal-mesh.md)** — Enable East-West communication between apps
 - **[NATS Setup & Security](nats-setup.md)** — Production NATS clustering and auth
