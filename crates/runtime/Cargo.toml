@@ -7,15 +7,19 @@ edition = "2021"
 [dependencies]
 wasmtime = { workspace = true, features = ["component-model", "cache", "pooling-allocator"] }
 wasmtime-wasi = { workspace = true }
+wasmtime-wasi-http = { workspace = true, features = ["p2"] }
 tokio = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+axum = { workspace = true }
 common = { path = "../common" }
 storage = { path = "../storage" }
 anyhow.workspace = true
 bytes = "1.5"
 async-trait = "0.1"
 ipnet = "2.12.0"
+hyper = { version = "1", features = ["server", "http1"] }
+futures = "0.3"
 
 [dev-dependencies]
 wat = "1.246.2"

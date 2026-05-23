@@ -30,14 +30,14 @@ which = "6"
 e2e = { path = "../e2e" }
 common = { path = "../common" }
 messaging = { path = "../messaging" }
+sha2 = { workspace = true }
+hex = { workspace = true }
 
 [dev-dependencies]
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
 assert_cmd = "2"
 testcontainers = { workspace = true }
 async-nats = { workspace = true }
-sha2 = { workspace = true }
-hex = { workspace = true }
 
 [[bin]]
 name = "vm-testbed-cli"

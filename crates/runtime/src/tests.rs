@@ -1,7 +1,8 @@
 use crate::{
     current_policy_boundary,
     executor::{
-        compose_socket_addr_check, top_level_entry_point_candidates, SocketAddrUse,
+        compose_socket_addr_check, top_level_entry_point_candidates, ComponentExecutionModel,
+        SocketAddrUse,
         SocketPolicyCheck,
     },
     policy_tracker::PolicyEnforcer,
@@ -85,6 +86,26 @@ fn no_op_component_with_wasi_cli_run_interface() -> &'static str {
             (export "run" (func $run))
         )
         (export "wasi:cli/run@0.2.6" (instance $cli-run))
+    )
+    "#
+}
+
+fn no_op_component_with_wasi_http_incoming_handler_interface() -> &'static str {
+    r#"
+    (component
+        (core module $m
+            (memory (export "memory") 1)
+            (func (export "handle")
+                nop
+            )
+        )
+        (core instance $i (instantiate $m))
+        (type $handle-func (func))
+        (func $handle (type $handle-func) (canon lift (core func $i "handle")))
+        (instance $incoming-handler
+            (export "handle" (func $handle))
+        )
+        (export "wasi:http/incoming-handler@0.2.3" (instance $incoming-handler))
     )
     "#
 }
@@ -334,6 +355,21 @@ fn test_run_supports_top_level_run_fallback() {
         stats.trap.is_none(),
         "top-level run fallback should execute successfully: {:?}",
         stats.trap
+    );
+}
+
+#[test]
+fn test_prepare_detects_wasi_http_incoming_handler_components() {
+    let runtime = WasmRuntime::new().expect("Failed to create WasmRuntime");
+    let wasm_bytes = wat::parse_str(no_op_component_with_wasi_http_incoming_handler_interface())
+        .expect("failed to parse component WAT");
+    let artifact = runtime.compile(&wasm_bytes).expect("Compilation failed");
+    let prepared = runtime
+        .prepare(&artifact, base_config())
+        .expect("Failed to prepare module");
+    assert_eq!(
+        prepared.execution_model(),
+        ComponentExecutionModel::WasiHttpIncomingHandler
     );
 }
 

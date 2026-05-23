@@ -60,13 +60,19 @@ The current maintained example is a `Spin` / `wasi:http` component path built ar
 
 ## What This Means For This Platform
 
-The runtime currently instantiates components and looks for CLI-style entry points such as:
+The runtime now supports two hosting shapes:
 
-- `wasi:cli/run@0.2.x#run`
-- top-level `run`
-- top-level `_start`
+- CLI-style components:
+  - `wasi:cli/run@0.2.x#run`
+  - top-level `run`
+  - top-level `_start`
+- `wasi:http/incoming-handler@0.2.x#handle` components via a local adapter server bound on the allocated instance port
 
-It does **not** currently host `wasi:http` incoming handler exports as the app-serving model.
+That closes the earlier hosting-model gap, but it does **not** by itself mean platform-level gRPC is ready:
+
+- the current adapter path serves requests through an HTTP/1.1 local bridge
+- gRPC needs an end-to-end HTTP/2 path plus trailer semantics
+- we still do not have a proven `wasm32-wasip2` gRPC server stack for this platform model
 
 That means:
 
@@ -79,6 +85,7 @@ That means:
 ### Supported
 
 - native Rust gRPC development and testing in the repository
+- hosting `wasi:http` incoming-handler components on the runtime
 
 ### Not Supported Yet
 
@@ -88,7 +95,7 @@ That means:
 
 To support gRPC seriously, one of these needs to happen:
 
-1. add platform support for `wasi:http` incoming-handler style components
-2. find a real `wasm32-wasip2` gRPC server stack that does not depend on the unsupported Tokio transport server path
+1. find a real `wasm32-wasip2` gRPC server stack that fits the current `wasi:http` hosting path
+2. add an HTTP/2-capable request bridge for `wasi:http` components, with correct gRPC status/trailer propagation
 
-Right now, the more realistic path is `wasi:http` component hosting.
+Right now, the runtime foundation is `wasi:http` component hosting, but the gRPC-specific transport path is still the missing piece.

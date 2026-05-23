@@ -16,6 +16,10 @@ These sample apps are used as platform fixtures first and reference implementati
   - native gRPC reference app based on `tonic`
   - validates that the Rust gRPC stack itself works in the repo
   - intentionally does **not** claim `wasm32-wasip2` support today; the current `tonic` transport server path depends on Tokio networking features that are not available on WASI yet
+- `http-hello-component`
+  - minimal `wasi:http` component for `wasm32-wasip2`
+  - validates the platform runtime's `wasi:http/incoming-handler` hosting path
+  - intended as the first real guest for future platform HTTP-component and gRPC-hosting work
 
 See also:
 

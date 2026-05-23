@@ -6,6 +6,7 @@
 /// - Deploying applications
 /// - Sending HTTP requests
 use messaging::{events::Event, NatsBus};
+use reqwest::StatusCode;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
@@ -233,13 +234,7 @@ impl NodeProcess {
             return Err(format!("Node process exited immediately with status: {}", status).into());
         }
 
-        // Wait for node to start up and all servers (proxy, artifact) to be ready
-        // The node needs time to:
-        // 1. Initialize the database
-        // 2. Start the artifact server
-        // 3. Start the proxy server
-        // 4. Connect to NATS
-        sleep(Duration::from_secs(8)).await;
+        wait_for_node_ready(admin_port, proxy_port, artifact_port).await?;
 
         eprintln!("✓ Node startup wait complete");
 
@@ -311,7 +306,7 @@ impl NodeProcess {
             .stderr(Stdio::inherit())
             .spawn()?;
 
-        sleep(Duration::from_secs(12)).await;
+        wait_for_node_ready(admin_port, proxy_port, artifact_port).await?;
         eprintln!("✓ Node restart complete");
 
         Ok(NodeProcess {
@@ -347,6 +342,51 @@ impl NodeProcess {
         self.process.kill()?;
         self.process.wait()?;
         Ok(())
+    }
+}
+
+async fn wait_for_node_ready(
+    admin_port: u16,
+    proxy_port: u16,
+    artifact_port: u16,
+) -> Result<(), Box<dyn std::error::Error>> {
+    wait_for_health(admin_port, Duration::from_secs(60)).await?;
+    wait_for_tcp(proxy_port, Duration::from_secs(10)).await?;
+    wait_for_tcp(artifact_port, Duration::from_secs(10)).await?;
+    Ok(())
+}
+
+async fn wait_for_health(
+    admin_port: u16,
+    timeout: Duration,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()?;
+    let deadline = tokio::time::Instant::now() + timeout;
+    let url = format!("http://127.0.0.1:{admin_port}/health");
+
+    loop {
+        match client.get(&url).send().await {
+            Ok(response) if response.status() == StatusCode::OK => return Ok(()),
+            _ if tokio::time::Instant::now() >= deadline => {
+                return Err(format!("health endpoint did not become ready: {url}").into());
+            }
+            _ => sleep(Duration::from_millis(200)).await,
+        }
+    }
+}
+
+async fn wait_for_tcp(port: u16, timeout: Duration) -> Result<(), Box<dyn std::error::Error>> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        match tokio::net::TcpStream::connect(("127.0.0.1", port)).await {
+            Ok(_) => return Ok(()),
+            Err(_) if tokio::time::Instant::now() >= deadline => {
+                return Err(format!("tcp listener not ready on 127.0.0.1:{port}").into());
+            }
+            Err(_) => sleep(Duration::from_millis(100)).await,
+        }
     }
 }
 
@@ -526,6 +566,56 @@ pub fn find_postgres_app_wasm() -> Result<PathBuf, Box<dyn std::error::Error>> {
         Ok(wasm_path)
     } else {
         Err("Build succeeded but wasm file not found".into())
+    }
+}
+
+/// Helper to find the http-hello-component.wasm test app
+#[allow(dead_code)]
+pub fn find_http_hello_component_wasm() -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let workspace_root = Path::new(manifest_dir).parent().unwrap().parent().unwrap();
+
+    let wasm_path = workspace_root.join("target/wasm32-wasip2/release/http_hello_component.wasm");
+
+    let needs_rebuild = if !wasm_path.exists() {
+        true
+    } else {
+        let wasm_modified = std::fs::metadata(&wasm_path)?.modified()?;
+        let main_modified = std::fs::metadata(
+            workspace_root.join("apps/http-hello-component/src/lib.rs"),
+        )?
+        .modified()?;
+        wasm_modified < main_modified
+    };
+
+    if needs_rebuild {
+        eprintln!("⚠️ Building http-hello-component.wasm...");
+
+        let output = std::process::Command::new("cargo")
+            .args([
+                "build",
+                "--release",
+                "--target",
+                "wasm32-wasip2",
+                "-p",
+                "http-hello-component",
+            ])
+            .current_dir(workspace_root)
+            .output()?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            eprintln!("Build error: {}", stderr);
+            return Err(format!("Failed to build http-hello-component: {}", stderr).into());
+        }
+
+        eprintln!("Build stdout: {}", String::from_utf8_lossy(&output.stdout));
+    }
+
+    if wasm_path.exists() {
+        Ok(wasm_path)
+    } else {
+        Err("Build succeeded but http-hello-component.wasm not found".into())
     }
 }
 

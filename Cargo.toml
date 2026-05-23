@@ -20,7 +20,8 @@ members = [
     "apps/hello-axum",
     "apps/echo-service",
     "apps/postgres-app",
-    "apps/grpc-echo"
+    "apps/grpc-echo",
+    "apps/http-hello-component"
 ]
 
 [workspace.dependencies]
@@ -43,6 +44,7 @@ tracing-subscriber    = { version = "0.3", features = ["env-filter", "json"] }
 # Wasm runtime
 wasmtime              = "43.0.1"
 wasmtime-wasi         = "43.0.1"
+wasmtime-wasi-http    = "43.0.1"
 
 # Proxy
 pingora               = "0.8"

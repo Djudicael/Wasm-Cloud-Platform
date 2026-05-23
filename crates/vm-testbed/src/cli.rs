@@ -1,10 +1,16 @@
 use anyhow::{anyhow, bail, Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
+use common::artifact_transfer::{
+    ArtifactManifestBatchRequest, ArtifactManifestBatchResponse,
+};
+use common::types::{AppConfig, AppId, FuelQuota, MemoryPages, Route};
+use messaging::{events::Event, NatsBus};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
+use sha2::Digest;
 use tokio::time::sleep;
 use tracing::info;
 use vm_testbed::{network, ClusterFixture, MicroVm, VmConfig};
@@ -64,6 +70,32 @@ enum Commands {
         state_file: PathBuf,
     },
 
+    /// Add one node to a detached topology.
+    AddNode {
+        #[arg(long, default_value = ".vm-testbed-state.json")]
+        state_file: PathBuf,
+        #[arg(long)]
+        memory: Option<usize>,
+        #[arg(long)]
+        vcpus: Option<usize>,
+    },
+
+    /// Remove one node from a detached topology.
+    RemoveNode {
+        #[arg(short, long)]
+        id: String,
+        #[arg(long, default_value = ".vm-testbed-state.json")]
+        state_file: PathBuf,
+    },
+
+    /// Scale a detached topology to the requested node count.
+    Scale {
+        #[arg(long, default_value = ".vm-testbed-state.json")]
+        state_file: PathBuf,
+        #[arg(long)]
+        nodes: usize,
+    },
+
     /// Kill one VM from a detached topology.
     Kill {
         /// VM identifier.
@@ -80,6 +112,46 @@ enum Commands {
         ip: String,
         #[arg(short, long, default_value = "9090")]
         port: u16,
+    },
+
+    /// Deploy a Wasm application into a detached topology.
+    DeployApp {
+        #[arg(long, default_value = ".vm-testbed-state.json")]
+        state_file: PathBuf,
+        #[arg(long)]
+        app: String,
+        #[arg(long)]
+        version: String,
+        #[arg(long, default_value = "default")]
+        namespace: String,
+        #[arg(long)]
+        wasm: PathBuf,
+        #[arg(long)]
+        route_host: Option<String>,
+        #[arg(long)]
+        target_node: Option<String>,
+        #[arg(long, default_value = "500000000")]
+        fuel: u64,
+        #[arg(long, default_value = "128")]
+        memory_mb: u32,
+        #[arg(long, default_value = "10")]
+        max_instances: u32,
+        #[arg(long, default_value = "300")]
+        idle_timeout: u64,
+        #[arg(long, default_value = "8080")]
+        bind_port: u16,
+        #[arg(long = "env", value_parser = parse_env_var)]
+        env_vars: Vec<(String, String)>,
+        #[arg(long = "secret")]
+        secret_keys: Vec<String>,
+    },
+
+    /// Remove an application from a detached topology.
+    UndeployApp {
+        #[arg(long, default_value = ".vm-testbed-state.json")]
+        state_file: PathBuf,
+        #[arg(long)]
+        app_id: String,
     },
 
     /// Run the existing VM asset/setup helpers through one command surface.
@@ -133,6 +205,7 @@ struct PersistedVm {
     ip: String,
     tap_device: String,
     admin_addr: String,
+    artifact_addr: String,
     proxy_addr: String,
 }
 
@@ -144,8 +217,30 @@ struct PersistedClusterState {
     subnet: String,
     gateway: String,
     nats_url: String,
+    kernel_path: PathBuf,
+    node_rootfs_path: PathBuf,
+    node_data_drive_path: Option<PathBuf>,
+    node_memory_mb: usize,
+    node_vcpus: usize,
+    next_node_index: u8,
     nats: Option<PersistedVm>,
     nodes: Vec<PersistedVm>,
+}
+
+struct DeployRequest {
+    app: String,
+    version: String,
+    namespace: String,
+    wasm: PathBuf,
+    route_host: Option<String>,
+    target_node: Option<String>,
+    fuel: u64,
+    memory_mb: u32,
+    max_instances: u32,
+    idle_timeout: u64,
+    bind_port: u16,
+    env_vars: Vec<(String, String)>,
+    secret_keys: Vec<String>,
 }
 
 #[tokio::main]
@@ -179,7 +274,7 @@ async fn main() -> Result<()> {
                 .wait_for_all_healthy(Duration::from_secs(120))
                 .await?;
 
-            let state = detach_cluster_state(&mut cluster, profile)?;
+            let state = detach_cluster_state(&mut cluster, profile, node_memory, node_vcpus)?;
             write_state(&state_file, &state)?;
             print_state_summary(&state);
 
@@ -198,6 +293,54 @@ async fn main() -> Result<()> {
             let state = read_state(&state_file)?;
             print_state_summary(&state);
             print_runtime_status(&state).await?;
+        }
+
+        Commands::AddNode {
+            state_file,
+            memory,
+            vcpus,
+        } => {
+            let mut state = read_state(&state_file)?;
+            let default_memory = state.node_memory_mb;
+            let default_vcpus = state.node_vcpus;
+            let vm = spawn_node_from_state(
+                &mut state,
+                memory.unwrap_or(default_memory),
+                vcpus.unwrap_or(default_vcpus),
+            )
+            .await?;
+            write_state(&state_file, &state)?;
+            println!(
+                "Added {} admin={} proxy={} pid={}",
+                vm.id, vm.admin_addr, vm.proxy_addr, vm.pid
+            );
+        }
+
+        Commands::RemoveNode { id, state_file } => {
+            let mut state = read_state(&state_file)?;
+            remove_node_from_state(&mut state, &id).await?;
+            write_state(&state_file, &state)?;
+            println!("Removed {}", id);
+        }
+
+        Commands::Scale { state_file, nodes } => {
+            let mut state = read_state(&state_file)?;
+            let default_memory = state.node_memory_mb;
+            let default_vcpus = state.node_vcpus;
+            while state.nodes.len() < nodes {
+                let vm = spawn_node_from_state(&mut state, default_memory, default_vcpus).await?;
+                println!("Added {}", vm.id);
+            }
+            while state.nodes.len() > nodes {
+                let victim = state
+                    .nodes
+                    .last()
+                    .map(|vm| vm.id.clone())
+                    .ok_or_else(|| anyhow!("no nodes available to remove"))?;
+                remove_node_from_state(&mut state, &victim).await?;
+                println!("Removed {}", victim);
+            }
+            write_state(&state_file, &state)?;
         }
 
         Commands::Kill { id, state_file } => {
@@ -227,6 +370,49 @@ async fn main() -> Result<()> {
             } else {
                 bail!("node at {addr} returned {}", resp.status());
             }
+        }
+
+        Commands::DeployApp {
+            state_file,
+            app,
+            version,
+            namespace,
+            wasm,
+            route_host,
+            target_node,
+            fuel,
+            memory_mb,
+            max_instances,
+            idle_timeout,
+            bind_port,
+            env_vars,
+            secret_keys,
+        } => {
+            let state = read_state(&state_file)?;
+            deploy_app_to_state(
+                &state,
+                DeployRequest {
+                    app,
+                    version,
+                    namespace,
+                    wasm,
+                    route_host,
+                    target_node,
+                    fuel,
+                    memory_mb,
+                    max_instances,
+                    idle_timeout,
+                    bind_port,
+                    env_vars,
+                    secret_keys,
+                },
+            )
+            .await?;
+        }
+
+        Commands::UndeployApp { state_file, app_id } => {
+            let state = read_state(&state_file)?;
+            undeploy_app_from_state(&state, &app_id).await?;
         }
 
         Commands::Assets { command } => run_asset_command(command)?,
@@ -278,6 +464,8 @@ async fn main() -> Result<()> {
 fn detach_cluster_state(
     cluster: &mut ClusterFixture,
     profile: TopologyProfile,
+    node_memory_mb: usize,
+    node_vcpus: usize,
 ) -> Result<PersistedClusterState> {
     let nats = cluster.nats.as_mut().map(detach_vm_state);
     let mut nodes = BTreeMap::new();
@@ -292,21 +480,244 @@ fn detach_cluster_state(
         subnet: cluster.subnet.clone(),
         gateway: cluster.gateway.clone(),
         nats_url: cluster.nats_url()?,
+        kernel_path: cluster.kernel_path.clone(),
+        node_rootfs_path: cluster.node_rootfs.clone(),
+        node_data_drive_path: cluster.node_data_drive.clone(),
+        node_memory_mb,
+        node_vcpus,
+        next_node_index: cluster.node_count() as u8,
         nats,
         nodes: nodes.into_values().collect(),
     })
 }
 
 fn detach_vm_state(vm: &mut MicroVm) -> PersistedVm {
+    let admin_addr = vm.admin_addr();
     vm.disable_cleanup_on_drop();
     PersistedVm {
         id: vm.config.id.clone(),
         pid: vm.pid(),
         ip: vm.config.ip.clone(),
         tap_device: vm.config.tap_device.clone(),
-        admin_addr: vm.admin_addr(),
+        admin_addr: admin_addr.clone(),
+        artifact_addr: admin_addr,
         proxy_addr: vm.proxy_addr(),
     }
+}
+
+async fn spawn_node_from_state(
+    state: &mut PersistedClusterState,
+    memory_mb: usize,
+    vcpus: usize,
+) -> Result<PersistedVm> {
+    let index = state.next_node_index;
+    state.next_node_index = state
+        .next_node_index
+        .checked_add(1)
+        .ok_or_else(|| anyhow!("node index space exhausted"))?;
+
+    let node_id = format!("{}-node-{}", state.name, index);
+    let ip = network::allocate_ip(&state.subnet, index + 10)
+        .map_err(|e| anyhow!("failed to allocate IP: {e}"))?;
+    let tap = format!("tap-{}-{}", state.name, node_id);
+
+    let config = VmConfig {
+        id: node_id.clone(),
+        kernel_path: state.kernel_path.clone(),
+        rootfs_path: state.node_rootfs_path.clone(),
+        data_drive_path: state.node_data_drive_path.clone(),
+        memory_mb,
+        vcpus,
+        ip: ip.clone(),
+        gateway: state.gateway.clone(),
+        bridge_name: state.bridge_name.clone(),
+        tap_device: tap,
+        mmds_data: Some(serde_json::json!({
+            "node_config": {
+                "node_id": node_id,
+                "nats_url": state.nats_url,
+                "proxy_port": 8080,
+                "admin_port": 9090,
+                "artifact_port": 9091,
+            }
+        })),
+    };
+
+    let mut vm = MicroVm::spawn(config).await?;
+    vm.wait_for_health(Duration::from_secs(120)).await?;
+    let persisted = detach_vm_state(&mut vm);
+    state.nodes.push(persisted.clone());
+    Ok(persisted)
+}
+
+async fn remove_node_from_state(state: &mut PersistedClusterState, id: &str) -> Result<()> {
+    let index = state
+        .nodes
+        .iter()
+        .position(|vm| vm.id == id)
+        .ok_or_else(|| anyhow!("node {id} not found"))?;
+    let vm = state.nodes.remove(index);
+    if process_alive(vm.pid) {
+        let _ = signal_pid(vm.pid, "-TERM");
+        sleep(Duration::from_secs(1)).await;
+        if process_alive(vm.pid) {
+            let _ = signal_pid(vm.pid, "-KILL");
+        }
+    }
+    let _ = network::remove_tap(&vm.tap_device);
+    Ok(())
+}
+
+async fn deploy_app_to_state(state: &PersistedClusterState, req: DeployRequest) -> Result<()> {
+    let node = select_target_vm(state, req.target_node.as_deref())?;
+    let mut bus = NatsBus::connect(&state.nats_url).await?;
+    bus.set_node_id("vm-testbed-cli".to_string());
+    let http = reqwest::Client::new();
+
+    let wasm_bytes = tokio::fs::read(&req.wasm)
+        .await
+        .with_context(|| format!("failed to read {}", req.wasm.display()))?;
+    let sha = hex::encode(sha2::Sha256::digest(&wasm_bytes));
+    let upload_url = format!("http://{}/artifacts/{}", node.admin_addr, sha);
+    let upload_resp = http.put(&upload_url).body(wasm_bytes.clone()).send().await?;
+    if !upload_resp.status().is_success() {
+        bail!("artifact upload failed: {}", upload_resp.status());
+    }
+
+    let registry_url = format!("http://{}/admin/cluster/nodes", node.admin_addr);
+    let registry_resp = http.get(&registry_url).send().await?;
+    let (peer_targets, manifests) = if registry_resp.status().is_success() {
+        let registry: ClusterNodeRegistryResponse = registry_resp.json().await?;
+        let peers = select_active_peer_node_ids(registry.nodes, Some(&node.id), registry.active_staleness_secs);
+        if peers.is_empty() {
+            (Vec::new(), Vec::new())
+        } else {
+            let authorize_url = format!("http://{}/artifacts/{}/authorize", node.admin_addr, sha);
+            let response = http
+                .post(&authorize_url)
+                .json(&ArtifactManifestBatchRequest {
+                    audiences: peers.clone(),
+                })
+                .send()
+                .await?;
+            if !response.status().is_success() {
+                bail!("artifact authorize failed: {}", response.status());
+            }
+            let body: ArtifactManifestBatchResponse = response.json().await?;
+            (peers, body.manifests)
+        }
+    } else {
+        (Vec::new(), Vec::new())
+    };
+
+    let app_id = AppId::new_namespaced(&req.namespace, &req.app, &req.version);
+    let artifact_url = format!("http://{}/artifacts/{}", node.admin_addr, sha);
+    let config = AppConfig {
+        id: app_id.clone(),
+        fuel_quota: FuelQuota(req.fuel),
+        memory_limit: MemoryPages((req.memory_mb * 1024 * 1024) / 65536),
+        max_instances: req.max_instances,
+        idle_timeout_secs: req.idle_timeout,
+        wasm_bind_port: req.bind_port,
+        env_vars: req.env_vars.into_iter().collect(),
+        secret_keys: req.secret_keys,
+        extended_limits: None,
+        health_check_path: Some("/health".to_string()),
+        db_max_connections: None,
+        rate_limit: None,
+        tenant_id: None,
+        policy: None,
+        namespace: req.namespace.clone(),
+    };
+
+    bus.publish(&Event::DeployApp {
+        app_id: app_id.clone(),
+        config,
+        artifact_url,
+        artifact_transfer_manifests: manifests,
+        expected_hash: Some(sha.clone()),
+        size_bytes: wasm_bytes.len() as u64,
+    })
+    .await?;
+
+    if let Some(host) = req.route_host {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        bus.publish(&Event::RouteAdd {
+            route: Route {
+                host: host.clone(),
+                app_id: app_id.clone(),
+                path_prefix: "/".to_string(),
+                strip_prefix: false,
+                created_at: now,
+                updated_at: now,
+            },
+        })
+        .await?;
+        println!("Route added: {} -> {}", host, app_id.0);
+    }
+
+    println!(
+        "Deployed {} via {} (peer manifests for {} node(s))",
+        app_id.0,
+        node.id,
+        peer_targets.len()
+    );
+    Ok(())
+}
+
+async fn undeploy_app_from_state(state: &PersistedClusterState, app_id: &str) -> Result<()> {
+    let mut bus = NatsBus::connect(&state.nats_url).await?;
+    bus.set_node_id("vm-testbed-cli".to_string());
+    let app_id = AppId::new_validate(app_id).map_err(|e| anyhow!(e))?;
+    bus.publish(&Event::RemoveApp { app_id: app_id.clone() }).await?;
+    println!("Undeploy requested for {}", app_id.0);
+    Ok(())
+}
+
+fn select_target_vm<'a>(
+    state: &'a PersistedClusterState,
+    requested: Option<&str>,
+) -> Result<&'a PersistedVm> {
+    match requested {
+        Some(id) => state
+            .nodes
+            .iter()
+            .find(|vm| vm.id == id)
+            .ok_or_else(|| anyhow!("node {id} not found")),
+        None => state
+            .nodes
+            .first()
+            .ok_or_else(|| anyhow!("no node available in detached topology")),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct ClusterNodeRegistryResponse {
+    nodes: Vec<common::types::ClusterNodeRecord>,
+    #[serde(default = "default_cluster_node_staleness_secs")]
+    active_staleness_secs: u64,
+}
+
+fn default_cluster_node_staleness_secs() -> u64 {
+    120
+}
+
+fn select_active_peer_node_ids(
+    nodes: Vec<common::types::ClusterNodeRecord>,
+    upload_source_node_id: Option<&str>,
+    max_staleness_secs: u64,
+) -> Vec<String> {
+    let mut peers: Vec<String> = nodes
+        .into_iter()
+        .filter(|node| !node.is_stale(max_staleness_secs))
+        .map(|node| node.node_id)
+        .filter(|node_id| upload_source_node_id != Some(node_id.as_str()))
+        .collect();
+    peers.sort();
+    peers
 }
 
 async fn down_from_state(state_file: &Path) -> Result<()> {
@@ -365,8 +776,8 @@ fn print_state_summary(state: &PersistedClusterState) {
     println!("nats: {}", state.nats_url);
     for vm in &state.nodes {
         println!(
-            "node {} admin={} proxy={} pid={}",
-            vm.id, vm.admin_addr, vm.proxy_addr, vm.pid
+            "node {} admin={} artifact={} proxy={} pid={}",
+            vm.id, vm.admin_addr, vm.artifact_addr, vm.proxy_addr, vm.pid
         );
     }
 }
@@ -418,6 +829,12 @@ fn run_asset_command(command: AssetCommands) -> Result<()> {
         bail!("{script} failed with status {status}");
     }
     Ok(())
+}
+
+fn parse_env_var(s: &str) -> Result<(String, String), String> {
+    s.split_once('=')
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .ok_or_else(|| format!("expected KEY=VALUE, got: {s}"))
 }
 
 fn find_kernel() -> PathBuf {

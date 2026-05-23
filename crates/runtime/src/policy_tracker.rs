@@ -103,11 +103,15 @@ impl std::fmt::Debug for PolicyEnforcer {
 
 impl PolicyEnforcer {
     pub fn new(policy: InstancePolicy) -> Self {
+        Self::with_counters(policy, Arc::new(PolicyCounters::new()))
+    }
+
+    pub fn with_counters(policy: InstancePolicy, counters: Arc<PolicyCounters>) -> Self {
         let allowed_cidrs_parsed = Self::parse_cidrs(&policy.network.allowed_cidrs);
         let denied_cidrs_parsed = Self::parse_cidrs(&policy.network.denied_cidrs);
         PolicyEnforcer {
             policy,
-            counters: Arc::new(PolicyCounters::new()),
+            counters,
             allowed_cidrs_parsed,
             denied_cidrs_parsed,
         }

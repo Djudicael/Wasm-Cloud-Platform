@@ -6,6 +6,9 @@ use common::{
     policy::InstancePolicy,
     types::{AppConfig, InstanceId},
 };
+use axum::body::Body as AxumBody;
+use hyper::server::conn::http1;
+use hyper::service::service_fn;
 use std::collections::HashSet;
 use std::future::Future;
 use std::net::{IpAddr, SocketAddr};
@@ -15,8 +18,15 @@ use std::sync::Arc;
 use std::time::Instant;
 use wasmtime::component::{Component, Instance, Linker, ResourceTable};
 use wasmtime::{Engine, Store};
-use wasmtime_wasi::p2::add_to_linker_sync;
+use wasmtime_wasi::p2::add_to_linker_sync as add_wasi_to_linker_sync;
 use wasmtime_wasi::{DirPerms, FilePerms, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
+use wasmtime_wasi_http::io::TokioIo;
+use wasmtime_wasi_http::p2::bindings::http::types::Scheme;
+use wasmtime_wasi_http::p2::bindings::ProxyPre;
+use wasmtime_wasi_http::p2::{
+    add_only_http_to_linker_sync, WasiHttpCtxView, WasiHttpView,
+};
+use wasmtime_wasi_http::WasiHttpCtx;
 
 /// Simplified mirror of `wasmtime_wasi::sockets::SocketAddrUse` for the public API.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -196,10 +206,31 @@ pub(crate) fn compose_socket_addr_check(
     })
 }
 
+const WASI_CLI_RUN_INTERFACES: &[&str] = &[
+    "wasi:cli/run@0.2.6",
+    "wasi:cli/run@0.2.5",
+    "wasi:cli/run@0.2.4",
+    "wasi:cli/run@0.2.3",
+    "wasi:cli/run@0.2.2",
+    "wasi:cli/run@0.2.1",
+    "wasi:cli/run@0.2.0",
+];
+const WASI_HTTP_INCOMING_HANDLER_INTERFACES: &[&str] = &[
+    "wasi:http/incoming-handler@0.2.3",
+    "wasi:http/incoming-handler@0.2.2",
+    "wasi:http/incoming-handler@0.2.1",
+    "wasi:http/incoming-handler@0.2.0",
+];
 const TOP_LEVEL_ENTRY_POINT_FALLBACKS: &[&str] = &["run", "_start"];
 
 pub(crate) fn top_level_entry_point_candidates() -> &'static [&'static str] {
     TOP_LEVEL_ENTRY_POINT_FALLBACKS
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ComponentExecutionModel {
+    WasiCli,
+    WasiHttpIncomingHandler,
 }
 
 fn configure_filesystem_preopens(
@@ -229,9 +260,95 @@ fn configure_filesystem_preopens(
     Ok(())
 }
 
+fn resolve_instance_policy(config: &AppConfig, port: u16) -> Result<InstancePolicy, PlatformError> {
+    match config.policy.as_ref() {
+        Some(p) => p.resolve(port),
+        None => common::policy::PolicyConfig::default().resolve(port),
+    }
+    .map_err(|e| PlatformError::runtime(format!("invalid policy config: {e}")))
+}
+
+fn build_store_state(
+    config: &AppConfig,
+    env_vars: Vec<(String, String)>,
+    port: u16,
+    socket_addr_check: Option<SocketAddrCheckFn>,
+    shared_policy_counters: Option<Arc<PolicyCounters>>,
+) -> Result<StoreState, PlatformError> {
+    let policy = resolve_instance_policy(config, port)?;
+
+    let mut builder = WasiCtxBuilder::new();
+    builder.inherit_stdout();
+    builder.inherit_stderr();
+    builder.inherit_network();
+    let allow_any_tcp = policy.network.allow_outbound_tcp || policy.network.allow_inbound;
+    builder.allow_tcp(allow_any_tcp);
+    builder.allow_udp(policy.network.allow_outbound_udp);
+    builder.allow_ip_name_lookup(policy.network.allow_dns);
+
+    let policy_enforcer = match shared_policy_counters {
+        Some(counters) => PolicyEnforcer::with_counters(policy.clone(), counters),
+        None => PolicyEnforcer::new(policy.clone()),
+    };
+    let policy_socket_check = SocketPolicyCheck::from_instance_policy(&policy);
+    let combined_socket_check = compose_socket_addr_check(
+        policy_socket_check,
+        policy_enforcer.clone(),
+        socket_addr_check,
+    );
+    builder.socket_addr_check(move |addr, use_type| {
+        let use_enum = match use_type {
+            wasmtime_wasi::sockets::SocketAddrUse::TcpBind => SocketAddrUse::TcpBind,
+            wasmtime_wasi::sockets::SocketAddrUse::TcpConnect => SocketAddrUse::TcpConnect,
+            wasmtime_wasi::sockets::SocketAddrUse::UdpBind => SocketAddrUse::UdpBind,
+            wasmtime_wasi::sockets::SocketAddrUse::UdpConnect => SocketAddrUse::UdpConnect,
+            wasmtime_wasi::sockets::SocketAddrUse::UdpOutgoingDatagram => {
+                SocketAddrUse::UdpOutgoingDatagram
+            }
+        };
+        combined_socket_check(addr, use_enum)
+    });
+
+    for (k, v) in env_vars {
+        builder.env(&k, &v);
+    }
+    let port_str = port.to_string();
+    builder.env("PORT", &port_str);
+
+    configure_filesystem_preopens(&mut builder, &policy)?;
+
+    let extended_limits = config
+        .extended_limits
+        .clone()
+        .map(|cfg| cfg.to_limits())
+        .unwrap_or_default();
+
+    Ok(StoreState {
+        ctx: builder.build(),
+        http: WasiHttpCtx::new(),
+        table: ResourceTable::new(),
+        limiter: MemoryLimiter::new(
+            config.memory_limit,
+            extended_limits,
+            Some(policy_enforcer.counters.clone()),
+        ),
+        policy_enforcer,
+    })
+}
+
+fn build_runtime_linker(engine: &Engine) -> Result<Linker<StoreState>, PlatformError> {
+    let mut linker = Linker::new(engine);
+    add_wasi_to_linker_sync(&mut linker)
+        .map_err(|e| PlatformError::runtime(format!("wasi linker error: {e}")))?;
+    add_only_http_to_linker_sync(&mut linker)
+        .map_err(|e| PlatformError::runtime(format!("wasi:http linker error: {e}")))?;
+    Ok(linker)
+}
+
 /// Store state for WASI Preview 2
 pub struct StoreState {
     pub ctx: WasiCtx,
+    pub http: WasiHttpCtx,
     pub table: ResourceTable,
     pub limiter: MemoryLimiter,
     pub policy_enforcer: PolicyEnforcer,
@@ -255,6 +372,16 @@ impl WasiView for StoreState {
     }
 }
 
+impl WasiHttpView for StoreState {
+    fn http(&mut self) -> WasiHttpCtxView<'_> {
+        WasiHttpCtxView {
+            ctx: &mut self.http,
+            table: &mut self.table,
+            hooks: Default::default(),
+        }
+    }
+}
+
 /// Result of a single Wasm execution.
 #[derive(Debug)]
 pub struct ExecutionStats {
@@ -272,6 +399,7 @@ pub struct PreparedModule {
     pub engine: Arc<Engine>,
     pub module: Component,
     pub config: AppConfig,
+    pub execution_model: ComponentExecutionModel,
 }
 
 impl std::fmt::Debug for PreparedModule {
@@ -291,10 +419,12 @@ impl PreparedModule {
     ) -> Result<Self, PlatformError> {
         // SAFETY: artifact was produced by our own compiler::compile()
         let module = unsafe { crate::compiler::deserialize(&engine, artifact_bytes) }?;
+        let execution_model = detect_component_execution_model(&engine, &module, &config)?;
         Ok(PreparedModule {
             engine,
             module,
             config,
+            execution_model,
         })
     }
 
@@ -310,96 +440,16 @@ impl PreparedModule {
         port: u16,
         socket_addr_check: Option<SocketAddrCheckFn>,
     ) -> Result<RunningInstance, PlatformError> {
+        if self.execution_model != ComponentExecutionModel::WasiCli {
+            return Err(PlatformError::runtime(
+                "spawn_instance called for non-CLI component; use wasi:http hosting path instead",
+            ));
+        }
         tracing::info!(app = %self.config.id.0, "spawn_instance called");
         let id = InstanceId::new();
         tracing::info!(instance_id = %id.0, "instance ID created");
 
-        // Resolve the policy for this instance
-        let policy = match self.config.policy.as_ref() {
-            Some(p) => p.resolve(port),
-            None => common::policy::PolicyConfig::default().resolve(port),
-        }
-        .map_err(|e| PlatformError::runtime(format!("invalid policy config: {e}")))?;
-
-        // Build WASI environment (Preview 2)
-        let mut builder = WasiCtxBuilder::new();
-        builder.inherit_stdout();
-        builder.inherit_stderr();
-
-        // Network configuration based on policy.
-        //
-        // Wasmtime exposes coarse protocol-level toggles (`allow_tcp`, `allow_udp`) and a
-        // per-operation `socket_addr_check` hook. We enable TCP if the instance is allowed
-        // to either bind/listen or initiate outbound TCP, then use the policy-aware socket
-        // checker to keep inbound bind permission separate from outbound connect permission.
-        builder.inherit_network();
-        let allow_any_tcp = policy.network.allow_outbound_tcp || policy.network.allow_inbound;
-        builder.allow_tcp(allow_any_tcp);
-        builder.allow_udp(policy.network.allow_outbound_udp);
-        builder.allow_ip_name_lookup(policy.network.allow_dns);
-
-        let policy_socket_check = SocketPolicyCheck::from_instance_policy(&policy);
-        let policy_enforcer = PolicyEnforcer::new(policy.clone());
-        let combined_socket_check = compose_socket_addr_check(
-            policy_socket_check,
-            policy_enforcer.clone(),
-            socket_addr_check,
-        );
-        builder.socket_addr_check(move |addr, use_type| {
-            let use_enum = match use_type {
-                wasmtime_wasi::sockets::SocketAddrUse::TcpBind => SocketAddrUse::TcpBind,
-                wasmtime_wasi::sockets::SocketAddrUse::TcpConnect => SocketAddrUse::TcpConnect,
-                wasmtime_wasi::sockets::SocketAddrUse::UdpBind => SocketAddrUse::UdpBind,
-                wasmtime_wasi::sockets::SocketAddrUse::UdpConnect => SocketAddrUse::UdpConnect,
-                wasmtime_wasi::sockets::SocketAddrUse::UdpOutgoingDatagram => {
-                    SocketAddrUse::UdpOutgoingDatagram
-                }
-            };
-            combined_socket_check(addr, use_enum)
-        });
-        tracing::debug!("policy-aware socket_addr_check installed");
-
-        tracing::debug!(
-            allow_tcp = %allow_any_tcp,
-            allow_udp = %policy.network.allow_outbound_udp,
-            allow_ip_name_lookup = %policy.network.allow_dns,
-            allow_inbound = %policy.network.allow_inbound,
-            allow_outbound_tcp = %policy.network.allow_outbound_tcp,
-            "WASI config built from policy"
-        );
-
-        for (k, v) in env_vars {
-            builder.env(&k, &v);
-        }
-        // The app is expected to bind to the injected runtime bind address on
-        // the allocated host port; the Supervisor enforces the allowed bind IP
-        // and port via the WASI socket address checker.
-        let port_str = port.to_string();
-        builder.env("PORT", &port_str);
-
-        // Configure filesystem preopens from policy. The current policy model uses the
-        // configured path both as the host path and the guest-visible mount path. When file
-        // create/delete is allowed we grant write/mutate permissions; otherwise the directory
-        // is exposed as read-only.
-        configure_filesystem_preopens(&mut builder, &policy)?;
-
-        let extended_limits = self
-            .config
-            .extended_limits
-            .clone()
-            .map(|cfg| cfg.to_limits())
-            .unwrap_or_default();
-
-        let state = StoreState {
-            ctx: builder.build(),
-            table: ResourceTable::new(),
-            limiter: MemoryLimiter::new(
-                self.config.memory_limit,
-                extended_limits,
-                Some(policy_enforcer.counters.clone()),
-            ),
-            policy_enforcer,
-        };
+        let state = build_store_state(&self.config, env_vars, port, socket_addr_check, None)?;
         let policy_counters = state.policy_enforcer.counters.clone();
 
         let mut store = Store::new(&*self.engine, state);
@@ -411,9 +461,7 @@ impl PreparedModule {
         configure_store(&mut store, self.config.fuel_quota)?;
 
         // Link WASI host functions (Component Model Preview 2)
-        let mut linker = Linker::new(&*self.engine);
-        add_to_linker_sync(&mut linker)
-            .map_err(|e| PlatformError::runtime(format!("linker error: {e}")))?;
+        let linker = build_runtime_linker(&self.engine)?;
 
         tracing::debug!("instantiating component");
         let instance = linker.instantiate(&mut store, &self.module).map_err(|e| {
@@ -432,6 +480,252 @@ impl PreparedModule {
             started_at: Instant::now(),
         })
     }
+
+    pub fn execution_model(&self) -> ComponentExecutionModel {
+        self.execution_model
+    }
+
+    pub fn spawn_http_server(
+        &self,
+        env_vars: Vec<(String, String)>,
+        addr: SocketAddr,
+        socket_addr_check: Option<SocketAddrCheckFn>,
+    ) -> Result<HttpServerInstance, PlatformError> {
+        if self.execution_model != ComponentExecutionModel::WasiHttpIncomingHandler {
+            return Err(PlatformError::runtime(
+                "spawn_http_server called for non-wasi:http component",
+            ));
+        }
+
+        let app_id = self.config.id.clone();
+        let config = self.config.clone();
+        let engine = self.engine.clone();
+        let module = self.module.clone();
+        let env_vars = Arc::new(env_vars);
+        let socket_addr_check = socket_addr_check.clone();
+        let policy = resolve_instance_policy(&self.config, addr.port())?;
+        let policy_counters = Arc::new(PolicyCounters::new());
+        let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let task_policy_counters = policy_counters.clone();
+
+        let task = tokio::spawn(async move {
+            let started_at = Instant::now();
+            let listener = match tokio::net::TcpListener::bind(addr).await {
+                Ok(listener) => listener,
+                Err(err) => {
+                    return ExecutionStats {
+                        instance_id: InstanceId::new(),
+                        fuel_limit: config.fuel_quota.0,
+                        fuel_consumed: 0,
+                        ram_bytes: 0,
+                        wall_clock_ms: 0,
+                        trap: Some(format!("failed to bind wasi:http adapter listener: {err}")),
+                        io_stats: IoStats {
+                            open_fds_peak: 0,
+                            fs_bytes_written: 0,
+                            net_egress_bytes: 0,
+                            outbound_connections: 0,
+                        },
+                    };
+                }
+            };
+
+            let linker = match build_runtime_linker(&engine) {
+                Ok(linker) => linker,
+                Err(err) => {
+                    return ExecutionStats {
+                        instance_id: InstanceId::new(),
+                        fuel_limit: config.fuel_quota.0,
+                        fuel_consumed: 0,
+                        ram_bytes: 0,
+                        wall_clock_ms: started_at.elapsed().as_millis() as u64,
+                        trap: Some(err.to_string()),
+                        io_stats: IoStats {
+                            open_fds_peak: 0,
+                            fs_bytes_written: 0,
+                            net_egress_bytes: 0,
+                            outbound_connections: 0,
+                        },
+                    };
+                }
+            };
+
+            let instance_pre = match linker.instantiate_pre(&module) {
+                Ok(pre) => pre,
+                Err(err) => {
+                    return ExecutionStats {
+                        instance_id: InstanceId::new(),
+                        fuel_limit: config.fuel_quota.0,
+                        fuel_consumed: 0,
+                        ram_bytes: 0,
+                        wall_clock_ms: started_at.elapsed().as_millis() as u64,
+                        trap: Some(format!("failed to pre-instantiate wasi:http component: {err}")),
+                        io_stats: IoStats {
+                            open_fds_peak: 0,
+                            fs_bytes_written: 0,
+                            net_egress_bytes: 0,
+                            outbound_connections: 0,
+                        },
+                    };
+                }
+            };
+            let pre = match ProxyPre::new(instance_pre) {
+                Ok(pre) => pre,
+                Err(err) => {
+                    return ExecutionStats {
+                        instance_id: InstanceId::new(),
+                        fuel_limit: config.fuel_quota.0,
+                        fuel_consumed: 0,
+                        ram_bytes: 0,
+                        wall_clock_ms: started_at.elapsed().as_millis() as u64,
+                        trap: Some(format!("component does not implement wasi:http/proxy world: {err}")),
+                        io_stats: IoStats {
+                            open_fds_peak: 0,
+                            fs_bytes_written: 0,
+                            net_egress_bytes: 0,
+                            outbound_connections: 0,
+                        },
+                    };
+                }
+            };
+            let pre = Arc::new(pre);
+            let mut trap: Option<String> = None;
+
+            loop {
+                tokio::select! {
+                    _ = &mut shutdown_rx => {
+                        break;
+                    }
+                    accept = listener.accept() => {
+                        match accept {
+                            Ok((client, _peer_addr)) => {
+                                let pre = pre.clone();
+                                let engine = engine.clone();
+                                let config = config.clone();
+                                let env_vars = env_vars.clone();
+                                let socket_addr_check = socket_addr_check.clone();
+                                let request_policy_counters = task_policy_counters.clone();
+                                let app_id = app_id.clone();
+                                tokio::spawn(async move {
+                                    let app_id_for_service = app_id.clone();
+                                    let service = service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
+                                        let pre = pre.clone();
+                                        let engine = engine.clone();
+                                        let config = config.clone();
+                                        let env_vars = env_vars.clone();
+                                        let socket_addr_check = socket_addr_check.clone();
+                                        let request_policy_counters = request_policy_counters.clone();
+                                        let app_id_for_request = app_id.clone();
+                                        async move {
+                                            let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+                                            let _worker = std::thread::spawn(move || {
+                                                let result = (|| -> Result<hyper::Response<AxumBody>, std::io::Error> {
+                                                    let state = build_store_state(
+                                                        &config,
+                                                        env_vars.as_ref().clone(),
+                                                        addr.port(),
+                                                        socket_addr_check.clone(),
+                                                        Some(request_policy_counters),
+                                                    ).map_err(|e| std::io::Error::other(e.to_string()))?;
+                                                    let mut store = Store::new(&*engine, state);
+                                                    store.limiter(|s| &mut s.limiter);
+                                                    configure_store(&mut store, config.fuel_quota)
+                                                        .map_err(|e| std::io::Error::other(e.to_string()))?;
+
+                                                    let (sender, receiver) = tokio::sync::oneshot::channel();
+                                                    let req = store
+                                                        .data_mut()
+                                                        .http()
+                                                        .new_incoming_request(Scheme::Http, req)
+                                                        .map_err(|e| std::io::Error::other(e.to_string()))?;
+                                                    let out = store
+                                                        .data_mut()
+                                                        .http()
+                                                        .new_response_outparam(sender)
+                                                        .map_err(|e| std::io::Error::other(e.to_string()))?;
+
+                                                    let proxy = pre
+                                                        .instantiate(&mut store)
+                                                        .map_err(|e| std::io::Error::other(e.to_string()))?;
+                                                    futures::executor::block_on(async {
+                                                        proxy
+                                                            .wasi_http_incoming_handler()
+                                                            .call_handle(&mut store, req, out)
+                                                            .await
+                                                            .map_err(|e| std::io::Error::other(e.to_string()))
+                                                    })?;
+
+                                                    match futures::executor::block_on(receiver) {
+                                                        Ok(Ok(resp)) => {
+                                                            let (parts, body) = resp.into_parts();
+                                                            Ok(hyper::Response::from_parts(parts, AxumBody::new(body)))
+                                                        }
+                                                        Ok(Err(e)) => Err(std::io::Error::other(e.to_string())),
+                                                        Err(_) => Err(std::io::Error::other(
+                                                            "guest never invoked response-outparam::set",
+                                                        )),
+                                                    }
+                                                })();
+                                                let _ = result_tx.send(result);
+                                            });
+                                            let result = result_rx
+                                                .await
+                                                .map_err(|_| std::io::Error::other("wasi:http worker thread dropped result"))?;
+                                            if let Err(err) = &result {
+                                                tracing::warn!(app = %app_id_for_request.0, error = %err, "wasi:http request bridge failed");
+                                            }
+                                            result
+                                        }
+                                    });
+
+                                    if let Err(err) = http1::Builder::new()
+                                        .keep_alive(true)
+                                        .serve_connection(TokioIo::new(client), service)
+                                        .await
+                                    {
+                                        tracing::warn!(app = %app_id_for_service.0, error = %err, "wasi:http adapter connection failed");
+                                    }
+                                });
+                            }
+                            Err(err) => {
+                                trap = Some(format!("wasi:http adapter accept failed: {err}"));
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+
+            ExecutionStats {
+                instance_id: InstanceId::new(),
+                fuel_limit: config.fuel_quota.0,
+                fuel_consumed: 0,
+                ram_bytes: task_policy_counters.current_memory_bytes.load(std::sync::atomic::Ordering::Relaxed) as usize,
+                wall_clock_ms: started_at.elapsed().as_millis() as u64,
+                trap,
+                io_stats: IoStats {
+                    open_fds_peak: task_policy_counters.open_fds_peak.load(std::sync::atomic::Ordering::Relaxed),
+                    fs_bytes_written: task_policy_counters.fs_write_bytes.load(std::sync::atomic::Ordering::Relaxed),
+                    net_egress_bytes: task_policy_counters.egress_bytes.load(std::sync::atomic::Ordering::Relaxed),
+                    outbound_connections: task_policy_counters.outbound_connections_total.load(std::sync::atomic::Ordering::Relaxed) as u32,
+                },
+            }
+        });
+
+        Ok(HttpServerInstance {
+            task,
+            shutdown_tx,
+            policy_counters,
+            policy,
+        })
+    }
+}
+
+pub struct HttpServerInstance {
+    pub task: tokio::task::JoinHandle<ExecutionStats>,
+    pub shutdown_tx: tokio::sync::oneshot::Sender<()>,
+    pub policy_counters: Arc<PolicyCounters>,
+    pub policy: InstancePolicy,
 }
 
 /// An instantiated, running Wasm module.
@@ -452,6 +746,91 @@ struct ResolvedEntryPoint {
     func: wasmtime::component::Func,
 }
 
+#[derive(Debug, Clone)]
+enum ResolvedExecutionModel {
+    WasiCliRun(ResolvedEntryPoint),
+    TopLevelEntryPoint(ResolvedEntryPoint),
+    WasiHttpIncomingHandler { interface_name: String },
+    Unknown,
+}
+
+fn detect_execution_model_from_instance(
+    store: &mut Store<StoreState>,
+    instance: &Instance,
+) -> ResolvedExecutionModel {
+    for interface_name in WASI_CLI_RUN_INTERFACES {
+        let interface_idx = instance.get_export_index(&mut *store, None, interface_name);
+        let Some(interface_idx) = interface_idx else {
+            continue;
+        };
+        let func_idx = instance.get_export_index(&mut *store, Some(&interface_idx), "run");
+        let Some(func_idx) = func_idx else {
+            continue;
+        };
+        if let Some(func) = instance.get_func(&mut *store, func_idx) {
+            return ResolvedExecutionModel::WasiCliRun(ResolvedEntryPoint {
+                name: format!("{interface_name}#run"),
+                func,
+            });
+        }
+    }
+
+    for export_name in top_level_entry_point_candidates() {
+        let func_idx = instance.get_export_index(&mut *store, None, export_name);
+        let Some(func_idx) = func_idx else {
+            continue;
+        };
+        if let Some(func) = instance.get_func(&mut *store, func_idx) {
+            return ResolvedExecutionModel::TopLevelEntryPoint(ResolvedEntryPoint {
+                name: export_name.to_string(),
+                func,
+            });
+        }
+    }
+
+    for interface_name in WASI_HTTP_INCOMING_HANDLER_INTERFACES {
+        let interface_idx = instance.get_export_index(&mut *store, None, interface_name);
+        let Some(interface_idx) = interface_idx else {
+            continue;
+        };
+        let func_idx = instance.get_export_index(&mut *store, Some(&interface_idx), "handle");
+        if func_idx.is_some() {
+            return ResolvedExecutionModel::WasiHttpIncomingHandler {
+                interface_name: interface_name.to_string(),
+            };
+        }
+    }
+
+    ResolvedExecutionModel::Unknown
+}
+
+fn detect_component_execution_model(
+    engine: &Arc<Engine>,
+    module: &Component,
+    config: &AppConfig,
+) -> Result<ComponentExecutionModel, PlatformError> {
+    let state = build_store_state(config, Vec::new(), config.wasm_bind_port, None, None)?;
+    let mut store = Store::new(&**engine, state);
+    store.limiter(|s| &mut s.limiter);
+    configure_store(&mut store, config.fuel_quota)?;
+    let linker = build_runtime_linker(engine)?;
+    let instance = linker
+        .instantiate(&mut store, module)
+        .map_err(|e| PlatformError::runtime(format!("instantiation error during model detection: {e}")))?;
+
+    match detect_execution_model_from_instance(&mut store, &instance) {
+        ResolvedExecutionModel::WasiCliRun(_) | ResolvedExecutionModel::TopLevelEntryPoint(_) => {
+            Ok(ComponentExecutionModel::WasiCli)
+        }
+        ResolvedExecutionModel::WasiHttpIncomingHandler { .. } => {
+            Ok(ComponentExecutionModel::WasiHttpIncomingHandler)
+        }
+        ResolvedExecutionModel::Unknown => Err(PlatformError::runtime(
+            "component export not supported: expected wasi:cli/run, run, _start, or wasi:http/incoming-handler",
+        )),
+    }
+}
+
 impl Drop for RunningInstance {
     fn drop(&mut self) {
         self.store.data().policy_enforcer.reset_active_counters();
@@ -464,65 +843,8 @@ impl RunningInstance {
         self.policy_counters.clone()
     }
 
-    fn resolve_entry_point(&mut self) -> Option<ResolvedEntryPoint> {
-        // WASI Preview 2 components typically export `wasi:cli/run@0.2.x` as an interface
-        // containing `run`. For compatibility with older/minimal components and tests, also
-        // support top-level `run` and `_start` exports.
-        let wasi_versions = [
-            "0.2.6", "0.2.5", "0.2.4", "0.2.3", "0.2.2", "0.2.1", "0.2.0",
-        ];
-
-        for ver in wasi_versions {
-            let interface_name = format!("wasi:cli/run@{ver}");
-            let interface_idx =
-                self.instance
-                    .get_export_index(&mut self.store, None, &interface_name);
-
-            tracing::trace!(interface = %interface_name, "checking for entry point");
-
-            let Some(interface_idx) = interface_idx else {
-                continue;
-            };
-
-            let func_idx =
-                self.instance
-                    .get_export_index(&mut self.store, Some(&interface_idx), "run");
-
-            tracing::trace!(interface = %interface_name, has_run = func_idx.is_some(), "checking for run function");
-
-            let Some(func_idx) = func_idx else {
-                continue;
-            };
-
-            if let Some(func) = self.instance.get_func(&mut self.store, func_idx) {
-                return Some(ResolvedEntryPoint {
-                    name: format!("{interface_name}#run"),
-                    func,
-                });
-            }
-        }
-
-        for export_name in top_level_entry_point_candidates() {
-            tracing::trace!(
-                export = export_name,
-                "checking top-level entry point fallback"
-            );
-            let func_idx = self
-                .instance
-                .get_export_index(&mut self.store, None, export_name);
-            let Some(func_idx) = func_idx else {
-                continue;
-            };
-
-            if let Some(func) = self.instance.get_func(&mut self.store, func_idx) {
-                return Some(ResolvedEntryPoint {
-                    name: export_name.to_string(),
-                    func,
-                });
-            }
-        }
-
-        None
+    fn detect_execution_model(&mut self) -> ResolvedExecutionModel {
+        detect_execution_model_from_instance(&mut self.store, &self.instance)
     }
 
     fn invoke_entry_point(&mut self, entry_point: &ResolvedEntryPoint) -> Option<String> {
@@ -586,32 +908,23 @@ impl RunningInstance {
         let fuel_limit = self.config.fuel_quota.0;
         let start = Instant::now();
 
-        let entry_point = self.resolve_entry_point();
-
-        if let Some(ref entry_point) = entry_point {
-            tracing::info!(entry_point = %entry_point.name, "WASI entry point found and callable");
-        }
-
-        tracing::debug!(
-            has_entry_point = entry_point.is_some(),
-            entry_point = entry_point
-                .as_ref()
-                .map(|e| e.name.as_str())
-                .unwrap_or("<none>"),
-            "entry point lookup complete"
-        );
-        tracing::info!(
-            has_entry_point = entry_point.is_some(),
-            entry_point = entry_point
-                .as_ref()
-                .map(|e| e.name.as_str())
-                .unwrap_or("<none>"),
-            "entry point lookup result"
-        );
-
-        let trap_msg = match entry_point {
-            Some(entry_point) => self.invoke_entry_point(&entry_point),
-            None => {
+        let execution_model = self.detect_execution_model();
+        let trap_msg = match execution_model {
+            ResolvedExecutionModel::WasiCliRun(entry_point)
+            | ResolvedExecutionModel::TopLevelEntryPoint(entry_point) => {
+                tracing::info!(entry_point = %entry_point.name, "WASI entry point found and callable");
+                tracing::debug!(entry_point = %entry_point.name, "entry point lookup complete");
+                tracing::info!(entry_point = %entry_point.name, "entry point lookup result");
+                self.invoke_entry_point(&entry_point)
+            }
+            ResolvedExecutionModel::WasiHttpIncomingHandler { interface_name } => {
+                let message = format!(
+                    "unsupported component model: {interface_name}#handle detected; current runtime only hosts CLI-style components"
+                );
+                tracing::error!(instance_id = %self.id.0, interface = %interface_name, "wasi:http component detected but runtime does not host incoming-handler components");
+                Some(message)
+            }
+            ResolvedExecutionModel::Unknown => {
                 tracing::error!(instance_id = %self.id.0, "No WASI entry point found");
                 tracing::error!(instance = %self.id.0, "No entry point found (wasi:cli/run@0.2.x#run, run, or _start)");
                 Some("export not found".to_string())
