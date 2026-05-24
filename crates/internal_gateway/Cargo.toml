@@ -24,6 +24,6 @@ futures = "0.3"
 
 [dev-dependencies]
 base64 = "0.22"
-jsonwebtoken = "9"
+jsonwebtoken = "10"
 rand = "0.8"
 rsa = "0.9"
