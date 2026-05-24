@@ -4,7 +4,13 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-type AppInstanceMap = HashMap<String, Vec<SocketAddr>>;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RegisteredEndpoint {
+    pub addr: SocketAddr,
+    pub h2c: bool,
+}
+
+type AppInstanceMap = HashMap<String, Vec<RegisteredEndpoint>>;
 type NamespaceInstanceMap = HashMap<String, AppInstanceMap>;
 
 /// Registry of running instances, scoped by namespace.
@@ -24,12 +30,18 @@ pub struct NamespaceRegistry {
 impl NamespaceRegistry {
     /// Register an instance address for an app.
     pub async fn register(&self, app_id: &AppId, addr: SocketAddr) {
+        self.register_endpoint(app_id, RegisteredEndpoint { addr, h2c: false })
+            .await;
+    }
+
+    /// Register an instance endpoint for an app.
+    pub async fn register_endpoint(&self, app_id: &AppId, endpoint: RegisteredEndpoint) {
         let mut map = self.instances.write().await;
         map.entry(app_id.namespace().to_string())
             .or_default()
             .entry(app_id.bare_app_name().to_string())
             .or_default()
-            .push(addr);
+            .push(endpoint);
     }
 
     /// Deregister an instance address.
@@ -38,7 +50,7 @@ impl NamespaceRegistry {
         if let Some(ns) = map.get_mut(app_id.namespace()) {
             let key = app_id.bare_app_name();
             if let Some(addrs) = ns.get_mut(key) {
-                addrs.retain(|a| a != addr);
+                addrs.retain(|endpoint| &endpoint.addr != addr);
                 if addrs.is_empty() {
                     ns.remove(key);
                 }
@@ -51,10 +63,21 @@ impl NamespaceRegistry {
 
     /// Resolve a bare app name inside a given namespace to its local address.
     pub async fn resolve(&self, namespace: &str, bare_name: &str) -> Option<SocketAddr> {
+        self.resolve_endpoint(namespace, bare_name)
+            .await
+            .map(|endpoint| endpoint.addr)
+    }
+
+    /// Resolve a bare app name inside a given namespace to its local endpoint metadata.
+    pub async fn resolve_endpoint(
+        &self,
+        namespace: &str,
+        bare_name: &str,
+    ) -> Option<RegisteredEndpoint> {
         let map = self.instances.read().await;
         map.get(namespace)
             .and_then(|ns| ns.get(bare_name))
-            .and_then(|addrs| addrs.first().copied())
+            .and_then(|endpoints| endpoints.first().copied())
     }
 
     /// Resolve an app by its destination port (for cross-namespace checks).
@@ -63,7 +86,7 @@ impl NamespaceRegistry {
         let map = self.instances.read().await;
         for (ns, apps) in map.iter() {
             for (bare_app_name, addrs) in apps.iter() {
-                if addrs.iter().any(|a| a.port() == port) {
+                if addrs.iter().any(|endpoint| endpoint.addr.port() == port) {
                     return Some(AppId::new_namespaced(ns, bare_app_name, "v1"));
                 }
             }
@@ -97,6 +120,17 @@ impl NamespaceRegistry {
             }
         }
         result
+            .into_iter()
+            .map(|(key, endpoints)| {
+                (
+                    key,
+                    endpoints
+                        .into_iter()
+                        .map(|endpoint| endpoint.addr)
+                        .collect(),
+                )
+            })
+            .collect()
     }
 
     /// Get all services within a specific namespace, keyed by bare app name
@@ -107,7 +141,20 @@ impl NamespaceRegistry {
         namespace: &str,
     ) -> HashMap<String, Vec<SocketAddr>> {
         let map = self.instances.read().await;
-        map.get(namespace).cloned().unwrap_or_default()
+        map.get(namespace)
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(bare_name, endpoints)| {
+                (
+                    bare_name,
+                    endpoints
+                        .into_iter()
+                        .map(|endpoint| endpoint.addr)
+                        .collect(),
+                )
+            })
+            .collect()
     }
 }
 

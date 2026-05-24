@@ -1,7 +1,7 @@
 //! Chaos test scenarios for the Wasm Cloud Platform.
 //!
 //! This module contains pre-built chaos test scenarios for each failure
-//! level (L1–L6) defined in Step 27 (Disaster Recovery). Each scenario:
+//! level (L1â€“L6) defined in Step 27 (Disaster Recovery). Each scenario:
 //!
 //! 1. Sets up a cluster fixture (NATS + N wasm-node instances)
 //! 2. Deploys a test application
@@ -66,30 +66,30 @@ use crate::reporter::TestReport;
 pub async fn run_all() -> Vec<TestReport> {
     let mut reports = Vec::new();
 
-    tracing::info!("═══ Starting chaos test suite ═══");
+    tracing::info!("â•â•â• Starting chaos test suite â•â•â•");
 
     // L1: Instance crash
-    tracing::info!("── L1: Instance Crash Recovery ──");
+    tracing::info!("â”€â”€ L1: Instance Crash Recovery â”€â”€");
     reports.push(l1_instance_crash::test_l1_instance_crash_recovery().await);
 
     // L2: Node restart
-    tracing::info!("── L2: Node Process Restart Recovery ──");
+    tracing::info!("â”€â”€ L2: Node Process Restart Recovery â”€â”€");
     reports.push(l2_node_restart::test_l2_node_restart_recovery().await);
 
     // L3: Redb corruption
-    tracing::info!("── L3: Redb Corruption Recovery ──");
+    tracing::info!("â”€â”€ L3: Redb Corruption Recovery â”€â”€");
     reports.push(l3_redb_corruption::test_l3_redb_corruption_recovery().await);
 
     // L4: Full rebuild
-    tracing::info!("── L4: Full Node Rebuild Recovery ──");
+    tracing::info!("â”€â”€ L4: Full Node Rebuild Recovery â”€â”€");
     reports.push(l4_full_rebuild::test_l4_full_rebuild_recovery().await);
 
     // L5: NATS partition
-    tracing::info!("── L5: NATS Partition Recovery ──");
+    tracing::info!("â”€â”€ L5: NATS Partition Recovery â”€â”€");
     reports.push(l5_nats_partition::test_l5_nats_partition_recovery().await);
 
     // L6: Multi-node failure
-    tracing::info!("── L6: Multi-Node Failure Recovery ──");
+    tracing::info!("â”€â”€ L6: Multi-Node Failure Recovery â”€â”€");
     reports.push(l6_multi_node_failure::test_l6_multi_node_failure_recovery().await);
 
     // Save all reports to disk
@@ -102,12 +102,12 @@ pub async fn run_all() -> Vec<TestReport> {
     // Print combined summary
     crate::reporter::print_summary(&reports);
 
-    tracing::info!("═══ Chaos test suite complete ═══");
+    tracing::info!("â•â•â• Chaos test suite complete â•â•â•");
 
     reports
 }
 
-/// Run only the "basic" chaos tests (L1–L2) that don't require root
+/// Run only the "basic" chaos tests (L1â€“L2) that don't require root
 /// or `CAP_NET_ADMIN`.
 ///
 /// These tests only need:
@@ -119,7 +119,7 @@ pub async fn run_all() -> Vec<TestReport> {
 pub async fn run_basic() -> Vec<TestReport> {
     let mut reports = Vec::new();
 
-    tracing::info!("═══ Starting basic chaos tests (L1–L2) ═══");
+    tracing::info!("â•â•â• Starting basic chaos tests (L1â€“L2) â•â•â•");
 
     reports.push(l1_instance_crash::test_l1_instance_crash_recovery().await);
     reports.push(l2_node_restart::test_l2_node_restart_recovery().await);
@@ -132,7 +132,7 @@ pub async fn run_basic() -> Vec<TestReport> {
 
     crate::reporter::print_summary(&reports);
 
-    tracing::info!("═══ Basic chaos tests complete ═══");
+    tracing::info!("â•â•â• Basic chaos tests complete â•â•â•");
 
     reports
 }
@@ -142,15 +142,15 @@ pub async fn run_basic() -> Vec<TestReport> {
 /// Returns `Ok(())` if all requirements are met, or an error describing
 /// what's missing. Use this before calling [`run_all`] to provide a
 /// clear error message instead of a cryptic test failure.
+#[cfg(not(unix))]
 pub fn check_environment() -> Result<(), String> {
-    // Check that we're on a Unix-like system
-    #[cfg(not(unix))]
-    {
-        return Err("chaos tests require a Unix-like system (Linux/WSL). \
-             Process signals (SIGKILL, SIGTERM) are not available on this platform."
-            .to_string());
-    }
+    Err("chaos tests require a Unix-like system (Linux/WSL). \
+         Process signals (SIGKILL, SIGTERM) are not available on this platform."
+        .to_string())
+}
 
+#[cfg(unix)]
+pub fn check_environment() -> Result<(), String> {
     // Check that the wasm-node binary exists
     let binary_path = crate::fixture::find_node_binary();
     if !std::path::Path::new(&binary_path).exists() {
@@ -173,7 +173,7 @@ pub fn check_environment() -> Result<(), String> {
 
     if !tc_available {
         tracing::warn!(
-            "tc (traffic control) not found — L5 NATS partition tests will use iptables fallback"
+            "tc (traffic control) not found - L5 NATS partition tests will use iptables fallback"
         );
     }
 
@@ -186,21 +186,20 @@ pub fn check_environment() -> Result<(), String> {
 
     if !tc_available && !iptables_available {
         tracing::warn!(
-            "neither tc nor iptables found — L5 NATS partition tests will fail. \
+            "neither tc nor iptables found - L5 NATS partition tests will fail. \
              Install iproute2 and/or iptables, or run with CAP_NET_ADMIN."
         );
     }
 
     Ok(())
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn test_check_environment_runs() {
-        // Just verify it doesn't panic — the result depends on the environment
+        // Just verify it doesn't panic â€” the result depends on the environment
         let _ = check_environment();
     }
 }

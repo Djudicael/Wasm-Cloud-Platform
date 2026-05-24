@@ -370,20 +370,25 @@ impl ProxyHttp for WasmProxy {
             }
         }
 
-        // 4. Authorization (new) — endpoint-level role check
+        // 4. Authorization — endpoint-level role/scope checks
         if let Some(ref identity) = ctx.user_identity {
             let authorized = match endpoint_rule {
-                Some(rule) => match &rule.auth {
-                    common::types::EndpointAuth::Roles {
-                        allowed_roles,
-                        client_id,
-                    } => crate::gateway::authz::authorize_roles(
-                        identity,
-                        allowed_roles,
-                        client_id.as_deref(),
-                    ),
-                    _ => true, // other auth types already validated
-                },
+                Some(rule) => {
+                    let roles_ok = match &rule.auth {
+                        common::types::EndpointAuth::Roles {
+                            allowed_roles,
+                            client_id,
+                        } => crate::gateway::authz::authorize_roles(
+                            identity,
+                            allowed_roles,
+                            client_id.as_deref(),
+                        ),
+                        _ => true,
+                    };
+                    let scopes_ok =
+                        crate::gateway::authz::authorize_scopes(identity, &rule.required_scopes);
+                    roles_ok && scopes_ok
+                }
                 None => ctx
                     .route_config
                     .as_ref()
@@ -397,7 +402,7 @@ impl ProxyHttp for WasmProxy {
                     session,
                     403,
                     "forbidden",
-                    "user lacks required role",
+                    "user lacks required role or scope",
                 )
                 .await;
             }

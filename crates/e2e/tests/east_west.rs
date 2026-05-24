@@ -65,6 +65,7 @@ async fn test_east_west_traffic() {
             path: "/echo".to_string(),
             methods: vec!["GET".to_string()],
             auth: common::types::EndpointAuth::None,
+            required_scopes: vec![],
             rate_limit: None,
         }],
         ..Default::default()

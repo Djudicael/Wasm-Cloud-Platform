@@ -214,6 +214,7 @@ path = "/api/users"
 methods = ["GET", "POST", "PUT"]
 auth = "roles"
 allowed_roles = ["user", "admin"]
+required_scopes = ["read:users"]
 rate_limit = { requests_per_second = 100, burst_capacity = 20 }
 
 [[gateway.endpoints]]
@@ -221,6 +222,7 @@ path = "/api/admin"
 methods = ["POST", "DELETE"]
 auth = "roles"
 allowed_roles = ["admin"]         # Stricter than route default
+required_scopes = ["admin:users"]
 rate_limit = { requests_per_second = 20, burst_capacity = 5 }
 
 # Environment variables (non-secret)
@@ -273,6 +275,8 @@ The platform supports fine-grained security rules at the endpoint level. Rules a
 | `api_key` | Valid `X-Api-Key` header required |
 | `inherit` | Use the route-level default (useful for explicit fallback) |
 
+Endpoint rules may also declare `required_scopes = ["..."]` when the JWT must carry specific scopes in `scope` or `scp`.
+
 ### Example: Public health check + protected admin
 
 ```toml
@@ -289,12 +293,60 @@ path = "/api/admin"
 methods = ["POST", "DELETE"]
 auth = "roles"
 allowed_roles = ["admin"]
+required_scopes = ["admin:users"]
 ```
 
 **Behavior:**
 - `GET /health` → **No auth** (passes immediately)
 - `GET /api/users` → **JWT required** (inherits route default)
-- `POST /api/admin` → **JWT + admin role** required
+- `POST /api/admin` → **JWT + admin role + admin:users scope** required
+
+### Example: Multiple endpoint rules
+
+Use one `[[gateway.endpoints]]` block per endpoint rule. Rules are evaluated top-to-bottom and the first match wins.
+
+```toml
+[gateway.auth]
+policy = "authenticated"
+
+[[gateway.endpoints]]
+path = "/health"
+methods = ["GET"]
+auth = "none"
+
+[[gateway.endpoints]]
+path = "/api/users"
+methods = ["GET"]
+auth = "authenticated"
+required_scopes = ["read:users"]
+
+[[gateway.endpoints]]
+path = "/api/users"
+methods = ["POST"]
+auth = "roles"
+allowed_roles = ["admin", "editor"]
+required_scopes = ["write:users"]
+
+[[gateway.endpoints]]
+path = "/api/admin"
+methods = ["POST", "DELETE"]
+auth = "roles"
+allowed_roles = ["admin"]
+required_scopes = ["admin:users"]
+
+[[gateway.endpoints]]
+path = "/api/public"
+methods = ["GET"]
+auth = "api_key"
+```
+
+In that example:
+
+- `GET /health` is public
+- `GET /api/users` requires a valid JWT with `read:users`
+- `POST /api/users` requires a valid JWT, one of `admin|editor`, and `write:users`
+- `POST` or `DELETE /api/admin` requires `admin` plus `admin:users`
+- `GET /api/public` requires an API key
 
 ### Managing API keys
 

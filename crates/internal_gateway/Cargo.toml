@@ -14,9 +14,16 @@ common = { version = "0.1.0", path = "../common" }
 supervisor = { version = "0.1.0", path = "../supervisor" }
 proxy = { version = "0.1.0", path = "../proxy" }
 ebpf-monitor = { version = "0.1.0", path = "../ebpf-monitor" }
-reqwest = { workspace = true }
 chrono = { workspace = true }
 http = "1"
+hyper = { version = "1", features = ["client", "http1", "http2"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
 tower = "0.5"
 tower-http = { version = "0.6", features = ["trace"] }
 futures = "0.3"
+
+[dev-dependencies]
+base64 = "0.22"
+jsonwebtoken = "9"
+rand = "0.8"
+rsa = "0.9"

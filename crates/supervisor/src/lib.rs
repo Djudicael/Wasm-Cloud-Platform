@@ -819,7 +819,16 @@ impl Supervisor {
 
         // 8. Register with local service registry (using qualified AppId)
         self.service_registry
-            .register(&qualified_app_id, addr)
+            .register_endpoint(
+                &qualified_app_id,
+                crate::network::RegisteredEndpoint {
+                    addr,
+                    h2c: matches!(
+                        prepared.execution_model(),
+                        ComponentExecutionModel::WasiHttpIncomingHandler
+                    ),
+                },
+            )
             .await;
 
         // 8b. Register source port for network interceptor attribution

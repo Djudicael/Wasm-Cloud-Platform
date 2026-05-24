@@ -12,6 +12,7 @@ use async_nats::Client;
 use common::error::PlatformError;
 use common::protocol::{MessageEnvelope, PROTOCOL_VERSION};
 use events::Event;
+use tokio::time::{sleep, Duration};
 use tokio_stream::StreamExt;
 
 const DURABLE_MAX_DELIVER: i64 = 3;
@@ -83,6 +84,53 @@ impl std::fmt::Debug for NatsBus {
 }
 
 impl NatsBus {
+    async fn create_stream_with_retry(
+        js: &jetstream::Context,
+        name: &str,
+        subjects: &[&str],
+    ) -> Result<(), PlatformError> {
+        const MAX_ATTEMPTS: usize = 20;
+        const RETRY_DELAY: Duration = Duration::from_millis(250);
+
+        for attempt in 1..=MAX_ATTEMPTS {
+            let result = js
+                .get_or_create_stream(StreamConfig {
+                    name: name.to_string(),
+                    subjects: subjects.iter().map(|subject| subject.to_string()).collect(),
+                    max_messages: 10_000,
+                    ..Default::default()
+                })
+                .await;
+
+            match result {
+                Ok(_) => return Ok(()),
+                Err(error) => {
+                    let error_text = error.to_string();
+                    let retryable = error_text.contains("jetstream unavailable")
+                        || error_text.contains("JetStreamUnavailable")
+                        || error_text.contains("503");
+
+                    if retryable && attempt < MAX_ATTEMPTS {
+                        tracing::debug!(
+                            stream = name,
+                            attempt,
+                            error = %error,
+                            "JetStream not ready yet, retrying stream creation"
+                        );
+                        sleep(RETRY_DELAY).await;
+                        continue;
+                    }
+
+                    return Err(PlatformError::messaging_source(error));
+                }
+            }
+        }
+
+        Err(PlatformError::messaging(
+            "exhausted JetStream setup retries unexpectedly",
+        ))
+    }
+
     /// Connect to the NATS server.
     pub async fn connect(url: &str) -> Result<Self, PlatformError> {
         let client = async_nats::connect(url)
@@ -171,97 +219,13 @@ impl NatsBus {
     pub async fn setup_jetstream(&self) -> Result<(), PlatformError> {
         let js = jetstream::new(self.client.clone());
 
-        // Create the "DEPLOY" stream that retains deploy events
-        js.get_or_create_stream(StreamConfig {
-            name: "DEPLOY".to_string(),
-            subjects: DEPLOY_STREAM_SUBJECTS
-                .iter()
-                .map(|subject| subject.to_string())
-                .collect(),
-            max_messages: 10_000,
-            ..Default::default()
-        })
-        .await
-        .map_err(PlatformError::messaging_source)?;
-
-        // Create "CONTROL" stream for instance, secrets, config, and gateway events
-        js.get_or_create_stream(StreamConfig {
-            name: "CONTROL".to_string(),
-            subjects: CONTROL_STREAM_SUBJECTS
-                .iter()
-                .map(|subject| subject.to_string())
-                .collect(),
-            max_messages: 10_000,
-            ..Default::default()
-        })
-        .await
-        .map_err(PlatformError::messaging_source)?;
-
-        // Create "NODE" stream for node load and cluster events
-        js.get_or_create_stream(StreamConfig {
-            name: "NODE".to_string(),
-            subjects: NODE_STREAM_SUBJECTS
-                .iter()
-                .map(|subject| subject.to_string())
-                .collect(),
-            max_messages: 10_000,
-            ..Default::default()
-        })
-        .await
-        .map_err(PlatformError::messaging_source)?;
-
-        // Create "HEALTH" stream for health events
-        js.get_or_create_stream(StreamConfig {
-            name: "HEALTH".to_string(),
-            subjects: HEALTH_STREAM_SUBJECTS
-                .iter()
-                .map(|subject| subject.to_string())
-                .collect(),
-            max_messages: 10_000,
-            ..Default::default()
-        })
-        .await
-        .map_err(PlatformError::messaging_source)?;
-
-        // Create "PLATFORM" stream for platform upgrade and hot-reload events
-        js.get_or_create_stream(StreamConfig {
-            name: "PLATFORM".to_string(),
-            subjects: PLATFORM_STREAM_SUBJECTS
-                .iter()
-                .map(|subject| subject.to_string())
-                .collect(),
-            max_messages: 10_000,
-            ..Default::default()
-        })
-        .await
-        .map_err(PlatformError::messaging_source)?;
-
-        // Create "EBPF" stream for eBPF monitor events (pressure, security incidents).
-        // Use single-token wildcards here instead of `>` so JetStream subjects do not
-        // overlap: `ebpf.pressure.*` must not match `ebpf.pressure.recovered.*`.
-        js.get_or_create_stream(StreamConfig {
-            name: "EBPF".to_string(),
-            subjects: EBPF_STREAM_SUBJECTS
-                .iter()
-                .map(|subject| subject.to_string())
-                .collect(),
-            max_messages: 10_000,
-            ..Default::default()
-        })
-        .await
-        .map_err(PlatformError::messaging_source)?;
-
-        js.get_or_create_stream(StreamConfig {
-            name: QUARANTINE_STREAM.to_string(),
-            subjects: QUARANTINE_STREAM_SUBJECTS
-                .iter()
-                .map(|subject| subject.to_string())
-                .collect(),
-            max_messages: 10_000,
-            ..Default::default()
-        })
-        .await
-        .map_err(PlatformError::messaging_source)?;
+        Self::create_stream_with_retry(&js, "DEPLOY", DEPLOY_STREAM_SUBJECTS).await?;
+        Self::create_stream_with_retry(&js, "CONTROL", CONTROL_STREAM_SUBJECTS).await?;
+        Self::create_stream_with_retry(&js, "NODE", NODE_STREAM_SUBJECTS).await?;
+        Self::create_stream_with_retry(&js, "HEALTH", HEALTH_STREAM_SUBJECTS).await?;
+        Self::create_stream_with_retry(&js, "PLATFORM", PLATFORM_STREAM_SUBJECTS).await?;
+        Self::create_stream_with_retry(&js, "EBPF", EBPF_STREAM_SUBJECTS).await?;
+        Self::create_stream_with_retry(&js, QUARANTINE_STREAM, QUARANTINE_STREAM_SUBJECTS).await?;
 
         Ok(())
     }

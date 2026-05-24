@@ -560,6 +560,11 @@ pub struct EndpointRule {
     #[serde(default)]
     pub auth: EndpointAuth,
 
+    /// Required JWT scopes for this endpoint.
+    /// Empty = no scope restriction beyond the auth policy.
+    #[serde(default)]
+    pub required_scopes: Vec<String>,
+
     /// Optional rate limit override.
     pub rate_limit: Option<RouteRateLimit>,
 }

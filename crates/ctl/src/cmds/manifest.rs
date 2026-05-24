@@ -134,6 +134,8 @@ pub struct EndpointRuleManifest {
     #[serde(default)]
     pub allowed_roles: Vec<String>,
     #[serde(default)]
+    pub required_scopes: Vec<String>,
+    #[serde(default)]
     pub client_id: Option<String>,
     #[serde(default)]
     pub rate_limit: Option<common::types::RouteRateLimit>,
@@ -231,6 +233,7 @@ impl DeployManifest {
                         "api_key" => common::types::EndpointAuth::ApiKey,
                         _ => common::types::EndpointAuth::Inherit,
                     },
+                    required_scopes: e.required_scopes.clone(),
                     rate_limit: e.rate_limit.clone(),
                 })
                 .collect(),
@@ -298,6 +301,7 @@ pub fn manifest_from_config(
                     }
                     _ => vec![],
                 },
+                required_scopes: e.required_scopes.clone(),
                 client_id: match &e.auth {
                     common::types::EndpointAuth::Roles { client_id, .. } => client_id.clone(),
                     _ => None,
@@ -383,6 +387,7 @@ path = "/api/admin"
 methods = ["POST"]
 auth = "roles"
 allowed_roles = ["admin"]
+required_scopes = ["admin:users"]
 "#;
         let manifest: DeployManifest = toml::from_str(toml).unwrap();
         let gw = manifest.gateway.as_ref().unwrap();
@@ -394,6 +399,7 @@ allowed_roles = ["admin"]
         assert_eq!(gw.endpoints[0].path, "/health");
         assert_eq!(gw.endpoints[0].auth, "none");
         assert_eq!(gw.endpoints[1].path, "/api/admin");
+        assert_eq!(gw.endpoints[1].required_scopes, vec!["admin:users"]);
     }
 
     #[test]
@@ -459,6 +465,7 @@ allowed_roles = ["admin"]
                     methods: vec!["GET".to_string()],
                     auth: "none".to_string(),
                     allowed_roles: vec![],
+                    required_scopes: vec!["status:read".to_string()],
                     client_id: None,
                     rate_limit: None,
                 }],
@@ -473,6 +480,7 @@ allowed_roles = ["admin"]
         assert_eq!(gw.rate_limit.as_ref().unwrap().requests_per_second, 100);
         assert!(!gw.rate_limit.as_ref().unwrap().distributed);
         assert_eq!(gw.endpoints.len(), 1);
+        assert_eq!(gw.endpoints[0].required_scopes, vec!["status:read"]);
     }
 
     #[test]

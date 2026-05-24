@@ -171,6 +171,16 @@ impl Gateway {
         session: &pingora_proxy::Session,
         policy: &config::AuthPolicy,
     ) -> Result<oidc::UserIdentity, GatewayError> {
+        self.authenticate_header_map_with_policy(&session.req_header().headers, policy)
+            .await
+    }
+
+    /// Authenticate request headers with a specific auth policy.
+    pub async fn authenticate_header_map_with_policy(
+        &self,
+        headers: &http::HeaderMap,
+        policy: &config::AuthPolicy,
+    ) -> Result<oidc::UserIdentity, GatewayError> {
         // For None policy, return an anonymous identity instead of an error
         if *policy == config::AuthPolicy::None {
             return Ok(oidc::UserIdentity::anonymous());
@@ -181,9 +191,7 @@ impl Gateway {
             .as_ref()
             .ok_or(GatewayError::Auth("OIDC not configured".to_string()))?;
 
-        let token = session
-            .req_header()
-            .headers
+        let token = headers
             .get("Authorization")
             .and_then(|v| v.to_str().ok())
             .and_then(|v| v.strip_prefix("Bearer "))

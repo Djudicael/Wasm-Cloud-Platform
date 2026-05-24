@@ -1,27 +1,63 @@
 use axum::{
     extract::{ConnectInfo, State},
-    http::{HeaderMap, Request, StatusCode},
+    http::{HeaderMap, Request, StatusCode, Uri},
     response::Response,
     routing::any,
     Router,
 };
 use futures::future::BoxFuture;
+use hyper::body::Incoming;
+use hyper::client::conn::{http1, http2};
+use hyper_util::rt::{TokioExecutor, TokioIo};
+use proxy::service::DEFAULT_MAX_BODY_SIZE_BYTES;
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
+use std::time::Instant;
 use supervisor::audit::{write_audit_event, AuditEvent, AuditEventType};
 use tokio::net::TcpListener;
 use tower::ServiceBuilder;
 use tower_http::trace::TraceLayer;
-
-/// Maximum request body size for the internal gateway (10 MB).
-const MAX_BODY_SIZE: usize = 10 * 1024 * 1024;
 
 /// Default request timeout for forwarded requests (30 seconds).
 const FORWARDING_TIMEOUT: Duration = Duration::from_secs(30);
 
 type ColdStartFn =
     dyn Fn(common::types::AppId) -> BoxFuture<'static, Option<SocketAddr>> + Send + Sync;
+
+#[derive(Debug)]
+struct LocalRouteBucket {
+    tokens: f64,
+    max_tokens: f64,
+    refill_rate: f64,
+    last_refill: Instant,
+}
+
+impl LocalRouteBucket {
+    fn new(rate_per_second: u32, burst_capacity: u32) -> Self {
+        Self {
+            tokens: burst_capacity as f64,
+            max_tokens: burst_capacity as f64,
+            refill_rate: rate_per_second as f64,
+            last_refill: Instant::now(),
+        }
+    }
+
+    fn try_acquire(&mut self) -> bool {
+        let now = Instant::now();
+        let elapsed = now.duration_since(self.last_refill).as_secs_f64();
+        self.last_refill = now;
+        self.tokens = (self.tokens + elapsed * self.refill_rate).min(self.max_tokens);
+
+        if self.tokens >= 1.0 {
+            self.tokens -= 1.0;
+            true
+        } else {
+            false
+        }
+    }
+}
 
 /// Identity of a caller, resolved from the NamespaceMap.
 #[derive(Debug, Clone)]
@@ -60,23 +96,23 @@ pub struct InternalGateway {
     pub circuit_breaker: Arc<proxy::gateway::circuit_breaker::CircuitBreakerManager>,
     pub gateway_config: Arc<proxy::gateway::Gateway>,
 
-    /// Shared HTTP client for forwarding requests (reused across all requests).
-    pub http_client: reqwest::Client,
-
     /// Namespace identity map — gateway calls resolve_identity(source_port).
     pub namespace_map: Option<Arc<ebpf_monitor::NamespaceMap>>,
 
     /// Whether eBPF namespace enforcement is active.
     pub ebpf_active: bool,
 
-    /// Whether to allow anonymous (unidentified) internal requests.
-    pub allow_anonymous_internal: bool,
-
     /// Loopback TCP port to bind for east-west traffic.
     pub bind_port: u16,
 
+    /// Maximum accepted request body size, enforced via Content-Length when present.
+    pub max_body_size_bytes: usize,
+
     /// Callback to trigger a cold-start when the target app has no running instances.
     pub cold_start: Option<Arc<ColdStartFn>>,
+
+    /// Local token buckets for route- and endpoint-level rate limiting.
+    route_rate_buckets: Arc<std::sync::Mutex<HashMap<String, LocalRouteBucket>>>,
 }
 
 impl InternalGateway {
@@ -86,22 +122,17 @@ impl InternalGateway {
         circuit_breaker: Arc<proxy::gateway::circuit_breaker::CircuitBreakerManager>,
         gateway_config: Arc<proxy::gateway::Gateway>,
     ) -> Self {
-        let http_client = reqwest::Client::builder()
-            .timeout(FORWARDING_TIMEOUT)
-            .build()
-            .expect("failed to build forwarding HTTP client");
-
         InternalGateway {
             registry,
             rate_limiter,
             circuit_breaker,
             gateway_config,
-            http_client,
             namespace_map: None,
             ebpf_active: false,
-            allow_anonymous_internal: false,
             bind_port: common::INTERNAL_GATEWAY_PORT,
+            max_body_size_bytes: DEFAULT_MAX_BODY_SIZE_BYTES,
             cold_start: None,
+            route_rate_buckets: Arc::new(std::sync::Mutex::new(HashMap::new())),
         }
     }
 
@@ -117,15 +148,14 @@ impl InternalGateway {
         self
     }
 
-    /// Set whether to allow anonymous internal requests.
-    pub fn with_allow_anonymous(mut self, allow: bool) -> Self {
-        self.allow_anonymous_internal = allow;
-        self
-    }
-
     /// Set the loopback port the internal gateway binds to.
     pub fn with_bind_port(mut self, bind_port: u16) -> Self {
         self.bind_port = bind_port;
+        self
+    }
+
+    pub fn with_max_body_size_bytes(mut self, max_body_size_bytes: usize) -> Self {
+        self.max_body_size_bytes = max_body_size_bytes;
         self
     }
 
@@ -167,6 +197,23 @@ impl InternalGateway {
     }
 }
 
+fn check_route_rate_limit(
+    buckets: &std::sync::Mutex<HashMap<String, LocalRouteBucket>>,
+    key: &str,
+    rate_limit: &common::types::RouteRateLimit,
+) -> bool {
+    let mut buckets = buckets.lock().unwrap();
+    let bucket = buckets.entry(key.to_string()).or_insert_with(|| {
+        LocalRouteBucket::new(rate_limit.requests_per_second, rate_limit.burst_capacity)
+    });
+    if (bucket.refill_rate - rate_limit.requests_per_second as f64).abs() > f64::EPSILON
+        || (bucket.max_tokens - rate_limit.burst_capacity as f64).abs() > f64::EPSILON
+    {
+        *bucket = LocalRouteBucket::new(rate_limit.requests_per_second, rate_limit.burst_capacity);
+    }
+    bucket.try_acquire()
+}
+
 /// Parse a hostname in the format `<app>.<namespace>.internal[:port]`.
 /// Returns (app_name, namespace) if the format matches.
 ///
@@ -179,13 +226,100 @@ fn strip_internal_identity_headers(headers: &mut HeaderMap) {
     headers.remove("x-source-tid");
 }
 
-fn unsupported_endpoint_auth_status(auth: &common::types::EndpointAuth) -> Option<StatusCode> {
-    match auth {
-        common::types::EndpointAuth::Authenticated | common::types::EndpointAuth::Roles { .. } => {
-            Some(StatusCode::NOT_IMPLEMENTED)
+fn endpoint_auth_policy(
+    route_auth: &common::types::AuthPolicy,
+    endpoint_auth: &common::types::EndpointAuth,
+) -> Option<proxy::gateway::config::AuthPolicy> {
+    match endpoint_auth {
+        common::types::EndpointAuth::Inherit => Some(route_auth.clone()),
+        common::types::EndpointAuth::None => Some(proxy::gateway::config::AuthPolicy::None),
+        common::types::EndpointAuth::Authenticated => {
+            Some(proxy::gateway::config::AuthPolicy::Authenticated)
         }
-        _ => None,
+        common::types::EndpointAuth::Roles {
+            allowed_roles,
+            client_id,
+        } => Some(proxy::gateway::config::AuthPolicy::Roles {
+            allowed_roles: allowed_roles.clone(),
+            client_id: client_id.clone(),
+        }),
+        common::types::EndpointAuth::ApiKey => None,
     }
+}
+
+async fn forward_request(
+    endpoint: supervisor::network::RegisteredEndpoint,
+    method: http::Method,
+    path_and_query: String,
+    headers: HeaderMap,
+    body: axum::body::Body,
+    target_app_name: &str,
+) -> Result<Response<axum::body::Body>, StatusCode> {
+    let stream = tokio::time::timeout(
+        FORWARDING_TIMEOUT,
+        tokio::net::TcpStream::connect(endpoint.addr),
+    )
+    .await
+    .map_err(|_| StatusCode::GATEWAY_TIMEOUT)?
+    .map_err(|_| StatusCode::BAD_GATEWAY)?;
+    let io = TokioIo::new(stream);
+
+    let mut req_builder = Request::builder().method(method).uri(
+        path_and_query
+            .parse::<Uri>()
+            .map_err(|_| StatusCode::BAD_REQUEST)?,
+    );
+
+    for (k, v) in &headers {
+        let name = k.as_str();
+        if name != "x-source-app" && name != "host" {
+            req_builder = req_builder.header(k, v);
+        }
+    }
+
+    let real_host = format!("{}:{}", target_app_name, endpoint.addr.port());
+    req_builder = req_builder.header("host", &real_host);
+
+    let forward_req = req_builder
+        .body(body)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let response = if endpoint.h2c {
+        let (mut sender, conn) = http2::Builder::new(TokioExecutor::new())
+            .handshake(io)
+            .await
+            .map_err(|_| StatusCode::BAD_GATEWAY)?;
+        tokio::spawn(async move {
+            if let Err(error) = conn.await {
+                tracing::warn!(error = %error, "[INTERNAL-GW] h2 upstream connection ended with error");
+            }
+        });
+        tokio::time::timeout(FORWARDING_TIMEOUT, sender.send_request(forward_req))
+            .await
+            .map_err(|_| StatusCode::GATEWAY_TIMEOUT)?
+            .map_err(|_| StatusCode::BAD_GATEWAY)?
+    } else {
+        let (mut sender, conn) = http1::Builder::new()
+            .handshake(io)
+            .await
+            .map_err(|_| StatusCode::BAD_GATEWAY)?;
+        tokio::spawn(async move {
+            if let Err(error) = conn.await {
+                tracing::warn!(error = %error, "[INTERNAL-GW] h1 upstream connection ended with error");
+            }
+        });
+        tokio::time::timeout(FORWARDING_TIMEOUT, sender.send_request(forward_req))
+            .await
+            .map_err(|_| StatusCode::GATEWAY_TIMEOUT)?
+            .map_err(|_| StatusCode::BAD_GATEWAY)?
+    };
+
+    Ok(map_hyper_response(response))
+}
+
+fn map_hyper_response(response: http::Response<Incoming>) -> Response<axum::body::Body> {
+    let (parts, body) = response.into_parts();
+    Response::from_parts(parts, axum::body::Body::new(body))
 }
 
 fn parse_internal_host(host: &str) -> Option<(&str, &str)> {
@@ -231,61 +365,66 @@ async fn proxy_handler(
     let path = req.uri().path().to_string();
     let req_method_str = method.as_str().to_string();
 
-    // ── 0. STRIP all internal identity headers ──────────────────────────
-    // Prevent header reflection attacks. The gateway resolves identity
-    // from the connection table, not from headers.
+    if let Some(content_length) = req
+        .headers()
+        .get("content-length")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<usize>().ok())
+    {
+        if content_length > gw.max_body_size_bytes {
+            tracing::warn!(
+                content_length,
+                max = gw.max_body_size_bytes,
+                "[INTERNAL-GW] request body too large"
+            );
+            return Err(StatusCode::PAYLOAD_TOO_LARGE);
+        }
+    }
+
     let mut sanitized_headers = req.headers().clone();
     strip_internal_identity_headers(&mut sanitized_headers);
 
-    // ── 1. RESOLVE caller identity — ask the NamespaceMap ───────────────
-    let caller_identity: Option<CallerIdentity> = if peer_addr.ip().is_loopback() {
-        if let Some(ref ns_map) = gw.namespace_map {
-            match ns_map.resolve_identity(peer_addr.port()) {
-                Some(identity) => {
-                    tracing::info!(
-                        source_port = peer_addr.port(),
-                        namespace = %identity.namespace,
-                        app_id = %identity.app_id,
-                        tid = identity.tid,
-                        "[INTERNAL-GW] caller identity resolved"
-                    );
-                    Some(CallerIdentity {
-                        namespace: identity.namespace,
-                        app_id: identity.app_id,
-                        tid: identity.tid,
-                    })
-                }
-                None => {
-                    // Source port not in port_to_tid map
-                    if gw.ebpf_active {
-                        // eBPF is active but this connection is unregistered — deny
-                        tracing::warn!(
-                            source_port = peer_addr.port(),
-                            "[INTERNAL-GW] unregistered connection — denying"
-                        );
-                        return Err(StatusCode::UNAUTHORIZED);
-                    } else {
-                        // eBPF not active — fall back to port_to_app (TOCTOU-vulnerable)
-                        tracing::debug!(
-                            source_port = peer_addr.port(),
-                            "[INTERNAL-GW] eBPF inactive, falling back to port_to_app"
-                        );
-                        gw.registry
-                            .resolve_source_app(peer_addr.port())
-                            .await
-                            .map(|app_id| CallerIdentity {
-                                namespace: app_id.namespace().to_string(),
-                                app_id: app_id.0.clone(),
-                                tid: 0,
-                            })
-                    }
+    let caller_identity: CallerIdentity = if peer_addr.ip().is_loopback() {
+        if !gw.ebpf_active {
+            tracing::warn!(
+                source_port = peer_addr.port(),
+                "[INTERNAL-GW] eBPF identity enforcement inactive - denying request"
+            );
+            return Err(StatusCode::UNAUTHORIZED);
+        }
+
+        let Some(ref ns_map) = gw.namespace_map else {
+            tracing::warn!(
+                source_port = peer_addr.port(),
+                "[INTERNAL-GW] namespace map unavailable while eBPF enforcement is required"
+            );
+            return Err(StatusCode::UNAUTHORIZED);
+        };
+
+        match ns_map.resolve_identity(peer_addr.port()) {
+            Some(identity) => {
+                tracing::info!(
+                    source_port = peer_addr.port(),
+                    namespace = %identity.namespace,
+                    app_id = %identity.app_id,
+                    tid = identity.tid,
+                    "[INTERNAL-GW] caller identity resolved"
+                );
+                CallerIdentity {
+                    namespace: identity.namespace,
+                    app_id: identity.app_id,
+                    tid: identity.tid,
                 }
             }
-        } else {
-            None
+            None => {
+                tracing::warn!(
+                    source_port = peer_addr.port(),
+                    "[INTERNAL-GW] unresolved caller identity - denying request"
+                );
+                return Err(StatusCode::UNAUTHORIZED);
+            }
         }
     } else {
-        // Non-loopback connections are never trusted for internal identity
         tracing::warn!(
             peer_addr = %peer_addr,
             "[INTERNAL-GW] non-loopback connection rejected"
@@ -293,7 +432,6 @@ async fn proxy_handler(
         return Err(StatusCode::FORBIDDEN);
     };
 
-    // ── 2. TARGET from the Host header ──────────────────────────────────
     let host_header = sanitized_headers
         .get("host")
         .and_then(|v| v.to_str().ok())
@@ -310,70 +448,55 @@ async fn proxy_handler(
         target_namespace = %target_namespace,
         method = %method,
         path = %path,
-        caller_ns = ?caller_identity.as_ref().map(|c| &c.namespace),
-        caller_app = ?caller_identity.as_ref().map(|c| &c.app_id),
+        caller_ns = %caller_identity.namespace,
+        caller_app = %caller_identity.app_id,
         "[INTERNAL-GW] request received"
     );
 
-    // ── 3. NAMESPACE CHECK — deny cross-namespace by default ────────────
-    if let Some(ref caller) = caller_identity {
-        if caller.namespace != target_namespace {
-            // Cross-namespace call — check allowlist
-            if !gw
-                .gateway_config
-                .is_cross_namespace_allowed(&caller.namespace, target_namespace)
-                .await
-            {
-                tracing::warn!(
-                    caller_ns = %caller.namespace,
-                    target_ns = %target_namespace,
-                    caller_app = %caller.app_id,
-                    "[INTERNAL-GW] cross-namespace call DENIED"
-                );
-                return Err(StatusCode::FORBIDDEN);
-            }
-            tracing::info!(
-                caller_ns = %caller.namespace,
-                target_ns = %target_namespace,
-                "[INTERNAL-GW] cross-namespace call ALLOWED (allowlist)"
-            );
-        }
-    } else {
-        // No identity resolved — deny by default
-        if !gw.allow_anonymous_internal {
+    if caller_identity.namespace != target_namespace {
+        if !gw
+            .gateway_config
+            .is_cross_namespace_allowed(&caller_identity.namespace, target_namespace)
+            .await
+        {
             tracing::warn!(
-                source_port = peer_addr.port(),
-                "[INTERNAL-GW] denying anonymous request"
+                caller_ns = %caller_identity.namespace,
+                target_ns = %target_namespace,
+                caller_app = %caller_identity.app_id,
+                "[INTERNAL-GW] cross-namespace call DENIED"
             );
-            return Err(StatusCode::UNAUTHORIZED);
+            return Err(StatusCode::FORBIDDEN);
         }
-        tracing::debug!(
-            source_port = peer_addr.port(),
-            "[INTERNAL-GW] allowing anonymous request"
+        tracing::info!(
+            caller_ns = %caller_identity.namespace,
+            target_ns = %target_namespace,
+            "[INTERNAL-GW] cross-namespace call ALLOWED (allowlist)"
         );
     }
 
-    // ── 3b. RATE LIMITING per source app ────────────────────────────────
-    if let Some(ref caller) = caller_identity {
-        let source_ip = peer_addr.ip();
-        if let Err(e) = gw.rate_limiter.check_request(&caller.app_id, source_ip) {
-            tracing::warn!(
-                caller_app = %caller.app_id,
-                error = %e,
-                "[INTERNAL-GW] rate limit exceeded"
-            );
-            return Err(StatusCode::TOO_MANY_REQUESTS);
-        }
+    let source_ip = peer_addr.ip();
+    if let Err(e) = gw
+        .rate_limiter
+        .check_request(&caller_identity.app_id, source_ip)
+    {
+        tracing::warn!(
+            caller_app = %caller_identity.app_id,
+            error = %e,
+            "[INTERNAL-GW] rate limit exceeded"
+        );
+        return Err(StatusCode::TOO_MANY_REQUESTS);
     }
 
-    // ── 4. RESOLVE target to real loopback address ──────────────────────
     let target_app_id =
         common::types::AppId::new_namespaced(target_namespace, target_app_name, "v1");
 
-    let target_addr = match gw.registry.resolve(target_namespace, target_app_name).await {
-        Some(addr) => addr,
+    let target_endpoint = match gw
+        .registry
+        .resolve_endpoint(target_namespace, target_app_name)
+        .await
+    {
+        Some(endpoint) => endpoint,
         None => {
-            // Target not running — try cold start
             if let Some(ref cold_start) = gw.cold_start {
                 tracing::info!(
                     target_ns = %target_namespace,
@@ -383,7 +506,10 @@ async fn proxy_handler(
                 match cold_start(target_app_id.clone()).await {
                     Some(addr) => {
                         tracing::info!(%addr, "[INTERNAL-GW] cold start succeeded");
-                        addr
+                        gw.registry
+                            .resolve_endpoint(target_namespace, target_app_name)
+                            .await
+                            .unwrap_or(supervisor::network::RegisteredEndpoint { addr, h2c: false })
                     }
                     None => {
                         tracing::warn!(
@@ -401,137 +527,185 @@ async fn proxy_handler(
     };
 
     tracing::info!(
-        target_addr = %target_addr,
+        target_addr = %target_endpoint.addr,
+        h2c = target_endpoint.h2c,
         "[INTERNAL-GW] resolved target address"
     );
 
-    // ── 5. APPLY ENDPOINT POLICIES ──────────────────────────────────────
     let route_config = gw.gateway_config.get_route_config(&target_app_id).await;
+    let route_auth = route_config
+        .as_ref()
+        .map(|cfg| cfg.auth.clone())
+        .unwrap_or(proxy::gateway::config::AuthPolicy::None);
 
     let req_path = req.uri().path();
-    if let Some(ref cfg) = route_config {
-        if let Some(rule) = cfg.endpoints.iter().find(|e| {
+    let endpoint_rule = route_config.as_ref().and_then(|cfg| {
+        cfg.endpoints.iter().find(|e| {
             req_path.starts_with(&e.path)
                 && (e.methods.is_empty()
                     || e.methods
                         .iter()
                         .any(|m| m.eq_ignore_ascii_case(req_method_str.as_str())))
-        }) {
-            if let Some(status) = unsupported_endpoint_auth_status(&rule.auth) {
-                tracing::warn!(
-                    target_app = %target_app_id.0,
-                    path = %req_path,
-                    "endpoint auth mode is configured but not implemented in the internal gateway"
-                );
-                return Err(status);
-            }
+        })
+    });
 
-            match &rule.auth {
-                common::types::EndpointAuth::None | common::types::EndpointAuth::Inherit => {}
-                common::types::EndpointAuth::ApiKey => {
-                    let api_key = sanitized_headers
-                        .get("x-api-key")
-                        .and_then(|v| v.to_str().ok());
-                    if let Some(key) = api_key {
-                        if !gw
-                            .gateway_config
-                            .validate_api_key(&target_app_id.0, key, req_path)
-                            .await
-                        {
-                            return Err(StatusCode::UNAUTHORIZED);
-                        }
-                    } else {
+    let mut user_identity: Option<proxy::gateway::oidc::UserIdentity> = None;
+
+    if let Some(rule) = endpoint_rule {
+        match &rule.auth {
+            common::types::EndpointAuth::ApiKey => {
+                let api_key = sanitized_headers
+                    .get("x-api-key")
+                    .and_then(|v| v.to_str().ok());
+                if let Some(key) = api_key {
+                    if !gw
+                        .gateway_config
+                        .validate_api_key(&target_app_id.0, key, req_path)
+                        .await
+                    {
                         return Err(StatusCode::UNAUTHORIZED);
                     }
+                } else {
+                    return Err(StatusCode::UNAUTHORIZED);
                 }
-                _ => unreachable!(
-                    "unsupported endpoint auth modes should have been rejected earlier"
-                ),
             }
+            _ => {
+                if let Some(policy) = endpoint_auth_policy(&route_auth, &rule.auth) {
+                    if policy != proxy::gateway::config::AuthPolicy::None {
+                        let identity = gw
+                            .gateway_config
+                            .authenticate_header_map_with_policy(&sanitized_headers, &policy)
+                            .await
+                            .map_err(|_| StatusCode::UNAUTHORIZED)?;
 
-            if let Some(ref rl) = rule.rate_limit {
-                let _ = rl; // TODO: per-endpoint rate limiting
+                        let roles_ok = proxy::gateway::authz::authorize(&identity, &policy);
+                        let scopes_ok = proxy::gateway::authz::authorize_scopes(
+                            &identity,
+                            &rule.required_scopes,
+                        );
+                        if !roles_ok || !scopes_ok {
+                            return Err(StatusCode::FORBIDDEN);
+                        }
+                        user_identity = Some(identity);
+                    }
+                }
+            }
+        }
+    } else if route_auth != proxy::gateway::config::AuthPolicy::None {
+        let identity = gw
+            .gateway_config
+            .authenticate_header_map_with_policy(&sanitized_headers, &route_auth)
+            .await
+            .map_err(|_| StatusCode::UNAUTHORIZED)?;
+        if !proxy::gateway::authz::authorize(&identity, &route_auth) {
+            return Err(StatusCode::FORBIDDEN);
+        }
+        user_identity = Some(identity);
+    }
+    let effective_rate_limit = endpoint_rule
+        .and_then(|rule| {
+            rule.rate_limit
+                .as_ref()
+                .map(|rl| (Some(rule.path.as_str()), rl))
+        })
+        .or_else(|| {
+            route_config
+                .as_ref()
+                .and_then(|cfg| cfg.rate_limit.as_ref().map(|rl| (None, rl)))
+        });
+
+    if let Some((endpoint_path, rl)) = effective_rate_limit {
+        let rate_limit_key = match endpoint_path {
+            Some(endpoint_path) => {
+                format!("{}#{}#{}", target_app_id.0, req_method_str, endpoint_path)
+            }
+            None => format!("{}#route", target_app_id.0),
+        };
+
+        if !check_route_rate_limit(&gw.route_rate_buckets, &rate_limit_key, rl) {
+            tracing::warn!(
+                app_id = %target_app_id.0,
+                key = %rate_limit_key,
+                requests_per_second = rl.requests_per_second,
+                burst_capacity = rl.burst_capacity,
+                "[INTERNAL-GW] route rate limit exceeded"
+            );
+            return Err(StatusCode::TOO_MANY_REQUESTS);
+        }
+
+        if rl.distributed {
+            let limiters = gw.gateway_config.distributed_limiters.read().await;
+            if let Some(limiter) = limiters.get(&target_app_id.0) {
+                if !limiter.check_request().await {
+                    tracing::warn!(
+                        app_id = %target_app_id.0,
+                        requests_per_second = rl.requests_per_second,
+                        "[INTERNAL-GW] distributed route rate limit exceeded"
+                    );
+                    return Err(StatusCode::TOO_MANY_REQUESTS);
+                }
             }
         }
     }
 
-    // ── 6. CIRCUIT BREAKER ──────────────────────────────────────────────
     if gw.circuit_breaker.is_circuit_open(&target_app_id.0) {
         return Err(StatusCode::SERVICE_UNAVAILABLE);
     }
 
-    // ── 7. FORWARD to the real target ───────────────────────────────────
-    let uri = format!(
-        "http://{}{}",
-        target_addr,
-        req.uri().path_and_query().map(|p| p.as_str()).unwrap_or("")
-    );
+    let (parts, body) = req.into_parts();
+    let path_and_query = parts
+        .uri
+        .path_and_query()
+        .map(|p| p.as_str().to_string())
+        .unwrap_or_else(|| "/".to_string());
 
-    let req_headers = sanitized_headers.clone();
+    let mut forwarded_headers = sanitized_headers.clone();
+    if let Some(identity) = user_identity.as_ref() {
+        if let Ok(value) = http::HeaderValue::from_str(&identity.sub) {
+            forwarded_headers.insert("X-User-Id", value);
+        }
+        if let Some(email) = identity.email.as_ref() {
+            if let Ok(value) = http::HeaderValue::from_str(email) {
+                forwarded_headers.insert("X-User-Email", value);
+            }
+        }
+        if !identity.roles.is_empty() {
+            if let Ok(value) = http::HeaderValue::from_str(&identity.roles.join(",")) {
+                forwarded_headers.insert("X-User-Roles", value);
+            }
+        }
+    }
 
-    let body_bytes = match axum::body::to_bytes(req.into_body(), MAX_BODY_SIZE).await {
-        Ok(bytes) => bytes,
+    let result: Result<Response<axum::body::Body>, StatusCode> = match forward_request(
+        target_endpoint,
+        method.clone(),
+        path_and_query,
+        forwarded_headers,
+        body,
+        target_app_name,
+    )
+    .await
+    {
+        Ok(resp) => {
+            gw.rate_limiter
+                .record_success(&caller_identity.app_id, peer_addr.ip());
+            gw.circuit_breaker.record_success(&target_app_id.0);
+            Ok(resp)
+        }
         Err(e) => {
-            tracing::warn!(error = %e, "[INTERNAL-GW] failed to read request body");
-            return Err(StatusCode::BAD_REQUEST);
+            tracing::warn!(status = %e, "[INTERNAL-GW] upstream error");
+            gw.circuit_breaker.record_failure(&target_app_id.0);
+            Err(e)
         }
     };
 
-    let mut forward_req = gw.http_client.request(method.clone(), &uri);
-
-    // Strip internal-only headers before forwarding to the target app.
-    for (k, v) in &req_headers {
-        let name = k.as_str();
-        if name != "x-source-app" && name != "host" {
-            forward_req = forward_req.header(k, v);
-        }
-    }
-    // Set the real Host header for the target app.
-    let real_host = format!("{}:{}", target_app_name, target_addr.port());
-    forward_req = forward_req.header("host", &real_host);
-
-    let result: Result<Response<axum::body::Body>, StatusCode> =
-        match forward_req.body(body_bytes).send().await {
-            Ok(resp) => {
-                if let Some(ref caller) = caller_identity {
-                    gw.rate_limiter
-                        .record_success(&caller.app_id, peer_addr.ip());
-                }
-                gw.circuit_breaker.record_success(&target_app_id.0);
-                let mut builder = Response::builder().status(resp.status());
-                for (k, v) in resp.headers() {
-                    builder = builder.header(k, v);
-                }
-                let resp_bytes = match resp.bytes().await {
-                    Ok(b) => b,
-                    Err(e) => {
-                        tracing::warn!(error = %e, "[INTERNAL-GW] failed to read response body");
-                        return Err(StatusCode::BAD_GATEWAY);
-                    }
-                };
-                builder
-                    .body(axum::body::Body::from(resp_bytes))
-                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "[INTERNAL-GW] upstream error");
-                gw.circuit_breaker.record_failure(&target_app_id.0);
-                Err(StatusCode::BAD_GATEWAY)
-            }
-        };
-
-    // ── AUDIT LOGGING ───────────────────────────────────────────────────
     let latency_ms = start_time.elapsed().as_millis() as u64;
     let audit_path = std::env::var("WASM_NODE_AUDIT_LOG")
         .unwrap_or_else(|_| "/var/log/wasm-node/audit.jsonl".to_string());
 
     let event_type = if result.is_err() {
-        if let Some(ref caller) = caller_identity {
-            if caller.namespace != target_namespace {
-                AuditEventType::CrossNamespaceDenied
-            } else {
-                AuditEventType::InternalGatewayRequest
-            }
+        if caller_identity.namespace != target_namespace {
+            AuditEventType::CrossNamespaceDenied
         } else {
             AuditEventType::InternalGatewayRequest
         }
@@ -543,15 +717,12 @@ async fn proxy_handler(
         timestamp: chrono::Utc::now().timestamp_millis() as u64,
         node_id: std::env::var("NODE_ID").unwrap_or_else(|_| "unknown".to_string()),
         event_type,
-        actor: caller_identity
-            .as_ref()
-            .map(|c| c.app_id.clone())
-            .unwrap_or_else(|| "anonymous".to_string()),
+        actor: caller_identity.app_id.clone(),
         app_id: format!("{}/{}", target_namespace, target_app_name),
         details: serde_json::json!({
-            "caller_namespace": caller_identity.as_ref().map(|c| &c.namespace),
-            "caller_app_id": caller_identity.as_ref().map(|c| &c.app_id),
-            "caller_tid": caller_identity.as_ref().map(|c| c.tid),
+            "caller_namespace": &caller_identity.namespace,
+            "caller_app_id": &caller_identity.app_id,
+            "caller_tid": caller_identity.tid,
             "target_namespace": target_namespace,
             "target_app": target_app_name,
             "path": path,
@@ -566,13 +737,19 @@ async fn proxy_handler(
 
     result
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use axum::body::Body;
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
     use http::HeaderValue;
+    use hyper::service::service_fn;
+    use jsonwebtoken::{DecodingKey, EncodingKey};
+    use rsa::pkcs1::EncodeRsaPrivateKey;
+    use rsa::{traits::PublicKeyParts, RsaPrivateKey, RsaPublicKey};
     use std::net::{IpAddr, Ipv4Addr};
+    use std::sync::Arc;
+    use tokio::net::TcpListener;
 
     async fn setup_gateway() -> (Arc<InternalGateway>, common::types::AppId) {
         let registry = Arc::new(supervisor::network::NamespaceRegistry::default());
@@ -595,6 +772,169 @@ mod tests {
         ));
 
         (gw, app_id)
+    }
+
+    async fn setup_gateway_with(
+        gateway_config: Arc<proxy::gateway::Gateway>,
+        endpoint: supervisor::network::RegisteredEndpoint,
+    ) -> (Arc<InternalGateway>, common::types::AppId) {
+        let registry = Arc::new(supervisor::network::NamespaceRegistry::default());
+        let app_id = common::types::AppId::new_namespaced("default", "target", "v1");
+        let namespace_map = Arc::new(ebpf_monitor::NamespaceMap::new_fallback());
+
+        registry.register_endpoint(&app_id, endpoint).await;
+        namespace_map
+            .register_tid(
+                4242,
+                ebpf_monitor::common::TidIdentity::new("default", "caller:v1"),
+            )
+            .unwrap();
+        namespace_map.bind_port(54321, 4242);
+
+        let gw = Arc::new(
+            InternalGateway::new(
+                registry,
+                Arc::new(proxy::rate_limiter::RateLimiter::new(
+                    proxy::rate_limiter::RateLimitConfig::default(),
+                )),
+                Arc::new(proxy::gateway::circuit_breaker::CircuitBreakerManager::new()),
+                gateway_config,
+            )
+            .with_namespace_map(namespace_map)
+            .with_ebpf_active(true),
+        );
+
+        (gw, app_id)
+    }
+
+    async fn test_gateway_with_provider() -> (Arc<proxy::gateway::Gateway>, String, String) {
+        let mut rng = rand::thread_rng();
+        let private_key = RsaPrivateKey::new(&mut rng, 2048).unwrap();
+        let public_key = RsaPublicKey::from(&private_key);
+
+        let private_pkcs1 = private_key.to_pkcs1_der().unwrap();
+        let encoding_key = EncodingKey::from_rsa_der(private_pkcs1.as_bytes());
+
+        let n_b64 = URL_SAFE_NO_PAD.encode(public_key.n().to_bytes_be());
+        let e_b64 = URL_SAFE_NO_PAD.encode(public_key.e().to_bytes_be());
+
+        let provider = Arc::new(proxy::gateway::oidc::OidcProvider::new(
+            common::types::OidcConfig {
+                issuer_url: "https://test-issuer.example.com".to_string(),
+                audience: "test-audience".to_string(),
+                jwks_refresh_secs: 3600,
+                clock_skew_secs: 30,
+            },
+        ));
+
+        provider
+            .inject_jwks_key(
+                "test-key-1".to_string(),
+                DecodingKey::from_rsa_components(&n_b64, &e_b64).unwrap(),
+            )
+            .await;
+
+        let gateway = Arc::new(proxy::gateway::Gateway::new(Some(provider)));
+
+        let with_scope = create_test_jwt(
+            &serde_json::json!({
+                "sub": "user-123",
+                "iss": "https://test-issuer.example.com",
+                "aud": "test-audience",
+                "exp": (chrono::Utc::now() + chrono::Duration::hours(1)).timestamp(),
+                "iat": chrono::Utc::now().timestamp(),
+                "realm_access": { "roles": ["admin"] },
+                "scope": "admin:users read:users",
+            }),
+            "test-key-1",
+            &encoding_key,
+        );
+
+        let missing_scope = create_test_jwt(
+            &serde_json::json!({
+                "sub": "user-123",
+                "iss": "https://test-issuer.example.com",
+                "aud": "test-audience",
+                "exp": (chrono::Utc::now() + chrono::Duration::hours(1)).timestamp(),
+                "iat": chrono::Utc::now().timestamp(),
+                "realm_access": { "roles": ["admin"] },
+                "scope": "read:users",
+            }),
+            "test-key-1",
+            &encoding_key,
+        );
+
+        (gateway, with_scope, missing_scope)
+    }
+
+    fn create_test_jwt(
+        claims: &serde_json::Value,
+        kid: &str,
+        encoding_key: &EncodingKey,
+    ) -> String {
+        let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::RS256);
+        header.kid = Some(kid.to_string());
+        jsonwebtoken::encode(&header, claims, encoding_key).unwrap()
+    }
+
+    async fn spawn_h2c_test_server() -> SocketAddr {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let io = TokioIo::new(stream);
+            let service = service_fn(|req: Request<Incoming>| async move {
+                assert_eq!(
+                    req.headers()
+                        .get("x-user-id")
+                        .and_then(|value| value.to_str().ok()),
+                    Some("user-123")
+                );
+                Ok::<_, std::convert::Infallible>(
+                    Response::builder()
+                        .status(StatusCode::OK)
+                        .body(axum::body::Body::from("ok"))
+                        .unwrap(),
+                )
+            });
+
+            hyper::server::conn::http2::Builder::new(TokioExecutor::new())
+                .serve_connection(io, service)
+                .await
+                .unwrap();
+        });
+
+        addr
+    }
+
+    async fn spawn_h1_test_server(max_requests: usize) -> SocketAddr {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            for _ in 0..max_requests {
+                let (stream, _) = listener.accept().await.unwrap();
+                let io = TokioIo::new(stream);
+                let service = service_fn(|_req: Request<Incoming>| async move {
+                    Ok::<_, std::convert::Infallible>(
+                        Response::builder()
+                            .status(StatusCode::OK)
+                            .body(axum::body::Body::from("ok"))
+                            .unwrap(),
+                    )
+                });
+
+                tokio::spawn(async move {
+                    hyper::server::conn::http1::Builder::new()
+                        .serve_connection(io, service)
+                        .await
+                        .unwrap();
+                });
+            }
+        });
+
+        addr
     }
 
     #[test]
@@ -703,21 +1043,260 @@ mod tests {
     }
 
     #[test]
-    fn test_unsupported_endpoint_auth_status_rejects_unimplemented_modes() {
+    fn test_endpoint_auth_policy_inherits_route_default() {
         assert_eq!(
-            unsupported_endpoint_auth_status(&common::types::EndpointAuth::Authenticated),
-            Some(StatusCode::NOT_IMPLEMENTED)
+            endpoint_auth_policy(
+                &common::types::AuthPolicy::Authenticated,
+                &common::types::EndpointAuth::Inherit,
+            ),
+            Some(common::types::AuthPolicy::Authenticated)
         );
+    }
+
+    #[tokio::test]
+    async fn test_internal_gateway_rejects_missing_bearer_token_for_route_auth() {
+        let gateway = Arc::new(proxy::gateway::Gateway::new(None));
+        gateway
+            .set_route_config(
+                "default/target:v1",
+                common::types::GatewayRouteConfig {
+                    auth: common::types::AuthPolicy::Authenticated,
+                    ..Default::default()
+                },
+            )
+            .await;
+
+        let (gw, _app_id) = setup_gateway_with(
+            gateway,
+            supervisor::network::RegisteredEndpoint {
+                addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 10101),
+                h2c: false,
+            },
+        )
+        .await;
+
+        let req = Request::builder()
+            .method("GET")
+            .uri("/users")
+            .header("host", "target.default.internal")
+            .body(Body::empty())
+            .unwrap();
+
+        let result = proxy_handler(
+            State(gw),
+            ConnectInfo(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 54321)),
+            req,
+        )
+        .await;
+
+        assert_eq!(result.unwrap_err(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn test_internal_gateway_enforces_endpoint_scopes() {
+        let (gateway, _good_token, missing_scope_token) = test_gateway_with_provider().await;
+        gateway
+            .set_route_config(
+                "default/target:v1",
+                common::types::GatewayRouteConfig {
+                    endpoints: vec![common::types::EndpointRule {
+                        path: "/api/admin".to_string(),
+                        methods: vec!["POST".to_string()],
+                        auth: common::types::EndpointAuth::Roles {
+                            allowed_roles: vec!["admin".to_string()],
+                            client_id: None,
+                        },
+                        required_scopes: vec!["admin:users".to_string()],
+                        rate_limit: None,
+                    }],
+                    ..Default::default()
+                },
+            )
+            .await;
+
+        let (gw, _app_id) = setup_gateway_with(
+            gateway,
+            supervisor::network::RegisteredEndpoint {
+                addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 10101),
+                h2c: false,
+            },
+        )
+        .await;
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/admin")
+            .header("host", "target.default.internal")
+            .header("authorization", format!("Bearer {missing_scope_token}"))
+            .body(Body::empty())
+            .unwrap();
+
+        let result = proxy_handler(
+            State(gw),
+            ConnectInfo(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 54321)),
+            req,
+        )
+        .await;
+
+        assert_eq!(result.unwrap_err(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn test_internal_gateway_forwards_h2c_with_identity_headers() {
+        let upstream_addr = spawn_h2c_test_server().await;
+        let (gateway, good_token, _missing_scope_token) = test_gateway_with_provider().await;
+        gateway
+            .set_route_config(
+                "default/target:v1",
+                common::types::GatewayRouteConfig {
+                    auth: common::types::AuthPolicy::Authenticated,
+                    ..Default::default()
+                },
+            )
+            .await;
+
+        let (gw, _app_id) = setup_gateway_with(
+            gateway,
+            supervisor::network::RegisteredEndpoint {
+                addr: upstream_addr,
+                h2c: true,
+            },
+        )
+        .await;
+
         assert_eq!(
-            unsupported_endpoint_auth_status(&common::types::EndpointAuth::Roles {
-                allowed_roles: vec!["admin".to_string()],
-                client_id: None,
-            }),
-            Some(StatusCode::NOT_IMPLEMENTED)
-        );
-        assert_eq!(
-            unsupported_endpoint_auth_status(&common::types::EndpointAuth::ApiKey),
+            endpoint_auth_policy(
+                &common::types::AuthPolicy::Authenticated,
+                &common::types::EndpointAuth::ApiKey,
+            ),
             None
         );
+
+        let req = Request::builder()
+            .method("GET")
+            .uri("/grpc")
+            .header("host", "target.default.internal")
+            .header("authorization", format!("Bearer {good_token}"))
+            .body(Body::empty())
+            .unwrap();
+
+        let resp = proxy_handler(
+            State(gw),
+            ConnectInfo(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 54321)),
+            req,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(&body[..], b"ok");
+    }
+
+    #[tokio::test]
+    async fn test_internal_gateway_rejects_oversized_request_body_from_content_length() {
+        let (gw, _app_id) = setup_gateway().await;
+        let namespace_map = Arc::new(ebpf_monitor::NamespaceMap::new_fallback());
+        namespace_map
+            .register_tid(
+                4242,
+                ebpf_monitor::common::TidIdentity::new("default", "caller:v1"),
+            )
+            .unwrap();
+        namespace_map.bind_port(54321, 4242);
+        let gw = Arc::new(
+            InternalGateway::new(
+                gw.registry.clone(),
+                gw.rate_limiter.clone(),
+                gw.circuit_breaker.clone(),
+                gw.gateway_config.clone(),
+            )
+            .with_namespace_map(namespace_map)
+            .with_ebpf_active(true)
+            .with_max_body_size_bytes(16),
+        );
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/upload")
+            .header("host", "target.default.internal")
+            .header("content-length", "32")
+            .body(Body::empty())
+            .unwrap();
+
+        let result = proxy_handler(
+            State(gw),
+            ConnectInfo(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 54321)),
+            req,
+        )
+        .await;
+
+        assert_eq!(result.unwrap_err(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    #[tokio::test]
+    async fn test_internal_gateway_enforces_endpoint_rate_limit() {
+        let upstream_addr = spawn_h1_test_server(2).await;
+        let gateway = Arc::new(proxy::gateway::Gateway::new(None));
+        gateway
+            .set_route_config(
+                "default/target:v1",
+                common::types::GatewayRouteConfig {
+                    endpoints: vec![common::types::EndpointRule {
+                        path: "/echo".to_string(),
+                        methods: vec!["GET".to_string()],
+                        auth: common::types::EndpointAuth::None,
+                        required_scopes: vec![],
+                        rate_limit: Some(common::types::RouteRateLimit {
+                            requests_per_second: 1,
+                            burst_capacity: 1,
+                            distributed: false,
+                        }),
+                    }],
+                    ..Default::default()
+                },
+            )
+            .await;
+
+        let (gw, _app_id) = setup_gateway_with(
+            gateway,
+            supervisor::network::RegisteredEndpoint {
+                addr: upstream_addr,
+                h2c: false,
+            },
+        )
+        .await;
+
+        let req1 = Request::builder()
+            .method("GET")
+            .uri("/echo")
+            .header("host", "target.default.internal")
+            .body(Body::empty())
+            .unwrap();
+        let resp1 = proxy_handler(
+            State(gw.clone()),
+            ConnectInfo(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 54321)),
+            req1,
+        )
+        .await
+        .unwrap();
+        assert_eq!(resp1.status(), StatusCode::OK);
+
+        let req2 = Request::builder()
+            .method("GET")
+            .uri("/echo")
+            .header("host", "target.default.internal")
+            .body(Body::empty())
+            .unwrap();
+        let resp2 = proxy_handler(
+            State(gw),
+            ConnectInfo(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 54321)),
+            req2,
+        )
+        .await;
+
+        assert_eq!(resp2.unwrap_err(), StatusCode::TOO_MANY_REQUESTS);
     }
 }

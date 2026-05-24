@@ -212,7 +212,9 @@ PAYMENT_SERVICE_URL=http://payment-service.production.internal:9080
 PAYMENT_SERVICE_URL=http://127.0.0.1:10101
 ```
 
-The Supervisor uses the **slow path** (`<app>.<namespace>.internal:9080`) when the target app has endpoint-level gateway rules, so that auth, rate limits, and circuit breakers are enforced on East-West traffic. It uses the **fast path** (direct loopback) when there are no endpoint rules.
+The Supervisor uses the **slow path** (`<app>.<namespace>.internal:9080`) when the target app has endpoint-level gateway rules, so that auth, role/scope checks, API-key checks, rate limits, and circuit breakers are enforced on East-West traffic. It uses the **fast path** (direct loopback) when there are no endpoint rules.
+
+For `wasi:http` / gRPC services on the slow path, the internal gateway now preserves the upstream `h2c` path instead of collapsing requests through a buffered HTTP/1 forwarding layer.
 
 **Inside the Wasm app:**
 

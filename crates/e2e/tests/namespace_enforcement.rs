@@ -239,6 +239,7 @@ async fn test_internal_gateway_rate_limiting() {
             path: "/echo".to_string(),
             methods: vec!["GET".to_string()],
             auth: common::types::EndpointAuth::None,
+            required_scopes: vec![],
             rate_limit: Some(common::types::RouteRateLimit {
                 requests_per_second: 1,
                 burst_capacity: 1,

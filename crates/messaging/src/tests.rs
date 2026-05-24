@@ -518,6 +518,7 @@ mod test_helpers {
                 path: "/echo".to_string(),
                 methods: vec!["GET".to_string()],
                 auth: EndpointAuth::None,
+                required_scopes: vec![],
                 rate_limit: None,
             }],
             ..Default::default()

@@ -401,6 +401,7 @@ async fn test_endpoint_rule_evaluation() {
                 path: "/health".to_string(),
                 methods: vec!["GET".to_string()],
                 auth: common::types::EndpointAuth::None,
+                required_scopes: vec![],
                 rate_limit: None,
             },
             common::types::EndpointRule {
@@ -410,6 +411,7 @@ async fn test_endpoint_rule_evaluation() {
                     allowed_roles: vec!["admin".to_string()],
                     client_id: None,
                 },
+                required_scopes: vec![],
                 rate_limit: None,
             },
         ],
@@ -430,6 +432,30 @@ async fn test_endpoint_rule_evaluation() {
         }
         other => panic!("expected Roles auth, got {:?}", other),
     }
+}
+
+#[test]
+fn test_endpoint_rule_scope_requirement() {
+    let config = common::types::GatewayRouteConfig {
+        endpoints: vec![common::types::EndpointRule {
+            path: "/api/users".to_string(),
+            methods: vec!["GET".to_string()],
+            auth: common::types::EndpointAuth::Roles {
+                allowed_roles: vec!["admin".to_string()],
+                client_id: None,
+            },
+            required_scopes: vec!["read:users".to_string()],
+            rate_limit: None,
+        }],
+        ..Default::default()
+    };
+
+    let rule = config
+        .endpoints
+        .iter()
+        .find(|e| e.path == "/api/users")
+        .unwrap();
+    assert_eq!(rule.required_scopes, vec!["read:users"]);
 }
 
 /// Test: namespace-qualified AppId resolution.

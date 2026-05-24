@@ -13,6 +13,18 @@ pub fn authorize(identity: &UserIdentity, policy: &AuthPolicy) -> bool {
     }
 }
 
+/// Check if a user has all required scopes.
+pub fn authorize_scopes(identity: &UserIdentity, required_scopes: &[String]) -> bool {
+    if required_scopes.is_empty() {
+        return true;
+    }
+
+    let scopes = extract_scopes(identity);
+    required_scopes
+        .iter()
+        .all(|required| scopes.iter().any(|scope| scope == required))
+}
+
 /// Check if a user has any of the allowed roles.
 pub fn authorize_roles(
     identity: &UserIdentity,
@@ -30,6 +42,42 @@ pub fn authorize_roles(
     })
 }
 
+fn extract_scopes(identity: &UserIdentity) -> Vec<String> {
+    let mut scopes = Vec::new();
+
+    if let Some(scope_str) = identity
+        .raw_claims
+        .get("scope")
+        .and_then(|value| value.as_str())
+    {
+        scopes.extend(scope_str.split_whitespace().map(str::to_string));
+    }
+
+    if let Some(scope_arr) = identity
+        .raw_claims
+        .get("scp")
+        .and_then(|value| value.as_array())
+    {
+        scopes.extend(
+            scope_arr
+                .iter()
+                .filter_map(|value| value.as_str().map(str::to_string)),
+        );
+    }
+
+    if let Some(scope_str) = identity
+        .raw_claims
+        .get("scp")
+        .and_then(|value| value.as_str())
+    {
+        scopes.extend(scope_str.split_whitespace().map(str::to_string));
+    }
+
+    scopes.sort();
+    scopes.dedup();
+    scopes
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -40,6 +88,18 @@ mod tests {
             email: Some("test@example.com".to_string()),
             roles,
             raw_claims: serde_json::json!({}),
+        }
+    }
+
+    fn test_identity_with_claims(
+        roles: Vec<String>,
+        raw_claims: serde_json::Value,
+    ) -> UserIdentity {
+        UserIdentity {
+            sub: "user-123".to_string(),
+            email: Some("test@example.com".to_string()),
+            roles,
+            raw_claims,
         }
     }
 
@@ -93,5 +153,36 @@ mod tests {
             client_id: None,
         };
         assert!(authorize(&identity, &policy));
+    }
+
+    #[test]
+    fn test_authorize_scopes_from_scope_string() {
+        let identity = test_identity_with_claims(
+            vec![],
+            serde_json::json!({ "scope": "read:users write:users" }),
+        );
+        assert!(authorize_scopes(
+            &identity,
+            &["read:users".to_string(), "write:users".to_string()]
+        ));
+    }
+
+    #[test]
+    fn test_authorize_scopes_from_scp_array() {
+        let identity = test_identity_with_claims(
+            vec![],
+            serde_json::json!({ "scp": ["read:users", "write:users"] }),
+        );
+        assert!(authorize_scopes(&identity, &["read:users".to_string()]));
+    }
+
+    #[test]
+    fn test_authorize_scopes_denies_missing_scope() {
+        let identity =
+            test_identity_with_claims(vec![], serde_json::json!({ "scope": "read:users" }));
+        assert!(!authorize_scopes(
+            &identity,
+            &["read:users".to_string(), "admin:users".to_string()]
+        ));
     }
 }
