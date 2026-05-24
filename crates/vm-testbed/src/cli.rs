@@ -1,16 +1,14 @@
 use anyhow::{anyhow, bail, Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
-use common::artifact_transfer::{
-    ArtifactManifestBatchRequest, ArtifactManifestBatchResponse,
-};
+use common::artifact_transfer::{ArtifactManifestBatchRequest, ArtifactManifestBatchResponse};
 use common::types::{AppConfig, AppId, FuelQuota, MemoryPages, Route};
 use messaging::{events::Event, NatsBus};
 use serde::{Deserialize, Serialize};
+use sha2::Digest;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
-use sha2::Digest;
 use tokio::time::sleep;
 use tracing::info;
 use vm_testbed::{network, ClusterFixture, MicroVm, VmConfig};
@@ -579,7 +577,11 @@ async fn deploy_app_to_state(state: &PersistedClusterState, req: DeployRequest) 
         .with_context(|| format!("failed to read {}", req.wasm.display()))?;
     let sha = hex::encode(sha2::Sha256::digest(&wasm_bytes));
     let upload_url = format!("http://{}/artifacts/{}", node.admin_addr, sha);
-    let upload_resp = http.put(&upload_url).body(wasm_bytes.clone()).send().await?;
+    let upload_resp = http
+        .put(&upload_url)
+        .body(wasm_bytes.clone())
+        .send()
+        .await?;
     if !upload_resp.status().is_success() {
         bail!("artifact upload failed: {}", upload_resp.status());
     }
@@ -588,7 +590,11 @@ async fn deploy_app_to_state(state: &PersistedClusterState, req: DeployRequest) 
     let registry_resp = http.get(&registry_url).send().await?;
     let (peer_targets, manifests) = if registry_resp.status().is_success() {
         let registry: ClusterNodeRegistryResponse = registry_resp.json().await?;
-        let peers = select_active_peer_node_ids(registry.nodes, Some(&node.id), registry.active_staleness_secs);
+        let peers = select_active_peer_node_ids(
+            registry.nodes,
+            Some(&node.id),
+            registry.active_staleness_secs,
+        );
         if peers.is_empty() {
             (Vec::new(), Vec::new())
         } else {
@@ -672,7 +678,10 @@ async fn undeploy_app_from_state(state: &PersistedClusterState, app_id: &str) ->
     let mut bus = NatsBus::connect(&state.nats_url).await?;
     bus.set_node_id("vm-testbed-cli".to_string());
     let app_id = AppId::new_validate(app_id).map_err(|e| anyhow!(e))?;
-    bus.publish(&Event::RemoveApp { app_id: app_id.clone() }).await?;
+    bus.publish(&Event::RemoveApp {
+        app_id: app_id.clone(),
+    })
+    .await?;
     println!("Undeploy requested for {}", app_id.0);
     Ok(())
 }

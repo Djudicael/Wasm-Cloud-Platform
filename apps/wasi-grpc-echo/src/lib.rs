@@ -17,7 +17,15 @@ use bindings::wasi::io::streams::StreamError;
 use pb::{EchoReply, EchoRequest};
 use prost::Message;
 
+const GRPC_CONTENT_TYPE: &[u8] = b"application/grpc";
+const GRPC_ENCODING_IDENTITY: &[u8] = b"identity";
+
 const GRPC_ECHO_PATH: &str = "/echo.EchoService/Echo";
+const GRPC_SERVER_STREAM_PATH: &str = "/echo.EchoService/ServerStream";
+const GRPC_CLIENT_STREAM_PATH: &str = "/echo.EchoService/ClientStream";
+const GRPC_BIDI_STREAM_PATH: &str = "/echo.EchoService/BidiStream";
+const GRPC_FAIL_UNARY_PATH: &str = "/echo.EchoService/FailUnary";
+const GRPC_FAIL_SERVER_STREAM_PATH: &str = "/echo.EchoService/FailServerStream";
 
 struct WasiGrpcEcho;
 
@@ -32,9 +40,16 @@ impl bindings::exports::wasi::http::incoming_handler::Guest for WasiGrpcEcho {
             "/" => write_plain_text_response(response_out, 200, "wasi grpc echo\n"),
             "/health" => write_plain_text_response(response_out, 200, "healthy\n"),
             GRPC_ECHO_PATH => handle_grpc_echo(request, response_out),
+            GRPC_SERVER_STREAM_PATH => handle_grpc_server_stream(request, response_out),
+            GRPC_CLIENT_STREAM_PATH => handle_grpc_client_stream(request, response_out),
+            GRPC_BIDI_STREAM_PATH => handle_grpc_bidi_stream(request, response_out),
+            GRPC_FAIL_UNARY_PATH => handle_grpc_fail_unary(request, response_out),
+            GRPC_FAIL_SERVER_STREAM_PATH => handle_grpc_fail_server_stream(request, response_out),
             _ => write_plain_text_response(response_out, 404, "not found\n"),
         }
-        .unwrap_or_else(|err| panic!("wasi-grpc-echo request handling failed for path {path}: {err}"));
+        .unwrap_or_else(|err| {
+            panic!("wasi-grpc-echo request handling failed for path {path}: {err}")
+        });
     }
 }
 
@@ -62,11 +77,8 @@ fn ensure_method(request: &IncomingRequest, expected: &str) -> Result<(), String
     }
 }
 
-fn handle_grpc_echo(
-    request: IncomingRequest,
-    response_out: ResponseOutparam,
-) -> Result<(), String> {
-    ensure_method(&request, "POST")?;
+fn ensure_grpc_request(request: &IncomingRequest) -> Result<(), String> {
+    ensure_method(request, "POST")?;
     let request_headers = request.headers();
     let content_type_values = request_headers.get("content-type");
     let content_type = content_type_values
@@ -74,22 +86,126 @@ fn handle_grpc_echo(
         .and_then(|value| std::str::from_utf8(value).ok())
         .unwrap_or_default();
     if !content_type.starts_with("application/grpc") {
-        return write_grpc_error(response_out, "unsupported content-type", "13");
+        return Err("unsupported content-type".to_string());
     }
+    Ok(())
+}
 
+fn handle_grpc_echo(
+    request: IncomingRequest,
+    response_out: ResponseOutparam,
+) -> Result<(), String> {
+    ensure_grpc_request(&request)?;
     let request_body = read_request_body(&request)?;
-    let echo_request = decode_grpc_unary_message::<EchoRequest>(&request_body)?;
+    let mut messages = decode_grpc_message_stream::<EchoRequest>(&request_body)?;
+    let echo_request = messages
+        .drain(..)
+        .next()
+        .ok_or_else(|| "grpc request body contained no message".to_string())?;
     let response_message = EchoReply {
         message: echo_request.message,
     };
-    let response_payload = encode_grpc_unary_message(&response_message)?;
+    write_grpc_response(response_out, &[response_message], "0", None)
+}
 
+fn handle_grpc_server_stream(
+    request: IncomingRequest,
+    response_out: ResponseOutparam,
+) -> Result<(), String> {
+    ensure_grpc_request(&request)?;
+    let request_body = read_request_body(&request)?;
+    let mut messages = decode_grpc_message_stream::<EchoRequest>(&request_body)?;
+    let echo_request = messages
+        .drain(..)
+        .next()
+        .ok_or_else(|| "grpc request body contained no message".to_string())?;
+    let replies = vec![
+        EchoReply {
+            message: format!("{}:1", echo_request.message),
+        },
+        EchoReply {
+            message: format!("{}:2", echo_request.message),
+        },
+        EchoReply {
+            message: format!("{}:3", echo_request.message),
+        },
+    ];
+    write_grpc_response(response_out, &replies, "0", None)
+}
+
+fn handle_grpc_client_stream(
+    request: IncomingRequest,
+    response_out: ResponseOutparam,
+) -> Result<(), String> {
+    ensure_grpc_request(&request)?;
+    let request_body = read_request_body(&request)?;
+    let messages = decode_grpc_message_stream::<EchoRequest>(&request_body)?;
+    let joined = messages
+        .iter()
+        .map(|msg| msg.message.as_str())
+        .collect::<Vec<_>>()
+        .join("|");
+    let reply = EchoReply {
+        message: format!("count={};messages={joined}", messages.len()),
+    };
+    write_grpc_response(response_out, &[reply], "0", None)
+}
+
+fn handle_grpc_bidi_stream(
+    request: IncomingRequest,
+    response_out: ResponseOutparam,
+) -> Result<(), String> {
+    ensure_grpc_request(&request)?;
+    let request_body = read_request_body(&request)?;
+    let messages = decode_grpc_message_stream::<EchoRequest>(&request_body)?;
+    let replies = messages
+        .into_iter()
+        .enumerate()
+        .map(|(idx, msg)| EchoReply {
+            message: format!("{}:{}", idx + 1, msg.message),
+        })
+        .collect::<Vec<_>>();
+    write_grpc_response(response_out, &replies, "0", None)
+}
+
+fn handle_grpc_fail_unary(
+    request: IncomingRequest,
+    response_out: ResponseOutparam,
+) -> Result<(), String> {
+    ensure_grpc_request(&request)?;
+    let _ = read_request_body(&request)?;
+    write_grpc_error(response_out, "forced unary failure", "7")
+}
+
+fn handle_grpc_fail_server_stream(
+    request: IncomingRequest,
+    response_out: ResponseOutparam,
+) -> Result<(), String> {
+    ensure_grpc_request(&request)?;
+    let request_body = read_request_body(&request)?;
+    let mut messages = decode_grpc_message_stream::<EchoRequest>(&request_body)?;
+    let echo_request = messages
+        .drain(..)
+        .next()
+        .ok_or_else(|| "grpc request body contained no message".to_string())?;
+    let partial = [EchoReply {
+        message: format!("partial:{}", echo_request.message),
+    }];
+    write_grpc_response(response_out, &partial, "13", Some("forced stream failure"))
+}
+
+fn write_grpc_response(
+    response_out: ResponseOutparam,
+    messages: &[EchoReply],
+    status: &str,
+    grpc_message: Option<&str>,
+) -> Result<(), String> {
     let headers = Fields::new();
     headers
-        .append("content-type", b"application/grpc")
+        .append("content-type", GRPC_CONTENT_TYPE)
         .map_err(|_| "failed to append grpc content-type header".to_string())?;
     headers
-        .append("grpc-encoding", b"identity")
+        .append("grpc-encoding", GRPC_ENCODING_IDENTITY)
         .map_err(|_| "failed to append grpc-encoding header".to_string())?;
 
     let response = OutgoingResponse::new(headers);
@@ -105,15 +221,25 @@ fn handle_grpc_echo(
     let stream = outgoing_body
         .write()
         .map_err(|_| "response body writer should open".to_string())?;
+    let mut response_bytes = Vec::new();
+    for message in messages {
+        let payload = encode_grpc_message(message)?;
+        response_bytes.extend_from_slice(&payload);
+    }
     stream
-        .blocking_write_and_flush(&response_payload)
+        .blocking_write_and_flush(&response_bytes)
         .map_err(|err| format!("grpc response write failed: {err}"))?;
     drop(stream);
 
     let trailers = Fields::new();
     trailers
-        .append("grpc-status", b"0")
+        .append("grpc-status", status.as_bytes())
         .map_err(|_| "failed to append grpc-status trailer".to_string())?;
+    if let Some(grpc_message) = grpc_message {
+        trailers
+            .append("grpc-message", grpc_message.as_bytes())
+            .map_err(|_| "failed to append grpc-message trailer".to_string())?;
+    }
     OutgoingBody::finish(outgoing_body, Some(trailers))
         .map_err(|err| format!("grpc response finalize failed: {err}"))?;
     Ok(())
@@ -124,36 +250,7 @@ fn write_grpc_error(
     message: &str,
     status: &str,
 ) -> Result<(), String> {
-    let headers = Fields::new();
-    headers
-        .append("content-type", b"application/grpc")
-        .map_err(|_| "failed to append grpc content-type header".to_string())?;
-
-    let response = OutgoingResponse::new(headers);
-    response
-        .set_status_code(200)
-        .map_err(|_| "invalid grpc status code".to_string())?;
-
-    let outgoing_body = response
-        .body()
-        .map_err(|_| "response body should be available".to_string())?;
-    ResponseOutparam::set(response_out, Ok(response));
-
-    let stream = outgoing_body
-        .write()
-        .map_err(|_| "response body writer should open".to_string())?;
-    drop(stream);
-
-    let trailers = Fields::new();
-    trailers
-        .append("grpc-status", status.as_bytes())
-        .map_err(|_| "failed to append grpc-status trailer".to_string())?;
-    trailers
-        .append("grpc-message", message.as_bytes())
-        .map_err(|_| "failed to append grpc-message trailer".to_string())?;
-    OutgoingBody::finish(outgoing_body, Some(trailers))
-        .map_err(|err| format!("grpc error finalize failed: {err}"))?;
-    Ok(())
+    write_grpc_response(response_out, &[], status, Some(message))
 }
 
 fn write_plain_text_response(
@@ -214,24 +311,38 @@ fn read_request_body(request: &IncomingRequest) -> Result<Vec<u8>, String> {
     Ok(bytes)
 }
 
-fn decode_grpc_unary_message<M>(bytes: &[u8]) -> Result<M, String>
+fn decode_grpc_message_stream<M>(bytes: &[u8]) -> Result<Vec<M>, String>
 where
     M: Message + Default,
 {
-    if bytes.len() < 5 {
-        return Err("grpc request body too short".to_string());
+    let mut offset = 0usize;
+    let mut messages = Vec::new();
+    while offset < bytes.len() {
+        if bytes.len() - offset < 5 {
+            return Err("grpc request body too short".to_string());
+        }
+        if bytes[offset] != 0 {
+            return Err("compressed grpc requests are not supported".to_string());
+        }
+        let message_len = u32::from_be_bytes([
+            bytes[offset + 1],
+            bytes[offset + 2],
+            bytes[offset + 3],
+            bytes[offset + 4],
+        ]) as usize;
+        offset += 5;
+        if bytes.len() - offset < message_len {
+            return Err("grpc request frame length mismatch".to_string());
+        }
+        let message = M::decode(&bytes[offset..offset + message_len])
+            .map_err(|err| format!("protobuf decode failed: {err}"))?;
+        messages.push(message);
+        offset += message_len;
     }
-    if bytes[0] != 0 {
-        return Err("compressed grpc requests are not supported".to_string());
-    }
-    let message_len = u32::from_be_bytes([bytes[1], bytes[2], bytes[3], bytes[4]]) as usize;
-    if bytes.len() != 5 + message_len {
-        return Err("grpc request frame length mismatch".to_string());
-    }
-    M::decode(&bytes[5..]).map_err(|err| format!("protobuf decode failed: {err}"))
+    Ok(messages)
 }
 
-fn encode_grpc_unary_message<M>(message: &M) -> Result<Vec<u8>, String>
+fn encode_grpc_message<M>(message: &M) -> Result<Vec<u8>, String>
 where
     M: Message,
 {

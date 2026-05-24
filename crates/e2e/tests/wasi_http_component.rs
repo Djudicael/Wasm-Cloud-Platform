@@ -21,10 +21,11 @@ async fn test_deploy_and_serve_wasi_http_component() {
         .await
         .expect("Failed to start node");
 
-    let wasm_path =
-        find_http_hello_component_wasm().expect("http-hello-component.wasm not found");
+    let wasm_path = find_http_hello_component_wasm().expect("http-hello-component.wasm not found");
     let sha256 = compute_sha256(&wasm_path).expect("Failed to compute SHA-256");
-    let size_bytes = std::fs::metadata(&wasm_path).expect("Failed to get file size").len();
+    let size_bytes = std::fs::metadata(&wasm_path)
+        .expect("Failed to get file size")
+        .len();
     upload_artifact(node.artifact_port, &wasm_path, &sha256)
         .await
         .expect("Failed to upload artifact to node artifact server");

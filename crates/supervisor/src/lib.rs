@@ -683,102 +683,104 @@ impl Supervisor {
         let app_id_clone = app_id.clone();
         let instance_id = InstanceId(uuid::Uuid::new_v4());
 
-        let (task, shutdown_tx, instance_tid, instance_policy_counters) =
-            match prepared.execution_model() {
-                ComponentExecutionModel::WasiCli => {
-                    let (shutdown_tx, _shutdown_rx) = tokio::sync::oneshot::channel::<()>();
-                    let prepared_clone = prepared.clone();
-                    let (spawn_result_tx, spawn_result_rx) =
-                        tokio::sync::oneshot::channel::<Result<(), PlatformError>>();
-                    let namespace_map_for_spawn = self.namespace_map.clone();
-                    let qualified_app_id_for_spawn = qualified_app_id.clone();
-                    let (tid_tx, tid_rx) = tokio::sync::oneshot::channel::<u32>();
-                    let (policy_counters_tx, policy_counters_rx) = tokio::sync::oneshot::channel();
+        let (task, shutdown_tx, instance_tid, instance_policy_counters) = match prepared
+            .execution_model()
+        {
+            ComponentExecutionModel::WasiCli => {
+                let (shutdown_tx, _shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+                let prepared_clone = prepared.clone();
+                let (spawn_result_tx, spawn_result_rx) =
+                    tokio::sync::oneshot::channel::<Result<(), PlatformError>>();
+                let namespace_map_for_spawn = self.namespace_map.clone();
+                let qualified_app_id_for_spawn = qualified_app_id.clone();
+                let (tid_tx, tid_rx) = tokio::sync::oneshot::channel::<u32>();
+                let (policy_counters_tx, policy_counters_rx) = tokio::sync::oneshot::channel();
 
-                    let task = tokio::task::spawn_blocking(move || {
-                        let tid = gettid();
-                        if let Some(ref ns_map) = namespace_map_for_spawn {
-                            let identity = ebpf_monitor::common::TidIdentity::new(
-                                qualified_app_id_for_spawn.namespace(),
-                                &qualified_app_id_for_spawn.0,
-                            );
-                            if let Err(e) = ns_map.register_tid(tid, identity) {
-                                tracing::warn!(tid, error = %e, "Failed to register TID - gateway will not attribute this instance");
-                            }
-                        }
-
-                        let _ = tid_tx.send(tid);
-
-                        let mut instance = match prepared_clone
-                            .spawn_instance(env_vars, host_port, Some(socket_addr_check))
-                        {
-                            Ok(instance) => instance,
-                            Err(e) => {
-                                if let Some(ref ns_map) = namespace_map_for_spawn {
-                                    let _ = ns_map.deregister_tid(tid);
-                                }
-                                let _ = spawn_result_tx.send(Err(PlatformError::runtime(format!(
-                                    "Failed to spawn instance: {}",
-                                    e
-                                ))));
-                                return ExecutionStats {
-                                    instance_id: InstanceId(uuid::Uuid::nil()),
-                                    fuel_limit: 0,
-                                    fuel_consumed: 0,
-                                    ram_bytes: 0,
-                                    wall_clock_ms: 0,
-                                    trap: Some("spawn_failed".to_string()),
-                                    io_stats: IoStats {
-                                        open_fds_peak: 0,
-                                        fs_bytes_written: 0,
-                                        net_egress_bytes: 0,
-                                        outbound_connections: 0,
-                                    },
-                                };
-                            }
-                        };
-
-                        let _ = policy_counters_tx.send(instance.policy_counters());
-                        let _ = spawn_result_tx.send(Ok(()));
-                        let stats = instance.run();
-
-                        if let Some(ref ns_map) = namespace_map_for_spawn {
-                            let _ = ns_map.deregister_tid(tid);
-                        }
-
-                        if let Some(ref trap) = stats.trap {
-                            tracing::error!(app = %app_id_clone.0, fuel_consumed = stats.fuel_consumed, ram_bytes = stats.ram_bytes, trap = %trap, "instance crashed with trap");
-                        } else {
-                            tracing::info!(app = %app_id_clone.0, fuel_consumed = stats.fuel_consumed, ram_bytes = stats.ram_bytes, "instance exited");
-                        }
-                        stats
-                    });
-
-                    match spawn_result_rx.await {
-                        Ok(Ok(())) => {}
-                        Ok(Err(e)) => {
-                            self.port_alloc.release(host_port);
-                            return Err(e);
-                        }
-                        Err(_) => {
-                            self.port_alloc.release(host_port);
-                            return Err(PlatformError::runtime(
-                                "Spawn result channel closed unexpectedly",
-                            ));
+                let task = tokio::task::spawn_blocking(move || {
+                    let tid = gettid();
+                    if let Some(ref ns_map) = namespace_map_for_spawn {
+                        let identity = ebpf_monitor::common::TidIdentity::new(
+                            qualified_app_id_for_spawn.namespace(),
+                            &qualified_app_id_for_spawn.0,
+                        );
+                        if let Err(e) = ns_map.register_tid(tid, identity) {
+                            tracing::warn!(tid, error = %e, "Failed to register TID - gateway will not attribute this instance");
                         }
                     }
 
-                    (
-                        task,
-                        shutdown_tx,
-                        tid_rx.await.ok(),
-                        policy_counters_rx.await.ok(),
-                    )
+                    let _ = tid_tx.send(tid);
+
+                    let mut instance = match prepared_clone.spawn_instance(
+                        env_vars,
+                        host_port,
+                        Some(socket_addr_check),
+                    ) {
+                        Ok(instance) => instance,
+                        Err(e) => {
+                            if let Some(ref ns_map) = namespace_map_for_spawn {
+                                let _ = ns_map.deregister_tid(tid);
+                            }
+                            let _ = spawn_result_tx.send(Err(PlatformError::runtime(format!(
+                                "Failed to spawn instance: {}",
+                                e
+                            ))));
+                            return ExecutionStats {
+                                instance_id: InstanceId(uuid::Uuid::nil()),
+                                fuel_limit: 0,
+                                fuel_consumed: 0,
+                                ram_bytes: 0,
+                                wall_clock_ms: 0,
+                                trap: Some("spawn_failed".to_string()),
+                                io_stats: IoStats {
+                                    open_fds_peak: 0,
+                                    fs_bytes_written: 0,
+                                    net_egress_bytes: 0,
+                                    outbound_connections: 0,
+                                },
+                            };
+                        }
+                    };
+
+                    let _ = policy_counters_tx.send(instance.policy_counters());
+                    let _ = spawn_result_tx.send(Ok(()));
+                    let stats = instance.run();
+
+                    if let Some(ref ns_map) = namespace_map_for_spawn {
+                        let _ = ns_map.deregister_tid(tid);
+                    }
+
+                    if let Some(ref trap) = stats.trap {
+                        tracing::error!(app = %app_id_clone.0, fuel_consumed = stats.fuel_consumed, ram_bytes = stats.ram_bytes, trap = %trap, "instance crashed with trap");
+                    } else {
+                        tracing::info!(app = %app_id_clone.0, fuel_consumed = stats.fuel_consumed, ram_bytes = stats.ram_bytes, "instance exited");
+                    }
+                    stats
+                });
+
+                match spawn_result_rx.await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => {
+                        self.port_alloc.release(host_port);
+                        return Err(e);
+                    }
+                    Err(_) => {
+                        self.port_alloc.release(host_port);
+                        return Err(PlatformError::runtime(
+                            "Spawn result channel closed unexpectedly",
+                        ));
+                    }
                 }
-                ComponentExecutionModel::WasiHttpIncomingHandler => {
-                    let http_server = match prepared
-                        .spawn_http_server(env_vars, addr, Some(socket_addr_check))
-                    {
+
+                (
+                    task,
+                    shutdown_tx,
+                    tid_rx.await.ok(),
+                    policy_counters_rx.await.ok(),
+                )
+            }
+            ComponentExecutionModel::WasiHttpIncomingHandler => {
+                let http_server =
+                    match prepared.spawn_http_server(env_vars, addr, Some(socket_addr_check)) {
                         Ok(server) => server,
                         Err(e) => {
                             self.port_alloc.release(host_port);
@@ -786,14 +788,14 @@ impl Supervisor {
                         }
                     };
 
-                    (
-                        http_server.task,
-                        http_server.shutdown_tx,
-                        None,
-                        Some(http_server.policy_counters),
-                    )
-                }
-            };
+                (
+                    http_server.task,
+                    http_server.shutdown_tx,
+                    None,
+                    Some(http_server.policy_counters),
+                )
+            }
+        };
 
         // 6. Wait for the TCP port to be ready
         if let Err(e) = crate::instance::wait_for_ready(addr, Duration::from_millis(500)).await {

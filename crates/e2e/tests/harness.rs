@@ -581,10 +581,9 @@ pub fn find_http_hello_component_wasm() -> Result<PathBuf, Box<dyn std::error::E
         true
     } else {
         let wasm_modified = std::fs::metadata(&wasm_path)?.modified()?;
-        let main_modified = std::fs::metadata(
-            workspace_root.join("apps/http-hello-component/src/lib.rs"),
-        )?
-        .modified()?;
+        let main_modified =
+            std::fs::metadata(workspace_root.join("apps/http-hello-component/src/lib.rs"))?
+                .modified()?;
         wasm_modified < main_modified
     };
 

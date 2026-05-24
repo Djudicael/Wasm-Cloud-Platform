@@ -95,10 +95,7 @@ impl WasmProxy {
                 match tokio::net::lookup_host(&node.proxy_address).await {
                     Ok(mut addrs) => {
                         if let Some(addr) = addrs.next() {
-                            return Some(crate::upstream::UpstreamEndpoint {
-                                addr,
-                                h2c: false,
-                            });
+                            return Some(crate::upstream::UpstreamEndpoint { addr, h2c: false });
                         }
                         tracing::warn!(
                             node = %node.node_id,

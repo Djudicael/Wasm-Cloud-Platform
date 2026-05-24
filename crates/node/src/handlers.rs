@@ -312,10 +312,7 @@ impl EventDispatcher {
                     self.upstream
                         .add(
                             &app_id,
-                            proxy::upstream::UpstreamEndpoint {
-                                addr,
-                                h2c: false,
-                            },
+                            proxy::upstream::UpstreamEndpoint { addr, h2c: false },
                         )
                         .await;
                     info!(app = %app_id.0, %addr, from_node = %node_id, "remote instance registered");

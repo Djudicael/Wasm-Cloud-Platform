@@ -4,6 +4,11 @@ package echo;
 
 service EchoService {
   rpc Echo(EchoRequest) returns (EchoReply);
+  rpc ServerStream(EchoRequest) returns (stream EchoReply);
+  rpc ClientStream(stream EchoRequest) returns (EchoReply);
+  rpc BidiStream(stream EchoRequest) returns (stream EchoReply);
+  rpc FailUnary(EchoRequest) returns (EchoReply);
+  rpc FailServerStream(EchoRequest) returns (stream EchoReply);
 }
 
 message EchoRequest {

@@ -85,7 +85,7 @@ The index routes to one operator guide per level, so each audience gets a concre
 | [`docs/getting-started.md`](docs/getting-started.md) | Build, install, and run your first node |
 | [`docs/deployment-levels.md`](docs/deployment-levels.md) | Index for the graduated Linux deployment guides |
 | [`docs/deploying-applications.md`](docs/deploying-applications.md) | Deploy apps with manifests, security, and secrets |
-| [`docs/grpc-compatibility.md`](docs/grpc-compatibility.md) | Current gRPC compatibility boundary and what is still missing |
+| [`docs/grpc-compatibility.md`](docs/grpc-compatibility.md) | Current gRPC compatibility boundary: `wasi:http` components are validated for unary and streaming gRPC |
 | [`docs/internal-mesh.md`](docs/internal-mesh.md) | East-West communication, namespaces, and service discovery |
 | [`docs/nats-setup.md`](docs/nats-setup.md) | NATS deployment, clustering, security, and monitoring |
 | [`docs/full-stack-example.md`](docs/full-stack-example.md) | End-to-end example: 2 apps + database + auth |

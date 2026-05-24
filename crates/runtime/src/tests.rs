@@ -2,8 +2,7 @@ use crate::{
     current_policy_boundary,
     executor::{
         compose_socket_addr_check, top_level_entry_point_candidates, ComponentExecutionModel,
-        SocketAddrUse,
-        SocketPolicyCheck,
+        SocketAddrUse, SocketPolicyCheck,
     },
     policy_tracker::PolicyEnforcer,
     PolicyEnforcementLayer, WasmRuntime,

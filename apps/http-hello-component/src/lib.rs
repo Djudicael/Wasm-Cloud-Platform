@@ -36,7 +36,9 @@ impl bindings::exports::wasi::http::incoming_handler::Guest for HttpHelloCompone
         let outgoing_body = response.body().expect("response body should be available");
         ResponseOutparam::set(response_out, Ok(response));
 
-        let stream = outgoing_body.write().expect("response body writer should open");
+        let stream = outgoing_body
+            .write()
+            .expect("response body writer should open");
         stream
             .blocking_write_and_flush(body)
             .expect("response body write should succeed");

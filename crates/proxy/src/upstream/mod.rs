@@ -98,7 +98,11 @@ impl UpstreamRegistry {
         let entry = map
             .entry(app_id.0.clone())
             .or_insert_with(|| (AtomicUsize::new(0), Vec::new()));
-        if !entry.1.iter().any(|existing| existing.addr == endpoint.addr) {
+        if !entry
+            .1
+            .iter()
+            .any(|existing| existing.addr == endpoint.addr)
+        {
             entry.1.push(endpoint);
             tracing::info!(
                 app = %app_id.0,

@@ -6,27 +6,26 @@ use common::{
     policy::InstancePolicy,
     types::{AppConfig, InstanceId},
 };
-use axum::body::Body as AxumBody;
+use hyper::body::{Body as HyperBodyTrait, Frame, SizeHint};
+use hyper::server::conn::http2;
 use hyper::service::service_fn;
-use hyper_util::server::conn::auto;
-use hyper_util::rt::TokioExecutor;
+use hyper_util::rt::{TokioExecutor, TokioIo};
 use std::collections::HashSet;
 use std::future::Future;
 use std::net::{IpAddr, SocketAddr};
 use std::path::Path;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 use std::time::Instant;
 use wasmtime::component::{Component, Instance, Linker, ResourceTable};
 use wasmtime::{Engine, Store};
 use wasmtime_wasi::p2::add_to_linker_sync as add_wasi_to_linker_sync;
 use wasmtime_wasi::{DirPerms, FilePerms, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
-use wasmtime_wasi_http::io::TokioIo;
 use wasmtime_wasi_http::p2::bindings::http::types::Scheme;
 use wasmtime_wasi_http::p2::bindings::ProxyPre;
-use wasmtime_wasi_http::p2::{
-    add_only_http_to_linker_sync, WasiHttpCtxView, WasiHttpView,
-};
+use wasmtime_wasi_http::p2::body::HyperOutgoingBody;
+use wasmtime_wasi_http::p2::{add_only_http_to_linker_sync, WasiHttpCtxView, WasiHttpView};
 use wasmtime_wasi_http::WasiHttpCtx;
 
 /// Simplified mirror of `wasmtime_wasi::sockets::SocketAddrUse` for the public API.
@@ -402,6 +401,58 @@ pub struct PreparedModule {
     pub execution_model: ComponentExecutionModel,
 }
 
+struct ManagedOutgoingBody {
+    inner: Pin<Box<HyperOutgoingBody>>,
+    completion_tx: Option<tokio::sync::oneshot::Sender<()>>,
+}
+
+impl ManagedOutgoingBody {
+    fn new(inner: HyperOutgoingBody, completion_tx: tokio::sync::oneshot::Sender<()>) -> Self {
+        Self {
+            inner: Box::pin(inner),
+            completion_tx: Some(completion_tx),
+        }
+    }
+
+    fn signal_complete(&mut self) {
+        if let Some(tx) = self.completion_tx.take() {
+            let _ = tx.send(());
+        }
+    }
+}
+
+impl Drop for ManagedOutgoingBody {
+    fn drop(&mut self) {
+        self.signal_complete();
+    }
+}
+
+impl HyperBodyTrait for ManagedOutgoingBody {
+    type Data = <HyperOutgoingBody as HyperBodyTrait>::Data;
+    type Error = <HyperOutgoingBody as HyperBodyTrait>::Error;
+
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+        match self.inner.as_mut().poll_frame(cx) {
+            Poll::Ready(None) => {
+                self.signal_complete();
+                Poll::Ready(None)
+            }
+            other => other,
+        }
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.inner.is_end_stream()
+    }
+
+    fn size_hint(&self) -> SizeHint {
+        self.inner.size_hint()
+    }
+}
+
 impl std::fmt::Debug for PreparedModule {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PreparedModule")
@@ -559,7 +610,9 @@ impl PreparedModule {
                         fuel_consumed: 0,
                         ram_bytes: 0,
                         wall_clock_ms: started_at.elapsed().as_millis() as u64,
-                        trap: Some(format!("failed to pre-instantiate wasi:http component: {err}")),
+                        trap: Some(format!(
+                            "failed to pre-instantiate wasi:http component: {err}"
+                        )),
                         io_stats: IoStats {
                             open_fds_peak: 0,
                             fs_bytes_written: 0,
@@ -578,7 +631,9 @@ impl PreparedModule {
                         fuel_consumed: 0,
                         ram_bytes: 0,
                         wall_clock_ms: started_at.elapsed().as_millis() as u64,
-                        trap: Some(format!("component does not implement wasi:http/proxy world: {err}")),
+                        trap: Some(format!(
+                            "component does not implement wasi:http/proxy world: {err}"
+                        )),
                         io_stats: IoStats {
                             open_fds_peak: 0,
                             fs_bytes_written: 0,
@@ -617,22 +672,30 @@ impl PreparedModule {
                                         let request_policy_counters = request_policy_counters.clone();
                                         let app_id_for_request = app_id.clone();
                                         async move {
-                                            let (result_tx, result_rx) = tokio::sync::oneshot::channel();
-                                            let _worker = std::thread::spawn(move || {
-                                                let result = (|| -> Result<hyper::Response<AxumBody>, std::io::Error> {
+                                            let (sender, receiver) = tokio::sync::oneshot::channel();
+                                            let (response_started_tx, response_started_rx) =
+                                                tokio::sync::oneshot::channel::<bool>();
+                                            let (body_complete_tx, body_complete_rx) =
+                                                tokio::sync::oneshot::channel::<()>();
+
+                                            let app_id_for_handle = app_id_for_request.clone();
+                                            let runtime_handle = tokio::runtime::Handle::current();
+                                            let handle = tokio::task::spawn_blocking(move || {
+                                                let result = runtime_handle.block_on(async {
                                                     let state = build_store_state(
                                                         &config,
                                                         env_vars.as_ref().clone(),
                                                         addr.port(),
                                                         socket_addr_check.clone(),
                                                         Some(request_policy_counters),
-                                                    ).map_err(|e| std::io::Error::other(e.to_string()))?;
+                                                    )
+                                                    .map_err(|e| std::io::Error::other(e.to_string()))?;
                                                     let mut store = Store::new(&*engine, state);
                                                     store.limiter(|s| &mut s.limiter);
                                                     configure_store(&mut store, config.fuel_quota)
                                                         .map_err(|e| std::io::Error::other(e.to_string()))?;
 
-                                                    let (sender, receiver) = tokio::sync::oneshot::channel();
+                                                    let req = req;
                                                     let req = store
                                                         .data_mut()
                                                         .http()
@@ -647,41 +710,67 @@ impl PreparedModule {
                                                     let proxy = pre
                                                         .instantiate(&mut store)
                                                         .map_err(|e| std::io::Error::other(e.to_string()))?;
-                                                    futures::executor::block_on(async {
-                                                        proxy
-                                                            .wasi_http_incoming_handler()
-                                                            .call_handle(&mut store, req, out)
-                                                            .await
-                                                            .map_err(|e| std::io::Error::other(e.to_string()))
-                                                    })?;
+                                                    proxy
+                                                        .wasi_http_incoming_handler()
+                                                        .call_handle(&mut store, req, out)
+                                                        .await
+                                                        .map_err(|e| std::io::Error::other(e.to_string()))?;
 
-                                                    match futures::executor::block_on(receiver) {
-                                                        Ok(Ok(resp)) => {
-                                                            let (parts, body) = resp.into_parts();
-                                                            Ok(hyper::Response::from_parts(parts, AxumBody::new(body)))
-                                                        }
-                                                        Ok(Err(e)) => Err(std::io::Error::other(e.to_string())),
-                                                        Err(_) => Err(std::io::Error::other(
-                                                            "guest never invoked response-outparam::set",
-                                                        )),
-                                                    }
-                                                })();
-                                                let _ = result_tx.send(result);
+                                                    Ok::<(), std::io::Error>(())
+                                                });
+
+                                                if let Ok(true) = response_started_rx.blocking_recv() {
+                                                    let _ = body_complete_rx.blocking_recv();
+                                                }
+
+                                                if let Err(err) = &result {
+                                                    tracing::warn!(
+                                                        app = %app_id_for_handle.0,
+                                                        error = %err,
+                                                        "wasi:http request bridge failed"
+                                                    );
+                                                }
+                                                result
                                             });
-                                            let result = result_rx
-                                                .await
-                                                .map_err(|_| std::io::Error::other("wasi:http worker thread dropped result"))?;
-                                            if let Err(err) = &result {
-                                                tracing::warn!(app = %app_id_for_request.0, error = %err, "wasi:http request bridge failed");
+
+                                            let response =
+                                                match receiver.await {
+                                                    Ok(Ok(resp)) => {
+                                                        let _ = response_started_tx.send(true);
+                                                        let (parts, body) = resp.into_parts();
+                                                        Ok(hyper::Response::from_parts(
+                                                            parts,
+                                                            ManagedOutgoingBody::new(body, body_complete_tx),
+                                                        ))
+                                                    }
+                                                    Ok(Err(err)) => {
+                                                        let _ = response_started_tx.send(false);
+                                                        Err(std::io::Error::other(err.to_string()))
+                                                    }
+                                                    Err(_) => {
+                                                        let _ = response_started_tx.send(false);
+                                                        match handle.await {
+                                                            Ok(Ok(())) => Err(std::io::Error::other(
+                                                                "guest never invoked response-outparam::set",
+                                                            )),
+                                                            Ok(Err(err)) => Err(err),
+                                                            Err(err) => Err(std::io::Error::other(err.to_string())),
+                                                        }
+                                                    }
+                                                };
+
+                                            if let Err(err) = &response {
+                                                tracing::warn!(app = %app_id_for_request.0, error = %err, "wasi:http response bridge failed");
                                             }
-                                            result
+
+                                            response
                                         }
                                     });
 
                                     let io = TokioIo::new(client);
-                                    let mut builder = auto::Builder::new(TokioExecutor::new());
-                                    builder.http1().keep_alive(true);
-                                    let result = builder.serve_connection(io, service).await;
+                                    let result = http2::Builder::new(TokioExecutor::new())
+                                        .serve_connection(io, service)
+                                        .await;
 
                                     if let Err(err) = result {
                                         tracing::warn!(
@@ -705,14 +794,25 @@ impl PreparedModule {
                 instance_id: InstanceId::new(),
                 fuel_limit: config.fuel_quota.0,
                 fuel_consumed: 0,
-                ram_bytes: task_policy_counters.current_memory_bytes.load(std::sync::atomic::Ordering::Relaxed) as usize,
+                ram_bytes: task_policy_counters
+                    .current_memory_bytes
+                    .load(std::sync::atomic::Ordering::Relaxed) as usize,
                 wall_clock_ms: started_at.elapsed().as_millis() as u64,
                 trap,
                 io_stats: IoStats {
-                    open_fds_peak: task_policy_counters.open_fds_peak.load(std::sync::atomic::Ordering::Relaxed),
-                    fs_bytes_written: task_policy_counters.fs_write_bytes.load(std::sync::atomic::Ordering::Relaxed),
-                    net_egress_bytes: task_policy_counters.egress_bytes.load(std::sync::atomic::Ordering::Relaxed),
-                    outbound_connections: task_policy_counters.outbound_connections_total.load(std::sync::atomic::Ordering::Relaxed) as u32,
+                    open_fds_peak: task_policy_counters
+                        .open_fds_peak
+                        .load(std::sync::atomic::Ordering::Relaxed),
+                    fs_bytes_written: task_policy_counters
+                        .fs_write_bytes
+                        .load(std::sync::atomic::Ordering::Relaxed),
+                    net_egress_bytes: task_policy_counters
+                        .egress_bytes
+                        .load(std::sync::atomic::Ordering::Relaxed),
+                    outbound_connections: task_policy_counters
+                        .outbound_connections_total
+                        .load(std::sync::atomic::Ordering::Relaxed)
+                        as u32,
                 },
             }
         });
@@ -819,9 +919,9 @@ fn detect_component_execution_model(
     store.limiter(|s| &mut s.limiter);
     configure_store(&mut store, config.fuel_quota)?;
     let linker = build_runtime_linker(engine)?;
-    let instance = linker
-        .instantiate(&mut store, module)
-        .map_err(|e| PlatformError::runtime(format!("instantiation error during model detection: {e}")))?;
+    let instance = linker.instantiate(&mut store, module).map_err(|e| {
+        PlatformError::runtime(format!("instantiation error during model detection: {e}"))
+    })?;
 
     match detect_execution_model_from_instance(&mut store, &instance) {
         ResolvedExecutionModel::WasiCliRun(_) | ResolvedExecutionModel::TopLevelEntryPoint(_) => {
