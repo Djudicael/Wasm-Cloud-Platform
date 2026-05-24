@@ -16,6 +16,9 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  CARGO_INCREMENTAL: 0
+  CARGO_PROFILE_DEV_DEBUG: 0
+  CARGO_PROFILE_TEST_DEBUG: 0
 
 jobs:
   # Job 1: Fast unit tests (< 30s)
@@ -207,11 +210,17 @@ jobs:
         run: cargo build --bin wasm-node --release
         timeout-minutes: 20
 
-      - name: Run E2E tests
-        run: cargo test -p e2e
+      - name: Build E2E test binaries
+        run: cargo test -p e2e --no-run
         env:
           NATS_URL: nats://localhost:4222
-        timeout-minutes: 5
+        timeout-minutes: 12
+
+      - name: Run E2E tests
+        run: cargo test -p e2e -- --test-threads=1
+        env:
+          NATS_URL: nats://localhost:4222
+        timeout-minutes: 8
 
       - name: Run cluster registry E2E regression
         run: cargo test -p e2e test_live_cluster_registry_drives_artifact_authorize_audience_set -- --ignored --test-threads=1 --nocapture
@@ -297,11 +306,10 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            target
           key: ${{ runner.os }}-cargo-build-${{ hashFiles('**/Cargo.lock') }}
 
-      - name: Build workspace
-        run: cargo build --workspace --all-targets --exclude http-hello-component --exclude wasi-grpc-echo
+      - name: Check workspace targets
+        run: cargo check --workspace --all-targets --exclude http-hello-component --exclude wasi-grpc-echo
         timeout-minutes: 20
 
       - name: Build WASI component apps
@@ -310,8 +318,8 @@ jobs:
           cargo build --manifest-path apps/wasi-grpc-echo/Cargo.toml --target wasm32-wasip2
         timeout-minutes: 15
 
-      - name: Build release
-        run: cargo build --workspace --release --exclude http-hello-component --exclude wasi-grpc-echo
+      - name: Build release binaries and libraries
+        run: cargo build --workspace --release --lib --bins --exclude http-hello-component --exclude wasi-grpc-echo
         timeout-minutes: 30
 
       - name: Build WASI component apps release

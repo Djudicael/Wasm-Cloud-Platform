@@ -1,5 +1,5 @@
-use common::types::{AppConfig, AppId};
 use common::container_runtime::NatsContainer;
+use common::types::{AppConfig, AppId};
 use messaging::events::Event;
 use messaging::NatsBus;
 use reqwest::Client;

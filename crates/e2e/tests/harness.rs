@@ -1,5 +1,8 @@
 #![allow(dead_code)]
 
+use common::container_runtime::{
+    NatsContainer as HostNatsContainer, PostgresContainer as HostPostgresContainer,
+};
 /// E2E Test Harness
 ///
 /// This module provides utilities for running end-to-end tests:
@@ -13,9 +16,6 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 use tempfile::TempDir;
-use common::container_runtime::{
-    NatsContainer as HostNatsContainer, PostgresContainer as HostPostgresContainer,
-};
 use tokio::time::sleep;
 
 /// A running NATS container
@@ -42,10 +42,8 @@ pub struct FileServer {
 impl NatsContainer {
     /// Start a NATS container with JetStream enabled
     pub async fn start(port: u16) -> Result<Self, Box<dyn std::error::Error>> {
-        let container =
-            HostNatsContainer::start(port).map_err(|e| -> Box<dyn std::error::Error> {
-                e.into()
-            })?;
+        let container = HostNatsContainer::start(port)
+            .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
         let url = container.url.clone();
 
         Ok(NatsContainer {

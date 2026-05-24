@@ -21,8 +21,8 @@
 //! sudo cargo test -p vm-testbed --test single_node_deploy -- --nocapture
 //! ```
 
-use std::time::Duration;
 use common::container_runtime::NatsContainer;
+use std::time::Duration;
 use vm_testbed::{MicroVm, VmConfig};
 
 /// Test that a wasm-node microVM can deploy and serve a Wasm application.
