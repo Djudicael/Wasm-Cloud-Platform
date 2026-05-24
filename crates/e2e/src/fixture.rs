@@ -12,11 +12,6 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 use tempfile::TempDir;
-use testcontainers::{
-    core::{ContainerPort, WaitFor},
-    runners::AsyncRunner,
-    ContainerAsync, GenericImage, ImageExt,
-};
 
 use tokio::time::sleep;
 use tracing::{info, warn};
@@ -81,12 +76,8 @@ pub fn setup_container_runtime() {
         let podman_socket = Path::new(&socket_path);
         if podman_socket.exists() {
             std::env::set_var("DOCKER_HOST", format!("unix://{socket_path}"));
-            info!("Configured testcontainers to use Podman (uid={uid})");
+            info!("Configured Podman socket for host container runtime (uid={uid})");
         }
-    }
-
-    if std::env::var("TESTCONTAINERS_RYUK_DISABLED").is_err() {
-        std::env::set_var("TESTCONTAINERS_RYUK_DISABLED", "true");
     }
 }
 
@@ -140,6 +131,17 @@ pub struct NodeProcess {
     port_end: u16,
 }
 
+pub struct NodeProcessStartConfig<'a> {
+    pub node_id: &'a str,
+    pub nats_url: &'a str,
+    pub admin_port: u16,
+    pub proxy_port: u16,
+    pub artifact_port: u16,
+    pub port_start: u16,
+    pub port_end: u16,
+    pub seed_local_state: bool,
+}
+
 impl NodeProcess {
     pub fn port_start(&self) -> u16 {
         self.port_start
@@ -154,16 +156,17 @@ impl NodeProcess {
     /// The process is spawned with `Stdio::null()` for stdout to prevent
     /// pipe-buffer backpressure deadlock on high log volume, and
     /// `Stdio::inherit()` for stderr so panics are visible.
-    pub async fn start(
-        node_id: &str,
-        nats_url: &str,
-        admin_port: u16,
-        proxy_port: u16,
-        artifact_port: u16,
-        port_start: u16,
-        port_end: u16,
-        seed_local_state: bool,
-    ) -> Result<Self, String> {
+    pub async fn start(config: NodeProcessStartConfig<'_>) -> Result<Self, String> {
+        let NodeProcessStartConfig {
+            node_id,
+            nats_url,
+            admin_port,
+            proxy_port,
+            artifact_port,
+            port_start,
+            port_end,
+            seed_local_state,
+        } = config;
         info!(
             node_id,
             admin_port,
@@ -480,13 +483,12 @@ impl Drop for NodeProcess {
 
 /// A running NATS container managed via `podman run --network=host`.
 ///
-/// Uses host networking directly instead of testcontainers because Podman
+/// Uses host networking directly instead of a container helper library because Podman
 /// rootless mode's `slirp4netns` port mappings are only reachable from the
 /// process that created the container. With `--network=host`, NATS binds
 /// directly to the host port and any child process (like `wasm-node`) can
 /// connect.
 enum NatsContainerBackend {
-    Testcontainers(ContainerAsync<GenericImage>),
     HostRuntime {
         runtime: String,
         container_id: String,
@@ -502,17 +504,6 @@ pub struct NatsContainer {
 impl NatsContainer {
     fn runtime_and_container_id(&self) -> Result<(&str, &str), String> {
         match &self.backend {
-            NatsContainerBackend::Testcontainers(container) => {
-                let runtime = match detect_host_container_runtime() {
-                    Some(HostContainerRuntime::Podman) => "podman",
-                    Some(HostContainerRuntime::Docker) => "docker",
-                    None => return Err(
-                        "no container runtime available to control testcontainers NATS instance"
-                            .to_string(),
-                    ),
-                };
-                Ok((runtime, container.id()))
-            }
             NatsContainerBackend::HostRuntime {
                 runtime,
                 container_id,
@@ -525,45 +516,6 @@ impl NatsContainer {
             .strip_prefix("nats://")
             .and_then(|endpoint| endpoint.rsplit_once(':').map(|(host, _)| host))
             .unwrap_or("127.0.0.1")
-    }
-
-    fn should_use_host_runtime_fallback() -> bool {
-        std::env::var("DOCKER_HOST")
-            .map(|host| host.contains("podman.sock"))
-            .unwrap_or(false)
-    }
-
-    async fn start_with_testcontainers(_port_hint: u16) -> Result<Self, String> {
-        let image = GenericImage::new("nats", "2.10-alpine")
-            .with_exposed_port(ContainerPort::Tcp(4222))
-            .with_wait_for(WaitFor::message_on_stdout("Server is ready"))
-            .with_cmd(["-js"]);
-
-        let container = image
-            .start()
-            .await
-            .map_err(|e| format!("testcontainers failed to start NATS: {e}"))?;
-        let host = container
-            .get_host()
-            .await
-            .map_err(|e| format!("testcontainers failed to resolve NATS host: {e}"))?
-            .to_string();
-        let port = container
-            .get_host_port_ipv4(4222)
-            .await
-            .map_err(|e| format!("testcontainers failed to resolve NATS port: {e}"))?;
-
-        crate::helpers::wait_for_tcp(&host, port, Duration::from_secs(10))
-            .await
-            .map_err(|e| format!("NATS via testcontainers not reachable on {host}:{port}: {e}"))?;
-
-        let url = format!("nats://{host}:{port}");
-        info!(%url, "NATS container ready via testcontainers");
-        Ok(NatsContainer {
-            url,
-            port,
-            backend: NatsContainerBackend::Testcontainers(container),
-        })
     }
 
     async fn start_with_host_runtime(port: u16) -> Result<Self, String> {
@@ -641,24 +593,9 @@ impl NatsContainer {
     }
 
     /// Start a NATS container with JetStream enabled on the given host port.
-    ///
-    /// Prefers `testcontainers` for normal Docker-style environments.
-    /// Falls back to a direct host-network container launch for WSL/rootless
-    /// Podman where port mapping is not reliably reachable by child processes.
     pub async fn start(port: u16) -> Result<Self, String> {
         setup_container_runtime();
-
-        if Self::should_use_host_runtime_fallback() {
-            return Self::start_with_host_runtime(port).await;
-        }
-
-        match Self::start_with_testcontainers(port).await {
-            Ok(container) => Ok(container),
-            Err(error) => {
-                warn!(port, error = %error, "testcontainers NATS startup failed, falling back to host-network container runtime");
-                Self::start_with_host_runtime(port).await
-            }
-        }
+        Self::start_with_host_runtime(port).await
     }
 
     /// Connect to this NATS instance and return a `NatsBus`.
@@ -710,46 +647,9 @@ impl NatsContainer {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::{select_host_container_runtime, HostContainerRuntime};
-
-    #[test]
-    fn test_select_host_container_runtime_prefers_podman_socket_hint() {
-        assert_eq!(
-            select_host_container_runtime(
-                Some("unix:///run/user/1000/podman/podman.sock"),
-                true,
-                true
-            ),
-            Some(HostContainerRuntime::Podman)
-        );
-    }
-
-    #[test]
-    fn test_select_host_container_runtime_prefers_available_podman_without_hint() {
-        assert_eq!(
-            select_host_container_runtime(None, true, true),
-            Some(HostContainerRuntime::Podman)
-        );
-    }
-
-    #[test]
-    fn test_select_host_container_runtime_falls_back_to_docker() {
-        assert_eq!(
-            select_host_container_runtime(None, false, true),
-            Some(HostContainerRuntime::Docker)
-        );
-    }
-}
-
 impl Drop for NatsContainer {
     fn drop(&mut self) {
         match &self.backend {
-            NatsContainerBackend::Testcontainers(container) => {
-                let _ = container.id();
-                info!("NATS testcontainers backend dropped");
-            }
             NatsContainerBackend::HostRuntime {
                 runtime,
                 container_id,
@@ -852,16 +752,16 @@ impl ClusterFixture {
                 port_end,
                 "starting cluster node"
             );
-            let node = NodeProcess::start(
-                &node_id,
-                &nats_url,
+            let node = NodeProcess::start(NodeProcessStartConfig {
+                node_id: &node_id,
+                nats_url: &nats_url,
                 admin_port,
                 proxy_port,
                 artifact_port,
                 port_start,
                 port_end,
-                node_count > 1,
-            )
+                seed_local_state: node_count > 1,
+            })
             .await?;
 
             nodes.push(node);
@@ -1029,4 +929,37 @@ pub fn find_node_binary() -> String {
     // Fall back — the caller will get a clear error from Command::new
     warn!("wasm-node binary not found, will attempt to build");
     "target/debug/wasm-node".to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{select_host_container_runtime, HostContainerRuntime};
+
+    #[test]
+    fn test_select_host_container_runtime_prefers_podman_socket_hint() {
+        assert_eq!(
+            select_host_container_runtime(
+                Some("unix:///run/user/1000/podman/podman.sock"),
+                true,
+                true
+            ),
+            Some(HostContainerRuntime::Podman)
+        );
+    }
+
+    #[test]
+    fn test_select_host_container_runtime_prefers_available_podman_without_hint() {
+        assert_eq!(
+            select_host_container_runtime(None, true, true),
+            Some(HostContainerRuntime::Podman)
+        );
+    }
+
+    #[test]
+    fn test_select_host_container_runtime_falls_back_to_docker() {
+        assert_eq!(
+            select_host_container_runtime(None, false, true),
+            Some(HostContainerRuntime::Docker)
+        );
+    }
 }

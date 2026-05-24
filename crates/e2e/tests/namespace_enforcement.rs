@@ -1,3 +1,5 @@
+#![allow(clippy::await_holding_lock)]
+
 /// Namespace Enforcement E2E Tests
 ///
 /// Verifies that the eBPF namespace enforcement system correctly:

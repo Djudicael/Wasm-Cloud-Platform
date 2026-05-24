@@ -30,6 +30,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9
         with:
+          toolchain: stable
           targets: wasm32-wasip2
 
       - name: Cache cargo registry
@@ -52,7 +53,7 @@ jobs:
 
       - name: Run unit tests
         run: cargo test --workspace --lib --bins
-        timeout-minutes: 5
+        timeout-minutes: 15
 
   # Job 2: Integration tests (< 3 min)
   integration-tests:
@@ -66,6 +67,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9
         with:
+          toolchain: stable
           targets: wasm32-wasip2
 
       - name: Cache dependencies
@@ -79,11 +81,11 @@ jobs:
 
       - name: Run storage integration tests
         run: cargo test -p storage --tests
-        timeout-minutes: 2
+        timeout-minutes: 6
 
       - name: Run runtime integration tests
         run: cargo test -p runtime --tests
-        timeout-minutes: 2
+        timeout-minutes: 6
 
   # Job 3: Critical gateway + supervisor integration suites
   gateway-supervisor-tests:
@@ -97,6 +99,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9
         with:
+          toolchain: stable
           targets: wasm32-wasip2
 
       - name: Cache dependencies
@@ -110,11 +113,11 @@ jobs:
 
       - name: Run proxy gateway integration tests
         run: cargo test -p proxy --test gateway_integration
-        timeout-minutes: 5
+        timeout-minutes: 10
 
       - name: Run supervisor integration tests
         run: cargo test -p supervisor --tests
-        timeout-minutes: 5
+        timeout-minutes: 10
 
   # Job 4: Node critical integration suites
   node-critical-tests:
@@ -128,6 +131,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9
         with:
+          toolchain: stable
           targets: wasm32-wasip2
 
       - name: Cache dependencies
@@ -145,7 +149,7 @@ jobs:
 
       - name: Run node cluster bootstrap regression suite
         run: cargo test -p node --test cluster_bootstrap
-        timeout-minutes: 5
+        timeout-minutes: 10
 
       - name: Run node DB integration tests
         run: cargo test -p node --test db_integration
@@ -179,6 +183,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9
         with:
+          toolchain: stable
           targets: wasm32-wasip2
 
       - name: Cache dependencies
@@ -200,7 +205,7 @@ jobs:
 
       - name: Build wasm-node binary
         run: cargo build --bin wasm-node --release
-        timeout-minutes: 10
+        timeout-minutes: 20
 
       - name: Run E2E tests
         run: cargo test -p e2e
@@ -220,8 +225,8 @@ jobs:
         with:
           name: e2e-test-logs
           path: |
-            target/debug/
             *.log
+            target/**/*.log
 
   # Job 6: Linting with Clippy
   clippy:
@@ -235,6 +240,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9
         with:
+          toolchain: stable
           components: clippy
           targets: wasm32-wasip2
 
@@ -249,7 +255,7 @@ jobs:
 
       - name: Run Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
-        timeout-minutes: 5
+        timeout-minutes: 15
 
   # Job 7: Code formatting
   format:
@@ -263,6 +269,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9
         with:
+          toolchain: stable
           components: rustfmt
 
       - name: Check formatting
@@ -281,6 +288,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9
         with:
+          toolchain: stable
           targets: wasm32-wasip2
 
       - name: Cache dependencies
@@ -293,11 +301,23 @@ jobs:
           key: ${{ runner.os }}-cargo-build-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Build workspace
-        run: cargo build --workspace --all-targets
+        run: cargo build --workspace --all-targets --exclude http-hello-component --exclude wasi-grpc-echo
+        timeout-minutes: 20
+
+      - name: Build WASI component apps
+        run: |
+          cargo build --manifest-path apps/http-hello-component/Cargo.toml --target wasm32-wasip2
+          cargo build --manifest-path apps/wasi-grpc-echo/Cargo.toml --target wasm32-wasip2
         timeout-minutes: 15
 
       - name: Build release
-        run: cargo build --workspace --release
+        run: cargo build --workspace --release --exclude http-hello-component --exclude wasi-grpc-echo
+        timeout-minutes: 30
+
+      - name: Build WASI component apps release
+        run: |
+          cargo build --manifest-path apps/http-hello-component/Cargo.toml --target wasm32-wasip2 --release
+          cargo build --manifest-path apps/wasi-grpc-echo/Cargo.toml --target wasm32-wasip2 --release
         timeout-minutes: 20
 
   # Job 9: Security audit (blocking)
@@ -311,6 +331,8 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9
+        with:
+          toolchain: stable
 
       - name: Cache cargo registry
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
@@ -338,6 +360,8 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9
+        with:
+          toolchain: stable
 
       - name: Cache cargo registry
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4

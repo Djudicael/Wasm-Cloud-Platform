@@ -7,8 +7,8 @@ edition = "2021"
 [dependencies]
 async-nats = { workspace = true }
 tokio = { workspace = true }
-common = { path = "../common" }
-secrets = { path = "../secrets" }
+common = { version = "0.1.0", path = "../common" }
+secrets = { version = "0.1.0", path = "../secrets" }
 tokio-stream = "0.1"
 serde_json = "1.0"
 tracing = { workspace = true }
@@ -16,5 +16,5 @@ serde.workspace = true
 chrono = { workspace = true }
 
 [dev-dependencies]
-testcontainers = { workspace = true }
 uuid.workspace = true
+libc = "0.2"

@@ -4,6 +4,9 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
+type AppInstanceMap = HashMap<String, Vec<SocketAddr>>;
+type NamespaceInstanceMap = HashMap<String, AppInstanceMap>;
+
 /// Registry of running instances, scoped by namespace.
 /// Replaces LocalServiceRegistry with namespace awareness and source-port attribution.
 #[derive(Clone, Default)]
@@ -11,7 +14,7 @@ pub struct NamespaceRegistry {
     /// namespace → bare_app_name → list of SocketAddr
     /// The inner key is the bare app name WITHOUT version (e.g. "echo-service"),
     /// so service discovery resolves by app name, not specific version.
-    instances: Arc<RwLock<HashMap<String, HashMap<String, Vec<SocketAddr>>>>>,
+    instances: Arc<RwLock<NamespaceInstanceMap>>,
 
     /// Reverse lookup: source_port (TCP ephemeral port allocated to an instance) → AppId.
     /// Populated by the Supervisor when an instance is spawned.

@@ -49,7 +49,7 @@ impl BillingCollector {
             let dropped = self
                 .dropped_count
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            if dropped % 1000 == 0 {
+            if dropped.is_multiple_of(1000) {
                 warn!(
                     total_dropped = dropped + 1,
                     "billing channel full, dropping records"
@@ -115,7 +115,7 @@ async fn billing_writer_loop(
 
         // Flush conditions: batch full, timeout elapsed, or channel closed
         if batch.len() >= BATCH_SIZE || (deadline_hit && !batch.is_empty()) {
-            flush_batch(&store, &node_id, &mut batch, &mut seq, &mut prev_hash);
+            flush_batch(&store, &node_id, &mut batch, &mut seq, &prev_hash);
             deadline = tokio::time::Instant::now() + BATCH_TIMEOUT;
         }
 
@@ -155,14 +155,14 @@ async fn billing_writer_loop(
 
                         // Flush immediately if batch is full
                         if batch.len() >= BATCH_SIZE {
-                            flush_batch(&store, &node_id, &mut batch, &mut seq, &mut prev_hash);
+                            flush_batch(&store, &node_id, &mut batch, &mut seq, &prev_hash);
                             deadline = tokio::time::Instant::now() + BATCH_TIMEOUT;
                         }
                     }
                     Ok(None) => {
                         // Channel closed — flush any remaining records and exit
                         if !batch.is_empty() {
-                            flush_batch(&store, &node_id, &mut batch, &mut seq, &mut prev_hash);
+                            flush_batch(&store, &node_id, &mut batch, &mut seq, &prev_hash);
                         }
                         break;
                     }
@@ -174,7 +174,7 @@ async fn billing_writer_loop(
             _ = &mut shutdown_rx => {
                 // Shutdown signal received — flush any remaining records and exit
                 if !batch.is_empty() {
-                    flush_batch(&store, &node_id, &mut batch, &mut seq, &mut prev_hash);
+                    flush_batch(&store, &node_id, &mut batch, &mut seq, &prev_hash);
                 }
                 tracing::info!("billing writer loop shut down gracefully");
                 break;
@@ -197,7 +197,7 @@ fn flush_batch(
     node_id: &str,
     batch: &mut Vec<BillingRecord>,
     seq: &mut u64,
-    prev_hash: &mut String,
+    prev_hash: &str,
 ) {
     if batch.is_empty() {
         return;
@@ -218,7 +218,7 @@ fn flush_batch(
     }
 
     // Persist seq and prev_hash for crash recovery
-    if let Ok(data) = serde_json::to_string(&(*seq, prev_hash.clone())) {
+    if let Ok(data) = serde_json::to_string(&(*seq, prev_hash)) {
         if let Err(e) = store.save_meta(&billing_cursor_key(node_id), &data) {
             tracing::warn!(error = %e, "failed to persist billing cursor");
         }

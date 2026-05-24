@@ -1,0 +1,5 @@
+package local:http-hello;
+
+world http-hello {
+  include wasi:http/proxy@0.2.6;
+}

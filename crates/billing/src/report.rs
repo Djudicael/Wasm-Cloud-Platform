@@ -70,13 +70,12 @@ pub fn generate_report(
 
     let mut apps: Vec<AppUsage> = per_app.into_values().collect();
     for app in &mut apps {
-        app.avg_fuel_per_request = if app.request_count > 0 {
-            app.fuel_consumed / app.request_count
-        } else {
-            0
-        };
+        app.avg_fuel_per_request = app
+            .fuel_consumed
+            .checked_div(app.request_count)
+            .unwrap_or(0);
     }
-    apps.sort_by(|a, b| b.fuel_consumed.cmp(&a.fuel_consumed));
+    apps.sort_by_key(|app| std::cmp::Reverse(app.fuel_consumed));
 
     TenantBillingReport {
         tenant_id: tenant_id.to_string(),

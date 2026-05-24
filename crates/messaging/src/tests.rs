@@ -1,60 +1,21 @@
 #[cfg(test)]
 mod test_helpers {
     use crate::{events::Event, NatsBus};
+    use common::container_runtime::{reserve_host_port, NatsContainer};
     use common::types::{AppConfig, AppId};
-    use std::net::TcpListener;
     use std::sync::{
         atomic::{AtomicUsize, Ordering},
         Arc,
     };
     use std::time::Duration;
-    use testcontainers::{core::ContainerPort, runners::AsyncRunner, GenericImage, ImageExt};
     use tokio::sync::mpsc;
     use tokio::time::timeout;
     use tokio_stream::StreamExt;
 
-    /// Configure Podman socket if available (for WSL users)
-    /// This ensures testcontainers can find Podman
-    fn setup_container_runtime() {
-        // Check if DOCKER_HOST is already set
-        if std::env::var("DOCKER_HOST").is_ok() {
-            return;
-        }
-
-        // Try to detect Podman socket on WSL
-        let podman_socket = std::path::Path::new("/run/user/1000/podman/podman.sock");
-        if podman_socket.exists() {
-            std::env::set_var("DOCKER_HOST", "unix:///run/user/1000/podman/podman.sock");
-            eprintln!("✓ Configured testcontainers to use Podman");
-        }
-
-        // Ensure Ryuk is disabled (often needed for Podman)
-        if std::env::var("TESTCONTAINERS_RYUK_DISABLED").is_err() {
-            std::env::set_var("TESTCONTAINERS_RYUK_DISABLED", "true");
-        }
-    }
-
-    fn reserve_host_port() -> u16 {
-        TcpListener::bind("127.0.0.1:0")
-            .expect("bind ephemeral test port")
-            .local_addr()
-            .expect("read ephemeral test port")
-            .port()
-    }
-
     #[tokio::test]
     async fn test_pub_sub_deploy_app() {
-        setup_container_runtime();
-
-        let image = GenericImage::new("nats", "latest")
-            .with_mapped_port(4224, ContainerPort::Tcp(4222))
-            .with_cmd(vec!["-js"]); // enable JetStream
-        let _container = image.start().await.expect("Failed to start NATS container");
-
-        // Wait for NATS to boot up
-        tokio::time::sleep(Duration::from_secs(2)).await;
-
-        let url = "nats://127.0.0.1:4224".to_string();
+        let _container = NatsContainer::start(4224).expect("Failed to start NATS container");
+        let url = _container.url.clone();
         let bus = NatsBus::connect(&url)
             .await
             .expect("Failed to connect to NATS");
@@ -109,17 +70,8 @@ mod test_helpers {
 
     #[tokio::test]
     async fn test_jetstream_durable_replay() {
-        setup_container_runtime();
-
-        let image = GenericImage::new("nats", "latest")
-            .with_mapped_port(4223, ContainerPort::Tcp(4222))
-            .with_cmd(vec!["-js"]); // enable JetStream
-        let _container = image.start().await.expect("Failed to start NATS container");
-
-        // Wait for NATS to boot up
-        tokio::time::sleep(Duration::from_secs(2)).await;
-
-        let url = "nats://127.0.0.1:4223".to_string();
+        let _container = NatsContainer::start(4223).expect("Failed to start NATS container");
+        let url = _container.url.clone();
         let bus = NatsBus::connect(&url)
             .await
             .expect("Failed to connect to NATS");
@@ -180,16 +132,8 @@ mod test_helpers {
 
     #[tokio::test]
     async fn test_jetstream_handler_error_redelivery() {
-        setup_container_runtime();
-
-        let image = GenericImage::new("nats", "latest")
-            .with_mapped_port(4225, ContainerPort::Tcp(4222))
-            .with_cmd(vec!["-js"]); // enable JetStream
-        let _container = image.start().await.expect("Failed to start NATS container");
-
-        tokio::time::sleep(Duration::from_secs(2)).await;
-
-        let url = "nats://127.0.0.1:4225".to_string();
+        let _container = NatsContainer::start(4225).expect("Failed to start NATS container");
+        let url = _container.url.clone();
         let bus = NatsBus::connect(&url)
             .await
             .expect("Failed to connect to NATS");
@@ -248,16 +192,8 @@ mod test_helpers {
 
     #[tokio::test]
     async fn test_poison_handler_failure_is_quarantined_after_retry_exhaustion() {
-        setup_container_runtime();
-
-        let host_port = reserve_host_port();
-        let image = GenericImage::new("nats", "latest")
-            .with_mapped_port(host_port, ContainerPort::Tcp(4222))
-            .with_cmd(vec!["-js"]);
-        let _container = image.start().await.expect("Failed to start NATS container");
-
-        tokio::time::sleep(Duration::from_secs(2)).await;
-
+        let host_port = reserve_host_port().expect("reserve host port");
+        let _container = NatsContainer::start(host_port).expect("Failed to start NATS container");
         let url = format!("nats://127.0.0.1:{host_port}");
         let bus = NatsBus::connect(&url)
             .await
@@ -319,16 +255,8 @@ mod test_helpers {
 
     #[tokio::test]
     async fn test_malformed_message_does_not_block_other_filtered_consumers() {
-        setup_container_runtime();
-
-        let image = GenericImage::new("nats", "latest")
-            .with_mapped_port(4226, ContainerPort::Tcp(4222))
-            .with_cmd(vec!["-js"]);
-        let _container = image.start().await.expect("Failed to start NATS container");
-
-        tokio::time::sleep(Duration::from_secs(2)).await;
-
-        let url = "nats://127.0.0.1:4226".to_string();
+        let _container = NatsContainer::start(4226).expect("Failed to start NATS container");
+        let url = _container.url.clone();
         let bus = NatsBus::connect(&url)
             .await
             .expect("Failed to connect to NATS");
@@ -411,17 +339,8 @@ mod test_helpers {
 
     #[tokio::test]
     async fn test_control_event_is_handled_exactly_once_by_intended_filtered_consumer() {
-        setup_container_runtime();
-
-        let host_port = reserve_host_port();
-
-        let image = GenericImage::new("nats", "latest")
-            .with_mapped_port(host_port, ContainerPort::Tcp(4222))
-            .with_cmd(vec!["-js"]);
-        let _container = image.start().await.expect("Failed to start NATS container");
-
-        tokio::time::sleep(Duration::from_secs(2)).await;
-
+        let host_port = reserve_host_port().expect("reserve host port");
+        let _container = NatsContainer::start(host_port).expect("Failed to start NATS container");
         let url = format!("nats://127.0.0.1:{host_port}");
         let bus = NatsBus::connect(&url)
             .await
@@ -503,17 +422,8 @@ mod test_helpers {
 
     #[tokio::test]
     async fn test_node_event_is_handled_exactly_once_by_intended_filtered_consumer() {
-        setup_container_runtime();
-
-        let host_port = reserve_host_port();
-
-        let image = GenericImage::new("nats", "latest")
-            .with_mapped_port(host_port, ContainerPort::Tcp(4222))
-            .with_cmd(vec!["-js"]);
-        let _container = image.start().await.expect("Failed to start NATS container");
-
-        tokio::time::sleep(Duration::from_secs(2)).await;
-
+        let host_port = reserve_host_port().expect("reserve host port");
+        let _container = NatsContainer::start(host_port).expect("Failed to start NATS container");
         let url = format!("nats://127.0.0.1:{host_port}");
         let bus = NatsBus::connect(&url)
             .await
@@ -746,3 +656,6 @@ mod test_helpers {
         }
     }
 }
+
+
+

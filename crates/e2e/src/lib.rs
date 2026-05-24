@@ -20,7 +20,7 @@
 //!
 //! - Unix process signals (`SIGKILL`, `SIGTERM`) for process management
 //! - `tc` / `iptables` for network partition simulation (L5)
-//! - Podman or Docker for testcontainers (NATS containers)
+//! - Podman or Docker for host-managed NATS containers
 //! - `CAP_NET_ADMIN` for scoped `tc` / `iptables` L5 NATS partition tests
 //!
 //! ```bash

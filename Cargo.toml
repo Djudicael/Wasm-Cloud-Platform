@@ -43,9 +43,9 @@ tracing               = "0.1"
 tracing-subscriber    = { version = "0.3", features = ["env-filter", "json"] }
 
 # Wasm runtime
-wasmtime              = "43.0.1"
-wasmtime-wasi         = "43.0.1"
-wasmtime-wasi-http    = "43.0.1"
+wasmtime              = "45.0.0"
+wasmtime-wasi         = "45.0.0"
+wasmtime-wasi-http    = "45.0.0"
 
 # Proxy
 pingora               = "0.8"
@@ -57,7 +57,7 @@ pingora-core          = "0.8"
 redb = "4.0"
 
 # Messaging
-async-nats = "0.47"
+async-nats = "0.48"
 
 # Encryption
 aes-gcm          = "0.10"
@@ -76,8 +76,7 @@ uuid   = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 
 # Testing
-reqwest = { version = "0.13", features = ["json"] }
-testcontainers = "0.27"
+reqwest = { version = "0.13.3", features = ["json"] }
 
 # Crypto
 sha2 = "0.11"

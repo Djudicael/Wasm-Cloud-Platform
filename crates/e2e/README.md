@@ -23,7 +23,7 @@ RUSTFLAGS='--cfg tokio_unstable' cargo build --manifest-path apps/hello-axum/Car
 
 ### 3. Container Runtime
 
-Tests use [testcontainers](https://github.com/testcontainers/testcontainers-rs) to manage NATS containers.
+Tests use the shared host container runtime helper to start NATS containers through Podman or Docker directly.
 
 **Docker:**
 ```bash
@@ -126,11 +126,8 @@ docker pull nats:2.10-alpine
 
 **Podman users:**
 ```bash
-# Check Podman socket
-ls -la /run/user/1000/podman/podman.sock
-
-# If missing, start Podman service
-systemctl --user enable --now podman.socket
+# Check Podman is available
+podman info
 ```
 
 ### Port conflicts

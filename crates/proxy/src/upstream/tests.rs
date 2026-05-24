@@ -1,5 +1,5 @@
 #[cfg(test)]
-mod tests {
+mod upstream_tests {
     use crate::upstream::{UpstreamEndpoint, UpstreamRegistry};
     use common::types::AppId;
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};

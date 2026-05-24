@@ -48,6 +48,12 @@ pub struct PolicyCounters {
     pub table_growth_denied_total: AtomicU64,
 }
 
+impl Default for PolicyCounters {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PolicyCounters {
     pub fn new() -> Self {
         PolicyCounters {

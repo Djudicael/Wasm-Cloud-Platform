@@ -1,3 +1,5 @@
+#![allow(clippy::await_holding_lock)]
+
 /// East-West Traffic Tests
 ///
 /// Verifies that apps communicate through the internal mesh gateway

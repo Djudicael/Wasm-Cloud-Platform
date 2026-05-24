@@ -6,7 +6,7 @@ edition = "2021"
 
 [dependencies]
 prometheus = { workspace = true }
-common = { path = "../common" }
+common = { version = "0.1.0", path = "../common" }
 axum.workspace = true
 serde.workspace = true
 tokio.workspace = true

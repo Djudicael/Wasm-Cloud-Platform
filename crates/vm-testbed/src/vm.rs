@@ -166,7 +166,7 @@ impl MicroVm {
         client
             .wait_for_socket(Duration::from_secs(5))
             .await
-            .map_err(|e| VmError::Firecracker(e))?;
+            .map_err(VmError::Firecracker)?;
 
         // 6. Configure logging
         let _ = client.configure_logging(&firecracker_log, "Info").await;
@@ -356,10 +356,7 @@ impl MicroVm {
 
     /// Check if the VMM process is still running.
     pub fn is_running(&mut self) -> bool {
-        match self.vmm_process.try_wait() {
-            Ok(None) => true,
-            _ => false,
-        }
+        matches!(self.vmm_process.try_wait(), Ok(None))
     }
 
     /// Return the Firecracker process ID.

@@ -357,13 +357,13 @@ impl Store {
 mod tests {
     use super::{decode_replay_route_event, ReplayRouteEvent};
     use common::{
+        container_runtime::{reserve_host_port, NatsContainer},
         protocol::MessageEnvelope,
         types::{AppId, Route},
     };
     use messaging::{events::Event, NatsBus};
-    use std::{net::TcpListener, time::Duration};
+    use std::time::Duration;
     use tempfile::NamedTempFile;
-    use testcontainers::{core::ContainerPort, runners::AsyncRunner, GenericImage, ImageExt};
 
     fn sample_route() -> Route {
         Route {
@@ -376,39 +376,12 @@ mod tests {
         }
     }
 
-    fn setup_container_runtime() {
-        if std::env::var("DOCKER_HOST").is_ok() {
-            return;
-        }
-
-        let podman_socket = std::path::Path::new("/run/user/1000/podman/podman.sock");
-        if podman_socket.exists() {
-            std::env::set_var("DOCKER_HOST", "unix:///run/user/1000/podman/podman.sock");
-        }
-
-        if std::env::var("TESTCONTAINERS_RYUK_DISABLED").is_err() {
-            std::env::set_var("TESTCONTAINERS_RYUK_DISABLED", "true");
-        }
-    }
-
-    fn reserve_host_port() -> u16 {
-        TcpListener::bind("127.0.0.1:0")
-            .expect("bind ephemeral test port")
-            .local_addr()
-            .expect("read ephemeral test port")
-            .port()
-    }
-
-    async fn start_test_nats() -> (testcontainers::ContainerAsync<GenericImage>, String) {
-        setup_container_runtime();
-
-        let host_port = reserve_host_port();
-        let image = GenericImage::new("nats", "latest")
-            .with_mapped_port(host_port, ContainerPort::Tcp(4222))
-            .with_cmd(vec!["-js"]);
-        let container = image.start().await.expect("Failed to start NATS container");
-        tokio::time::sleep(Duration::from_secs(2)).await;
-        (container, format!("nats://127.0.0.1:{host_port}"))
+    async fn start_test_nats() -> (NatsContainer, String) {
+        let host_port = reserve_host_port().expect("reserve host port");
+        let container = NatsContainer::start(host_port).expect("Failed to start NATS container");
+        let url = container.url.clone();
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        (container, url)
     }
 
     fn route(host: &str, app_id: &str, updated_at: u64) -> Route {

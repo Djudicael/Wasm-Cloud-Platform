@@ -24,11 +24,11 @@ tabled = "0.15"
 rpassword = "7"
 futures = "0.3"
 chrono = { workspace = true }
-common = { path = "../common" }
-messaging = { path = "../messaging" }
-secrets = { path = "../secrets" }
-storage = { path = "../storage" }
-billing = { path = "../billing" }
+common = { version = "0.1.0", path = "../common" }
+messaging = { version = "0.1.0", path = "../messaging" }
+secrets = { version = "0.1.0", path = "../secrets" }
+storage = { version = "0.1.0", path = "../storage" }
+billing = { version = "0.1.0", path = "../billing" }
 ipnet = "2.12.0"
 toml = "0.8"
 

@@ -11,16 +11,16 @@ pingora-load-balancing = { workspace = true }
 pingora-core = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
-common = { path = "../common" }
+common = { version = "0.1.0", path = "../common" }
 async-trait = "0.1.89"
 futures = "0.3.32"
 axum.workspace = true
 serde_json.workspace = true
-storage = { path = "../storage" }
+storage = { version = "0.1.0", path = "../storage" }
 prometheus = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true }
-messaging = { path = "../messaging" }
+messaging = { version = "0.1.0", path = "../messaging" }
 dashmap = { workspace = true }
 rand = "0.8"
 hex = { workspace = true }
@@ -34,4 +34,4 @@ sha2 = { workspace = true }
 tower = "0.5"
 rsa = "0.9"
 base64 = "0.22"
-e2e = { path = "../e2e" }
+e2e = { version = "0.1.0", path = "../e2e" }

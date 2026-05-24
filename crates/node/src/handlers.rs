@@ -760,6 +760,7 @@ impl EventDispatcher {
         self.node_id.clone()
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn handle_node_joined(
         &self,
         new_node_id: String,
@@ -882,6 +883,7 @@ impl EventDispatcher {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn handle_state_snapshot(
         &self,
         bootstrap_session_id: String,
@@ -1732,10 +1734,12 @@ mod tests {
         use std::sync::Arc as StdArc;
         use tokio::sync::oneshot;
 
+        type WebhookCaptureSender =
+            StdArc<std::sync::Mutex<Option<oneshot::Sender<(HeaderMap, RouteChangeWebhook)>>>>;
+
         #[derive(Clone)]
         struct WebhookState {
-            sender:
-                StdArc<std::sync::Mutex<Option<oneshot::Sender<(HeaderMap, RouteChangeWebhook)>>>>,
+            sender: WebhookCaptureSender,
         }
 
         let (tx, rx) = oneshot::channel();

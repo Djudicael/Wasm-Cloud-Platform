@@ -1,0 +1,5 @@
+package local:wasi-grpc-echo;
+
+world wasi-grpc-echo {
+  include wasi:http/proxy@0.2.6;
+}

@@ -27,9 +27,6 @@ serde_json    = { workspace = true }
 # Logging
 tracing       = { workspace = true }
 
-# Container management (NATS, future: Postgres)
-testcontainers = { workspace = true }
-
 # NATS client (event bus, JetStream replay)
 async-nats    = { workspace = true }
 
@@ -53,10 +50,10 @@ chrono        = { workspace = true, features = ["serde"] }
 uuid          = { workspace = true, features = ["v4"] }
 
 # Local crates — types, events, storage, supervisor
-common        = { path = "../common" }
-messaging     = { path = "../messaging" }
-storage       = { path = "../storage" }
-supervisor    = { path = "../supervisor" }
+common        = { version = "0.1.0", path = "../common" }
+messaging     = { version = "0.1.0", path = "../messaging" }
+storage       = { version = "0.1.0", path = "../storage" }
+supervisor    = { version = "0.1.0", path = "../supervisor" }
 
 [dev-dependencies]
 # Tracing subscriber (test log initialization)
@@ -69,8 +66,8 @@ assert_cmd    = "2"
 axum          = { workspace = true }
 
 # Runtime and billing for test-only direct access
-runtime       = { path = "../runtime" }
-billing       = { path = "../billing" }
+runtime       = { version = "0.1.0", path = "../runtime" }
+billing       = { version = "0.1.0", path = "../billing" }
 tonic = { version = "0.14.6", features = ["transport"] }
 tonic-prost = "0.14.2"
 prost = "0.14.1"

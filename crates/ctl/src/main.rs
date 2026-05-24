@@ -51,7 +51,7 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     /// Deploy or update a Wasm application
-    Deploy(cmds::deploy::DeployArgs),
+    Deploy(Box<cmds::deploy::DeployArgs>),
     /// Remove a deployed application
     Remove { app_id: String },
     /// List all deployed applications
@@ -74,7 +74,7 @@ enum Commands {
     /// Show cluster health status
     Status,
     /// Platform binary management and upgrades
-    Platform(cmds::platform::PlatformArgs),
+    Platform(Box<cmds::platform::PlatformArgs>),
     /// Garbage collection management
     Gc(cmds::gc::GcArgs),
     /// Node-level operations (health check, rebuild)
@@ -99,7 +99,7 @@ enum Commands {
         action: cmds::policy::PolicyCommand,
     },
     /// API gateway configuration
-    Gateway(cmds::gateway::GatewayArgs),
+    Gateway(Box<cmds::gateway::GatewayArgs>),
 }
 
 #[derive(Subcommand)]
@@ -330,7 +330,7 @@ impl NodeAction {
                     body["kill_largest"] = serde_json::json!(true);
                     body["kill_largest_reason"] = serde_json::json!(kill_largest_reason);
                 }
-                if body.as_object().map_or(true, |o| o.is_empty()) {
+                if body.as_object().is_none_or(|o| o.is_empty()) {
                     println!("No actions specified. Use --prune_idle or --kill_largest.");
                     return Ok(());
                 }
@@ -514,7 +514,7 @@ async fn main() -> anyhow::Result<()> {
     let http = build_http_client(auth_token.as_deref())?;
 
     match cli.command {
-        Commands::Deploy(args) => cmds::deploy::run(args, &bus, &cli.node_api, &http).await?,
+        Commands::Deploy(args) => cmds::deploy::run(*args, &bus, &cli.node_api, &http).await?,
         Commands::Remove { app_id } => cmds::deploy::remove(&app_id, &bus).await?,
         Commands::List => cmds::list::run(&cli.node_api, &http).await?,
         Commands::Instances => cmds::list::instances(&cli.node_api, &http).await?,
@@ -523,7 +523,7 @@ async fn main() -> anyhow::Result<()> {
         Commands::App(args) => cmds::app::run(args, &cli.node_api, &http).await?,
         Commands::Logs { app_id } => cmds::logs::run(&app_id, &cli.node_api, &http).await?,
         Commands::Status => cmds::status::run(&cli.node_api, &http).await?,
-        Commands::Platform(args) => cmds::platform::run(args, &bus, &cli.node_api, &http).await?,
+        Commands::Platform(args) => cmds::platform::run(*args, &bus, &cli.node_api, &http).await?,
         Commands::Gc(args) => cmds::gc::run(args, &bus, &cli.node_api, &http).await?,
         Commands::Logging { action } => match action {
             LoggingAction::Levels => {
@@ -586,7 +586,7 @@ async fn main() -> anyhow::Result<()> {
             BillingAction::Export { output } => cmds::billing::export(&store_path, &output).await?,
         },
         Commands::Policy { action } => cmds::policy::run(action, &cli.node_api, &http).await?,
-        Commands::Gateway(args) => cmds::gateway::run(args, &bus, &cli.node_api, &http).await?,
+        Commands::Gateway(args) => cmds::gateway::run(*args, &bus, &cli.node_api, &http).await?,
     }
     Ok(())
 }

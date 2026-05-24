@@ -27,16 +27,15 @@ clap = { workspace = true, features = ["derive", "env"] }
 which = "6"
 
 # Re-use existing E2E test infrastructure
-e2e = { path = "../e2e" }
-common = { path = "../common" }
-messaging = { path = "../messaging" }
+e2e = { version = "0.1.0", path = "../e2e" }
+common = { version = "0.1.0", path = "../common" }
+messaging = { version = "0.1.0", path = "../messaging" }
 sha2 = { workspace = true }
 hex = { workspace = true }
 
 [dev-dependencies]
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
 assert_cmd = "2"
-testcontainers = { workspace = true }
 async-nats = { workspace = true }
 
 [[bin]]

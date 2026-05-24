@@ -62,8 +62,7 @@ impl Store {
 
         // Sort versions within each app (numeric-aware sort)
         for versions in inventory.values_mut() {
-            versions
-                .sort_by(|a, b| version_sort_key(&a.version).cmp(&version_sort_key(&b.version)));
+            versions.sort_by_key(|a| version_sort_key(&a.version));
         }
 
         Ok(inventory)

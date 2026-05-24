@@ -1,4 +1,5 @@
 use common::types::{AppConfig, AppId};
+use common::container_runtime::NatsContainer;
 use messaging::events::Event;
 use messaging::NatsBus;
 use reqwest::Client;
@@ -8,7 +9,6 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
-use testcontainers::{core::ContainerPort, runners::AsyncRunner, GenericImage, ImageExt};
 use tokio::time::sleep;
 
 #[tokio::test]
@@ -61,16 +61,10 @@ async fn test_full_platform_e2e() {
 
     let node_bin = workspace_root.join("target/release/wasm-node");
 
-    // 2. Start NATS via testcontainers
+    // 2. Start NATS on the host runtime
     println!("Starting NATS container...");
-    let image = GenericImage::new("nats", "latest")
-        .with_mapped_port(4222, ContainerPort::Tcp(4222))
-        .with_cmd(vec!["-js"]);
-
-    let _nats_container = image.start().await.expect("Failed to start NATS container");
-    sleep(Duration::from_secs(2)).await; // wait for NATS to boot
-
-    let nats_url = "nats://127.0.0.1:4222".to_string();
+    let _nats_container = NatsContainer::start(4222).expect("Failed to start NATS container");
+    let nats_url = _nats_container.url.clone();
 
     // 3. Set up paths and ports for the node
     let db_path = env::temp_dir().join(format!("wasm-node-{}.redb", uuid::Uuid::new_v4()));

@@ -3,3 +3,7 @@
 /crates/**/target
 /assets
 **/wit
+!apps/http-hello-component/wit/
+!apps/http-hello-component/wit/**
+!apps/wasi-grpc-echo/wit/
+!apps/wasi-grpc-echo/wit/**

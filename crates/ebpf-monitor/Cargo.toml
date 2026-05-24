@@ -10,8 +10,8 @@ ebpf = ["dep:aya", "dep:aya-log"]
 [dependencies]
 aya = { version = "0.12", optional = true }
 aya-log = { version = "0.2", optional = true }
-common = { path = "../common" }
-metrics = { path = "../metrics" }
+common = { version = "0.1.0", path = "../common" }
+metrics = { version = "0.1.0", path = "../metrics" }
 prometheus = { version = "0.14", features = ["process"] }
 tokio = { version = "1.52", features = ["full"] }
 tracing = "0.1"

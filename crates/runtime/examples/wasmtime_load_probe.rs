@@ -174,15 +174,17 @@ fn runtime_config(
     cache_directory: Option<&Path>,
     peak_live_instances: u32,
 ) -> RuntimeSection {
-    let mut runtime = RuntimeSection::default();
-    runtime.cache_directory = cache_directory.map(|path| path.display().to_string());
-    runtime.pooling_allocator = scenario.pooling_enabled();
-    runtime.pooling_total_component_instances = peak_live_instances.saturating_mul(2).max(64);
-    runtime.pooling_max_core_instances_per_component =
-        Some(peak_live_instances.saturating_mul(2).max(8));
-    runtime.pooling_max_memories_per_component = Some(peak_live_instances.max(4));
-    runtime.pooling_max_tables_per_component = Some(peak_live_instances.max(4));
-    runtime
+    RuntimeSection {
+        cache_directory: cache_directory.map(|path| path.display().to_string()),
+        pooling_allocator: scenario.pooling_enabled(),
+        pooling_total_component_instances: peak_live_instances.saturating_mul(2).max(64),
+        pooling_max_core_instances_per_component: Some(
+            peak_live_instances.saturating_mul(2).max(8),
+        ),
+        pooling_max_memories_per_component: Some(peak_live_instances.max(4)),
+        pooling_max_tables_per_component: Some(peak_live_instances.max(4)),
+        ..RuntimeSection::default()
+    }
 }
 
 fn run_probe(options: &ProbeOptions) -> Result<ProbeResult, Box<dyn std::error::Error>> {

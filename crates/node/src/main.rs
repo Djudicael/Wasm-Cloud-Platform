@@ -1940,10 +1940,7 @@ async fn main() -> anyhow::Result<()> {
 
     // 5. Create distributed rate limiters for apps with gateway rate limit configs
     if let Some(ref kv) = rate_limit_kv {
-        let gateway_configs = match store.list_gateway_configs() {
-            Ok(configs) => configs,
-            Err(_) => Vec::new(),
-        };
+        let gateway_configs = store.list_gateway_configs().unwrap_or_default();
         for (app_id, cfg) in gateway_configs {
             if let Some(ref route_rl) = cfg.rate_limit {
                 if route_rl.distributed {
@@ -3499,6 +3496,7 @@ async fn main() -> anyhow::Result<()> {
 }
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod tests {
     use super::{
         admin_tls_is_configured, admin_tls_material, artifact_server_url_is_loopback,
@@ -3823,11 +3821,13 @@ uoKQp7o8ET+CcFRg9vEG/uA=
 
     #[test]
     fn test_admin_tls_material_prefers_dedicated_admin_cert() {
-        let mut config = NodeConfig::default();
-        config.proxy = ProxySection {
-            tls_cert: Some("/tmp/proxy.crt".to_string()),
-            tls_key: Some("/tmp/proxy.key".to_string()),
-            ..ProxySection::default()
+        let mut config = NodeConfig {
+            proxy: ProxySection {
+                tls_cert: Some("/tmp/proxy.crt".to_string()),
+                tls_key: Some("/tmp/proxy.key".to_string()),
+                ..ProxySection::default()
+            },
+            ..NodeConfig::default()
         };
         config.admin.tls_cert = Some("/tmp/admin.crt".to_string());
         config.admin.tls_key = Some("/tmp/admin.key".to_string());
@@ -4803,6 +4803,7 @@ uoKQp7o8ET+CcFRg9vEG/uA=
 /// - Health-check paths (`/health`, `/_platform/health`, `/status/`) are always allowed
 ///   so that load-balancers can probe the node without credentials.
 /// - Otherwise the `Authorization` header must be `Bearer <token>`.
+///
 /// Set up a SIGHUP handler that reloads auth configuration from the config file.
 ///
 /// When the operator edits the config file with new tokens and sends SIGHUP,

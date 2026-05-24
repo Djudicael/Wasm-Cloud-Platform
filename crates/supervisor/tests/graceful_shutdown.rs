@@ -170,7 +170,10 @@ async fn test_upstream_removal_integration() {
         .expect("save config failed");
 
     // Manually add a backend to upstream registry
-    let test_addr = "127.0.0.1:15000".parse().unwrap();
+    let test_addr = proxy::upstream::UpstreamEndpoint {
+        addr: "127.0.0.1:15000".parse().unwrap(),
+        h2c: false,
+    };
     supervisor.upstream().add(&app_id, test_addr).await;
 
     // Verify it's in upstream

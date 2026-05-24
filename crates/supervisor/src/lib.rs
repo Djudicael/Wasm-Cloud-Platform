@@ -492,7 +492,7 @@ impl Supervisor {
 
         for (bare_app_name, addrs) in &ns_services {
             // Skip self (don't inject env vars for own service)
-            if bare_app_name == &app_id.bare_app_name() {
+            if bare_app_name == app_id.bare_app_name() {
                 continue;
             }
             if let Some(addr) = addrs.first() {
@@ -839,7 +839,7 @@ impl Supervisor {
             .clone()
             .unwrap_or_else(|| app_id.0.split(':').next().unwrap_or(&app_id.0).to_string());
         let fuel_quota = config.fuel_quota.0;
-        let ram_bytes = config.memory_limit.to_bytes() as u64;
+        let ram_bytes = config.memory_limit.to_bytes();
 
         let managed = ManagedInstance {
             id: instance_id.clone(),

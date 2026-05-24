@@ -9,12 +9,12 @@
 ///
 /// - Unix process signals (`SIGKILL`, `SIGTERM`) for process management
 /// - `tc` / `iptables` for network partition simulation (L5)
-/// - Podman or Docker for testcontainers (NATS containers)
+/// - Podman or Docker for host-managed NATS containers
 /// - `CAP_NET_ADMIN` for scoped `tc` / `iptables` NATS partition tests
 /// - The `wasm-node` binary built (`cargo build --bin wasm-node`)
 /// - The test WASM app built (`hello-axum` target `wasm32-wasip2`)
 ///
-/// NATS is provisioned automatically via testcontainers — no external
+/// NATS is provisioned automatically via the host container runtime helper — no external
 /// NATS server is needed.
 ///
 /// ## `CAP_NET_ADMIN` (L5 Tests Only)
@@ -126,7 +126,6 @@
 ///
 /// ```bash
 /// export WASM_NODE_BINARY="target/debug/wasm-node"
-/// export TESTCONTAINERS_RYUK_DISABLED=true  # Podman compatibility
 /// export CHAOS_REPORT_DIR="target/chaos-reports"  # Optional
 /// ```
 ///

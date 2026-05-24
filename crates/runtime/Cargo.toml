@@ -12,8 +12,8 @@ tokio = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 axum = { workspace = true }
-common = { path = "../common" }
-storage = { path = "../storage" }
+common = { version = "0.1.0", path = "../common" }
+storage = { version = "0.1.0", path = "../storage" }
 anyhow.workspace = true
 bytes = "1.5"
 async-trait = "0.1"

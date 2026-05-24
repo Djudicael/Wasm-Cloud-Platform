@@ -1846,7 +1846,7 @@ default_memory_pages = 4096
         );
         assert_eq!(config.runtime.pooling_max_memories_per_component, Some(8));
         assert_eq!(config.runtime.pooling_max_tables_per_component, Some(8));
-        assert_eq!(config.database.enable_db_proxy, true);
+        assert!(config.database.enable_db_proxy);
         assert_eq!(config.database.db_proxy_max_connections, 50);
         assert_eq!(config.logging.level, "warn");
         assert_eq!(

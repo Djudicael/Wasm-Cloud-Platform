@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 /// E2E Test Harness
 ///
 /// This module provides utilities for running end-to-end tests:
@@ -11,32 +13,17 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 use tempfile::TempDir;
-use testcontainers::{core::ContainerPort, runners::AsyncRunner, GenericImage, ImageExt};
+use common::container_runtime::{
+    NatsContainer as HostNatsContainer, PostgresContainer as HostPostgresContainer,
+};
 use tokio::time::sleep;
-
-/// Configure Podman socket if available (for WSL users)
-pub fn setup_container_runtime() {
-    if std::env::var("DOCKER_HOST").is_ok() {
-        return;
-    }
-
-    let podman_socket = std::path::Path::new("/run/user/1000/podman/podman.sock");
-    if podman_socket.exists() {
-        std::env::set_var("DOCKER_HOST", "unix:///run/user/1000/podman/podman.sock");
-        eprintln!("✓ Configured testcontainers to use Podman");
-    }
-
-    if std::env::var("TESTCONTAINERS_RYUK_DISABLED").is_err() {
-        std::env::set_var("TESTCONTAINERS_RYUK_DISABLED", "true");
-    }
-}
 
 /// A running NATS container
 #[allow(dead_code)]
 pub struct NatsContainer {
     pub url: String,
     pub port: u16,
-    _container: testcontainers::ContainerAsync<GenericImage>,
+    _container: HostNatsContainer,
 }
 
 /// A running PostgreSQL container
@@ -44,7 +31,7 @@ pub struct NatsContainer {
 pub struct PostgresContainer {
     pub url: String,
     pub port: u16,
-    _container: testcontainers::ContainerAsync<GenericImage>,
+    _container: HostPostgresContainer,
 }
 
 /// A simple HTTP file server for serving WASM artifacts
@@ -55,31 +42,11 @@ pub struct FileServer {
 impl NatsContainer {
     /// Start a NATS container with JetStream enabled
     pub async fn start(port: u16) -> Result<Self, Box<dyn std::error::Error>> {
-        setup_container_runtime();
-
-        // Use host networking so the container shares the host's network
-        // namespace. This is critical for Podman rootless mode where port
-        // mappings are only reachable from the process that created the
-        // container (slirp4netns limitation). With --network=host, NATS
-        // binds directly to the host port and any child process can connect.
-        // We pass --port to NATS so it listens on the requested host port
-        // instead of the default 4222.
-        // We use `with_host_config_modifier` to set `network_mode = "host"`
-        // directly on the Docker/Podman HostConfig, because `with_network("host")`
-        // would try to *create* a Docker network named "host" which conflicts
-        // with the reserved network mode.
-        let image = GenericImage::new("nats", "2.10-alpine")
-            .with_host_config_modifier(|config| {
-                config.network_mode = Some("host".to_string());
-            })
-            .with_cmd(vec!["-js", "--port", &port.to_string()]);
-
-        let container = image.start().await?;
-
-        // Wait for NATS to be ready
-        sleep(Duration::from_secs(2)).await;
-
-        let url = format!("nats://127.0.0.1:{}", port);
+        let container =
+            HostNatsContainer::start(port).map_err(|e| -> Box<dyn std::error::Error> {
+                e.into()
+            })?;
+        let url = container.url.clone();
 
         Ok(NatsContainer {
             url,
@@ -98,23 +65,9 @@ impl NatsContainer {
 impl PostgresContainer {
     /// Start a PostgreSQL container
     pub async fn start(port: u16, password: &str) -> Result<Self, Box<dyn std::error::Error>> {
-        setup_container_runtime();
-
-        let image = GenericImage::new("postgres", "17-alpine")
-            .with_mapped_port(port, ContainerPort::Tcp(5432))
-            .with_env_var("POSTGRES_PASSWORD", password)
-            .with_env_var("POSTGRES_USER", "postgres")
-            .with_env_var("POSTGRES_DB", "postgres");
-
-        let container = image.start().await?;
-
-        // Wait for PostgreSQL to be ready
-        sleep(Duration::from_secs(3)).await;
-
-        let url = format!(
-            "postgres://postgres:{}@127.0.0.1:{}/postgres",
-            password, port
-        );
+        let container = HostPostgresContainer::start(port, password)
+            .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+        let url = container.url.clone();
 
         Ok(PostgresContainer {
             url,

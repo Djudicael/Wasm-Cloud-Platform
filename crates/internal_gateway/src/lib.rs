@@ -20,6 +20,9 @@ const MAX_BODY_SIZE: usize = 10 * 1024 * 1024;
 /// Default request timeout for forwarded requests (30 seconds).
 const FORWARDING_TIMEOUT: Duration = Duration::from_secs(30);
 
+type ColdStartFn =
+    dyn Fn(common::types::AppId) -> BoxFuture<'static, Option<SocketAddr>> + Send + Sync;
+
 /// Identity of a caller, resolved from the NamespaceMap.
 #[derive(Debug, Clone)]
 struct CallerIdentity {
@@ -73,9 +76,7 @@ pub struct InternalGateway {
     pub bind_port: u16,
 
     /// Callback to trigger a cold-start when the target app has no running instances.
-    pub cold_start: Option<
-        Arc<dyn Fn(common::types::AppId) -> BoxFuture<'static, Option<SocketAddr>> + Send + Sync>,
-    >,
+    pub cold_start: Option<Arc<ColdStartFn>>,
 }
 
 impl InternalGateway {
@@ -128,12 +129,7 @@ impl InternalGateway {
         self
     }
 
-    pub fn with_cold_start(
-        mut self,
-        cold_start: Arc<
-            dyn Fn(common::types::AppId) -> BoxFuture<'static, Option<SocketAddr>> + Send + Sync,
-        >,
-    ) -> Self {
+    pub fn with_cold_start(mut self, cold_start: Arc<ColdStartFn>) -> Self {
         self.cold_start = Some(cold_start);
         self
     }
@@ -325,7 +321,7 @@ async fn proxy_handler(
             // Cross-namespace call — check allowlist
             if !gw
                 .gateway_config
-                .is_cross_namespace_allowed(&caller.namespace, &target_namespace)
+                .is_cross_namespace_allowed(&caller.namespace, target_namespace)
                 .await
             {
                 tracing::warn!(
@@ -372,13 +368,9 @@ async fn proxy_handler(
 
     // ── 4. RESOLVE target to real loopback address ──────────────────────
     let target_app_id =
-        common::types::AppId::new_namespaced(&target_namespace, target_app_name, "v1");
+        common::types::AppId::new_namespaced(target_namespace, target_app_name, "v1");
 
-    let target_addr = match gw
-        .registry
-        .resolve(&target_namespace, target_app_name)
-        .await
-    {
+    let target_addr = match gw.registry.resolve(target_namespace, target_app_name).await {
         Some(addr) => addr,
         None => {
             // Target not running — try cold start

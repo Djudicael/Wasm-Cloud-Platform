@@ -503,7 +503,7 @@ impl PreparedModule {
         let state = build_store_state(&self.config, env_vars, port, socket_addr_check, None)?;
         let policy_counters = state.policy_enforcer.counters.clone();
 
-        let mut store = Store::new(&*self.engine, state);
+        let mut store = Store::new(&self.engine, state);
 
         // Hook up the resource limiter for memory bounds
         store.limiter(|s| &mut s.limiter);
@@ -690,7 +690,7 @@ impl PreparedModule {
                                                         Some(request_policy_counters),
                                                     )
                                                     .map_err(|e| std::io::Error::other(e.to_string()))?;
-                                                    let mut store = Store::new(&*engine, state);
+                                                    let mut store = Store::new(&engine, state);
                                                     store.limiter(|s| &mut s.limiter);
                                                     configure_store(&mut store, config.fuel_quota)
                                                         .map_err(|e| std::io::Error::other(e.to_string()))?;
@@ -915,7 +915,7 @@ fn detect_component_execution_model(
     config: &AppConfig,
 ) -> Result<ComponentExecutionModel, PlatformError> {
     let state = build_store_state(config, Vec::new(), config.wasm_bind_port, None, None)?;
-    let mut store = Store::new(&**engine, state);
+    let mut store = Store::new(engine, state);
     store.limiter(|s| &mut s.limiter);
     configure_store(&mut store, config.fuel_quota)?;
     let linker = build_runtime_linker(engine)?;

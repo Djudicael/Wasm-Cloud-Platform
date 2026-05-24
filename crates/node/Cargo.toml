@@ -12,8 +12,7 @@ path = "src/main.rs"
 ebpf = ["ebpf-monitor/ebpf"]
 
 [dev-dependencies]
-e2e = { path = "../e2e" }
-testcontainers = { workspace = true }
+e2e = { version = "0.1.0", path = "../e2e" }
 uuid = { workspace = true }
 serde_json = { workspace = true }
 tempfile = "3"
@@ -41,16 +40,16 @@ rustls = "0.23"
 serde = { workspace = true }
 serde_json = { workspace = true }
 toml = "0.8"
-common = { path = "../common" }
-storage = { path = "../storage" }
-runtime = { path = "../runtime" }
-supervisor = { path = "../supervisor" }
-proxy = { path = "../proxy" }
-messaging = { path = "../messaging" }
-metrics = { path = "../metrics" }
-secrets = { path = "../secrets" }
-billing = { path = "../billing" }
+common = { version = "0.1.0", path = "../common" }
+storage = { version = "0.1.0", path = "../storage" }
+runtime = { version = "0.1.0", path = "../runtime" }
+supervisor = { version = "0.1.0", path = "../supervisor" }
+proxy = { version = "0.1.0", path = "../proxy" }
+messaging = { version = "0.1.0", path = "../messaging" }
+metrics = { version = "0.1.0", path = "../metrics" }
+secrets = { version = "0.1.0", path = "../secrets" }
+billing = { version = "0.1.0", path = "../billing" }
 async-nats = { workspace = true }
-ebpf-monitor = { path = "../ebpf-monitor" }
-config = { path = "../config" }
-internal_gateway = { path = "../internal_gateway" }
+ebpf-monitor = { version = "0.1.0", path = "../ebpf-monitor" }
+config = { version = "0.1.0", path = "../config" }
+internal_gateway = { version = "0.1.0", path = "../internal_gateway" }

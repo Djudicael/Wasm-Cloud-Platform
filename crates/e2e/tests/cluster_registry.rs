@@ -1,3 +1,5 @@
+#![allow(clippy::await_holding_lock)]
+
 use common::artifact_transfer::{ArtifactManifestBatchRequest, ArtifactManifestBatchResponse};
 use common::types::ClusterNodeRecord;
 use e2e::fixture::ClusterFixture;

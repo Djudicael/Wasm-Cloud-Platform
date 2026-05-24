@@ -714,7 +714,7 @@ mod tests {
         ]);
 
         let gateway = build_gateway_config(&parsed.args).unwrap();
-        assert_eq!(gateway.rate_limit.unwrap().distributed, false);
+        assert!(!gateway.rate_limit.unwrap().distributed);
     }
 
     #[test]
@@ -733,7 +733,7 @@ mod tests {
         ]);
 
         let gateway = build_gateway_config(&parsed.args).unwrap();
-        assert_eq!(gateway.rate_limit.unwrap().distributed, true);
+        assert!(gateway.rate_limit.unwrap().distributed);
     }
 
     #[tokio::test]

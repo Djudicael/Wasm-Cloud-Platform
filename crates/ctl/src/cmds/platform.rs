@@ -1,10 +1,8 @@
-// crates/ctl/src/cmds/platform.rs
 use clap::Subcommand;
 use common::upgrade_provenance::{
     NodeBinaryReleaseProvenance, SignedNodeBinaryReleaseProvenance, SignedReleaseKeyDelegation,
 };
 use ed25519_dalek::{Signer, SigningKey};
-use hex;
 use messaging::events::{node_upgrade_signature_payload, Event};
 use messaging::NatsBus;
 
@@ -99,6 +97,21 @@ pub enum PlatformCommands {
     },
 }
 
+struct UpgradeRequest {
+    binary_url: String,
+    sha256: String,
+    protocol_version: u32,
+    binary_version: String,
+    target_node: Option<String>,
+    signing_key_file: Option<String>,
+    provenance_delegation_file: Option<String>,
+    provenance_source_repository: Option<String>,
+    provenance_source_commit_sha: Option<String>,
+    provenance_build_workflow_ref: Option<String>,
+    provenance_build_run_id: Option<String>,
+    provenance_ttl_secs: u64,
+}
+
 pub async fn run(
     args: PlatformArgs,
     bus: &NatsBus,
@@ -136,18 +149,20 @@ pub async fn run(
             provenance_ttl_secs,
         } => {
             initiate_upgrade(
-                &binary_url,
-                &sha256,
-                protocol_version,
-                &binary_version,
-                target_node,
-                signing_key_file.as_deref(),
-                provenance_delegation_file.as_deref(),
-                provenance_source_repository,
-                provenance_source_commit_sha,
-                provenance_build_workflow_ref,
-                provenance_build_run_id,
-                provenance_ttl_secs,
+                UpgradeRequest {
+                    binary_url,
+                    sha256,
+                    protocol_version,
+                    binary_version,
+                    target_node,
+                    signing_key_file,
+                    provenance_delegation_file,
+                    provenance_source_repository,
+                    provenance_source_commit_sha,
+                    provenance_build_workflow_ref,
+                    provenance_build_run_id,
+                    provenance_ttl_secs,
+                },
                 bus,
             )
             .await?;
@@ -171,16 +186,15 @@ async fn upload_binary(
 ) -> anyhow::Result<()> {
     use sha2::{Digest, Sha256};
 
-    println!("📦 Reading binary from {}", binary_path);
+    println!("Reading binary from {}", binary_path);
     let binary_bytes = std::fs::read(binary_path)?;
 
-    // Compute SHA-256
     let mut hasher = Sha256::new();
     hasher.update(&binary_bytes);
     let sha256 = hex::encode(hasher.finalize());
 
-    println!("🔐 SHA-256: {}", sha256);
-    println!("📤 Uploading to {}...", artifact_url);
+    println!("SHA-256: {}", sha256);
+    println!("Uploading to {}...", artifact_url);
 
     let upload_url = format!("{}/artifacts/{}", artifact_url, sha256);
     let resp = http.put(&upload_url).body(binary_bytes).send().await?;
@@ -189,10 +203,10 @@ async fn upload_binary(
         anyhow::bail!("Upload failed with status: {}", resp.status());
     }
 
-    println!("✅ Binary uploaded successfully");
-    println!("   Protocol version: {}", protocol_version);
-    println!("   Binary version:   {}", binary_version);
-    println!("   SHA-256:          {}", sha256);
+    println!("Binary uploaded successfully");
+    println!("  Protocol version: {}", protocol_version);
+    println!("  Binary version:   {}", binary_version);
+    println!("  SHA-256:          {}", sha256);
     println!();
     println!("To upgrade the cluster, run:");
     println!("  wasm-ctl platform upgrade \\");
@@ -225,104 +239,107 @@ fn load_signed_release_key_delegation(path: &str) -> anyhow::Result<SignedReleas
     serde_json::from_str(&raw).map_err(Into::into)
 }
 
-async fn initiate_upgrade(
-    binary_url: &str,
-    sha256: &str,
-    protocol_version: u32,
-    binary_version: &str,
-    target_node: Option<String>,
-    signing_key_file: Option<&str>,
-    provenance_delegation_file: Option<&str>,
-    provenance_source_repository: Option<String>,
-    provenance_source_commit_sha: Option<String>,
-    provenance_build_workflow_ref: Option<String>,
-    provenance_build_run_id: Option<String>,
-    provenance_ttl_secs: u64,
-    bus: &NatsBus,
-) -> anyhow::Result<()> {
-    println!("🚀 Initiating platform upgrade");
-    println!("   Binary URL:       {}", binary_url);
-    println!("   SHA-256:          {}", sha256);
-    println!("   Protocol version: {}", protocol_version);
-    println!("   Binary version:   {}", binary_version);
+async fn initiate_upgrade(request: UpgradeRequest, bus: &NatsBus) -> anyhow::Result<()> {
+    let UpgradeRequest {
+        binary_url,
+        sha256,
+        protocol_version,
+        binary_version,
+        target_node,
+        signing_key_file,
+        provenance_delegation_file,
+        provenance_source_repository,
+        provenance_source_commit_sha,
+        provenance_build_workflow_ref,
+        provenance_build_run_id,
+        provenance_ttl_secs,
+    } = request;
+
+    println!("Initiating platform upgrade");
+    println!("  Binary URL:       {}", binary_url);
+    println!("  SHA-256:          {}", sha256);
+    println!("  Protocol version: {}", protocol_version);
+    println!("  Binary version:   {}", binary_version);
 
     if let Some(ref node) = target_node {
-        println!("   Target node:      {}", node);
+        println!("  Target node:      {}", node);
     } else {
-        println!("   Target:           All nodes (rolling upgrade)");
+        println!("  Target:           All nodes (rolling upgrade)");
     }
 
     let target_node = target_node.unwrap_or_else(|| "*".to_string());
-    let (signature_ed25519, release_provenance) =
-        match (signing_key_file, provenance_delegation_file) {
-            (Some(signing_key_path), Some(delegation_path)) => {
-                let signing_key = load_upgrade_signing_key(signing_key_path)?;
-                let delegation = load_signed_release_key_delegation(delegation_path)?;
-                let delegated_public_key = hex::encode(signing_key.verifying_key().to_bytes());
-                if delegation.delegation.public_key_ed25519.trim() != delegated_public_key {
-                    anyhow::bail!(
-                        "delegation public key does not match the provided provenance signing key"
-                    );
-                }
-
-                let issued_at_ms = now_unix_ms();
-                let provenance = NodeBinaryReleaseProvenance {
-                    version: 1,
-                    delegation_key_id: delegation.delegation.key_id.clone(),
-                    binary_url: binary_url.to_string(),
-                    binary_sha256: sha256.to_string(),
-                    new_protocol_version: protocol_version,
-                    new_binary_version: binary_version.to_string(),
-                    source_repository: provenance_source_repository,
-                    source_commit_sha: provenance_source_commit_sha,
-                    build_workflow_ref: provenance_build_workflow_ref,
-                    build_run_id: provenance_build_run_id,
-                    issued_at_ms,
-                    expires_at_ms: issued_at_ms
-                        .saturating_add(provenance_ttl_secs.saturating_mul(1000)),
-                };
-                (
-                    None,
-                    Some(SignedNodeBinaryReleaseProvenance::sign(
-                        provenance,
-                        delegation,
-                        &signing_key,
-                    )),
-                )
-            }
-            (Some(signing_key_path), None) => {
-                let signing_key = load_upgrade_signing_key(signing_key_path)?;
-                let payload = node_upgrade_signature_payload(
-                    &target_node,
-                    binary_url,
-                    sha256,
-                    protocol_version,
-                    binary_version,
+    let (signature_ed25519, release_provenance) = match (
+        signing_key_file.as_deref(),
+        provenance_delegation_file.as_deref(),
+    ) {
+        (Some(signing_key_path), Some(delegation_path)) => {
+            let signing_key = load_upgrade_signing_key(signing_key_path)?;
+            let delegation = load_signed_release_key_delegation(delegation_path)?;
+            let delegated_public_key = hex::encode(signing_key.verifying_key().to_bytes());
+            if delegation.delegation.public_key_ed25519.trim() != delegated_public_key {
+                anyhow::bail!(
+                    "delegation public key does not match the provided provenance signing key"
                 );
-                (
-                    Some(hex::encode(signing_key.sign(&payload).to_bytes())),
-                    None,
-                )
             }
-            (None, Some(_)) => {
-                anyhow::bail!("--provenance-delegation-file requires --signing-key-file");
-            }
-            (None, None) => (None, None),
-        };
+
+            let issued_at_ms = now_unix_ms();
+            let provenance = NodeBinaryReleaseProvenance {
+                version: 1,
+                delegation_key_id: delegation.delegation.key_id.clone(),
+                binary_url: binary_url.clone(),
+                binary_sha256: sha256.clone(),
+                new_protocol_version: protocol_version,
+                new_binary_version: binary_version.clone(),
+                source_repository: provenance_source_repository,
+                source_commit_sha: provenance_source_commit_sha,
+                build_workflow_ref: provenance_build_workflow_ref,
+                build_run_id: provenance_build_run_id,
+                issued_at_ms,
+                expires_at_ms: issued_at_ms
+                    .saturating_add(provenance_ttl_secs.saturating_mul(1000)),
+            };
+            (
+                None,
+                Some(SignedNodeBinaryReleaseProvenance::sign(
+                    provenance,
+                    delegation,
+                    &signing_key,
+                )),
+            )
+        }
+        (Some(signing_key_path), None) => {
+            let signing_key = load_upgrade_signing_key(signing_key_path)?;
+            let payload = node_upgrade_signature_payload(
+                &target_node,
+                &binary_url,
+                &sha256,
+                protocol_version,
+                &binary_version,
+            );
+            (
+                Some(hex::encode(signing_key.sign(&payload).to_bytes())),
+                None,
+            )
+        }
+        (None, Some(_)) => {
+            anyhow::bail!("--provenance-delegation-file requires --signing-key-file");
+        }
+        (None, None) => (None, None),
+    };
 
     let event = Event::NodeUpgrade {
         target_node,
-        binary_url: binary_url.to_string(),
-        binary_sha256: sha256.to_string(),
+        binary_url,
+        binary_sha256: sha256,
         signature_ed25519,
         release_provenance,
         new_protocol_version: protocol_version,
-        new_binary_version: binary_version.to_string(),
+        new_binary_version: binary_version,
     };
 
     bus.publish(&event).await?;
 
-    println!("✅ Upgrade event published");
+    println!("Upgrade event published");
     println!();
     println!("Monitor progress with:");
     println!("  wasm-ctl platform status");
@@ -331,20 +348,18 @@ async fn initiate_upgrade(
 }
 
 async fn check_upgrade_status(node_api: &str, http: &reqwest::Client) -> anyhow::Result<()> {
-    println!("📊 Cluster Upgrade Status");
+    println!("Cluster Upgrade Status");
     println!();
 
-    // Query the cluster status endpoint
     let status_url = format!("{}/api/cluster/status", node_api);
     let resp = http.get(&status_url).send().await?;
 
     if !resp.status().is_success() {
-        println!("⚠️  Could not fetch cluster status: {}", resp.status());
+        println!("Could not fetch cluster status: {}", resp.status());
         return Ok(());
     }
 
     let status: serde_json::Value = resp.json().await?;
-
     println!("{}", serde_json::to_string_pretty(&status)?);
 
     Ok(())
@@ -355,7 +370,7 @@ async fn rollback_node(
     node_api: &str,
     http: &reqwest::Client,
 ) -> anyhow::Result<()> {
-    println!("⏮️  Rolling back node: {}", node_id);
+    println!("Rolling back node: {}", node_id);
 
     let rollback_url = format!("{}/api/nodes/{}/rollback", node_api, node_id);
     let resp = http.post(&rollback_url).send().await?;
@@ -364,8 +379,8 @@ async fn rollback_node(
         anyhow::bail!("Rollback failed with status: {}", resp.status());
     }
 
-    println!("✅ Rollback initiated");
-    println!("   The node will restart with the previous binary version");
+    println!("Rollback initiated");
+    println!("  The node will restart with the previous binary version");
 
     Ok(())
 }

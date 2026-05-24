@@ -9,10 +9,10 @@ axum = { workspace = true }
 tracing = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-common = { path = "../common" }
-supervisor = { path = "../supervisor" }
-proxy = { path = "../proxy" }
-ebpf-monitor = { path = "../ebpf-monitor" }
+common = { version = "0.1.0", path = "../common" }
+supervisor = { version = "0.1.0", path = "../supervisor" }
+proxy = { version = "0.1.0", path = "../proxy" }
+ebpf-monitor = { version = "0.1.0", path = "../ebpf-monitor" }
 reqwest = { workspace = true }
 chrono = { workspace = true }
 http = "1"

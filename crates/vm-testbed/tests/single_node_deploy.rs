@@ -1,7 +1,7 @@
 //! End-to-end test: Deploy a Wasm app inside a microVM.
 //!
 //! This test:
-//! 1. Starts a NATS container (on host, via testcontainers)
+//! 1. Starts a NATS container on the host runtime
 //! 2. Spawns a wasm-node microVM
 //! 3. Uploads hello-axum.wasm to the artifact server
 //! 4. Deploys the app via NATS
@@ -22,6 +22,7 @@
 //! ```
 
 use std::time::Duration;
+use common::container_runtime::NatsContainer;
 use vm_testbed::{MicroVm, VmConfig};
 
 /// Test that a wasm-node microVM can deploy and serve a Wasm application.
@@ -38,7 +39,7 @@ async fn test_single_node_deploy() {
     let nats_container = start_nats_container()
         .await
         .expect("Failed to start NATS container");
-    let nats_url = format!("nats://{}:4222", nats_container.host);
+    let nats_url = nats_container.url.clone();
 
     // 2. Spawn wasm-node microVM
     let vm_config = VmConfig {
@@ -123,29 +124,8 @@ async fn test_single_node_deploy() {
 // ── Helpers ──────────────────────────────────────────────────────────
 
 async fn start_nats_container() -> Result<NatsContainer, Box<dyn std::error::Error>> {
-    // Re-use testcontainers from the e2e crate
-    use testcontainers::{core::WaitFor, runners::AsyncRunner, GenericImage, ImageExt};
-
-    let image = GenericImage::new("nats", "2.10-alpine")
-        .with_exposed_port(4222.into())
-        .with_wait_for(WaitFor::message_on_stdout("Server is ready"))
-        .with_cmd(["--js"]);
-
-    let container = image.start().await?;
-    let host = container.get_host().await?.to_string();
-    let port = container.get_host_port_ipv4(4222).await?;
-
-    Ok(NatsContainer {
-        host,
-        port,
-        _container: container,
-    })
-}
-
-struct NatsContainer {
-    host: String,
-    port: u16,
-    _container: testcontainers::ContainerAsync<testcontainers::GenericImage>,
+    let container = NatsContainer::start(4222)?;
+    Ok(container)
 }
 
 fn find_kernel() -> std::path::PathBuf {
@@ -257,8 +237,6 @@ async fn deploy_app(
     artifact_url: &str,
     sha256: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    use async_nats::ConnectOptions;
-
     let client = async_nats::connect(nats_url).await?;
 
     let deploy_event = serde_json::json!({

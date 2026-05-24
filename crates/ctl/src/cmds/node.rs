@@ -157,28 +157,24 @@ pub async fn cluster_health(bus: &NatsBus) -> Result<()> {
             break;
         }
         let msg = msg?;
-        if let Ok(event) = serde_json::from_slice::<messaging::events::Event>(&msg.payload) {
-            match event {
-                messaging::events::Event::NodeHealthSnapshot {
-                    node_id,
-                    status,
-                    active_instances,
-                    deployed_apps,
-                    nats_connected,
-                    disk_free_mb,
-                    memory_used_mb,
-                    ..
-                } => {
-                    let entry = node_statuses.entry(node_id.clone()).or_default();
-                    entry.status = Some(status);
-                    entry.active_instances = Some(active_instances);
-                    entry.deployed_apps = Some(deployed_apps);
-                    entry.nats_connected = Some(nats_connected);
-                    entry.disk_free_mb = Some(disk_free_mb);
-                    entry.memory_used_mb = Some(memory_used_mb);
-                }
-                _ => {}
-            }
+        if let Ok(messaging::events::Event::NodeHealthSnapshot {
+            node_id,
+            status,
+            active_instances,
+            deployed_apps,
+            nats_connected,
+            disk_free_mb,
+            memory_used_mb,
+            ..
+        }) = serde_json::from_slice::<messaging::events::Event>(&msg.payload)
+        {
+            let entry = node_statuses.entry(node_id.clone()).or_default();
+            entry.status = Some(status);
+            entry.active_instances = Some(active_instances);
+            entry.deployed_apps = Some(deployed_apps);
+            entry.nats_connected = Some(nats_connected);
+            entry.disk_free_mb = Some(disk_free_mb);
+            entry.memory_used_mb = Some(memory_used_mb);
         }
         let _ = msg.ack().await;
         count += 1;

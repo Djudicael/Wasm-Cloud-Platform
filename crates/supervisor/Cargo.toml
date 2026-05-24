@@ -12,17 +12,17 @@ tokio = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 chrono = { workspace = true }
-common = { path = "../common" }
-runtime = { path = "../runtime" }
-storage = { path = "../storage" }
-secrets = { path = "../secrets" }
-metrics = { path = "../metrics" }
+common = { version = "0.1.0", path = "../common" }
+runtime = { version = "0.1.0", path = "../runtime" }
+storage = { version = "0.1.0", path = "../storage" }
+secrets = { version = "0.1.0", path = "../secrets" }
+metrics = { version = "0.1.0", path = "../metrics" }
 billing = { version = "0.1.0", path = "../billing" }
-ebpf-monitor = { path = "../ebpf-monitor" }
+ebpf-monitor = { version = "0.1.0", path = "../ebpf-monitor" }
 messaging = { version = "0.1.0", path = "../messaging" }
 proxy = { version = "0.1.0", path = "../proxy" }
 uuid.workspace = true
-reqwest = "0.13.2"
+reqwest = { workspace = true }
 libc = "0.2"
 
 [dev-dependencies]

@@ -125,45 +125,51 @@ impl ClusterFixture {
         memory_mb: usize,
         vcpus: usize,
     ) -> Result<&MicroVm, ClusterError> {
-        if self.nats.is_some() {
+        let needs_start = self.nats.is_none();
+        if !needs_start {
             warn!("NATS VM already running");
-            return Ok(self.nats.as_ref().unwrap());
         }
 
-        info!("Starting NATS microVM");
+        if needs_start {
+            info!("Starting NATS microVM");
 
-        let ip = "172.20.0.10".to_string();
-        let tap = format!("tap-{}-nats", self.name);
+            let ip = "172.20.0.10".to_string();
+            let tap = format!("tap-{}-nats", self.name);
 
-        let config = VmConfig {
-            id: format!("{}-nats", self.name),
-            kernel_path: self.kernel_path.clone(),
-            rootfs_path: self.nats_rootfs.clone(),
-            data_drive_path: None,
-            memory_mb,
-            vcpus,
-            ip: ip.clone(),
-            gateway: self.gateway.clone(),
-            bridge_name: self.bridge_name.clone(),
-            tap_device: tap,
-            mmds_data: Some(json!({
-                "nats_config": {
-                    "jetstream": true,
-                    "store_dir": "/data/jetstream",
-                    "max_memory_store": "1GB",
-                    "max_file_store": "10GB",
-                }
-            })),
-        };
+            let config = VmConfig {
+                id: format!("{}-nats", self.name),
+                kernel_path: self.kernel_path.clone(),
+                rootfs_path: self.nats_rootfs.clone(),
+                data_drive_path: None,
+                memory_mb,
+                vcpus,
+                ip: ip.clone(),
+                gateway: self.gateway.clone(),
+                bridge_name: self.bridge_name.clone(),
+                tap_device: tap,
+                mmds_data: Some(json!({
+                    "nats_config": {
+                        "jetstream": true,
+                        "store_dir": "/data/jetstream",
+                        "max_memory_store": "1GB",
+                        "max_file_store": "10GB",
+                    }
+                })),
+            };
 
-        let vm = MicroVm::spawn(config).await?;
-        self.nats = Some(vm);
+            let vm = MicroVm::spawn(config).await?;
+            self.nats = Some(vm);
 
-        // Wait for NATS to be ready
-        sleep(Duration::from_secs(3)).await;
+            // Wait for NATS to be ready
+            sleep(Duration::from_secs(3)).await;
 
-        info!("NATS microVM started");
-        Ok(self.nats.as_ref().unwrap())
+            info!("NATS microVM started");
+        }
+
+        Ok(self
+            .nats
+            .as_ref()
+            .expect("NATS should be available after start"))
     }
 
     /// Start a new wasm-node microVM.

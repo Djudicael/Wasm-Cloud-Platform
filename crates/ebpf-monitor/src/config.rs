@@ -347,10 +347,12 @@ mod tests {
     #[test]
     fn test_sync_from_ebpf_section() {
         let mut config = MonitorConfig::default();
-        let mut section = common::config::EbpfSection::default();
-        section.fd_soft_limit = 4096;
-        section.fd_hard_limit = 5000;
-        section.syscall_rate_limit = 50_000;
+        let section = common::config::EbpfSection {
+            fd_soft_limit: 4096,
+            fd_hard_limit: 5000,
+            syscall_rate_limit: 50_000,
+            ..Default::default()
+        };
 
         config.sync_from_ebpf_section(&section);
         assert_eq!(config.fd_soft_limit, 4096);

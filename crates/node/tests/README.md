@@ -37,7 +37,7 @@ rustup target add wasm32-wasip2
 
 ### For `e2e_smoke` and `test_graceful_shutdown_e2e`:
 ```bash
-# Install podman or docker (for testcontainers)
+# Install podman or docker (used by the host container runtime helper)
 # On Ubuntu/WSL:
 sudo apt install podman
 

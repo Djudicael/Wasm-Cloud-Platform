@@ -419,9 +419,7 @@ fn test_spawn_instance_fails_for_missing_allowed_filesystem_path() {
     let runtime = WasmRuntime::new().expect("Failed to create WasmRuntime");
     let wasm_bytes = wat::parse_str(no_op_component_with_wasi_cli_run_interface()).unwrap();
     let artifact = runtime.compile(&wasm_bytes).unwrap();
-    let prepared = runtime.prepare(&artifact, config).unwrap();
-
-    let err = match prepared.spawn_instance(vec![], 8080, None) {
+    let err = match runtime.prepare(&artifact, config) {
         Ok(_) => panic!("missing preopen path should fail"),
         Err(err) => err,
     };

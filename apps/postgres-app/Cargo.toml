@@ -10,8 +10,8 @@ serde_json = { workspace = true }
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
 axum = { workspace = true }
 tokio = { workspace = true }
-wasi-pg-client = { version = "0.1.2", features = ["tokio-transport"] }
+wasi-pg-client = { version = "0.1.3", features = ["tokio-transport"] }
 
 [target.'cfg(target_family = "wasm")'.dependencies]
-wasi-pg-client = "0.1.2"
+wasi-pg-client = "0.1.3"
 wstd = "0.6"

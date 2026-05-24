@@ -157,7 +157,7 @@ ClusterFixture
 ### Code Quality
 
 - **`tests/harness.rs` duplicates ~760 lines from `src/fixture.rs` and `src/helpers.rs`** — This massive duplication increases maintenance burden and risk of divergence.
-- **`NatsContainer` uses podman directly** — The `testcontainers` dependency is declared but unused; the implementation shells out to `podman` instead.
+- **`NatsContainer` uses the host container runtime directly** — the test harness shells out to Podman or Docker instead of going through an extra library layer.
 - **Several E2E tests NOT marked `#[ignore]`** — Tests that require NATS will fail in environments without it.
 
 ### Performance

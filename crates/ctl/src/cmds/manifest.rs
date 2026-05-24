@@ -239,6 +239,7 @@ impl DeployManifest {
 }
 
 /// Reconstruct a manifest from an AppConfig and gateway config (for `app manifest` command).
+#[allow(dead_code)]
 pub fn manifest_from_config(
     app_config: &common::types::AppConfig,
     gateway_config: Option<&common::types::GatewayRouteConfig>,

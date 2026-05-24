@@ -135,11 +135,7 @@ impl InProgressBucket {
             minute_ts: self.minute_ts,
             request_count: self.count,
             fuel_consumed_total: self.fuel_sum,
-            fuel_consumed_avg: if self.count > 0 {
-                self.fuel_sum / self.count
-            } else {
-                0
-            },
+            fuel_consumed_avg: self.fuel_sum.checked_div(self.count).unwrap_or(0),
             ram_usage_peak_bytes: self.ram_peak,
             latency_p50_ms: p50,
             latency_p99_ms: p99,

@@ -1,6 +1,6 @@
 # Testing the Messaging Crate
 
-This crate uses [testcontainers](https://github.com/testcontainers/testcontainers-rs) to spin up NATS containers for integration tests.
+This crate uses the shared host container runtime helper to spin up NATS containers through Podman or Docker directly.
 
 ## Running Tests
 
@@ -14,33 +14,12 @@ cargo test -p messaging
 
 ### With Podman (WSL/Linux)
 
-The tests automatically detect and use Podman if available. The test setup checks for:
-- Podman socket at `/run/user/1000/podman/podman.sock`
-- Automatically configures `DOCKER_HOST` environment variable
-- Disables Ryuk (often needed for Podman)
+The tests automatically detect and use Podman if available.
 
 Simply run:
 
 ```bash
 cargo test -p messaging
-```
-
-### Manual Configuration
-
-If auto-detection doesn't work, you can manually set environment variables:
-
-```bash
-DOCKER_HOST=unix:///run/user/1000/podman/podman.sock \
-TESTCONTAINERS_RYUK_DISABLED=true \
-cargo test -p messaging
-```
-
-Or uncomment the `DOCKER_HOST` line in `.cargo/config.toml`:
-
-```toml
-[env]
-TESTCONTAINERS_RYUK_DISABLED = "true"
-DOCKER_HOST = "unix:///run/user/1000/podman/podman.sock"
 ```
 
 ## Tests Included

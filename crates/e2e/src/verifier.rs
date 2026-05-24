@@ -975,9 +975,10 @@ pub async fn verify_integrity_check_passed(
                         return Ok(ttr);
                     }
                     "full_rebootstrap" => {
-                        return Err(format!(
+                        return Err(
                             "integrity check recommends full rebootstrap — data loss likely"
-                        ));
+                                .to_string(),
+                        );
                     }
                     _ => {
                         // Unknown action — keep polling
