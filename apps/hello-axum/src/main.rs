@@ -13,6 +13,7 @@ fn main() {
         .unwrap_or_else(|_| "127.0.0.1".to_string());
     let addr = format!("{}:{}", bind_addr, port);
     let listener = TcpListener::bind(&addr).expect("failed to bind");
+    let mut shutdown_requested = false;
 
     for stream in listener.incoming() {
         let mut stream = match stream {
@@ -40,7 +41,7 @@ fn main() {
         // Parse method and full path (including query string)
         let full_path = request_line.split_whitespace().nth(1).unwrap_or("/");
 
-        let (status, content_type, body) = route(full_path);
+        let (status, content_type, body, should_shutdown) = route(full_path);
 
         let response = format!(
             "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -52,6 +53,12 @@ fn main() {
         );
 
         let _ = stream.write_all(response.as_bytes());
+        if should_shutdown {
+            shutdown_requested = true;
+        }
+        if shutdown_requested {
+            break;
+        }
     }
 }
 
@@ -70,16 +77,23 @@ fn extract_query_param(path: &str, key: &str) -> Option<String> {
 }
 
 #[cfg(target_family = "wasm")]
-fn route(path: &str) -> (u16, &'static str, String) {
+fn route(path: &str) -> (u16, &'static str, String, bool) {
     // Strip query string for exact matches
     let base_path = path.split('?').next().unwrap_or(path);
 
     match base_path {
-        "/" => (200, "text/plain", "Hello from wasip2!".to_string()),
+        "/" => (200, "text/plain", "Hello from wasip2!".to_string(), false),
         "/health" => (
             200,
             "application/json",
             r#"{"status":"healthy"}"#.to_string(),
+            false,
+        ),
+        "/_platform/shutdown" => (
+            200,
+            "application/json",
+            r#"{"status":"shutting_down"}"#.to_string(),
+            true,
         ),
         "/call-echo" => {
             // Make outbound HTTP call to echo-service.
@@ -98,11 +112,12 @@ fn route(path: &str) -> (u16, &'static str, String) {
             let result = make_http_request(&url);
 
             match result {
-                Ok(response) => (200, "text/plain", response),
+                Ok(response) => (200, "text/plain", response, false),
                 Err(e) => (
                     500,
                     "text/plain",
                     format!("Failed to call echo-service: {}", e),
+                    false,
                 ),
             }
         }
@@ -115,11 +130,13 @@ fn route(path: &str) -> (u16, &'static str, String) {
                     200,
                     "application/json",
                     format!(r#"{{"echo_service_url":"{}"}}"#, url),
+                    false,
                 ),
                 Err(_) => (
                     200,
                     "application/json",
                     r#"{"echo_service_url":null}"#.to_string(),
+                    false,
                 ),
             }
         }
@@ -143,6 +160,7 @@ fn route(path: &str) -> (u16, &'static str, String) {
                             r#"{{"connected":false,"error":"invalid port: {}"}}"#,
                             port_str
                         ),
+                        false,
                     )
                 }
             };
@@ -152,6 +170,7 @@ fn route(path: &str) -> (u16, &'static str, String) {
                     200,
                     "application/json",
                     format!(r#"{{"connected":true,"target":"{}:{}"}}"#, host, port),
+                    false,
                 ),
                 Err(e) => (
                     200,
@@ -162,10 +181,11 @@ fn route(path: &str) -> (u16, &'static str, String) {
                         port,
                         e.to_string().replace('"', "\\\"")
                     ),
+                    false,
                 ),
             }
         }
-        _ => (404, "text/plain", "Not Found".to_string()),
+        _ => (404, "text/plain", "Not Found".to_string(), false),
     }
 }
 
