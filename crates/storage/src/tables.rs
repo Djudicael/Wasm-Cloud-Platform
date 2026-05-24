@@ -12,7 +12,7 @@ pub const CONFIGS: TableDefinition<&str, &str> = TableDefinition::new("configs")
 
 // ── ENCRYPTED SECRETS ─────────────────────────────────────────────────────────
 // Key   : app_id
-// Value : EncryptedBlob struct serialized with bincode
+// Value : AppSecretBundle serialized with CBOR
 pub const SECRETS: TableDefinition<&str, &[u8]> = TableDefinition::new("secrets");
 
 // ── TELEMETRY (aggregated, 1-minute buckets) ──────────────────────────────────

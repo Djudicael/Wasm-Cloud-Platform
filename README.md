@@ -346,3 +346,12 @@ See `INFRA_IMPL/39_API_GATEWAY.md` for the full specification.
 - The NATS bus is the primary control plane; data plane traffic is handled by Pingora and the Supervisor.
 - On Linux 5.8+ with BTF, eBPF provides sub-millisecond failure detection. On other platforms, graceful fallback to userspace polling maintains full functionality.
 
+## License
+
+This project is dual-licensed under:
+
+- `MIT`
+- `Apache-2.0`
+
+You may use it under either license at your option. See [`LICENSE-MIT`](LICENSE-MIT) and [`LICENSE-APACHE`](LICENSE-APACHE).
+

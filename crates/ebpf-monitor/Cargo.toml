@@ -1,6 +1,7 @@
 [package]
 name = "ebpf-monitor"
 version = "0.1.0"
+license.workspace = true
 edition = "2021"
 
 [features]
@@ -8,7 +9,7 @@ default = []
 ebpf = ["dep:aya", "dep:aya-log"]
 
 [dependencies]
-aya = { version = "0.12", optional = true }
+aya = { version = "0.13.1", optional = true }
 aya-log = { version = "0.2", optional = true }
 common = { version = "0.1.0", path = "../common" }
 metrics = { version = "0.1.0", path = "../metrics" }

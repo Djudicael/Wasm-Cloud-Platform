@@ -1,6 +1,7 @@
 [package]
 name = "hello-axum"
 version = "0.1.0"
+license.workspace = true
 edition = "2021"
 
 # No [lib] section — this is a binary (wasi:cli/run)

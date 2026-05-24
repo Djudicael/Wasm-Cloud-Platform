@@ -128,7 +128,7 @@ provider.delete("my-app", "database-password").await?;
 | Issue | Impact | Suggested Fix |
 |-------|--------|---------------|
 | Unused `hex` dependency | Unnecessary dependency bloat | Remove from `Cargo.toml` |
-| `bincode` 1.x used | Not forward-compatible; no migration path | Migrate to `bincode` 2.x or use a versioned format |
+| Secret bundle encoding should remain versioned and documented | Persisted format changes need migration discipline | Keep `AppSecretBundle` versioned and migrate deliberately |
 
 ## Security Considerations
 

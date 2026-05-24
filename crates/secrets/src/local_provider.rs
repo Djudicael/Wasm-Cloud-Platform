@@ -3,6 +3,7 @@ use crate::{
     provider::SecretProvider,
 };
 use async_trait::async_trait;
+use ciborium::{from_reader, into_writer};
 use common::{error::PlatformError, types::AppId};
 use redb::ReadableDatabase;
 use std::sync::Arc;
@@ -99,8 +100,10 @@ impl LocalSecretProvider {
             .map_err(PlatformError::storage_source)?
         {
             Some(v) => {
-                let bundle: AppSecretBundle =
-                    bincode::deserialize(v.value()).map_err(PlatformError::storage_source)?;
+                let mut bytes = v.value();
+                let bundle: AppSecretBundle = from_reader(&mut bytes).map_err(|e| {
+                    PlatformError::storage(format!("failed to decode secret bundle: {e}"))
+                })?;
                 Ok(Some(bundle))
             }
             None => Ok(None),
@@ -108,7 +111,9 @@ impl LocalSecretProvider {
     }
 
     fn save_bundle(&self, bundle: &AppSecretBundle) -> Result<(), PlatformError> {
-        let bytes = bincode::serialize(bundle).map_err(PlatformError::storage_source)?;
+        let mut bytes = Vec::new();
+        into_writer(bundle, &mut bytes)
+            .map_err(|e| PlatformError::storage(format!("failed to encode secret bundle: {e}")))?;
         let tx = self
             .store
             .db()

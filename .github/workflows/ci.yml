@@ -216,11 +216,39 @@ jobs:
           NATS_URL: nats://localhost:4222
         timeout-minutes: 12
 
-      - name: Run E2E tests
-        run: cargo test -p e2e -- --test-threads=1
+      - name: Run E2E smoke suites
+        run: |
+          cargo test -p e2e --test deploy_and_request -- --test-threads=1
+          cargo test -p e2e --test routes -- --test-threads=1
+          cargo test -p e2e --test east_west -- --test-threads=1
+          cargo test -p e2e --test hot_swap -- --test-threads=1
+          cargo test -p e2e --test namespace_enforcement -- --test-threads=1
+          cargo test -p e2e --test postgres -- --test-threads=1
+          cargo test -p e2e --test wasi_http_component -- --test-threads=1
+        env:
+          NATS_URL: nats://localhost:4222
+        timeout-minutes: 10
+
+      - name: Run E2E platform suites
+        run: |
+          cargo test -p e2e --test config_hot_reload -- --test-threads=1
+          cargo test -p e2e --test disaster_recovery -- --test-threads=1
+          cargo test -p e2e --test gateway -- --test-threads=1
+        env:
+          NATS_URL: nats://localhost:4222
+        timeout-minutes: 10
+
+      - name: Run E2E billing suite
+        run: cargo test -p e2e --test billing -- --test-threads=1
         env:
           NATS_URL: nats://localhost:4222
         timeout-minutes: 8
+
+      - name: Run E2E chaos suite
+        run: cargo test -p e2e --test chaos -- --test-threads=1
+        env:
+          NATS_URL: nats://localhost:4222
+        timeout-minutes: 20
 
       - name: Run cluster registry E2E regression
         run: cargo test -p e2e test_live_cluster_registry_drives_artifact_authorize_audience_set -- --ignored --test-threads=1 --nocapture

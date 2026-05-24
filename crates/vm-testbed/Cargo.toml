@@ -1,6 +1,7 @@
 [package]
 name = "vm-testbed"
 version = "0.1.0"
+license.workspace = true
 edition = "2021"
 description = "MicroVM-based testbed for pre-production validation of the Wasm Cloud Platform using Firecracker"
 
