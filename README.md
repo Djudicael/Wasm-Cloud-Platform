@@ -78,6 +78,8 @@ The index routes to one operator guide per level, so each audience gets a concre
 
 ## Documentation
 
+- [`docs/performance-benchmarks.md`](docs/performance-benchmarks.md) for the supported measurement paths, including the real platform cold-start benchmark
+
 ### Getting Started
 
 | Guide | Description |

@@ -356,3 +356,4 @@ NATS with JetStream is the messaging backbone:
 - **[Internal Service Mesh](internal-mesh.md)** — Enable East-West communication between apps
 - **[NATS Setup & Security](nats-setup.md)** — Production NATS clustering and auth
 - **[Full Stack Example](full-stack-example.md)** — End-to-end: 2 apps + database + auth
+- **[Performance Benchmarks](performance-benchmarks.md)** ??? Measure platform cold-start and runtime latency on your Linux target

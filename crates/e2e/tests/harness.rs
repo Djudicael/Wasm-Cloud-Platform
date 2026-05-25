@@ -1,7 +1,9 @@
 #![allow(dead_code)]
 
+use common::artifact_transfer::{ArtifactManifestBatchRequest, ArtifactManifestBatchResponse};
 use common::container_runtime::{
-    NatsContainer as HostNatsContainer, PostgresContainer as HostPostgresContainer,
+    reserve_host_port, NatsContainer as HostNatsContainer,
+    PostgresContainer as HostPostgresContainer,
 };
 /// E2E Test Harness
 ///
@@ -17,6 +19,10 @@ use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 use tempfile::TempDir;
 use tokio::time::sleep;
+
+pub fn reserve_test_port() -> Result<u16, Box<dyn std::error::Error>> {
+    reserve_host_port().map_err(|e| e.into())
+}
 
 /// A running NATS container
 #[allow(dead_code)]
@@ -655,6 +661,57 @@ pub async fn upload_artifact(
     }
 
     Ok(())
+}
+
+pub async fn upload_and_authorize_artifact_for_node(
+    node: &NodeProcess,
+    wasm_path: &Path,
+) -> Result<
+    (
+        String,
+        String,
+        u64,
+        Vec<common::artifact_transfer::ArtifactManifestAudienceBinding>,
+    ),
+    Box<dyn std::error::Error>,
+> {
+    let sha256 = compute_sha256(wasm_path)?;
+    let size_bytes = std::fs::metadata(wasm_path)?.len();
+
+    upload_artifact(node.artifact_port, wasm_path, &sha256).await?;
+
+    let artifact_url = format!(
+        "http://127.0.0.1:{}/artifacts/{}",
+        node.artifact_port, sha256
+    );
+    let authorize_url = format!(
+        "http://127.0.0.1:{}/artifacts/{}/authorize",
+        node.artifact_port, sha256
+    );
+
+    let response = reqwest::Client::new()
+        .post(&authorize_url)
+        .json(&ArtifactManifestBatchRequest {
+            audiences: vec![node.node_id.clone()],
+        })
+        .send()
+        .await?;
+
+    if !response.status().is_success() {
+        return Err(format!(
+            "artifact authorize failed: HTTP {} from {}",
+            response.status(),
+            authorize_url
+        )
+        .into());
+    }
+
+    let manifests = response
+        .json::<ArtifactManifestBatchResponse>()
+        .await?
+        .manifests;
+
+    Ok((artifact_url, sha256, size_bytes, manifests))
 }
 
 /// Build a default AppConfig for testing
