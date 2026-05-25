@@ -70,6 +70,8 @@ The review uses the real `hello-axum` component, compares baseline vs cache vs p
 
 The production template keeps pooling disabled by default. Enable it only if this review shows a material instantiation gain without unacceptable RSS growth for the workload you actually expect to run.
 
+This review is the current evidence path for startup and instantiation latency. The repository does not currently publish a single end-to-end platform benchmark that substantiates a universal `sub-10ms cold start` claim across workloads and deployment shapes.
+
 ## Known Issues & Improvements
 
 ### Concurrency Bugs

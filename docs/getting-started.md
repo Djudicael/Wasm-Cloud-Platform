@@ -17,7 +17,7 @@ For deployment posture after your first successful startup, use [`docs/deploymen
 
 ## Architecture Overview
 
-The Wasm Cloud Platform is a multi-tenant, Wasm-native application platform. Instead of containers, it runs WebAssembly modules with deterministic resource metering, sub-10ms cold starts, and high-density multi-tenancy.
+The Wasm Cloud Platform is a multi-tenant, Wasm-native application platform. Instead of containers, it runs WebAssembly modules with deterministic resource metering, low cold-start latency, and high-density multi-tenancy.
 
 ### High-Level Architecture
 
@@ -62,7 +62,7 @@ The Wasm Cloud Platform is a multi-tenant, Wasm-native application platform. Ins
 | Aspect | Traditional Container Platform | Wasm Cloud Platform |
 |--------|-------------------------------|---------------------|
 | Isolation | Linux cgroups/namespaces | Wasm sandbox + fuel metering |
-| Cold start | 100ms–2s | <10ms (AOT compiled) |
+| Cold start | 100ms–2s | workload-dependent low-latency startup (AOT compiled) |
 | Image format | OCI/container images | `.wasm` + AOT artifacts |
 | CPU accounting | Wall-clock time / cgroups | Wasm instruction fuel |
 | Density | 10s–100s per node | 1000s per node |

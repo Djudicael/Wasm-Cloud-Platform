@@ -1,6 +1,6 @@
 # Wasm Cloud Platform
 
-A multi-tenant, HTTP-serving cloud platform built on WebAssembly and WASI. Replaces container-based architectures with lightweight Wasm isolation, deterministic resource metering, and sub-10ms cold starts.
+A multi-tenant, HTTP-serving cloud platform built on WebAssembly and WASI. Replaces container-based architectures with lightweight Wasm isolation, deterministic resource metering, and low cold-start latency.
 
 ## What this project is
 
@@ -12,7 +12,7 @@ This project targets Linux production environments. Windows is not a production 
 
 ## Core platform goals
 
-- **Cold Start < 10ms** via AOT-compiled Wasm artifacts
+- **Low cold-start latency** via AOT-compiled Wasm artifacts and runtime caching
 - **Fuel-based CPU accounting** for deterministic multi-tenant fairness
 - **Shared-nothing node architecture** with local `redb` persistence
 - **NATS control plane** for deploys, secrets, and cluster coordination
