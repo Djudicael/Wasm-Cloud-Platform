@@ -84,51 +84,20 @@ impl std::fmt::Debug for NatsBus {
 }
 
 impl NatsBus {
-    async fn create_stream_with_retry(
+    async fn create_stream(
         js: &jetstream::Context,
         name: &str,
         subjects: &[&str],
     ) -> Result<(), PlatformError> {
-        const MAX_ATTEMPTS: usize = 20;
-        const RETRY_DELAY: Duration = Duration::from_millis(250);
-
-        for attempt in 1..=MAX_ATTEMPTS {
-            let result = js
-                .get_or_create_stream(StreamConfig {
-                    name: name.to_string(),
-                    subjects: subjects.iter().map(|subject| subject.to_string()).collect(),
-                    max_messages: 10_000,
-                    ..Default::default()
-                })
-                .await;
-
-            match result {
-                Ok(_) => return Ok(()),
-                Err(error) => {
-                    let error_text = error.to_string();
-                    let retryable = error_text.contains("jetstream unavailable")
-                        || error_text.contains("JetStreamUnavailable")
-                        || error_text.contains("503");
-
-                    if retryable && attempt < MAX_ATTEMPTS {
-                        tracing::debug!(
-                            stream = name,
-                            attempt,
-                            error = %error,
-                            "JetStream not ready yet, retrying stream creation"
-                        );
-                        sleep(RETRY_DELAY).await;
-                        continue;
-                    }
-
-                    return Err(PlatformError::messaging_source(error));
-                }
-            }
-        }
-
-        Err(PlatformError::messaging(
-            "exhausted JetStream setup retries unexpectedly",
-        ))
+        js.get_or_create_stream(StreamConfig {
+            name: name.to_string(),
+            subjects: subjects.iter().map(|subject| subject.to_string()).collect(),
+            max_messages: 10_000,
+            ..Default::default()
+        })
+        .await
+        .map(|_| ())
+        .map_err(PlatformError::messaging_source)
     }
 
     /// Connect to the NATS server.
@@ -217,17 +186,57 @@ impl NatsBus {
 
     /// Create durable JetStream subjects for deployment events.
     pub async fn setup_jetstream(&self) -> Result<(), PlatformError> {
+        const MAX_ATTEMPTS: usize = 60;
+        const RETRY_DELAY: Duration = Duration::from_millis(500);
         let js = jetstream::new(self.client.clone());
 
-        Self::create_stream_with_retry(&js, "DEPLOY", DEPLOY_STREAM_SUBJECTS).await?;
-        Self::create_stream_with_retry(&js, "CONTROL", CONTROL_STREAM_SUBJECTS).await?;
-        Self::create_stream_with_retry(&js, "NODE", NODE_STREAM_SUBJECTS).await?;
-        Self::create_stream_with_retry(&js, "HEALTH", HEALTH_STREAM_SUBJECTS).await?;
-        Self::create_stream_with_retry(&js, "PLATFORM", PLATFORM_STREAM_SUBJECTS).await?;
-        Self::create_stream_with_retry(&js, "EBPF", EBPF_STREAM_SUBJECTS).await?;
-        Self::create_stream_with_retry(&js, QUARANTINE_STREAM, QUARANTINE_STREAM_SUBJECTS).await?;
+        let mut last_error: Option<PlatformError> = None;
+        for attempt in 1..=MAX_ATTEMPTS {
+            if let Err(error) = js.query_account().await {
+                let error = PlatformError::messaging_source(error);
+                tracing::debug!(
+                    attempt,
+                    error = %error,
+                    "JetStream account info not ready yet"
+                );
+                last_error = Some(error);
+                if attempt < MAX_ATTEMPTS {
+                    sleep(RETRY_DELAY).await;
+                    continue;
+                }
+                break;
+            }
 
-        Ok(())
+            let mut failed = None;
+            for (name, subjects) in JETSTREAM_STREAM_SUBJECT_SPECS {
+                if let Err(error) = Self::create_stream(&js, name, subjects).await {
+                    failed = Some((name, error));
+                    break;
+                }
+            }
+
+            match failed {
+                None => return Ok(()),
+                Some((stream_name, error)) => {
+                    let should_retry = attempt < MAX_ATTEMPTS;
+                    tracing::debug!(
+                        stream = stream_name,
+                        attempt,
+                        error = %error,
+                        "JetStream bootstrap not ready yet"
+                    );
+                    last_error = Some(error);
+                    if should_retry {
+                        sleep(RETRY_DELAY).await;
+                        continue;
+                    }
+                }
+            }
+        }
+
+        Err(last_error.unwrap_or_else(|| {
+            PlatformError::messaging("exhausted JetStream setup retries unexpectedly")
+        }))
     }
 
     /// Subscribe to a durable JetStream consumer, acknowledging messages.

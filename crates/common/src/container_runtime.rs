@@ -140,6 +140,7 @@ impl NatsContainer {
 
         let container_id = String::from_utf8_lossy(&output.stdout).trim().to_string();
         wait_for_tcp("127.0.0.1", port, Duration::from_secs(10))?;
+        sleep(Duration::from_secs(1));
         Ok(Self {
             url: format!("nats://127.0.0.1:{port}"),
             port,
