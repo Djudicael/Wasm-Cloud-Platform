@@ -6,10 +6,11 @@ This guide covers everything you need to deploy, configure, and manage Wasm appl
 
 1. [Deploying Your First App](#deploying-your-first-app)
 2. [Deployment Manifests](#deployment-manifests)
-3. [Per-Endpoint Security](#per-endpoint-security)
-4. [Environment Variables & Secrets](#environment-variables--secrets)
-5. [Managing Deployments](#managing-deployments)
-6. [Zero-Downtime Updates](#zero-downtime-updates)
+3. [Remote Artifact Deploys](#remote-artifact-deploys)
+4. [Per-Endpoint Security](#per-endpoint-security)
+5. [Environment Variables & Secrets](#environment-variables--secrets)
+6. [Managing Deployments](#managing-deployments)
+7. [Zero-Downtime Updates](#zero-downtime-updates)
 
 ---
 
@@ -87,6 +88,147 @@ wasm-ctl deploy \
   --version v1 \
   --namespace production \
   --wasm ./hello-api.wasm
+```
+
+## Remote Artifact Deploys
+
+You can deploy without uploading a local `.wasm` from the CLI host. In that mode, the CLI sends deploy intent to the platform deploy ingress endpoint, and the platform fetches the artifact directly, verifies the digest, stores it locally, and then the normal `DeployApp` flow continues.
+
+Remote deploys use the deploy ingress URL, which can be configured separately from the node admin URL:
+
+```bash
+export WASM_CTL_DEPLOY_API=https://deploy.example.com
+```
+
+or per command:
+
+```bash
+wasm-ctl deploy \
+  --deploy-api https://deploy.example.com \
+  ...
+```
+
+The expected runtime shape is:
+
+1. run one or more `wasm-deploy-ingress` processes as the control-plane ingress
+2. point CI at `WASM_CTL_DEPLOY_API`
+3. let nodes fetch artifacts from the deploy-ingress artifact server via signed transfer manifests
+
+### Running deploy ingress
+
+The deploy ingress is configured by environment variables and CLI flags, not by the node TOML config files.
+
+Operator-facing examples are in:
+
+- [`config/deploy-ingress.env.example`](../config/deploy-ingress.env.example)
+- [`systemd/wasm-deploy-ingress.service`](../systemd/wasm-deploy-ingress.service)
+
+A typical production setup is:
+
+1. install `wasm-deploy-ingress` on a control-plane host
+2. create `/etc/wasm-cloud/deploy-ingress.env` from the example
+3. provide a stable KEK via `WASM_DEPLOY_INGRESS_KEY_SOURCE`
+4. expose the deploy API and artifact port behind your ingress or load balancer as needed
+5. point CI at `WASM_CTL_DEPLOY_API`
+
+Do not leave `WASM_DEPLOY_INGRESS_KEY_SOURCE=generate` in production. That mode is only suitable for ephemeral test environments because stored artifact credentials become undecryptable after restart.
+
+### HTTP(S) artifact URL
+
+```bash
+wasm-ctl deploy \
+  --app hello-api \
+  --version v1 \
+  --artifact-url https://artifacts.example.com/hello-api.wasm \
+  --sha256 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+```
+
+### Private artifact with platform-managed credential
+
+First store the fetch credential in the platform:
+
+```bash
+export WASM_CTL_DEPLOY_API=https://deploy.example.com
+wasm-ctl secrets set-artifact-credential --key ghcr-reader
+```
+
+`set-artifact-credential` writes to the deploy-ingress credential store, not to node-local runtime secret storage.
+
+By default the stored value is used as a bearer token. If you need an exact `Authorization` header, store it with the `authorization:` prefix, for example:
+
+```text
+authorization:Basic <base64(user:token)>
+```
+
+Then deploy:
+
+```bash
+wasm-ctl deploy \
+  --app hello-api \
+  --version v1 \
+  --artifact-url https://artifacts.example.com/hello-api.wasm \
+  --sha256 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef \
+  --artifact-credential ghcr-reader
+```
+
+### OCI / GHCR reference
+
+The platform accepts:
+
+- digest-pinned refs such as `oci://ghcr.io/org/app@sha256:...`
+- tag refs such as `oci://ghcr.io/org/app:v1`
+
+Resolution happens on the node during deploy ingress. For tag refs, the node fetches the OCI manifest from the registry, resolves the blob digest, then downloads and verifies the blob.
+
+Example:
+
+```bash
+wasm-ctl deploy \
+  --app hello-api \
+  --version v1 \
+  --artifact-ref oci://ghcr.io/example-org/hello-api:v1 \
+  --artifact-credential ghcr-reader
+```
+
+Digest-pinned form is also supported:
+
+```bash
+wasm-ctl deploy \
+  --app hello-api \
+  --version v1 \
+  --artifact-ref oci://ghcr.io/example-org/hello-api@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef \
+  --artifact-credential ghcr-reader
+```
+
+### Manifest-driven remote deploy
+
+HTTP(S) source:
+
+```toml
+[app]
+name = "hello-api"
+version = "v1"
+namespace = "production"
+wasm_bind_port = 8080
+
+[artifact]
+url = "https://artifacts.example.com/hello-api.wasm"
+sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+credential_ref = "ghcr-reader"
+```
+
+OCI source:
+
+```toml
+[app]
+name = "hello-api"
+version = "v1"
+namespace = "production"
+wasm_bind_port = 8080
+
+[artifact]
+reference = "oci://ghcr.io/example-org/hello-api:v1"
+credential_ref = "ghcr-reader"
 ```
 
 ### Add a public route

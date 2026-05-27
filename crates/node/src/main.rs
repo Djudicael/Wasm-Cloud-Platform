@@ -956,6 +956,12 @@ struct Args {
     #[arg(long, env = "WASM_NODE_ADMIN_ARTIFACT_BIND_ADDRESS")]
     artifact_bind_address: Option<String>,
 
+    #[arg(long, default_value = "9092", env = "WASM_NODE_DEPLOY_INGRESS_PORT")]
+    deploy_ingress_port: u16,
+
+    #[arg(long, env = "WASM_NODE_DEPLOY_INGRESS_BIND_ADDRESS")]
+    deploy_ingress_bind_address: Option<String>,
+
     #[arg(long, env = "WASM_NODE_ADMIN_TLS_CERT")]
     admin_tls_cert: Option<String>,
 
@@ -1219,8 +1225,10 @@ async fn main() -> anyhow::Result<()> {
         tls_key: args.tls_key.clone(),
         admin_port: Some(args.admin_port),
         artifact_port: Some(args.artifact_port),
+        deploy_ingress_port: Some(args.deploy_ingress_port),
         admin_bind_address: args.admin_bind_address.clone(),
         artifact_bind_address: args.artifact_bind_address.clone(),
+        deploy_ingress_bind_address: args.deploy_ingress_bind_address.clone(),
         admin_tls_cert: args.admin_tls_cert.clone(),
         admin_tls_key: args.admin_tls_key.clone(),
         admin_advertised_host: args.admin_advertised_host.clone(),
@@ -2911,6 +2919,147 @@ async fn main() -> anyhow::Result<()> {
             }),
         )
         .route(
+            "/admin/deploy/ingest",
+            axum::routing::post({
+                let store = store.clone();
+                let secret_provider = secret_provider.clone();
+                let artifact_server_url = artifact_server_url.clone();
+                let artifact_transfer_authority = artifact_transfer_authority.clone();
+                let node_id = config.node.node_id.clone();
+                let cluster_node_stale_after_secs = config.health.cluster_node_stale_after_secs;
+                move |axum::Json(body): axum::Json<common::deploy::RemoteArtifactIngressRequest>| {
+                    let store = store.clone();
+                    let secret_provider = secret_provider.clone();
+                    let artifact_server_url = artifact_server_url.clone();
+                    let artifact_transfer_authority = artifact_transfer_authority.clone();
+                    let node_id = node_id.clone();
+                    let cluster_node_stale_after_secs = cluster_node_stale_after_secs;
+                    async move {
+                        match handlers::ingest_remote_artifact(
+                            &store,
+                            secret_provider.as_ref(),
+                            &artifact_server_url,
+                            &artifact_transfer_authority,
+                            &node_id,
+                            cluster_node_stale_after_secs,
+                            body.artifact,
+                        )
+                        .await
+                        {
+                            Ok(response) => (
+                                axum::http::StatusCode::OK,
+                                axum::Json(serde_json::to_value(response).unwrap_or_else(|e| {
+                                    serde_json::json!({
+                                        "error": "serialization_error",
+                                        "message": format!("{e}"),
+                                    })
+                                })),
+                            ),
+                            Err(err) => {
+                                let status = match &err {
+                                    common::error::PlatformError::ConfigValidation(_) => {
+                                        axum::http::StatusCode::BAD_REQUEST
+                                    }
+                                    common::error::PlatformError::Security(_) => {
+                                        axum::http::StatusCode::BAD_REQUEST
+                                    }
+                                    common::error::PlatformError::External { .. } => {
+                                        axum::http::StatusCode::BAD_GATEWAY
+                                    }
+                                    common::error::PlatformError::Storage { .. }
+                                    | common::error::PlatformError::Internal(_)
+                                    | common::error::PlatformError::Io { .. } => {
+                                        axum::http::StatusCode::INTERNAL_SERVER_ERROR
+                                    }
+                                    _ => axum::http::StatusCode::BAD_REQUEST,
+                                };
+                                (
+                                    status,
+                                    axum::Json(serde_json::json!({
+                                        "error": "artifact_ingest_failed",
+                                        "message": format!("{err}"),
+                                    })),
+                                )
+                            }
+                        }
+                    }
+                }
+            })
+            .layer(axum::extract::DefaultBodyLimit::max(32 * 1024)),
+        )
+        .route(
+            "/admin/deploy/intent",
+            axum::routing::post({
+                let store = store.clone();
+                let secret_provider = secret_provider.clone();
+                let artifact_server_url = artifact_server_url.clone();
+                let artifact_transfer_authority = artifact_transfer_authority.clone();
+                let node_id = config.node.node_id.clone();
+                let cluster_node_stale_after_secs = config.health.cluster_node_stale_after_secs;
+                let bus = bus.clone();
+                move |axum::Json(body): axum::Json<common::deploy::DeployIntentRequest>| {
+                    let store = store.clone();
+                    let secret_provider = secret_provider.clone();
+                    let artifact_server_url = artifact_server_url.clone();
+                    let artifact_transfer_authority = artifact_transfer_authority.clone();
+                    let node_id = node_id.clone();
+                    let bus = bus.clone();
+                    let cluster_node_stale_after_secs = cluster_node_stale_after_secs;
+                    async move {
+                        match handlers::process_deploy_intent(
+                            &store,
+                            secret_provider.as_ref(),
+                            &artifact_server_url,
+                            &artifact_transfer_authority,
+                            &node_id,
+                            cluster_node_stale_after_secs,
+                            &bus,
+                            body,
+                        )
+                        .await
+                        {
+                            Ok(response) => (
+                                axum::http::StatusCode::ACCEPTED,
+                                axum::Json(serde_json::to_value(response).unwrap_or_else(|e| {
+                                    serde_json::json!({
+                                        "error": "serialization_error",
+                                        "message": format!("{e}"),
+                                    })
+                                })),
+                            ),
+                            Err(err) => {
+                                let status = match &err {
+                                    common::error::PlatformError::ConfigValidation(_) => {
+                                        axum::http::StatusCode::BAD_REQUEST
+                                    }
+                                    common::error::PlatformError::Security(_) => {
+                                        axum::http::StatusCode::FORBIDDEN
+                                    }
+                                    common::error::PlatformError::External { .. } => {
+                                        axum::http::StatusCode::BAD_GATEWAY
+                                    }
+                                    common::error::PlatformError::Storage { .. }
+                                    | common::error::PlatformError::Internal(_)
+                                    | common::error::PlatformError::Io { .. } => {
+                                        axum::http::StatusCode::INTERNAL_SERVER_ERROR
+                                    }
+                                    _ => axum::http::StatusCode::BAD_REQUEST,
+                                };
+                                (
+                                    status,
+                                    axum::Json(serde_json::json!({
+                                        "error": "deploy_intent_failed",
+                                        "message": format!("{err}"),
+                                    })),
+                                )
+                            }
+                        }
+                    }
+                }
+            })
+            .layer(axum::extract::DefaultBodyLimit::max(256 * 1024)),
+        )
+        .route(
             "/admin/api_keys/{app_id}",
             axum::routing::post({
                 let store = store.clone();
@@ -3313,7 +3462,85 @@ async fn main() -> anyhow::Result<()> {
         )
         // ── Auth Middleware Layer ───────────────────────────────────────
         .layer(axum::middleware::from_fn_with_state(
-            auth_state,
+            auth_state.clone(),
+            proxy::auth_middleware::auth_middleware,
+        ));
+
+    let deploy_ingress_app = axum::Router::new()
+        .route(
+            "/deploy/intent",
+            axum::routing::post({
+                let store = store.clone();
+                let secret_provider = secret_provider.clone();
+                let artifact_server_url = artifact_server_url.clone();
+                let artifact_transfer_authority = artifact_transfer_authority.clone();
+                let node_id = config.node.node_id.clone();
+                let cluster_node_stale_after_secs = config.health.cluster_node_stale_after_secs;
+                let bus = bus.clone();
+                move |axum::Json(body): axum::Json<common::deploy::DeployIntentRequest>| {
+                    let store = store.clone();
+                    let secret_provider = secret_provider.clone();
+                    let artifact_server_url = artifact_server_url.clone();
+                    let artifact_transfer_authority = artifact_transfer_authority.clone();
+                    let node_id = node_id.clone();
+                    let bus = bus.clone();
+                    let cluster_node_stale_after_secs = cluster_node_stale_after_secs;
+                    async move {
+                        match handlers::process_deploy_intent(
+                            &store,
+                            secret_provider.as_ref(),
+                            &artifact_server_url,
+                            &artifact_transfer_authority,
+                            &node_id,
+                            cluster_node_stale_after_secs,
+                            &bus,
+                            body,
+                        )
+                        .await
+                        {
+                            Ok(response) => (
+                                axum::http::StatusCode::ACCEPTED,
+                                axum::Json(serde_json::to_value(response).unwrap_or_else(|e| {
+                                    serde_json::json!({
+                                        "error": "serialization_error",
+                                        "message": format!("{e}"),
+                                    })
+                                })),
+                            ),
+                            Err(err) => {
+                                let status = match &err {
+                                    common::error::PlatformError::ConfigValidation(_) => {
+                                        axum::http::StatusCode::BAD_REQUEST
+                                    }
+                                    common::error::PlatformError::Security(_) => {
+                                        axum::http::StatusCode::FORBIDDEN
+                                    }
+                                    common::error::PlatformError::External { .. } => {
+                                        axum::http::StatusCode::BAD_GATEWAY
+                                    }
+                                    common::error::PlatformError::Storage { .. }
+                                    | common::error::PlatformError::Internal(_)
+                                    | common::error::PlatformError::Io { .. } => {
+                                        axum::http::StatusCode::INTERNAL_SERVER_ERROR
+                                    }
+                                    _ => axum::http::StatusCode::BAD_REQUEST,
+                                };
+                                (
+                                    status,
+                                    axum::Json(serde_json::json!({
+                                        "error": "deploy_intent_failed",
+                                        "message": format!("{err}"),
+                                    })),
+                                )
+                            }
+                        }
+                    }
+                }
+            }),
+        )
+        .layer(axum::extract::DefaultBodyLimit::max(256 * 1024))
+        .layer(axum::middleware::from_fn_with_state(
+            auth_state.clone(),
             proxy::auth_middleware::auth_middleware,
         ));
 
@@ -3415,6 +3642,28 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
+    let deploy_ingress_addr = bind_socket_address(
+        &config.admin.deploy_ingress_bind_address,
+        config.admin.deploy_ingress_port,
+    )?;
+    let deploy_ingress_tls = admin_tls_material(&config);
+    let (deploy_ingress_tls_cert, deploy_ingress_tls_key) = match deploy_ingress_tls {
+        Some((cert, key)) => (Some(cert), Some(key)),
+        None => (None, None),
+    };
+    tokio::spawn(async move {
+        if let Err(e) = serve_admin_app(
+            deploy_ingress_addr,
+            deploy_ingress_app,
+            deploy_ingress_tls_cert,
+            deploy_ingress_tls_key,
+        )
+        .await
+        {
+            tracing::error!(error = %e, "deploy ingress server failed");
+        }
+    });
+
     let mut artifact_peer_tokens: Vec<storage::artifact_server::ArtifactPeerTokenConfig> =
         Vec::new();
     if let Some(token) = effective_auth_config.write_token.clone() {
@@ -3457,6 +3706,7 @@ async fn main() -> anyhow::Result<()> {
         http = config.proxy.http_port,
         https = config.proxy.https_port,
         admin = config.admin.port,
+        deploy_ingress = config.admin.deploy_ingress_port,
         artifact = config.admin.artifact_port,
         "node fully started"
     );

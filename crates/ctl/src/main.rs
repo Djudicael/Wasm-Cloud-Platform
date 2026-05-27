@@ -35,6 +35,9 @@ struct Cli {
     )]
     node_api: String,
 
+    #[arg(long, env = "WASM_CTL_DEPLOY_API")]
+    deploy_api: Option<String>,
+
     #[arg(long, env = "WASM_CTL_NATS_CREDS")]
     nats_creds: Option<String>,
 
@@ -514,12 +517,16 @@ async fn main() -> anyhow::Result<()> {
     let http = build_http_client(auth_token.as_deref())?;
 
     match cli.command {
-        Commands::Deploy(args) => cmds::deploy::run(*args, &bus, &cli.node_api, &http).await?,
+        Commands::Deploy(args) => {
+            cmds::deploy::run(*args, &bus, &cli.node_api, cli.deploy_api.as_deref(), &http).await?
+        }
         Commands::Remove { app_id } => cmds::deploy::remove(&app_id, &bus).await?,
         Commands::List => cmds::list::run(&cli.node_api, &http).await?,
         Commands::Instances => cmds::list::instances(&cli.node_api, &http).await?,
         Commands::Routes(args) => cmds::routes::run(args, &bus).await?,
-        Commands::Secrets(args) => cmds::secrets::run(args, &bus, &cli.node_api, &http).await?,
+        Commands::Secrets(args) => {
+            cmds::secrets::run(args, &bus, &cli.node_api, cli.deploy_api.as_deref(), &http).await?
+        }
         Commands::App(args) => cmds::app::run(args, &cli.node_api, &http).await?,
         Commands::Logs { app_id } => cmds::logs::run(&app_id, &cli.node_api, &http).await?,
         Commands::Status => cmds::status::run(&cli.node_api, &http).await?,

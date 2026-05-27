@@ -166,12 +166,17 @@ pub struct AdminSection {
     pub port: u16,
     #[serde(default = "default_artifact_port")]
     pub artifact_port: u16,
+    #[serde(default = "default_deploy_ingress_port")]
+    pub deploy_ingress_port: u16,
     /// Local bind host/address for the admin API listener.
     #[serde(default = "default_admin_bind_address")]
     pub bind_address: String,
     /// Local bind host/address for the artifact server listener.
     #[serde(default = "default_admin_bind_address")]
     pub artifact_bind_address: String,
+    /// Local bind host/address for the deploy ingress listener.
+    #[serde(default = "default_admin_bind_address")]
+    pub deploy_ingress_bind_address: String,
     /// Optional dedicated TLS certificate path for the admin HTTPS listener.
     /// If unset, the node may fall back to the shared proxy TLS material.
     #[serde(default)]
@@ -203,6 +208,10 @@ fn default_artifact_port() -> u16 {
     9091
 }
 
+fn default_deploy_ingress_port() -> u16 {
+    9092
+}
+
 fn default_admin_bind_address() -> String {
     "127.0.0.1".to_string()
 }
@@ -212,8 +221,10 @@ impl Default for AdminSection {
         AdminSection {
             port: default_admin_port(),
             artifact_port: default_artifact_port(),
+            deploy_ingress_port: default_deploy_ingress_port(),
             bind_address: default_admin_bind_address(),
             artifact_bind_address: default_admin_bind_address(),
+            deploy_ingress_bind_address: default_admin_bind_address(),
             tls_cert: None,
             tls_key: None,
             advertised_host: None,

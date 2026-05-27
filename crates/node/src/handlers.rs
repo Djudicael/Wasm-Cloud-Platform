@@ -4,6 +4,10 @@ use common::{
         BootstrapArtifactFetchAuthorization, SignedArtifactTransferManifest,
         ARTIFACT_TRANSFER_MANIFEST_HEADER, ARTIFACT_TRANSFER_REQUESTER_NODE_HEADER,
     },
+    deploy::{
+        DeployIntentRequest, DeployIntentResponse, RemoteArtifactIngressResponse,
+        RemoteArtifactSource,
+    },
     error::PlatformError,
     types::{AppId, ClusterNodeRecord},
 };
@@ -26,6 +30,15 @@ use storage::Store;
 use supervisor::Supervisor;
 use tokio::sync::Mutex;
 use tracing::{error, info, warn};
+
+const ARTIFACT_CREDENTIALS_APP_ID: &str = "_platform/artifact-credentials:v1";
+const OCI_ACCEPT_HEADER: &str = concat!(
+    "application/vnd.oci.image.manifest.v1+json,",
+    "application/vnd.oci.image.index.v1+json,",
+    "application/vnd.docker.distribution.manifest.v2+json,",
+    "application/vnd.docker.distribution.manifest.list.v2+json,",
+    "application/vnd.oci.artifact.manifest.v1+json"
+);
 
 fn is_loopback_artifact_url(url: &str) -> bool {
     Url::parse(url)
@@ -91,6 +104,569 @@ fn merge_cluster_node_record(
     node_id: &str,
 ) -> ClusterNodeRecord {
     existing.unwrap_or_else(|| ClusterNodeRecord::new(node_id.to_string(), now_unix_secs()))
+}
+
+fn artifact_credentials_app_id() -> AppId {
+    AppId(ARTIFACT_CREDENTIALS_APP_ID.to_string())
+}
+
+async fn resolve_artifact_authorization_header(
+    secret_provider: &dyn SecretProvider,
+    credential_ref: &str,
+) -> Result<String, PlatformError> {
+    let app_id = artifact_credentials_app_id();
+    let value = secret_provider.get(&app_id, credential_ref).await?;
+    let trimmed = value.trim();
+    if let Some(header) = trimmed.strip_prefix("authorization:") {
+        return Ok(header.trim().to_string());
+    }
+    Ok(format!("Bearer {trimmed}"))
+}
+
+fn trim_artifact_base_url(base_url: &str) -> &str {
+    base_url.trim_end_matches('/')
+}
+
+fn registry_base_url(registry: &str) -> String {
+    let host = registry
+        .split(':')
+        .next()
+        .unwrap_or(registry)
+        .trim()
+        .trim_start_matches('[')
+        .trim_end_matches(']');
+    let is_loopback = host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<IpAddr>()
+            .map(|ip| ip.is_loopback())
+            .unwrap_or(false);
+    let scheme = if is_loopback { "http" } else { "https" };
+    format!("{scheme}://{registry}")
+}
+
+#[derive(Debug, Clone)]
+struct OciReference {
+    registry: String,
+    repository: String,
+    reference: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct OciPlatform {
+    architecture: String,
+    os: String,
+    #[serde(default)]
+    _variant: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct OciDescriptor {
+    #[serde(rename = "mediaType")]
+    _media_type: Option<String>,
+    digest: String,
+    #[serde(default)]
+    platform: Option<OciPlatform>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct OciManifestDocument {
+    #[serde(rename = "mediaType")]
+    _media_type: Option<String>,
+    #[serde(default)]
+    config: Option<OciDescriptor>,
+    #[serde(default)]
+    layers: Vec<OciDescriptor>,
+    #[serde(default)]
+    manifests: Vec<OciDescriptor>,
+}
+
+fn normalized_host_architecture() -> &'static str {
+    match std::env::consts::ARCH {
+        "x86_64" => "amd64",
+        "aarch64" => "arm64",
+        other => other,
+    }
+}
+
+fn preferred_oci_platforms() -> Vec<(&'static str, &'static str)> {
+    vec![
+        (std::env::consts::OS, normalized_host_architecture()),
+        ("wasi", "wasm"),
+        ("wasi", "wasm32"),
+        ("wasip2", "wasm"),
+        ("wasip2", "wasm32"),
+    ]
+}
+
+fn select_oci_manifest_descriptor<'a>(manifests: &'a [OciDescriptor]) -> Option<&'a OciDescriptor> {
+    for (os, arch) in preferred_oci_platforms() {
+        if let Some(descriptor) = manifests.iter().find(|descriptor| {
+            descriptor
+                .platform
+                .as_ref()
+                .map(|platform| {
+                    platform.os.eq_ignore_ascii_case(os)
+                        && platform.architecture.eq_ignore_ascii_case(arch)
+                })
+                .unwrap_or(false)
+        }) {
+            return Some(descriptor);
+        }
+    }
+
+    if manifests
+        .iter()
+        .all(|descriptor| descriptor.platform.is_none())
+    {
+        manifests.first()
+    } else {
+        None
+    }
+}
+
+fn parse_oci_reference(reference: &str) -> Result<OciReference, PlatformError> {
+    let without_scheme = reference.strip_prefix("oci://").ok_or_else(|| {
+        PlatformError::config_validation("OCI artifact reference must start with oci://")
+    })?;
+    let slash_index = without_scheme.find('/').ok_or_else(|| {
+        PlatformError::config_validation(
+            "OCI artifact reference must include a registry and repository path",
+        )
+    })?;
+    let registry = &without_scheme[..slash_index];
+    let repo_and_ref = &without_scheme[slash_index + 1..];
+    let last_slash = repo_and_ref.rfind('/').unwrap_or(0);
+    let at_index = repo_and_ref.rfind('@');
+    let colon_index = repo_and_ref.rfind(':');
+
+    let (repository, reference_value) = if let Some(at_index) = at_index {
+        (&repo_and_ref[..at_index], &repo_and_ref[at_index + 1..])
+    } else if let Some(colon_index) = colon_index {
+        if colon_index <= last_slash {
+            return Err(PlatformError::config_validation(
+                "OCI artifact reference must include a tag or digest",
+            ));
+        }
+        (
+            &repo_and_ref[..colon_index],
+            &repo_and_ref[colon_index + 1..],
+        )
+    } else {
+        return Err(PlatformError::config_validation(
+            "OCI artifact reference must include a tag or digest",
+        ));
+    };
+
+    if registry.trim().is_empty()
+        || repository.trim().is_empty()
+        || reference_value.trim().is_empty()
+    {
+        return Err(PlatformError::config_validation(
+            "OCI artifact reference contains an empty registry, repository, or tag/digest",
+        ));
+    }
+
+    Ok(OciReference {
+        registry: registry.to_string(),
+        repository: repository.to_string(),
+        reference: reference_value.to_string(),
+    })
+}
+
+async fn send_authenticated_get(
+    client: &reqwest::Client,
+    url: &str,
+    authorization: Option<&str>,
+    accept: Option<&str>,
+) -> Result<reqwest::Response, PlatformError> {
+    let mut request = client.get(url);
+    if let Some(authorization) = authorization {
+        request = request.header(reqwest::header::AUTHORIZATION, authorization);
+    }
+    if let Some(accept) = accept {
+        request = request.header(reqwest::header::ACCEPT, accept);
+    }
+    request.send().await.map_err(PlatformError::external_source)
+}
+
+async fn fetch_http_artifact_bytes(
+    url: &str,
+    expected_hash: &str,
+    authorization: Option<&str>,
+) -> Result<Vec<u8>, PlatformError> {
+    let parsed = Url::parse(url)
+        .map_err(|e| PlatformError::config_validation(format!("invalid artifact URL: {e}")))?;
+    match parsed.scheme() {
+        "http" | "https" => {}
+        other => {
+            return Err(PlatformError::config_validation(format!(
+                "unsupported artifact URL scheme: {other}"
+            )))
+        }
+    }
+
+    let client = reqwest::Client::new();
+    let response = send_authenticated_get(&client, parsed.as_str(), authorization, None).await?;
+    if !response.status().is_success() {
+        return Err(PlatformError::external(format!(
+            "artifact download failed with HTTP {}",
+            response.status()
+        )));
+    }
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(PlatformError::external_source)?;
+    let actual_hash = hex::encode(sha2::Sha256::digest(&bytes));
+    if actual_hash != expected_hash {
+        return Err(PlatformError::security(format!(
+            "artifact sha256 mismatch: expected {}, got {}",
+            expected_hash, actual_hash
+        )));
+    }
+    Ok(bytes.to_vec())
+}
+
+fn strip_sha256_prefix(digest: &str) -> Result<String, PlatformError> {
+    let hash = digest
+        .strip_prefix("sha256:")
+        .ok_or_else(|| PlatformError::config_validation("OCI digest must use sha256"))?;
+    if hash.len() != 64 || !hash.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        return Err(PlatformError::config_validation(
+            "OCI digest contains an invalid sha256 value",
+        ));
+    }
+    Ok(hash.to_lowercase())
+}
+
+async fn fetch_oci_manifest_document(
+    client: &reqwest::Client,
+    registry: &str,
+    repository: &str,
+    reference: &str,
+    authorization: Option<&str>,
+) -> Result<OciManifestDocument, PlatformError> {
+    let manifest_url = format!(
+        "{}/v2/{repository}/manifests/{reference}",
+        registry_base_url(registry)
+    );
+    let response = send_authenticated_get(
+        client,
+        &manifest_url,
+        authorization,
+        Some(OCI_ACCEPT_HEADER),
+    )
+    .await?;
+    if !response.status().is_success() {
+        return Err(PlatformError::external(format!(
+            "OCI manifest fetch failed with HTTP {}",
+            response.status()
+        )));
+    }
+    response
+        .json::<OciManifestDocument>()
+        .await
+        .map_err(PlatformError::external_source)
+}
+
+async fn resolve_oci_blob_digest(
+    client: &reqwest::Client,
+    reference: &OciReference,
+    authorization: Option<&str>,
+) -> Result<String, PlatformError> {
+    let mut current_ref = reference.reference.clone();
+    for _ in 0..4 {
+        let manifest = fetch_oci_manifest_document(
+            client,
+            &reference.registry,
+            &reference.repository,
+            &current_ref,
+            authorization,
+        )
+        .await?;
+
+        if let Some(descriptor) = manifest.layers.first() {
+            return strip_sha256_prefix(&descriptor.digest);
+        }
+        if let Some(descriptor) = select_oci_manifest_descriptor(&manifest.manifests) {
+            current_ref = descriptor.digest.clone();
+            continue;
+        }
+        if !manifest.manifests.is_empty() {
+            return Err(PlatformError::config_validation(
+                "OCI manifest list did not contain a descriptor matching this node platform",
+            ));
+        }
+        if let Some(descriptor) = manifest.config.as_ref() {
+            return strip_sha256_prefix(&descriptor.digest);
+        }
+        return Err(PlatformError::config_validation(
+            "OCI manifest did not contain a fetchable blob descriptor",
+        ));
+    }
+
+    Err(PlatformError::config_validation(
+        "OCI manifest resolution exceeded recursion limit",
+    ))
+}
+
+async fn fetch_oci_artifact_bytes(
+    reference: &str,
+    authorization: Option<&str>,
+) -> Result<(String, Vec<u8>), PlatformError> {
+    let parsed = parse_oci_reference(reference)?;
+    let client = reqwest::Client::new();
+    let blob_hash = if parsed.reference.starts_with("sha256:") {
+        strip_sha256_prefix(&parsed.reference)?
+    } else {
+        resolve_oci_blob_digest(&client, &parsed, authorization).await?
+    };
+    let blob_url = format!(
+        "{}/v2/{}/blobs/sha256:{}",
+        registry_base_url(&parsed.registry),
+        parsed.repository,
+        blob_hash
+    );
+    let bytes = fetch_http_artifact_bytes(&blob_url, &blob_hash, authorization).await?;
+    Ok((blob_hash, bytes))
+}
+
+pub async fn ingest_remote_artifact(
+    store: &Store,
+    secret_provider: &dyn SecretProvider,
+    artifact_server_url: &str,
+    artifact_transfer_authority: &ArtifactTransferAuthority,
+    node_id: &str,
+    cluster_node_stale_after_secs: u64,
+    artifact: RemoteArtifactSource,
+) -> Result<RemoteArtifactIngressResponse, PlatformError> {
+    let authorization = if let Some(credential_ref) = artifact.credential_ref.as_deref() {
+        Some(resolve_artifact_authorization_header(secret_provider, credential_ref).await?)
+    } else {
+        None
+    };
+
+    let (expected_hash, bytes) = if let Some(reference) = artifact.reference.as_deref() {
+        let (expected_hash, bytes) =
+            fetch_oci_artifact_bytes(reference, authorization.as_deref()).await?;
+        (expected_hash, bytes)
+    } else {
+        if artifact.url.trim().is_empty() {
+            return Err(PlatformError::config_validation(
+                "remote artifact source must include either url or reference",
+            ));
+        }
+        if artifact.sha256.trim().is_empty() {
+            return Err(PlatformError::config_validation(
+                "remote artifact URL sources require sha256",
+            ));
+        }
+        let expected_hash = artifact.sha256.to_lowercase();
+        let bytes =
+            fetch_http_artifact_bytes(&artifact.url, &expected_hash, authorization.as_deref())
+                .await?;
+        (expected_hash, bytes)
+    };
+
+    let bytes = if let Some(existing) = store.load_raw_wasm(&expected_hash)? {
+        existing
+    } else {
+        store.save_raw_wasm(&expected_hash, &bytes)?;
+        bytes
+    };
+
+    let target_node_ids: Vec<String> = store
+        .list_cluster_nodes()?
+        .into_iter()
+        .filter(|node| !node.is_stale(cluster_node_stale_after_secs))
+        .map(|node| node.node_id)
+        .filter(|peer_id| peer_id != node_id)
+        .collect();
+
+    let artifact_transfer_manifests = target_node_ids
+        .into_iter()
+        .map(|audience_node_id| ArtifactManifestAudienceBinding {
+            artifact_transfer_manifest: artifact_transfer_authority
+                .issue_read_manifest_for_audience(&expected_hash, &audience_node_id),
+            audience_node_id,
+        })
+        .collect();
+
+    Ok(RemoteArtifactIngressResponse {
+        source_node_id: node_id.to_string(),
+        artifact_url: format!(
+            "{}/artifacts/{}",
+            trim_artifact_base_url(artifact_server_url),
+            expected_hash
+        ),
+        expected_hash,
+        size_bytes: bytes.len() as u64,
+        artifact_transfer_manifests,
+    })
+}
+
+fn audit_deploy_intent(
+    node_id: &str,
+    event_type: supervisor::audit::AuditEventType,
+    app_id: &AppId,
+    artifact: &RemoteArtifactSource,
+    result: &str,
+    detail: serde_json::Value,
+) {
+    let source_kind = if artifact.reference.is_some() {
+        "oci"
+    } else {
+        "http"
+    };
+    let source = artifact
+        .reference
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| artifact.url.as_str());
+    supervisor::audit::write_audit_event(
+        "/var/log/wasm-node/audit.jsonl",
+        &supervisor::audit::AuditEvent {
+            timestamp: chrono::Utc::now().timestamp_millis() as u64,
+            node_id: node_id.to_string(),
+            event_type,
+            actor: "admin:deploy_intent".to_string(),
+            app_id: app_id.0.clone(),
+            details: serde_json::json!({
+                "artifact_source_kind": source_kind,
+                "artifact_source": source,
+                "expected_sha256": artifact.sha256,
+                "credential_ref": artifact.credential_ref,
+                "result": result,
+                "detail": detail,
+            }),
+        },
+    );
+}
+
+fn validate_deploy_intent_request(request: &DeployIntentRequest) -> Result<(), PlatformError> {
+    if request.app_id != request.config.id {
+        return Err(PlatformError::config_validation(format!(
+            "deploy intent app_id {} does not match config.id {}",
+            request.app_id.0, request.config.id.0
+        )));
+    }
+    if request.config.namespace.trim() != request.app_id.namespace() {
+        return Err(PlatformError::config_validation(format!(
+            "deploy intent namespace {} does not match app_id namespace {}",
+            request.config.namespace,
+            request.app_id.namespace()
+        )));
+    }
+    if request
+        .config
+        .secret_keys
+        .iter()
+        .any(|key| key.trim().is_empty() || key.contains('='))
+    {
+        return Err(PlatformError::config_validation(
+            "deploy intent secret references must be non-empty names, not inline values",
+        ));
+    }
+    if request.artifact.reference.is_none() && request.artifact.sha256.trim().is_empty() {
+        return Err(PlatformError::config_validation(
+            "remote HTTP artifact sources require sha256",
+        ));
+    }
+    Ok(())
+}
+
+pub async fn process_deploy_intent(
+    store: &Store,
+    secret_provider: &dyn SecretProvider,
+    artifact_server_url: &str,
+    artifact_transfer_authority: &ArtifactTransferAuthority,
+    node_id: &str,
+    cluster_node_stale_after_secs: u64,
+    bus: &messaging::NatsBus,
+    request: DeployIntentRequest,
+) -> Result<DeployIntentResponse, PlatformError> {
+    validate_deploy_intent_request(&request)?;
+
+    let ingress = ingest_remote_artifact(
+        store,
+        secret_provider,
+        artifact_server_url,
+        artifact_transfer_authority,
+        node_id,
+        cluster_node_stale_after_secs,
+        request.artifact.clone(),
+    )
+    .await
+    .inspect_err(|err| {
+        audit_deploy_intent(
+            node_id,
+            supervisor::audit::AuditEventType::AdminApiCall,
+            &request.app_id,
+            &request.artifact,
+            "artifact_ingest_failed",
+            serde_json::json!({
+                "error": err.to_string(),
+            }),
+        );
+    })?;
+
+    bus.publish(&Event::DeployApp {
+        app_id: request.app_id.clone(),
+        config: request.config.clone(),
+        artifact_url: ingress.artifact_url.clone(),
+        artifact_transfer_manifests: ingress.artifact_transfer_manifests.clone(),
+        expected_hash: Some(ingress.expected_hash.clone()),
+        size_bytes: ingress.size_bytes,
+    })
+    .await
+    .map_err(PlatformError::from)?;
+
+    let gateway_config_published = if let Some(gateway_config) = request.gateway_config.clone() {
+        bus.publish(&Event::GatewayConfigUpdate {
+            app_id: request.app_id.clone(),
+            config: gateway_config,
+        })
+        .await
+        .map_err(PlatformError::from)?;
+        true
+    } else {
+        false
+    };
+
+    if !request.api_keys.is_empty() {
+        store.save_api_keys(&request.app_id.0, &request.api_keys)?;
+        let _ = bus
+            .publish(&Event::GatewayConfigUpdate {
+                app_id: request.app_id.clone(),
+                config: request.gateway_config.unwrap_or_default(),
+            })
+            .await;
+    }
+
+    audit_deploy_intent(
+        node_id,
+        supervisor::audit::AuditEventType::AppDeployed,
+        &request.app_id,
+        &request.artifact,
+        "accepted",
+        serde_json::json!({
+            "artifact_url": ingress.artifact_url,
+            "size_bytes": ingress.size_bytes,
+            "gateway_config_published": gateway_config_published,
+            "api_key_count": request.api_keys.len(),
+        }),
+    );
+
+    Ok(DeployIntentResponse {
+        app_id: request.app_id,
+        artifact_url: ingress.artifact_url,
+        expected_hash: ingress.expected_hash,
+        size_bytes: ingress.size_bytes,
+        source_node_id: ingress.source_node_id,
+        artifact_transfer_manifests: ingress.artifact_transfer_manifests,
+        gateway_config_published,
+        api_key_count: request.api_keys.len(),
+    })
 }
 
 fn extract_proxy_host(address: &str) -> Option<String> {
@@ -1251,7 +1827,8 @@ async fn fetch_artifact(
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_secret_update, fetch_artifact, is_loopback_artifact_url, validate_peer_artifact_url,
+        apply_secret_update, artifact_credentials_app_id, fetch_artifact, ingest_remote_artifact,
+        is_loopback_artifact_url, normalized_host_architecture, validate_peer_artifact_url,
         BootstrapSessionState, EventDispatcher,
     };
     use common::{
@@ -1598,6 +2175,441 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(fetched, wasm_bytes);
+    }
+
+    #[tokio::test]
+    async fn test_ingest_remote_artifact_fetches_with_stored_authorization_header() {
+        use axum::{
+            extract::State,
+            http::{HeaderMap, StatusCode},
+            routing::get,
+            Router,
+        };
+
+        #[derive(Clone)]
+        struct ArtifactState {
+            expected_auth: String,
+            wasm_bytes: Vec<u8>,
+        }
+
+        let wasm_bytes = b"remote-artifact-ingest-ok".to_vec();
+        let sha256 = hex::encode(sha2::Sha256::digest(&wasm_bytes));
+        let state = ArtifactState {
+            expected_auth: "Bearer super-token".to_string(),
+            wasm_bytes: wasm_bytes.clone(),
+        };
+
+        let app = Router::new()
+            .route(
+                "/payload.wasm",
+                get(
+                    |State(state): State<ArtifactState>, headers: HeaderMap| async move {
+                        if headers
+                            .get(reqwest::header::AUTHORIZATION.as_str())
+                            .and_then(|value| value.to_str().ok())
+                            != Some(state.expected_auth.as_str())
+                        {
+                            return (StatusCode::UNAUTHORIZED, Vec::new());
+                        }
+                        (StatusCode::OK, state.wasm_bytes.clone())
+                    },
+                ),
+            )
+            .with_state(state);
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let temp = NamedTempFile::new().unwrap();
+        let store = Store::open(temp.path()).unwrap();
+        store
+            .save_cluster_node(&common::types::ClusterNodeRecord::new(
+                "node-under-test".to_string(),
+                super::now_unix_secs(),
+            ))
+            .unwrap();
+        store
+            .save_cluster_node(&common::types::ClusterNodeRecord::new(
+                "node-peer".to_string(),
+                super::now_unix_secs(),
+            ))
+            .unwrap();
+        let provider = LocalSecretProvider::new(store.clone(), SymmetricKey::generate());
+        provider
+            .set(&artifact_credentials_app_id(), "ghcr-reader", "super-token")
+            .await
+            .unwrap();
+
+        let response = ingest_remote_artifact(
+            &store,
+            &provider,
+            "http://node-under-test.internal:9091",
+            &ArtifactTransferAuthority::derive("node-under-test", &[9u8; 32]),
+            "node-under-test",
+            120,
+            common::deploy::RemoteArtifactSource {
+                reference: None,
+                url: format!("http://{addr}/payload.wasm"),
+                sha256: sha256.clone(),
+                credential_ref: Some("ghcr-reader".to_string()),
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response.expected_hash, sha256);
+        assert_eq!(response.size_bytes, wasm_bytes.len() as u64);
+        assert_eq!(
+            response.artifact_url,
+            format!("http://node-under-test.internal:9091/artifacts/{sha256}")
+        );
+        assert_eq!(response.artifact_transfer_manifests.len(), 1);
+        assert!(store.load_raw_wasm(&sha256).unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn test_ingest_remote_artifact_rejects_hash_mismatch() {
+        use axum::{http::StatusCode, routing::get, Router};
+
+        let app = Router::new().route(
+            "/payload.wasm",
+            get(|| async { (StatusCode::OK, b"wrong-bytes".to_vec()) }),
+        );
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let temp = NamedTempFile::new().unwrap();
+        let store = Store::open(temp.path()).unwrap();
+        let provider = LocalSecretProvider::new(store.clone(), SymmetricKey::generate());
+
+        let err = ingest_remote_artifact(
+            &store,
+            &provider,
+            "http://node-under-test.internal:9091",
+            &ArtifactTransferAuthority::derive("node-under-test", &[9u8; 32]),
+            "node-under-test",
+            120,
+            common::deploy::RemoteArtifactSource {
+                reference: None,
+                url: format!("http://{addr}/payload.wasm"),
+                sha256: "deadbeef".repeat(8),
+                credential_ref: None,
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert!(err.to_string().contains("sha256 mismatch"));
+    }
+
+    #[tokio::test]
+    async fn test_ingest_remote_artifact_resolves_oci_tag_to_blob() {
+        use axum::{
+            extract::State,
+            http::{HeaderMap, StatusCode},
+            routing::get,
+            Router,
+        };
+
+        #[derive(Clone)]
+        struct RegistryState {
+            expected_auth: String,
+            manifest_body: String,
+            blob_bytes: Vec<u8>,
+            blob_digest: String,
+        }
+
+        let blob_bytes = b"oci-registry-blob".to_vec();
+        let blob_hash = hex::encode(sha2::Sha256::digest(&blob_bytes));
+        let manifest_body = serde_json::json!({
+            "schemaVersion": 2,
+            "mediaType": "application/vnd.oci.image.manifest.v1+json",
+            "config": {
+                "mediaType": "application/vnd.unknown.config.v1+json",
+                "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "size": 2
+            },
+            "layers": [{
+                "mediaType": "application/wasm",
+                "digest": format!("sha256:{blob_hash}"),
+                "size": blob_bytes.len()
+            }]
+        })
+        .to_string();
+        let state = RegistryState {
+            expected_auth: "Bearer registry-token".to_string(),
+            manifest_body,
+            blob_bytes: blob_bytes.clone(),
+            blob_digest: blob_hash.clone(),
+        };
+
+        let app = Router::new()
+            .route(
+                "/v2/example-org/hello-api/manifests/v1",
+                get(
+                    |State(state): State<RegistryState>, headers: HeaderMap| async move {
+                        if headers
+                            .get(reqwest::header::AUTHORIZATION.as_str())
+                            .and_then(|value| value.to_str().ok())
+                            != Some(state.expected_auth.as_str())
+                        {
+                            return (StatusCode::UNAUTHORIZED, String::new());
+                        }
+                        (StatusCode::OK, state.manifest_body.clone())
+                    },
+                ),
+            )
+            .route(
+                "/v2/example-org/hello-api/blobs/{digest}",
+                get(
+                    |State(state): State<RegistryState>,
+                     axum::extract::Path(digest): axum::extract::Path<String>,
+                     headers: HeaderMap| async move {
+                        if headers
+                            .get(reqwest::header::AUTHORIZATION.as_str())
+                            .and_then(|value| value.to_str().ok())
+                            != Some(state.expected_auth.as_str())
+                        {
+                            return (StatusCode::UNAUTHORIZED, Vec::new());
+                        }
+                        if digest != format!("sha256:{}", state.blob_digest) {
+                            return (StatusCode::NOT_FOUND, Vec::new());
+                        }
+                        (StatusCode::OK, state.blob_bytes.clone())
+                    },
+                ),
+            )
+            .with_state(state);
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let temp = NamedTempFile::new().unwrap();
+        let store = Store::open(temp.path()).unwrap();
+        let provider = LocalSecretProvider::new(store.clone(), SymmetricKey::generate());
+        provider
+            .set(
+                &artifact_credentials_app_id(),
+                "ghcr-reader",
+                "authorization:Bearer registry-token",
+            )
+            .await
+            .unwrap();
+
+        let response = ingest_remote_artifact(
+            &store,
+            &provider,
+            "http://node-under-test.internal:9091",
+            &ArtifactTransferAuthority::derive("node-under-test", &[9u8; 32]),
+            "node-under-test",
+            120,
+            common::deploy::RemoteArtifactSource {
+                reference: Some(format!(
+                    "oci://127.0.0.1:{}/example-org/hello-api:v1",
+                    addr.port()
+                )),
+                url: String::new(),
+                sha256: String::new(),
+                credential_ref: Some("ghcr-reader".to_string()),
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response.expected_hash, blob_hash);
+        assert_eq!(
+            response.artifact_url,
+            format!("http://node-under-test.internal:9091/artifacts/{blob_hash}")
+        );
+        assert!(store.load_raw_wasm(&blob_hash).unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn test_ingest_remote_artifact_selects_matching_platform_from_oci_index() {
+        use axum::{
+            extract::{Path, State},
+            http::{HeaderMap, StatusCode},
+            routing::get,
+            Router,
+        };
+
+        #[derive(Clone)]
+        struct RegistryState {
+            expected_auth: String,
+            index_body: String,
+            matching_manifest_body: String,
+            non_matching_manifest_body: String,
+            matching_blob_bytes: Vec<u8>,
+            matching_blob_digest: String,
+            matching_manifest_digest: String,
+            non_matching_manifest_digest: String,
+        }
+
+        let matching_blob_bytes = b"oci-platform-match".to_vec();
+        let matching_blob_hash = hex::encode(sha2::Sha256::digest(&matching_blob_bytes));
+        let matching_manifest_body = serde_json::json!({
+            "schemaVersion": 2,
+            "mediaType": "application/vnd.oci.image.manifest.v1+json",
+            "layers": [{
+                "mediaType": "application/wasm",
+                "digest": format!("sha256:{matching_blob_hash}"),
+                "size": matching_blob_bytes.len()
+            }]
+        })
+        .to_string();
+        let non_matching_manifest_body = serde_json::json!({
+            "schemaVersion": 2,
+            "mediaType": "application/vnd.oci.image.manifest.v1+json",
+            "layers": [{
+                "mediaType": "application/wasm",
+                "digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "size": 16
+            }]
+        })
+        .to_string();
+        let matching_manifest_digest =
+            hex::encode(sha2::Sha256::digest(matching_manifest_body.as_bytes()));
+        let non_matching_manifest_digest =
+            hex::encode(sha2::Sha256::digest(non_matching_manifest_body.as_bytes()));
+        let index_body = serde_json::json!({
+            "schemaVersion": 2,
+            "mediaType": "application/vnd.oci.image.index.v1+json",
+            "manifests": [
+                {
+                    "mediaType": "application/vnd.oci.image.manifest.v1+json",
+                    "digest": format!("sha256:{non_matching_manifest_digest}"),
+                    "size": non_matching_manifest_body.len(),
+                    "platform": {
+                        "os": "linux",
+                        "architecture": "arm64"
+                    }
+                },
+                {
+                    "mediaType": "application/vnd.oci.image.manifest.v1+json",
+                    "digest": format!("sha256:{matching_manifest_digest}"),
+                    "size": matching_manifest_body.len(),
+                    "platform": {
+                        "os": std::env::consts::OS,
+                        "architecture": normalized_host_architecture()
+                    }
+                }
+            ]
+        })
+        .to_string();
+
+        let state = RegistryState {
+            expected_auth: "Bearer registry-token".to_string(),
+            index_body,
+            matching_manifest_body,
+            non_matching_manifest_body,
+            matching_blob_bytes: matching_blob_bytes.clone(),
+            matching_blob_digest: matching_blob_hash.clone(),
+            matching_manifest_digest: matching_manifest_digest.clone(),
+            non_matching_manifest_digest: non_matching_manifest_digest.clone(),
+        };
+
+        let app = Router::new()
+            .route(
+                "/v2/example-org/hello-api/manifests/{reference}",
+                get(
+                    |State(state): State<RegistryState>,
+                     Path(reference): Path<String>,
+                     headers: HeaderMap| async move {
+                        if headers
+                            .get(reqwest::header::AUTHORIZATION.as_str())
+                            .and_then(|value| value.to_str().ok())
+                            != Some(state.expected_auth.as_str())
+                        {
+                            return (StatusCode::UNAUTHORIZED, String::new());
+                        }
+                        let body = if reference == "v1" {
+                            state.index_body.clone()
+                        } else if reference == format!("sha256:{}", state.matching_manifest_digest)
+                        {
+                            state.matching_manifest_body.clone()
+                        } else if reference
+                            == format!("sha256:{}", state.non_matching_manifest_digest)
+                        {
+                            state.non_matching_manifest_body.clone()
+                        } else {
+                            return (StatusCode::NOT_FOUND, String::new());
+                        };
+                        (StatusCode::OK, body)
+                    },
+                ),
+            )
+            .route(
+                "/v2/example-org/hello-api/blobs/{digest}",
+                get(
+                    |State(state): State<RegistryState>,
+                     Path(digest): Path<String>,
+                     headers: HeaderMap| async move {
+                        if headers
+                            .get(reqwest::header::AUTHORIZATION.as_str())
+                            .and_then(|value| value.to_str().ok())
+                            != Some(state.expected_auth.as_str())
+                        {
+                            return (StatusCode::UNAUTHORIZED, Vec::new());
+                        }
+                        if digest != format!("sha256:{}", state.matching_blob_digest) {
+                            return (StatusCode::NOT_FOUND, Vec::new());
+                        }
+                        (StatusCode::OK, state.matching_blob_bytes.clone())
+                    },
+                ),
+            )
+            .with_state(state);
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let temp = NamedTempFile::new().unwrap();
+        let store = Store::open(temp.path()).unwrap();
+        let provider = LocalSecretProvider::new(store.clone(), SymmetricKey::generate());
+        provider
+            .set(
+                &artifact_credentials_app_id(),
+                "ghcr-reader",
+                "authorization:Bearer registry-token",
+            )
+            .await
+            .unwrap();
+
+        let response = ingest_remote_artifact(
+            &store,
+            &provider,
+            "http://node-under-test.internal:9091",
+            &ArtifactTransferAuthority::derive("node-under-test", &[9u8; 32]),
+            "node-under-test",
+            120,
+            common::deploy::RemoteArtifactSource {
+                reference: Some(format!(
+                    "oci://127.0.0.1:{}/example-org/hello-api:v1",
+                    addr.port()
+                )),
+                url: String::new(),
+                sha256: String::new(),
+                credential_ref: Some("ghcr-reader".to_string()),
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response.expected_hash, matching_blob_hash);
+        assert!(store.load_raw_wasm(&matching_blob_hash).unwrap().is_some());
     }
 
     #[tokio::test]

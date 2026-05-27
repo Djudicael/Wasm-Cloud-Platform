@@ -12,6 +12,7 @@ members = [
     "crates/common",
     "crates/billing",
     "crates/ctl",
+    "crates/deploy-ingress",
     "crates/e2e",
     "crates/vm-testbed",
     "crates/ebpf-monitor",

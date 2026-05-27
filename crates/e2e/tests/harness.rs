@@ -131,6 +131,17 @@ pub struct NodeProcess {
     pub proxy_port: u16,
     pub artifact_port: u16,
     pub admin_port: u16,
+    pub deploy_port: u16,
+    pub db_path: PathBuf,
+    _temp_dir: TempDir,
+    process: Child,
+}
+
+#[allow(dead_code)]
+pub struct DeployIngressProcess {
+    pub ingress_id: String,
+    pub deploy_port: u16,
+    pub artifact_port: u16,
     pub db_path: PathBuf,
     _temp_dir: TempDir,
     process: Child,
@@ -145,7 +156,8 @@ impl NodeProcess {
         proxy_port: u16,
         artifact_port: u16,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        Self::start_with_admin(node_id, nats_url, proxy_port, artifact_port, 9190).await
+        let admin_port = reserve_test_port()?;
+        Self::start_with_admin(node_id, nats_url, proxy_port, artifact_port, admin_port).await
     }
 
     /// Start a wasm-node process with custom admin port
@@ -156,6 +168,7 @@ impl NodeProcess {
         artifact_port: u16,
         admin_port: u16,
     ) -> Result<Self, Box<dyn std::error::Error>> {
+        let deploy_port = reserve_test_port()?;
         let temp_dir = tempfile::tempdir()?;
         let db_path = temp_dir.path().join("node.db");
 
@@ -179,6 +192,8 @@ impl NodeProcess {
             .arg(admin_port.to_string())
             .arg("--artifact-port")
             .arg(artifact_port.to_string())
+            .arg("--deploy-ingress-port")
+            .arg(deploy_port.to_string())
             .arg("--db-path")
             .arg(&db_path)
             .env("RUST_LOG", "debug")
@@ -200,6 +215,7 @@ impl NodeProcess {
             proxy_port,
             artifact_port,
             admin_port,
+            deploy_port,
             db_path,
             _temp_dir: temp_dir,
             process,
@@ -239,6 +255,7 @@ impl NodeProcess {
         db_path: PathBuf,
         _temp_dir: TempDir,
     ) -> Result<Self, Box<dyn std::error::Error>> {
+        let deploy_port = reserve_test_port()?;
         let node_binary = find_node_binary()?;
 
         eprintln!("Restarting node {} with existing DB", node_id);
@@ -256,6 +273,8 @@ impl NodeProcess {
             .arg(admin_port.to_string())
             .arg("--artifact-port")
             .arg(artifact_port.to_string())
+            .arg("--deploy-ingress-port")
+            .arg(deploy_port.to_string())
             .arg("--db-path")
             .arg(&db_path)
             .env("RUST_LOG", "debug")
@@ -271,6 +290,7 @@ impl NodeProcess {
             proxy_port,
             artifact_port,
             admin_port,
+            deploy_port,
             db_path,
             _temp_dir,
             process,
@@ -296,6 +316,70 @@ impl NodeProcess {
     #[allow(dead_code)]
     pub fn stop(mut self) -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("Stopping node {}", self.node_id);
+        self.process.kill()?;
+        self.process.wait()?;
+        Ok(())
+    }
+}
+
+impl DeployIngressProcess {
+    pub async fn start(
+        ingress_id: &str,
+        nats_url: &str,
+        deploy_port: u16,
+        artifact_port: u16,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let temp_dir = tempfile::tempdir()?;
+        let db_path = temp_dir.path().join("deploy-ingress.db");
+        let ingress_binary = find_deploy_ingress_binary()?;
+        let advertised_artifact_url = format!("http://127.0.0.1:{artifact_port}");
+
+        eprintln!(
+            "Starting deploy ingress {} (deploy:{}, artifact:{})",
+            ingress_id, deploy_port, artifact_port
+        );
+
+        let mut process = Command::new(&ingress_binary)
+            .arg("--ingress-id")
+            .arg(ingress_id)
+            .arg("--nats-url")
+            .arg(nats_url)
+            .arg("--deploy-port")
+            .arg(deploy_port.to_string())
+            .arg("--artifact-port")
+            .arg(artifact_port.to_string())
+            .arg("--advertised-artifact-url")
+            .arg(&advertised_artifact_url)
+            .arg("--db-path")
+            .arg(&db_path)
+            .env("RUST_LOG", "info")
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .spawn()?;
+
+        if let Some(status) = process.try_wait()? {
+            return Err(format!(
+                "Deploy ingress process exited immediately with status: {}",
+                status
+            )
+            .into());
+        }
+
+        wait_for_health(deploy_port, Duration::from_secs(60)).await?;
+        wait_for_tcp(artifact_port, Duration::from_secs(10)).await?;
+
+        Ok(DeployIngressProcess {
+            ingress_id: ingress_id.to_string(),
+            deploy_port,
+            artifact_port,
+            db_path,
+            _temp_dir: temp_dir,
+            process,
+        })
+    }
+
+    pub fn stop(mut self) -> Result<(), Box<dyn std::error::Error>> {
+        eprintln!("Stopping deploy ingress {}", self.ingress_id);
         self.process.kill()?;
         self.process.wait()?;
         Ok(())
@@ -353,31 +437,110 @@ impl Drop for NodeProcess {
     }
 }
 
+impl Drop for DeployIngressProcess {
+    fn drop(&mut self) {
+        let _ = self.process.kill();
+    }
+}
+
 /// Helper to find the wasm-node binary
 fn find_node_binary() -> Result<PathBuf, Box<dyn std::error::Error>> {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
     let workspace_root = Path::new(manifest_dir).parent().unwrap().parent().unwrap();
 
     let debug_binary = workspace_root.join("target/debug/wasm-node");
-    let release_binary = workspace_root.join("target/release/wasm-node");
 
-    if release_binary.exists() {
-        Ok(release_binary)
-    } else if debug_binary.exists() {
-        Ok(debug_binary)
-    } else {
-        eprintln!("⚠️ wasm-node not found, building...");
-        let status = std::process::Command::new("cargo")
-            .args(["build", "--release", "-p", "node"])
-            .current_dir(workspace_root)
-            .status()?;
+    eprintln!("Building wasm-node...");
+    let status = std::process::Command::new("cargo")
+        .args(["build", "-p", "node"])
+        .current_dir(workspace_root)
+        .status()?;
 
-        if !status.success() {
-            return Err("Failed to build wasm-node".into());
-        }
-
-        Ok(release_binary)
+    if !status.success() {
+        return Err("Failed to build wasm-node".into());
     }
+
+    Ok(debug_binary)
+}
+
+/// Helper to find the wasm-ctl binary
+pub fn find_ctl_binary() -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let workspace_root = Path::new(manifest_dir).parent().unwrap().parent().unwrap();
+
+    let debug_binary = workspace_root.join("target/debug/wasm-ctl");
+
+    eprintln!("Building wasm-ctl...");
+    let status = std::process::Command::new("cargo")
+        .args(["build", "-p", "ctl"])
+        .current_dir(workspace_root)
+        .status()?;
+
+    if !status.success() {
+        return Err("Failed to build wasm-ctl".into());
+    }
+
+    Ok(debug_binary)
+}
+
+fn find_deploy_ingress_binary() -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let workspace_root = Path::new(manifest_dir).parent().unwrap().parent().unwrap();
+
+    let debug_binary = workspace_root.join("target/debug/wasm-deploy-ingress");
+
+    eprintln!("Building wasm-deploy-ingress...");
+    let status = std::process::Command::new("cargo")
+        .args(["build", "-p", "deploy-ingress"])
+        .current_dir(workspace_root)
+        .status()?;
+
+    if !status.success() {
+        return Err("Failed to build wasm-deploy-ingress".into());
+    }
+
+    Ok(debug_binary)
+}
+
+pub fn run_ctl(
+    args: &[&str],
+    nats_url: &str,
+    node_api: &str,
+    deploy_api: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let ctl_binary = find_ctl_binary()?;
+    let output = Command::new(&ctl_binary)
+        .args(args)
+        .env("WASM_CTL_NATS_URL", nats_url)
+        .env("WASM_CTL_NODE_API", node_api)
+        .env("WASM_CTL_DEPLOY_API", deploy_api)
+        .output()?;
+
+    if output.status.success() {
+        return Ok(());
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    Err(format!(
+        "wasm-ctl failed with status {}.\nstdout:\n{}\nstderr:\n{}",
+        output.status, stdout, stderr
+    )
+    .into())
+}
+
+pub async fn run_ctl_async(
+    args: Vec<String>,
+    nats_url: String,
+    node_api: String,
+    deploy_api: String,
+) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || {
+        let arg_refs = args.iter().map(String::as_str).collect::<Vec<_>>();
+        run_ctl(&arg_refs, &nats_url, &node_api, &deploy_api).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("failed to join wasm-ctl task: {e}"))?
 }
 
 /// Helper to find the hello-axum.wasm test app

@@ -1,0 +1,23 @@
+[Unit]
+Description=Wasm Cloud Platform Deploy Ingress
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=wasm-platform
+Group=wasm-platform
+EnvironmentFile=/etc/wasm-cloud/deploy-ingress.env
+WorkingDirectory=/var/lib/wasm-cloud/deploy-ingress
+ExecStart=/usr/local/bin/wasm-deploy-ingress
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/wasm-cloud/deploy-ingress
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

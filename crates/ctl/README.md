@@ -37,6 +37,50 @@ The CLI follows a standard command-and-handler pattern:
 | `policy` | Policy management |
 | `gateway` | Gateway configuration |
 
+### Remote deploys
+
+`wasm-ctl deploy` supports three artifact sources:
+
+- local file via `--wasm`
+- remote URL via `--artifact-url` plus `--sha256`
+- OCI reference via `--artifact-ref`
+
+Remote artifact deploys use the deploy ingress endpoint. Configure it with:
+
+- `--deploy-api`
+- or `WASM_CTL_DEPLOY_API`
+
+This can be separate from `--node-api` / `WASM_CTL_NODE_API`, which remain relevant for local artifact upload and other node/admin operations.
+
+Examples:
+
+```bash
+wasm-ctl deploy --app hello --version v1 --wasm ./hello.wasm
+
+wasm-ctl deploy \
+  --app hello \
+  --version v1 \
+  --artifact-url https://artifacts.example.com/hello.wasm \
+  --sha256 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+
+wasm-ctl deploy \
+  --app hello \
+  --version v1 \
+  --artifact-ref oci://ghcr.io/example-org/hello:v1 \
+  --artifact-credential ghcr-reader
+```
+
+Artifact fetch credentials are managed separately from runtime app secrets:
+
+```bash
+export WASM_CTL_DEPLOY_API=https://deploy.example.com
+wasm-ctl secrets set-artifact-credential --key ghcr-reader
+```
+
+Those credentials are stored in the deploy-ingress credential store under `_platform/artifact-credentials:v1` and are used only for deploy-time artifact fetch.
+
+For OCI refs, the node resolves tags or digests during deploy ingress, fetches the registry manifest if needed, then downloads the final blob and verifies its content hash before publishing the normal deploy event.
+
 ## Public API
 
 This crate produces the `wasm-ctl` binary. It is not intended to be used as a library.

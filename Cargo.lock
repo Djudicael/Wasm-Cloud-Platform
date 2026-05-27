@@ -1926,6 +1926,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "deploy-ingress"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum 0.8.8",
+ "chrono",
+ "clap",
+ "common",
+ "hex",
+ "messaging",
+ "node",
+ "reqwest",
+ "secrets",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "storage",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "der"
 version = "0.7.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"

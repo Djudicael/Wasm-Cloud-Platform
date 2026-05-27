@@ -1,9 +1,12 @@
 use anyhow::Result;
 use clap::{Args, Subcommand};
 use colored::Colorize;
+use common::deploy::ArtifactCredentialSetRequest;
 use common::types::{AppId, ClusterNodeRecord};
 use messaging::{events::Event, NatsBus};
 use secrets::{encrypt_for_peer, SecretTransportEnvelope};
+
+const ARTIFACT_CREDENTIALS_APP: &str = "_platform/artifact-credentials:v1";
 
 #[derive(serde::Deserialize)]
 struct ClusterNodeRegistryResponse {
@@ -28,6 +31,14 @@ enum SecretsCmd {
     Set {
         #[arg(long)]
         app: String,
+        #[arg(long)]
+        key: String,
+        /// If not provided, reads from stdin (safe, not visible in shell history)
+        #[arg(long)]
+        value: Option<String>,
+    },
+    /// Set a credential used for remote artifact fetch during deploy ingress
+    SetArtifactCredential {
         #[arg(long)]
         key: String,
         /// If not provided, reads from stdin (safe, not visible in shell history)
@@ -88,10 +99,69 @@ fn select_secret_targets(
     Ok(targets)
 }
 
+async fn distribute_secret_value(
+    bus: &NatsBus,
+    http: &reqwest::Client,
+    node_api: &str,
+    app_id: AppId,
+    key: String,
+    plaintext: String,
+) -> Result<()> {
+    let registry = load_cluster_node_registry(http, node_api).await?;
+    let targets = select_secret_targets(registry.nodes, registry.active_staleness_secs)?;
+    if targets.is_empty() {
+        anyhow::bail!(
+            "authoritative cluster node registry contains no active nodes for secret distribution"
+        );
+    }
+
+    for (target_node_id, public_key_bytes) in targets {
+        let ciphertext = encrypt_for_peer(&public_key_bytes, plaintext.as_bytes())?;
+        let event = Event::SecretUpdate {
+            app_id: app_id.clone(),
+            key: key.clone(),
+            target_node_id: Some(target_node_id),
+            secret: SecretTransportEnvelope::node_transport_ciphertext(ciphertext),
+        };
+        bus.publish(&event).await?;
+    }
+
+    Ok(())
+}
+
+async fn store_artifact_credential_via_deploy_api(
+    http: &reqwest::Client,
+    deploy_api: &str,
+    key: String,
+    plaintext: String,
+) -> Result<()> {
+    let url = format!(
+        "{}/deploy/artifact-credentials",
+        deploy_api.trim_end_matches('/')
+    );
+    let response = http
+        .put(&url)
+        .json(&ArtifactCredentialSetRequest {
+            key,
+            value: plaintext,
+        })
+        .send()
+        .await?;
+    if !response.status().is_success() {
+        anyhow::bail!(
+            "artifact credential request failed: HTTP {} from {}",
+            response.status(),
+            url
+        );
+    }
+    Ok(())
+}
+
 pub async fn run(
     args: SecretsArgs,
     bus: &NatsBus,
     node_api: &str,
+    deploy_api: Option<&str>,
     http: &reqwest::Client,
 ) -> Result<()> {
     match args.cmd {
@@ -105,31 +175,34 @@ pub async fn run(
                 .split_once(':')
                 .ok_or_else(|| anyhow::anyhow!("app must be <name>:<version>"))?;
             let app_id = AppId::new(name, version);
-
-            let registry = load_cluster_node_registry(http, node_api).await?;
-            let targets = select_secret_targets(registry.nodes, registry.active_staleness_secs)?;
-            if targets.is_empty() {
-                anyhow::bail!(
-                    "authoritative cluster node registry contains no active nodes for secret distribution"
-                );
-            }
-
-            for (target_node_id, public_key_bytes) in targets {
-                let ciphertext = encrypt_for_peer(&public_key_bytes, plaintext.as_bytes())?;
-                let event = Event::SecretUpdate {
-                    app_id: app_id.clone(),
-                    key: key.clone(),
-                    target_node_id: Some(target_node_id),
-                    secret: SecretTransportEnvelope::node_transport_ciphertext(ciphertext),
-                };
-                bus.publish(&event).await?;
-            }
+            distribute_secret_value(bus, http, node_api, app_id.clone(), key.clone(), plaintext)
+                .await?;
 
             println!(
                 "{} Secret '{}' set for {}",
                 "\u{2713}".green(),
                 key.cyan(),
                 app.yellow()
+            );
+        }
+        SecretsCmd::SetArtifactCredential { key, value } => {
+            let plaintext = match value {
+                Some(v) => v,
+                None => rpassword::prompt_password(format!("Value for {}: ", key.cyan()))?,
+            };
+            if let Some(deploy_api) = deploy_api {
+                store_artifact_credential_via_deploy_api(http, deploy_api, key.clone(), plaintext)
+                    .await?;
+            } else {
+                let app_id = AppId(ARTIFACT_CREDENTIALS_APP.to_string());
+                distribute_secret_value(bus, http, node_api, app_id, key.clone(), plaintext)
+                    .await?;
+            }
+            println!(
+                "{} Artifact credential '{}' set for {}",
+                "\u{2713}".green(),
+                key.cyan(),
+                ARTIFACT_CREDENTIALS_APP.yellow()
             );
         }
         SecretsCmd::Delete { app, key } => {

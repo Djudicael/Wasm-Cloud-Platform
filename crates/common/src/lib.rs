@@ -4,6 +4,7 @@ pub mod billing;
 pub mod config;
 pub mod container_runtime;
 pub mod crypto;
+pub mod deploy;
 pub mod error;
 pub mod gc;
 pub mod health;

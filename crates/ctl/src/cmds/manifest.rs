@@ -27,6 +27,9 @@ pub struct DeployManifest {
 
     #[serde(default)]
     pub api_keys: Vec<common::types::ApiKeyRecord>,
+
+    #[serde(default)]
+    pub artifact: Option<ArtifactManifestSection>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -37,9 +40,22 @@ pub struct AppManifestSection {
     pub namespace: String,
     #[serde(default)]
     pub description: String,
+    #[serde(default)]
     pub wasm_artifact: String,
     #[serde(default = "default_wasm_bind_port")]
     pub wasm_bind_port: u16,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ArtifactManifestSection {
+    #[serde(default)]
+    pub reference: Option<String>,
+    #[serde(default)]
+    pub url: String,
+    #[serde(default)]
+    pub sha256: String,
+    #[serde(default)]
+    pub credential_ref: Option<String>,
 }
 
 fn default_namespace() -> String {
@@ -331,6 +347,7 @@ pub fn manifest_from_config(
         env: app_config.env_vars.clone(),
         secrets: HashMap::new(),
         api_keys: api_keys.to_vec(),
+        artifact: None,
     }
 }
 
@@ -360,6 +377,7 @@ idle_timeout_secs = 60
         assert_eq!(manifest.app.wasm_artifact, "./test.wasm");
         assert_eq!(manifest.fuel.quota, 100000000);
         assert_eq!(manifest.fuel.memory_pages, 512);
+        assert!(manifest.artifact.is_none());
     }
 
     #[test]
@@ -428,6 +446,7 @@ required_scopes = ["admin:users"]
             },
             secrets: HashMap::new(),
             api_keys: vec![],
+            artifact: None,
         };
 
         let config = manifest.to_app_config();
@@ -473,6 +492,7 @@ required_scopes = ["admin:users"]
             env: HashMap::new(),
             secrets: HashMap::new(),
             api_keys: vec![],
+            artifact: None,
         };
 
         let gw = manifest.to_gateway_config().unwrap();
@@ -503,5 +523,57 @@ burst_capacity = 20
             .and_then(|gateway| gateway.rate_limit.as_ref())
             .unwrap();
         assert!(!rate_limit.distributed);
+    }
+
+    #[test]
+    fn test_manifest_parse_remote_artifact_section() {
+        let toml = r#"
+[app]
+name = "api-users"
+version = "v1"
+
+[artifact]
+url = "https://example.com/api-users.wasm"
+sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+credential_ref = "github-packages-reader"
+"#;
+
+        let manifest: DeployManifest = toml::from_str(toml).unwrap();
+        let artifact = manifest.artifact.unwrap();
+        assert_eq!(artifact.url, "https://example.com/api-users.wasm");
+        assert_eq!(
+            artifact.sha256,
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        );
+        assert_eq!(
+            artifact.credential_ref.as_deref(),
+            Some("github-packages-reader")
+        );
+        assert!(artifact.reference.is_none());
+    }
+
+    #[test]
+    fn test_manifest_parse_oci_artifact_reference_section() {
+        let toml = r#"
+[app]
+name = "api-users"
+version = "v1"
+
+[artifact]
+reference = "oci://ghcr.io/example-org/api-users@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+credential_ref = "ghcr-reader"
+"#;
+
+        let manifest: DeployManifest = toml::from_str(toml).unwrap();
+        let artifact = manifest.artifact.unwrap();
+        assert_eq!(
+            artifact.reference.as_deref(),
+            Some(
+                "oci://ghcr.io/example-org/api-users@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+            )
+        );
+        assert_eq!(artifact.credential_ref.as_deref(), Some("ghcr-reader"));
+        assert!(artifact.url.is_empty());
+        assert!(artifact.sha256.is_empty());
     }
 }

@@ -38,8 +38,10 @@ pub struct CliOverrides {
     pub tls_key: Option<String>,
     pub admin_port: Option<u16>,
     pub artifact_port: Option<u16>,
+    pub deploy_ingress_port: Option<u16>,
     pub admin_bind_address: Option<String>,
     pub artifact_bind_address: Option<String>,
+    pub deploy_ingress_bind_address: Option<String>,
     pub admin_tls_cert: Option<String>,
     pub admin_tls_key: Option<String>,
     pub admin_advertised_host: Option<String>,
@@ -165,8 +167,10 @@ fn merge_config(base: NodeConfig, overlay: NodeConfig) -> NodeConfig {
         admin: AdminSection {
             port: overlay.admin.port,
             artifact_port: overlay.admin.artifact_port,
+            deploy_ingress_port: overlay.admin.deploy_ingress_port,
             bind_address: overlay.admin.bind_address,
             artifact_bind_address: overlay.admin.artifact_bind_address,
+            deploy_ingress_bind_address: overlay.admin.deploy_ingress_bind_address,
             tls_cert: overlay.admin.tls_cert.or(base.admin.tls_cert),
             tls_key: overlay.admin.tls_key.or(base.admin.tls_key),
             advertised_host: overlay.admin.advertised_host.or(base.admin.advertised_host),
@@ -648,11 +652,17 @@ fn apply_cli_overrides(mut config: NodeConfig, cli: &CliOverrides) -> NodeConfig
     if let Some(v) = cli.artifact_port {
         config.admin.artifact_port = v;
     }
+    if let Some(v) = cli.deploy_ingress_port {
+        config.admin.deploy_ingress_port = v;
+    }
     if let Some(v) = &cli.admin_bind_address {
         config.admin.bind_address = v.clone();
     }
     if let Some(v) = &cli.artifact_bind_address {
         config.admin.artifact_bind_address = v.clone();
+    }
+    if let Some(v) = &cli.deploy_ingress_bind_address {
+        config.admin.deploy_ingress_bind_address = v.clone();
     }
     if let Some(v) = &cli.admin_tls_cert {
         config.admin.tls_cert = Some(v.clone());
