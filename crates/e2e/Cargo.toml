@@ -59,6 +59,8 @@ supervisor    = { version = "0.1.0", path = "../supervisor" }
 [dev-dependencies]
 # Tracing subscriber (test log initialization)
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
+base64 = "0.22"
+ed25519-dalek = "2"
 
 # CLI assertion helpers
 assert_cmd    = "2"

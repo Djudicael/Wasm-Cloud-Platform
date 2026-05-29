@@ -133,6 +133,15 @@ A typical production setup is:
 
 Do not leave `WASM_DEPLOY_INGRESS_KEY_SOURCE=generate` in production. That mode is only suitable for ephemeral test environments because stored artifact credentials become undecryptable after restart.
 
+If you run more than one deploy-ingress instance:
+
+- keep `WASM_DEPLOY_INGRESS_HA_ENABLED=true`
+- give every instance the same KEK source
+- point them at the same NATS / JetStream cluster
+- put the deploy API and artifact port behind a stable ingress or load balancer
+
+Only the current lease holder accepts mutating deploy requests. Followers stay hot, replicate artifacts, and take over when they acquire the leader lease.
+
 ### HTTP(S) artifact URL
 
 ```bash
@@ -171,6 +180,8 @@ wasm-ctl deploy \
   --artifact-credential ghcr-reader
 ```
 
+Remote artifact fetch is capped at `64 MiB` per artifact. Oversized remote payloads fail closed before deploy publication.
+
 ### OCI / GHCR reference
 
 The platform accepts:
@@ -198,6 +209,43 @@ wasm-ctl deploy \
   --version v1 \
   --artifact-ref oci://ghcr.io/example-org/hello-api@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef \
   --artifact-credential ghcr-reader
+```
+
+### Optional signed artifact metadata
+
+Deploy ingress can require a signed metadata envelope for remote artifacts. The current implementation verifies an Ed25519 signature over:
+
+- `sha256`
+- `issuer`
+- `repository`
+- `namespace`
+
+Example:
+
+```bash
+wasm-ctl deploy \
+  --app hello-api \
+  --version v1 \
+  --artifact-ref oci://ghcr.io/example-org/hello-api@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef \
+  --artifact-public-key <base64-ed25519-public-key> \
+  --artifact-signature <base64-ed25519-signature> \
+  --artifact-issuer https://token.actions.githubusercontent.com \
+  --artifact-repository example-org/hello-api \
+  --artifact-namespace production \
+  --artifact-credential ghcr-reader
+```
+
+Deploy-ingress policy knobs:
+
+- `WASM_DEPLOY_INGRESS_REQUIRE_SIGNATURE=true`
+- `WASM_DEPLOY_INGRESS_ALLOWED_ISSUERS=...`
+- `WASM_DEPLOY_INGRESS_ALLOWED_REPOSITORIES=...`
+- `WASM_DEPLOY_INGRESS_ALLOWED_NAMESPACES=...`
+
+Verification records are stored by artifact digest and can be queried from deploy ingress with:
+
+```text
+GET /artifacts/{sha256}/verification
 ```
 
 ### Manifest-driven remote deploy
@@ -230,6 +278,73 @@ wasm_bind_port = 8080
 reference = "oci://ghcr.io/example-org/hello-api:v1"
 credential_ref = "ghcr-reader"
 ```
+
+### GitHub Actions example
+
+This shape works with GitHub-hosted runners because CI only talks to deploy ingress:
+
+```yaml
+name: Deploy Wasm App
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip2
+      - run: cargo build --release --target wasm32-wasip2 -p hello-axum
+      - run: |
+          sha256sum target/wasm32-wasip2/release/hello_axum.wasm | tee artifact.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hello-axum-wasm
+          path: |
+            target/wasm32-wasip2/release/hello_axum.wasm
+            artifact.sha256
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: hello-axum-wasm
+          path: dist
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build -p ctl
+      - name: Deploy through ingress
+        env:
+          WASM_CTL_DEPLOY_API: ${{ secrets.WCP_DEPLOY_API }}
+          WASM_CTL_NATS_URL: ${{ secrets.WCP_NATS_URL }}
+        run: |
+          DIGEST="$(cut -d' ' -f1 dist/artifact.sha256)"
+          target/debug/wasm-ctl deploy \
+            --app hello-axum \
+            --version v1 \
+            --artifact-url https://artifacts.example.com/hello_axum.wasm \
+            --sha256 "$DIGEST" \
+            --artifact-credential ghcr-reader
+```
+
+Required secrets:
+
+- `WCP_DEPLOY_API`
+- `WCP_NATS_URL`
+
+Optional deploy-time setup, done once on the platform:
+
+- `wasm-ctl secrets set-artifact-credential --key ghcr-reader`
+
+Runtime app secrets stay separate. CI should not send plaintext `DATABASE_URL`, JWT keys, or similar values in the deploy request.
 
 ### Add a public route
 

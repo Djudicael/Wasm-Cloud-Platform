@@ -3,7 +3,7 @@ use crate::{
     tables::{ARTIFACTS, ARTIFACT_HASHES, RAW_WASM},
     Store,
 };
-use common::{error::PlatformError, types::AppId};
+use common::{deploy::ArtifactVerificationRecord, error::PlatformError, types::AppId};
 use redb::{ReadableDatabase, ReadableTable};
 
 impl Store {
@@ -203,6 +203,49 @@ impl Store {
                 .map_err(PlatformError::storage_source)?;
         }
         tx.commit().map_err(PlatformError::storage_source)
+    }
+
+    pub fn save_artifact_verification(
+        &self,
+        sha256: &str,
+        record: &ArtifactVerificationRecord,
+    ) -> Result<(), PlatformError> {
+        let json = serde_json::to_string(record).map_err(|e| {
+            PlatformError::storage_with_msg("failed to serialize artifact verification", e)
+        })?;
+        let tx = self
+            .db
+            .begin_write()
+            .map_err(PlatformError::storage_source)?;
+        {
+            let mut table = tx
+                .open_table(crate::tables::ARTIFACT_VERIFICATIONS)
+                .map_err(PlatformError::storage_source)?;
+            table
+                .insert(sha256, json.as_str())
+                .map_err(PlatformError::storage_source)?;
+        }
+        tx.commit().map_err(PlatformError::storage_source)?;
+        Ok(())
+    }
+
+    pub fn load_artifact_verification(
+        &self,
+        sha256: &str,
+    ) -> Result<Option<ArtifactVerificationRecord>, PlatformError> {
+        let tx = self
+            .db
+            .begin_read()
+            .map_err(PlatformError::storage_source)?;
+        let table = tx
+            .open_table(crate::tables::ARTIFACT_VERIFICATIONS)
+            .map_err(PlatformError::storage_source)?;
+        match table.get(sha256).map_err(PlatformError::storage_source)? {
+            Some(value) => serde_json::from_str(value.value()).map(Some).map_err(|e| {
+                PlatformError::storage_with_msg("failed to deserialize artifact verification", e)
+            }),
+            None => Ok(None),
+        }
     }
 
     /// Prune all raw wasm bytes (garbage collection).

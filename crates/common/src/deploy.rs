@@ -4,6 +4,25 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
+pub struct ArtifactSignature {
+    #[serde(default = "default_signature_algorithm")]
+    pub algorithm: String,
+    pub public_key: String,
+    pub signature: String,
+    #[serde(default)]
+    pub issuer: Option<String>,
+    #[serde(default)]
+    pub repository: Option<String>,
+    #[serde(default)]
+    pub namespace: Option<String>,
+}
+
+fn default_signature_algorithm() -> String {
+    "ed25519".to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct RemoteArtifactSource {
     #[serde(default)]
     pub reference: Option<String>,
@@ -13,6 +32,8 @@ pub struct RemoteArtifactSource {
     pub sha256: String,
     #[serde(default)]
     pub credential_ref: Option<String>,
+    #[serde(default)]
+    pub signature: Option<ArtifactSignature>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -68,4 +89,21 @@ pub struct ArtifactCredentialSetRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ArtifactCredentialSetResponse {
     pub key: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ArtifactVerificationRecord {
+    pub sha256: String,
+    pub verified: bool,
+    #[serde(default)]
+    pub algorithm: Option<String>,
+    #[serde(default)]
+    pub issuer: Option<String>,
+    #[serde(default)]
+    pub repository: Option<String>,
+    #[serde(default)]
+    pub namespace: Option<String>,
+    #[serde(default)]
+    pub public_key_sha256: Option<String>,
+    pub verified_at_unix_secs: u64,
 }

@@ -56,6 +56,8 @@ pub struct ArtifactManifestSection {
     pub sha256: String,
     #[serde(default)]
     pub credential_ref: Option<String>,
+    #[serde(default)]
+    pub signature: Option<common::deploy::ArtifactSignature>,
 }
 
 fn default_namespace() -> String {

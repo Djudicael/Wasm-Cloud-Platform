@@ -35,6 +35,7 @@ pub const PLATFORM_STREAM_SUBJECTS: &[&str] = &[
     "platform.upgrade_complete.>",
     "platform.draining.>",
     "config.hot_reload.>",
+    "platform.deploy_ingress.>",
 ];
 pub const EBPF_STREAM_SUBJECTS: &[&str] = &[
     "ebpf.pressure.*",

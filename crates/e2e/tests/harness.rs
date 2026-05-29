@@ -16,6 +16,7 @@ use messaging::{events::Event, NatsBus};
 use reqwest::StatusCode;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::OnceLock;
 use std::time::Duration;
 use tempfile::TempDir;
 use tokio::time::sleep;
@@ -143,6 +144,7 @@ pub struct DeployIngressProcess {
     pub deploy_port: u16,
     pub artifact_port: u16,
     pub db_path: PathBuf,
+    pub audit_path: PathBuf,
     _temp_dir: TempDir,
     process: Child,
 }
@@ -329,8 +331,19 @@ impl DeployIngressProcess {
         deploy_port: u16,
         artifact_port: u16,
     ) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::start_with_env(ingress_id, nats_url, deploy_port, artifact_port, &[]).await
+    }
+
+    pub async fn start_with_env(
+        ingress_id: &str,
+        nats_url: &str,
+        deploy_port: u16,
+        artifact_port: u16,
+        extra_env: &[(&str, &str)],
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let temp_dir = tempfile::tempdir()?;
         let db_path = temp_dir.path().join("deploy-ingress.db");
+        let audit_path = temp_dir.path().join("audit.jsonl");
         let ingress_binary = find_deploy_ingress_binary()?;
         let advertised_artifact_url = format!("http://127.0.0.1:{artifact_port}");
 
@@ -339,7 +352,8 @@ impl DeployIngressProcess {
             ingress_id, deploy_port, artifact_port
         );
 
-        let mut process = Command::new(&ingress_binary)
+        let mut process = Command::new(&ingress_binary);
+        process
             .arg("--ingress-id")
             .arg(ingress_id)
             .arg("--nats-url")
@@ -352,10 +366,19 @@ impl DeployIngressProcess {
             .arg(&advertised_artifact_url)
             .arg("--db-path")
             .arg(&db_path)
+            .env(
+                "WASM_DEPLOY_INGRESS_AUDIT_PATH",
+                audit_path.to_string_lossy().to_string(),
+            )
             .env("RUST_LOG", "info")
             .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit())
-            .spawn()?;
+            .stderr(Stdio::inherit());
+
+        for (key, value) in extra_env {
+            process.env(key, value);
+        }
+
+        let mut process = process.spawn()?;
 
         if let Some(status) = process.try_wait()? {
             return Err(format!(
@@ -373,6 +396,7 @@ impl DeployIngressProcess {
             deploy_port,
             artifact_port,
             db_path,
+            audit_path,
             _temp_dir: temp_dir,
             process,
         })
@@ -447,19 +471,8 @@ impl Drop for DeployIngressProcess {
 fn find_node_binary() -> Result<PathBuf, Box<dyn std::error::Error>> {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
     let workspace_root = Path::new(manifest_dir).parent().unwrap().parent().unwrap();
-
     let debug_binary = workspace_root.join("target/debug/wasm-node");
-
-    eprintln!("Building wasm-node...");
-    let status = std::process::Command::new("cargo")
-        .args(["build", "-p", "node"])
-        .current_dir(workspace_root)
-        .status()?;
-
-    if !status.success() {
-        return Err("Failed to build wasm-node".into());
-    }
-
+    ensure_helper_binary_built_once("wasm-node", workspace_root, &["build", "-p", "node"])?;
     Ok(debug_binary)
 }
 
@@ -467,39 +480,59 @@ fn find_node_binary() -> Result<PathBuf, Box<dyn std::error::Error>> {
 pub fn find_ctl_binary() -> Result<PathBuf, Box<dyn std::error::Error>> {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
     let workspace_root = Path::new(manifest_dir).parent().unwrap().parent().unwrap();
-
     let debug_binary = workspace_root.join("target/debug/wasm-ctl");
-
-    eprintln!("Building wasm-ctl...");
-    let status = std::process::Command::new("cargo")
-        .args(["build", "-p", "ctl"])
-        .current_dir(workspace_root)
-        .status()?;
-
-    if !status.success() {
-        return Err("Failed to build wasm-ctl".into());
-    }
-
+    ensure_helper_binary_built_once("wasm-ctl", workspace_root, &["build", "-p", "ctl"])?;
     Ok(debug_binary)
 }
 
 fn find_deploy_ingress_binary() -> Result<PathBuf, Box<dyn std::error::Error>> {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
     let workspace_root = Path::new(manifest_dir).parent().unwrap().parent().unwrap();
-
     let debug_binary = workspace_root.join("target/debug/wasm-deploy-ingress");
-
-    eprintln!("Building wasm-deploy-ingress...");
-    let status = std::process::Command::new("cargo")
-        .args(["build", "-p", "deploy-ingress"])
-        .current_dir(workspace_root)
-        .status()?;
-
-    if !status.success() {
-        return Err("Failed to build wasm-deploy-ingress".into());
-    }
-
+    ensure_helper_binary_built_once(
+        "wasm-deploy-ingress",
+        workspace_root,
+        &["build", "-p", "deploy-ingress"],
+    )?;
     Ok(debug_binary)
+}
+
+fn ensure_helper_binary_built_once(
+    binary_name: &'static str,
+    workspace_root: &Path,
+    cargo_args: &[&str],
+) -> Result<(), Box<dyn std::error::Error>> {
+    static NODE_BUILD: OnceLock<Result<(), String>> = OnceLock::new();
+    static CTL_BUILD: OnceLock<Result<(), String>> = OnceLock::new();
+    static DEPLOY_INGRESS_BUILD: OnceLock<Result<(), String>> = OnceLock::new();
+
+    let cell = match binary_name {
+        "wasm-node" => &NODE_BUILD,
+        "wasm-ctl" => &CTL_BUILD,
+        "wasm-deploy-ingress" => &DEPLOY_INGRESS_BUILD,
+        _ => return Err(format!("unsupported helper binary: {binary_name}").into()),
+    };
+
+    let result = cell.get_or_init(|| {
+        eprintln!("Building {}...", binary_name);
+        match std::process::Command::new("cargo")
+            .args(cargo_args)
+            .current_dir(workspace_root)
+            .status()
+        {
+            Ok(status) if status.success() => Ok(()),
+            Ok(status) => Err(format!("failed to build {}: {}", binary_name, status)),
+            Err(err) => Err(format!(
+                "failed to spawn cargo build for {}: {}",
+                binary_name, err
+            )),
+        }
+    });
+
+    result
+        .as_ref()
+        .map(|_| ())
+        .map_err(|err| -> Box<dyn std::error::Error> { err.clone().into() })
 }
 
 pub fn run_ctl(

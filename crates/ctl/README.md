@@ -70,6 +70,20 @@ wasm-ctl deploy \
   --artifact-credential ghcr-reader
 ```
 
+Optional signed-artifact metadata can be attached on remote deploys:
+
+```bash
+wasm-ctl deploy \
+  --app hello \
+  --version v1 \
+  --artifact-ref oci://ghcr.io/example-org/hello@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef \
+  --artifact-public-key <base64-ed25519-public-key> \
+  --artifact-signature <base64-ed25519-signature> \
+  --artifact-issuer https://token.actions.githubusercontent.com \
+  --artifact-repository example-org/hello \
+  --artifact-namespace production
+```
+
 Artifact fetch credentials are managed separately from runtime app secrets:
 
 ```bash

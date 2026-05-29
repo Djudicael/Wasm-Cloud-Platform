@@ -7,7 +7,8 @@ use common::artifact_transfer::{
     ArtifactUploadAuthorizationResponse,
 };
 use common::deploy::{
-    DeployIntentRequest, DeployIntentResponse, RemoteArtifactIngressResponse, RemoteArtifactSource,
+    ArtifactSignature, DeployIntentRequest, DeployIntentResponse, RemoteArtifactIngressResponse,
+    RemoteArtifactSource,
 };
 use common::types::{AppConfig, AppId, ClusterNodeRecord, FuelQuota, MemoryPages};
 use hex;
@@ -49,6 +50,26 @@ pub struct DeployArgs {
     /// Platform secret reference for remote artifact fetch credentials
     #[arg(long)]
     artifact_credential: Option<String>,
+
+    /// Base64-encoded Ed25519 public key for artifact signature verification
+    #[arg(long)]
+    artifact_public_key: Option<String>,
+
+    /// Base64-encoded Ed25519 signature over the artifact claims payload
+    #[arg(long)]
+    artifact_signature: Option<String>,
+
+    /// Optional signature issuer claim
+    #[arg(long)]
+    artifact_issuer: Option<String>,
+
+    /// Optional signature repository claim
+    #[arg(long)]
+    artifact_repository: Option<String>,
+
+    /// Optional signature namespace claim
+    #[arg(long)]
+    artifact_namespace: Option<String>,
 
     /// Path to a deployment manifest TOML file
     #[arg(long)]
@@ -184,9 +205,27 @@ enum ArtifactInput {
     Remote(RemoteArtifactSource),
 }
 
+fn build_artifact_signature(args: &DeployArgs) -> Result<Option<ArtifactSignature>> {
+    match (&args.artifact_public_key, &args.artifact_signature) {
+        (None, None) => Ok(None),
+        (Some(public_key), Some(signature)) => Ok(Some(ArtifactSignature {
+            algorithm: "ed25519".to_string(),
+            public_key: public_key.clone(),
+            signature: signature.clone(),
+            issuer: args.artifact_issuer.clone(),
+            repository: args.artifact_repository.clone(),
+            namespace: args.artifact_namespace.clone(),
+        })),
+        _ => anyhow::bail!(
+            "--artifact-public-key and --artifact-signature must be provided together"
+        ),
+    }
+}
+
 fn remote_source_from_oci_reference(
     reference: &str,
     credential_ref: Option<String>,
+    signature: Option<ArtifactSignature>,
 ) -> Result<RemoteArtifactSource> {
     let without_scheme = reference
         .strip_prefix("oci://")
@@ -211,6 +250,7 @@ fn remote_source_from_oci_reference(
         url: String::new(),
         sha256: String::new(),
         credential_ref,
+        signature,
     })
 }
 
@@ -297,6 +337,7 @@ fn resolve_artifact_input(
     args: &DeployArgs,
     manifest: Option<&super::manifest::DeployManifest>,
 ) -> Result<ArtifactInput> {
+    let cli_signature = build_artifact_signature(args)?;
     let manifest_remote = match manifest.and_then(|m| m.artifact.as_ref()) {
         Some(artifact) if artifact.reference.is_some() && !artifact.url.trim().is_empty() => {
             anyhow::bail!("manifest artifact section cannot specify both reference and url");
@@ -304,12 +345,14 @@ fn resolve_artifact_input(
         Some(artifact) if artifact.reference.is_some() => Some(remote_source_from_oci_reference(
             artifact.reference.as_deref().unwrap_or_default(),
             artifact.credential_ref.clone(),
+            artifact.signature.clone(),
         )?),
         Some(artifact) if !artifact.url.trim().is_empty() => Some(RemoteArtifactSource {
             reference: None,
             url: artifact.url.clone(),
             sha256: artifact.sha256.clone(),
             credential_ref: artifact.credential_ref.clone(),
+            signature: artifact.signature.clone(),
         }),
         Some(_) => None,
         None => None,
@@ -325,6 +368,7 @@ fn resolve_artifact_input(
         Some(remote_source_from_oci_reference(
             reference,
             args.artifact_credential.clone(),
+            cli_signature.clone(),
         )?)
     } else {
         args.artifact_url.as_ref().map(|url| RemoteArtifactSource {
@@ -332,6 +376,7 @@ fn resolve_artifact_input(
             url: url.clone(),
             sha256: args.sha256.clone().unwrap_or_default(),
             credential_ref: args.artifact_credential.clone(),
+            signature: cli_signature,
         })
     };
 
@@ -1020,6 +1065,7 @@ mod tests {
         let source = remote_source_from_oci_reference(
             "oci://ghcr.io/example-org/example-app@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
             Some("ghcr-reader".to_string()),
+            None,
         )
         .unwrap();
         assert_eq!(

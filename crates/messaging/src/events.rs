@@ -90,6 +90,13 @@ pub enum Event {
     GatewayConfigRemove {
         app_id: AppId,
     },
+    DeployIngressArtifactReplicated {
+        source_ingress_id: String,
+        artifact_url: String,
+        expected_hash: String,
+        #[serde(default)]
+        size_bytes: u64,
+    },
 
     // ── Load Reporting ────────────────────────────────────────────
     NodeLoad {
@@ -283,6 +290,9 @@ impl Event {
             }
             Event::GatewayConfigRemove { app_id, .. } => {
                 format!("gateway.config.remove.{}", app_id.0)
+            }
+            Event::DeployIngressArtifactReplicated { expected_hash, .. } => {
+                format!("platform.deploy_ingress.artifact.{}", expected_hash)
             }
             Event::NodeLoad { node_id, .. } => {
                 format!("node.load.{}", node_id)

@@ -34,7 +34,8 @@ mod tests;
 /// - 5: Added GATEWAY_CONFIGS table
 /// - 6: Added API_KEYS table
 /// - 7: Added CLUSTER_NODES table
-const CURRENT_SCHEMA_VERSION: u32 = 7;
+/// - 8: Added ARTIFACT_VERIFICATIONS table
+const CURRENT_SCHEMA_VERSION: u32 = 8;
 
 #[derive(Clone)]
 pub struct Store {
@@ -156,6 +157,7 @@ impl Store {
             tx.open_table(tables::GATEWAY_CONFIGS)?;
             tx.open_table(tables::API_KEYS)?;
             tx.open_table(tables::CLUSTER_NODES)?;
+            tx.open_table(tables::ARTIFACT_VERIFICATIONS)?;
         }
         tx.commit()?;
 
@@ -265,6 +267,10 @@ impl Store {
             7 => {
                 // v6 → v7: Ensure CLUSTER_NODES table exists
                 self.migrate_v6_to_v7()?;
+            }
+            8 => {
+                // v7 → v8: Ensure ARTIFACT_VERIFICATIONS table exists
+                self.migrate_v7_to_v8()?;
             }
             n => {
                 return Err(redb::Error::Corrupted(format!(
@@ -560,6 +566,19 @@ impl Store {
         }
         tx.commit()?;
         tracing::info!("v6→v7: ensured CLUSTER_NODES table exists");
+        Ok(())
+    }
+
+    /// Migration v7 → v8: Ensure ARTIFACT_VERIFICATIONS table exists.
+    fn migrate_v7_to_v8(&self) -> Result<(), redb::Error> {
+        let tx = self.db.begin_write()?;
+        {
+            let _ = tx.open_table(tables::ARTIFACT_VERIFICATIONS)?;
+            let mut meta_table = tx.open_table(tables::SCHEMA_META)?;
+            meta_table.insert("version", "8")?;
+        }
+        tx.commit()?;
+        tracing::info!("v7→v8: ensured ARTIFACT_VERIFICATIONS table exists");
         Ok(())
     }
 

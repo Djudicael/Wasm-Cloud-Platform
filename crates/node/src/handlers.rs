@@ -39,6 +39,7 @@ const OCI_ACCEPT_HEADER: &str = concat!(
     "application/vnd.docker.distribution.manifest.list.v2+json,",
     "application/vnd.oci.artifact.manifest.v1+json"
 );
+const MAX_REMOTE_ARTIFACT_BYTES: u64 = 64 * 1024 * 1024;
 
 fn is_loopback_artifact_url(url: &str) -> bool {
     Url::parse(url)
@@ -313,10 +314,12 @@ async fn fetch_http_artifact_bytes(
             response.status()
         )));
     }
-    let bytes = response
-        .bytes()
-        .await
-        .map_err(PlatformError::external_source)?;
+    let bytes = read_response_bytes_with_limit(
+        response,
+        MAX_REMOTE_ARTIFACT_BYTES,
+        "remote artifact download",
+    )
+    .await?;
     let actual_hash = hex::encode(sha2::Sha256::digest(&bytes));
     if actual_hash != expected_hash {
         return Err(PlatformError::security(format!(
@@ -429,6 +432,39 @@ async fn fetch_oci_artifact_bytes(
     );
     let bytes = fetch_http_artifact_bytes(&blob_url, &blob_hash, authorization).await?;
     Ok((blob_hash, bytes))
+}
+
+async fn read_response_bytes_with_limit(
+    mut response: reqwest::Response,
+    max_bytes: u64,
+    context: &str,
+) -> Result<Vec<u8>, PlatformError> {
+    if let Some(content_length) = response.content_length() {
+        if content_length > max_bytes {
+            return Err(PlatformError::security(format!(
+                "{context} exceeds maximum size: {} bytes > {} bytes",
+                content_length, max_bytes
+            )));
+        }
+    }
+
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(PlatformError::external_source)?
+    {
+        let next_len = bytes.len() as u64 + chunk.len() as u64;
+        if next_len > max_bytes {
+            return Err(PlatformError::security(format!(
+                "{context} exceeds maximum size: {} bytes > {} bytes",
+                next_len, max_bytes
+            )));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+
+    Ok(bytes)
 }
 
 pub async fn ingest_remote_artifact(
@@ -1237,6 +1273,7 @@ impl EventDispatcher {
                 // cluster's configuration may have diverged.
                 Ok(())
             }
+            Event::DeployIngressArtifactReplicated { .. } => Ok(()),
         }
     }
 
@@ -2255,6 +2292,7 @@ mod tests {
                 url: format!("http://{addr}/payload.wasm"),
                 sha256: sha256.clone(),
                 credential_ref: Some("ghcr-reader".to_string()),
+                signature: None,
             },
         )
         .await
@@ -2301,12 +2339,57 @@ mod tests {
                 url: format!("http://{addr}/payload.wasm"),
                 sha256: "deadbeef".repeat(8),
                 credential_ref: None,
+                signature: None,
             },
         )
         .await
         .unwrap_err();
 
         assert!(err.to_string().contains("sha256 mismatch"));
+    }
+
+    #[tokio::test]
+    async fn test_ingest_remote_artifact_rejects_oversized_payload() {
+        use axum::{http::StatusCode, routing::get, Router};
+
+        let oversized_body = vec![0u8; super::MAX_REMOTE_ARTIFACT_BYTES as usize + 1];
+        let app = Router::new().route(
+            "/payload.wasm",
+            get(move || {
+                let oversized_body = oversized_body.clone();
+                async move { (StatusCode::OK, oversized_body) }
+            }),
+        );
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let temp = NamedTempFile::new().unwrap();
+        let store = Store::open(temp.path()).unwrap();
+        let provider = LocalSecretProvider::new(store.clone(), SymmetricKey::generate());
+
+        let err = ingest_remote_artifact(
+            &store,
+            &provider,
+            "http://node-under-test.internal:9091",
+            &ArtifactTransferAuthority::derive("node-under-test", &[9u8; 32]),
+            "node-under-test",
+            120,
+            common::deploy::RemoteArtifactSource {
+                reference: None,
+                url: format!("http://{addr}/payload.wasm"),
+                sha256: "deadbeef".repeat(8),
+                credential_ref: None,
+                signature: None,
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert!(err.to_string().contains("maximum size"));
     }
 
     #[tokio::test]
@@ -2421,6 +2504,7 @@ mod tests {
                 url: String::new(),
                 sha256: String::new(),
                 credential_ref: Some("ghcr-reader".to_string()),
+                signature: None,
             },
         )
         .await
@@ -2603,6 +2687,7 @@ mod tests {
                 url: String::new(),
                 sha256: String::new(),
                 credential_ref: Some("ghcr-reader".to_string()),
+                signature: None,
             },
         )
         .await
