@@ -199,7 +199,7 @@ fn preferred_oci_platforms() -> Vec<(&'static str, &'static str)> {
     ]
 }
 
-fn select_oci_manifest_descriptor<'a>(manifests: &'a [OciDescriptor]) -> Option<&'a OciDescriptor> {
+fn select_oci_manifest_descriptor(manifests: &[OciDescriptor]) -> Option<&OciDescriptor> {
     for (os, arch) in preferred_oci_platforms() {
         if let Some(descriptor) = manifests.iter().find(|descriptor| {
             descriptor
@@ -558,7 +558,7 @@ fn audit_deploy_intent(
         .reference
         .as_deref()
         .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| artifact.url.as_str());
+        .unwrap_or(artifact.url.as_str());
     supervisor::audit::write_audit_event(
         "/var/log/wasm-node/audit.jsonl",
         &supervisor::audit::AuditEvent {
@@ -612,30 +612,24 @@ fn validate_deploy_intent_request(request: &DeployIntentRequest) -> Result<(), P
 }
 
 pub async fn process_deploy_intent(
-    store: &Store,
-    secret_provider: &dyn SecretProvider,
-    artifact_server_url: &str,
-    artifact_transfer_authority: &ArtifactTransferAuthority,
-    node_id: &str,
-    cluster_node_stale_after_secs: u64,
-    bus: &messaging::NatsBus,
+    ctx: DeployIntentContext<'_>,
     request: DeployIntentRequest,
 ) -> Result<DeployIntentResponse, PlatformError> {
     validate_deploy_intent_request(&request)?;
 
     let ingress = ingest_remote_artifact(
-        store,
-        secret_provider,
-        artifact_server_url,
-        artifact_transfer_authority,
-        node_id,
-        cluster_node_stale_after_secs,
+        ctx.store,
+        ctx.secret_provider,
+        ctx.artifact_server_url,
+        ctx.artifact_transfer_authority,
+        ctx.node_id,
+        ctx.cluster_node_stale_after_secs,
         request.artifact.clone(),
     )
     .await
     .inspect_err(|err| {
         audit_deploy_intent(
-            node_id,
+            ctx.node_id,
             supervisor::audit::AuditEventType::AdminApiCall,
             &request.app_id,
             &request.artifact,
@@ -646,32 +640,34 @@ pub async fn process_deploy_intent(
         );
     })?;
 
-    bus.publish(&Event::DeployApp {
-        app_id: request.app_id.clone(),
-        config: request.config.clone(),
-        artifact_url: ingress.artifact_url.clone(),
-        artifact_transfer_manifests: ingress.artifact_transfer_manifests.clone(),
-        expected_hash: Some(ingress.expected_hash.clone()),
-        size_bytes: ingress.size_bytes,
-    })
-    .await
-    .map_err(PlatformError::from)?;
+    ctx.bus
+        .publish(&Event::DeployApp {
+            app_id: request.app_id.clone(),
+            config: request.config.clone(),
+            artifact_url: ingress.artifact_url.clone(),
+            artifact_transfer_manifests: ingress.artifact_transfer_manifests.clone(),
+            expected_hash: Some(ingress.expected_hash.clone()),
+            size_bytes: ingress.size_bytes,
+        })
+        .await?;
 
     let gateway_config_published = if let Some(gateway_config) = request.gateway_config.clone() {
-        bus.publish(&Event::GatewayConfigUpdate {
-            app_id: request.app_id.clone(),
-            config: gateway_config,
-        })
-        .await
-        .map_err(PlatformError::from)?;
+        ctx.bus
+            .publish(&Event::GatewayConfigUpdate {
+                app_id: request.app_id.clone(),
+                config: gateway_config,
+            })
+            .await?;
         true
     } else {
         false
     };
 
     if !request.api_keys.is_empty() {
-        store.save_api_keys(&request.app_id.0, &request.api_keys)?;
-        let _ = bus
+        ctx.store
+            .save_api_keys(&request.app_id.0, &request.api_keys)?;
+        let _ = ctx
+            .bus
             .publish(&Event::GatewayConfigUpdate {
                 app_id: request.app_id.clone(),
                 config: request.gateway_config.unwrap_or_default(),
@@ -680,7 +676,7 @@ pub async fn process_deploy_intent(
     }
 
     audit_deploy_intent(
-        node_id,
+        ctx.node_id,
         supervisor::audit::AuditEventType::AppDeployed,
         &request.app_id,
         &request.artifact,
@@ -703,6 +699,16 @@ pub async fn process_deploy_intent(
         gateway_config_published,
         api_key_count: request.api_keys.len(),
     })
+}
+
+pub struct DeployIntentContext<'a> {
+    pub store: &'a Store,
+    pub secret_provider: &'a dyn SecretProvider,
+    pub artifact_server_url: &'a str,
+    pub artifact_transfer_authority: &'a ArtifactTransferAuthority,
+    pub node_id: &'a str,
+    pub cluster_node_stale_after_secs: u64,
+    pub bus: &'a messaging::NatsBus,
 }
 
 fn extract_proxy_host(address: &str) -> Option<String> {

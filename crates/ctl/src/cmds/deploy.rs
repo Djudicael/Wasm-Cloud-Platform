@@ -202,7 +202,7 @@ fn parse_env_var(s: &str) -> Result<(String, String), String> {
 
 enum ArtifactInput {
     LocalPath(String),
-    Remote(RemoteArtifactSource),
+    Remote(Box<RemoteArtifactSource>),
 }
 
 fn build_artifact_signature(args: &DeployArgs) -> Result<Option<ArtifactSignature>> {
@@ -397,7 +397,7 @@ fn resolve_artifact_input(
         if remote.reference.is_none() && remote.sha256.trim().is_empty() {
             anyhow::bail!("remote artifact deploy requires --sha256 or manifest artifact.sha256");
         }
-        return Ok(ArtifactInput::Remote(remote));
+        return Ok(ArtifactInput::Remote(Box::new(remote)));
     }
 
     let wasm_path = args
@@ -626,7 +626,7 @@ pub async fn run(
                 config,
                 gateway_config,
                 api_keys,
-                artifact,
+                artifact: *artifact,
             },
         )
         .await?;

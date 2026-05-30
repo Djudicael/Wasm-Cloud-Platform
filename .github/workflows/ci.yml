@@ -206,8 +206,8 @@ jobs:
             --release
         timeout-minutes: 5
 
-      - name: Build wasm-node binary
-        run: cargo build --bin wasm-node --release
+      - name: Build E2E helper binaries
+        run: cargo build -p node -p ctl -p deploy-ingress
         timeout-minutes: 20
 
       - name: Build E2E test binaries
@@ -229,14 +229,23 @@ jobs:
           NATS_URL: nats://localhost:4222
         timeout-minutes: 10
 
-      - name: Run E2E platform suites
-        run: |
-          cargo test -p e2e --test config_hot_reload -- --test-threads=1
-          cargo test -p e2e --test disaster_recovery -- --test-threads=1
-          cargo test -p e2e --test gateway -- --test-threads=1
+      - name: Run E2E config hot reload suite
+        run: cargo test -p e2e --test config_hot_reload -- --test-threads=1
         env:
           NATS_URL: nats://localhost:4222
-        timeout-minutes: 10
+        timeout-minutes: 8
+
+      - name: Run E2E disaster recovery suite
+        run: cargo test -p e2e --test disaster_recovery -- --test-threads=1
+        env:
+          NATS_URL: nats://localhost:4222
+        timeout-minutes: 8
+
+      - name: Run E2E gateway suite
+        run: cargo test -p e2e --test gateway -- --test-threads=1
+        env:
+          NATS_URL: nats://localhost:4222
+        timeout-minutes: 8
 
       - name: Run E2E billing suite
         run: cargo test -p e2e --test billing -- --test-threads=1

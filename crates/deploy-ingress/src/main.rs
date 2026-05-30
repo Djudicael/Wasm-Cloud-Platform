@@ -604,8 +604,7 @@ async fn process_deploy_intent(
             expected_hash: Some(ingress.expected_hash.clone()),
             size_bytes: ingress.size_bytes,
         })
-        .await
-        .map_err(PlatformError::from)?;
+        .await?;
 
     let gateway_config_published = if let Some(gateway_config) = request.gateway_config.clone() {
         state
@@ -614,8 +613,7 @@ async fn process_deploy_intent(
                 app_id: request.app_id.clone(),
                 config: gateway_config,
             })
-            .await
-            .map_err(PlatformError::from)?;
+            .await?;
         true
     } else {
         false

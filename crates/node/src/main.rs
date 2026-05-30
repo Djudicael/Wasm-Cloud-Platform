@@ -519,6 +519,8 @@ const NODE_SUBSCRIPTION_SPECS: &[(&str, &str)] = &[
     ("EBPF", "ebpf.security.incident.*"),
 ];
 
+const NON_NODE_STREAM_SUBJECT_SPECS: &[(&str, &str)] = &[("PLATFORM", "platform.deploy_ingress.>")];
+
 fn sanitize_subject(subject: &str) -> String {
     subject
         .replace('.', "-")
@@ -561,6 +563,13 @@ fn collect_missing_node_stream_subscriptions() -> Vec<(&'static str, &'static st
                 .iter()
                 .copied()
                 .filter(move |subject| {
+                    if NON_NODE_STREAM_SUBJECT_SPECS.iter().any(
+                        |(excluded_stream, excluded_subject)| {
+                            excluded_stream == stream && excluded_subject == subject
+                        },
+                    ) {
+                        return false;
+                    }
                     !NODE_SUBSCRIPTION_SPECS
                         .iter()
                         .any(|(subscription_stream, filter)| {
@@ -3007,13 +3016,15 @@ async fn main() -> anyhow::Result<()> {
                     let cluster_node_stale_after_secs = cluster_node_stale_after_secs;
                     async move {
                         match handlers::process_deploy_intent(
-                            &store,
-                            secret_provider.as_ref(),
-                            &artifact_server_url,
-                            &artifact_transfer_authority,
-                            &node_id,
-                            cluster_node_stale_after_secs,
-                            &bus,
+                            handlers::DeployIntentContext {
+                                store: &store,
+                                secret_provider: secret_provider.as_ref(),
+                                artifact_server_url: &artifact_server_url,
+                                artifact_transfer_authority: &artifact_transfer_authority,
+                                node_id: &node_id,
+                                cluster_node_stale_after_secs,
+                                bus: &bus,
+                            },
                             body,
                         )
                         .await
@@ -3487,13 +3498,15 @@ async fn main() -> anyhow::Result<()> {
                     let cluster_node_stale_after_secs = cluster_node_stale_after_secs;
                     async move {
                         match handlers::process_deploy_intent(
-                            &store,
-                            secret_provider.as_ref(),
-                            &artifact_server_url,
-                            &artifact_transfer_authority,
-                            &node_id,
-                            cluster_node_stale_after_secs,
-                            &bus,
+                            handlers::DeployIntentContext {
+                                store: &store,
+                                secret_provider: secret_provider.as_ref(),
+                                artifact_server_url: &artifact_server_url,
+                                artifact_transfer_authority: &artifact_transfer_authority,
+                                node_id: &node_id,
+                                cluster_node_stale_after_secs,
+                                bus: &bus,
+                            },
                             body,
                         )
                         .await
