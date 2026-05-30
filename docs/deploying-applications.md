@@ -98,6 +98,7 @@ Remote deploys use the deploy ingress URL, which can be configured separately fr
 
 ```bash
 export WASM_CTL_DEPLOY_API=https://deploy.example.com
+export WASM_CTL_AUTH_TOKEN=<deploy-ingress-bearer-token>
 ```
 
 or per command:
@@ -122,6 +123,7 @@ Operator-facing examples are in:
 
 - [`config/deploy-ingress.env.example`](../config/deploy-ingress.env.example)
 - [`systemd/wasm-deploy-ingress.service`](../systemd/wasm-deploy-ingress.service)
+- [`docs/deploy-ingress-operations.md`](./deploy-ingress-operations.md)
 
 A typical production setup is:
 
@@ -130,6 +132,7 @@ A typical production setup is:
 3. provide a stable KEK via `WASM_DEPLOY_INGRESS_KEY_SOURCE`
 4. expose the deploy API and artifact port behind your ingress or load balancer as needed
 5. point CI at `WASM_CTL_DEPLOY_API`
+6. provide a deploy-ingress bearer token to CI through `WASM_CTL_AUTH_TOKEN`
 
 Do not leave `WASM_DEPLOY_INGRESS_KEY_SOURCE=generate` in production. That mode is only suitable for ephemeral test environments because stored artifact credentials become undecryptable after restart.
 
@@ -141,6 +144,28 @@ If you run more than one deploy-ingress instance:
 - put the deploy API and artifact port behind a stable ingress or load balancer
 
 Only the current lease holder accepts mutating deploy requests. Followers stay hot, replicate artifacts, and take over when they acquire the leader lease.
+
+### Deploy ingress auth in CI
+
+Remote deploys use the same CLI auth token mechanism as other authenticated HTTP calls:
+
+- `WASM_CTL_AUTH_TOKEN`
+- or `--auth-token`
+
+Recommended split:
+
+- CI deploy jobs: write-capable token
+- operator verification tooling: read-capable token
+
+Minimal GitHub Actions shape:
+
+```yaml
+env:
+  WASM_CTL_DEPLOY_API: https://deploy.example.com
+  WASM_CTL_AUTH_TOKEN: ${{ secrets.WCP_DEPLOY_WRITE_TOKEN }}
+```
+
+Do not reuse a node bootstrap secret or a runtime app secret here. This token authenticates the CI caller to deploy ingress only.
 
 ### HTTP(S) artifact URL
 
@@ -211,12 +236,20 @@ wasm-ctl deploy \
   --artifact-credential ghcr-reader
 ```
 
+If you want hardened registry policy, deploy ingress can reject mutable OCI tag refs entirely:
+
+- `WASM_DEPLOY_INGRESS_REQUIRE_OCI_DIGEST_REFS=true`
+
+With that enabled, `oci://...:v1` deploys fail closed and callers must use
+`oci://...@sha256:...`.
+
 ### Optional signed artifact metadata
 
 Deploy ingress can require a signed metadata envelope for remote artifacts. The current implementation verifies an Ed25519 signature over:
 
 - `sha256`
 - `issuer`
+- `identity`
 - `repository`
 - `namespace`
 
@@ -229,24 +262,67 @@ wasm-ctl deploy \
   --artifact-ref oci://ghcr.io/example-org/hello-api@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef \
   --artifact-public-key <base64-ed25519-public-key> \
   --artifact-signature <base64-ed25519-signature> \
+  --artifact-signature-algorithm ed25519 \
   --artifact-issuer https://token.actions.githubusercontent.com \
   --artifact-repository example-org/hello-api \
   --artifact-namespace production \
   --artifact-credential ghcr-reader
 ```
 
+Cosign-style payload verification is also supported with a public key:
+
+```bash
+wasm-ctl deploy \
+  --app hello-api \
+  --version v1 \
+  --artifact-ref oci://ghcr.io/example-org/hello-api@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef \
+  --artifact-public-key <base64-ed25519-public-key> \
+  --artifact-signature <base64-ed25519-signature> \
+  --artifact-signature-algorithm cosign-ed25519 \
+  --artifact-signature-payload '{"critical":{"identity":{"docker-reference":"ghcr.io/example-org/hello-api"},"image":{"docker-manifest-digest":"sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"},"type":"cosign container image signature"},"optional":{"issuer":"https://token.actions.githubusercontent.com","repository":"example-org/hello-api","namespace":"production"}}' \
+  --artifact-credential ghcr-reader
+```
+
+This mode verifies a Cosign-style signed payload with the supplied public key and
+maps its digest and identity claims into the existing deploy-ingress policy
+checks. It is not full Fulcio/Rekor transparency-log integration.
+
+For keyless Sigstore bundle verification:
+
+```bash
+wasm-ctl deploy \
+  --app hello-api \
+  --version v1 \
+  --artifact-url https://artifacts.example.com/hello-api.wasm \
+  --sha256 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef \
+  --artifact-public-key <base64-ed25519-public-key> \
+  --artifact-signature <base64-ed25519-signature> \
+  --artifact-signature-algorithm sigstore-bundle \
+  --artifact-signature-payload "$(cat artifact.sigstore.json)" \
+  --artifact-identity user@example.com \
+  --artifact-issuer https://github.com/login/oauth
+```
+
+This mode verifies a Sigstore bundle against Sigstore’s trust root. In the
+current platform integration, the strongest policy binding for it is issuer +
+identity.
+
 Deploy-ingress policy knobs:
 
 - `WASM_DEPLOY_INGRESS_REQUIRE_SIGNATURE=true`
 - `WASM_DEPLOY_INGRESS_ALLOWED_ISSUERS=...`
+- `WASM_DEPLOY_INGRESS_ALLOWED_IDENTITIES=...`
 - `WASM_DEPLOY_INGRESS_ALLOWED_REPOSITORIES=...`
 - `WASM_DEPLOY_INGRESS_ALLOWED_NAMESPACES=...`
+- `WASM_DEPLOY_INGRESS_REQUIRE_OCI_DIGEST_REFS=true`
 
 Verification records are stored by artifact digest and can be queried from deploy ingress with:
 
 ```text
 GET /artifacts/{sha256}/verification
 ```
+
+That endpoint requires a read-capable bearer token when deploy-ingress auth is enabled.
 
 ### Manifest-driven remote deploy
 

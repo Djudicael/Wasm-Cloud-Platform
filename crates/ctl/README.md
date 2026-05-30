@@ -70,6 +70,10 @@ wasm-ctl deploy \
   --artifact-credential ghcr-reader
 ```
 
+If deploy ingress is running with `WASM_DEPLOY_INGRESS_REQUIRE_OCI_DIGEST_REFS=true`,
+mutable OCI tag refs like `oci://...:v1` are rejected and callers must use
+digest-pinned refs.
+
 Optional signed-artifact metadata can be attached on remote deploys:
 
 ```bash
@@ -79,10 +83,47 @@ wasm-ctl deploy \
   --artifact-ref oci://ghcr.io/example-org/hello@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef \
   --artifact-public-key <base64-ed25519-public-key> \
   --artifact-signature <base64-ed25519-signature> \
+  --artifact-signature-algorithm ed25519 \
   --artifact-issuer https://token.actions.githubusercontent.com \
   --artifact-repository example-org/hello \
   --artifact-namespace production
 ```
+
+For Cosign-style signed payload verification with a public key:
+
+```bash
+wasm-ctl deploy \
+  --app hello \
+  --version v1 \
+  --artifact-ref oci://ghcr.io/example-org/hello@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef \
+  --artifact-public-key <base64-ed25519-public-key> \
+  --artifact-signature <base64-ed25519-signature> \
+  --artifact-signature-algorithm cosign-ed25519 \
+  --artifact-signature-payload '{"critical":{"identity":{"docker-reference":"ghcr.io/example-org/hello"},"image":{"docker-manifest-digest":"sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"},"type":"cosign container image signature"},"optional":{"issuer":"https://token.actions.githubusercontent.com","repository":"example-org/hello","namespace":"production"}}'
+```
+
+`cosign-ed25519` verifies a Cosign-style signed payload with the supplied public
+key and then applies the normal deploy-ingress issuer/repository/namespace
+policy checks. It does not implement Fulcio/Rekor verification by itself.
+
+For Sigstore bundle verification:
+
+```bash
+wasm-ctl deploy \
+  --app hello \
+  --version v1 \
+  --artifact-url https://artifacts.example.com/hello.wasm \
+  --sha256 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef \
+  --artifact-public-key <base64-ed25519-public-key> \
+  --artifact-signature <base64-ed25519-signature> \
+  --artifact-signature-algorithm sigstore-bundle \
+  --artifact-signature-payload "$(cat artifact.sigstore.json)" \
+  --artifact-identity user@example.com \
+  --artifact-issuer https://github.com/login/oauth
+```
+
+This mode verifies a Sigstore bundle against Sigstore’s trust root. The current
+policy binding for it is issuer + identity.
 
 Artifact fetch credentials are managed separately from runtime app secrets:
 

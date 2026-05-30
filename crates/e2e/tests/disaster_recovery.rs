@@ -150,19 +150,28 @@ async fn test_total_node_loss_recovery() {
         .await
         .expect("Failed to upload artifact");
 
+    let artifact_transfer_manifests = authorize_artifact_for_audiences(
+        &node1,
+        &sha256,
+        &[node1.node_id.clone(), "test-dr-recovered".to_string()],
+    )
+    .await
+    .expect("Failed to authorize artifact for recovery nodes");
+
     let app_id = "dr-total-loss:v1";
     let artifact_url = format!(
         "http://127.0.0.1:{}/artifacts/{}",
         node1.artifact_port, sha256
     );
 
-    deploy_app(
+    deploy_app_with_manifests(
         &bus,
         app_id,
         artifact_url,
         sha256,
         size_bytes,
         build_app_config(app_id, 100_000_000, 100, 1),
+        artifact_transfer_manifests,
     )
     .await
     .expect("Failed to deploy app");
@@ -336,18 +345,28 @@ async fn test_integrity_check_at_startup() {
         .expect("App did not become ready");
 
     // Check that startup succeeded (node should be healthy)
-    // Note: Node uses hardcoded admin port 9190 in test harness
-    let health_resp = reqwest::get(format!("http://127.0.0.1:{}/health", 9190))
+    let health_resp = reqwest::get(format!("http://127.0.0.1:{}/health", node.admin_port))
         .await
         .expect("Failed to check health");
+    let health_json: serde_json::Value = health_resp.json().await.expect("Failed to parse health");
     assert_eq!(
-        health_resp.text().await.expect("Failed to read health"),
-        "OK",
+        health_json
+            .get("status")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default(),
+        "healthy",
         "Node should be healthy after startup integrity check"
+    );
+    assert_eq!(
+        health_json
+            .get("node_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default(),
+        "test-dr-integrity"
     );
 
     // Check that metrics endpoint is accessible
-    let metrics_resp = reqwest::get(format!("http://127.0.0.1:{}/metrics", 9190))
+    let metrics_resp = reqwest::get(format!("http://127.0.0.1:{}/metrics", node.admin_port))
         .await
         .expect("Failed to fetch metrics");
     assert!(

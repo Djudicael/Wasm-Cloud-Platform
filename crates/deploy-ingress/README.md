@@ -22,6 +22,17 @@ This keeps remote deploys off the node admin API and removes the need for CI to 
 
 ## API
 
+### Auth Matrix
+
+| Endpoint | Method | Required permission when auth is enabled | Notes |
+|----------|--------|-------------------------------------------|-------|
+| `/health` | `GET` | none | Liveness only |
+| `/deploy/intent` | `POST` | write | Mutating deploy request |
+| `/deploy/artifact-credentials` | `PUT` | write | Mutating credential store |
+| `/artifacts/{sha256}/verification` | `GET` | read | Verification lookup |
+
+If `WASM_DEPLOY_INGRESS_AUTH_ENABLED=false`, all endpoints behave as write-authorized for backward compatibility. That is acceptable for local development only.
+
 ### Health
 
 ```text
@@ -29,6 +40,19 @@ GET /health
 ```
 
 Returns a simple liveness payload.
+
+Example response:
+
+```json
+{
+  "status": "ok",
+  "ingress_id": "deploy-ingress-0",
+  "ha_enabled": true,
+  "is_leader": true,
+  "leader_ingress_id": "deploy-ingress-0",
+  "leader_artifact_server_url": "https://deploy.example.com/artifacts"
+}
+```
 
 ### Deploy Intent
 
@@ -38,6 +62,56 @@ POST /deploy/intent
 
 Accepts [`DeployIntentRequest`](../common/src/deploy.rs) JSON and returns `202 Accepted` with `DeployIntentResponse` on success.
 
+When auth is enabled, callers must send:
+
+```text
+Authorization: Bearer <write-token>
+```
+
+Minimum request shape:
+
+```json
+{
+  "app_id": "hello-api:v1",
+  "config": {
+    "id": "hello-api:v1",
+    "namespace": "default"
+  },
+  "artifact": {
+    "url": "https://artifacts.example.com/hello-api.wasm",
+    "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "credential_ref": "ghcr-reader"
+  }
+}
+```
+
+Success response:
+
+```json
+{
+  "app_id": "hello-api:v1",
+  "artifact_url": "http://deploy-ingress/artifacts/012345...",
+  "expected_hash": "012345...",
+  "size_bytes": 123456,
+  "source_node_id": "deploy-ingress-0",
+  "artifact_transfer_manifests": [],
+  "gateway_config_published": false,
+  "api_key_count": 0
+}
+```
+
+Primary status codes:
+
+| Status | Meaning |
+|--------|---------|
+| `202 Accepted` | Deploy intent accepted and `DeployApp` published |
+| `400 Bad Request` | Invalid deploy payload |
+| `401 Unauthorized` | Missing or invalid bearer token |
+| `403 Forbidden` | Authenticated caller lacks write permission, or security policy rejected the deploy |
+| `422 Unprocessable Entity` | Request body parsed but failed schema extraction/validation before handler logic |
+| `502 Bad Gateway` | Remote artifact source failed |
+| `503 Service Unavailable` | This ingress instance is a follower; retry on leader |
+
 ### Artifact Credential Storage
 
 ```text
@@ -46,7 +120,30 @@ PUT /deploy/artifact-credentials
 
 Stores a deploy-time artifact fetch credential under `_platform/artifact-credentials:v1`.
 
+When auth is enabled, callers must send:
+
+```text
+Authorization: Bearer <write-token>
+```
+
 This credential store is separate from application runtime secret injection. It exists only so deploy ingress can authenticate to external registries or artifact hosts.
+
+Request:
+
+```json
+{
+  "key": "ghcr-reader",
+  "value": "authorization:Bearer <token>"
+}
+```
+
+Success response:
+
+```json
+{
+  "key": "ghcr-reader"
+}
+```
 
 ### Artifact Verification Lookup
 
@@ -55,6 +152,43 @@ GET /artifacts/{sha256}/verification
 ```
 
 Returns the stored verification record for a previously accepted remote artifact.
+
+When auth is enabled, callers must send:
+
+```text
+Authorization: Bearer <read-token>
+```
+
+Success response:
+
+```json
+{
+  "sha256": "012345...",
+  "verified": true,
+  "algorithm": "ed25519",
+  "issuer": "https://token.actions.githubusercontent.com",
+  "repository": "example-org/hello-api",
+  "namespace": "production",
+  "public_key_sha256": "abcd...",
+  "verified_at_unix_secs": 1760000000
+}
+```
+
+If the artifact was never accepted, the endpoint returns `404`.
+
+### Follower Rejection Contract
+
+When HA is enabled, mutating requests sent to a follower return:
+
+```json
+{
+  "error": "deploy_ingress_not_leader",
+  "leader_ingress_id": "deploy-ingress-1",
+  "leader_artifact_server_url": "https://deploy.example.com/artifacts"
+}
+```
+
+with HTTP `503 Service Unavailable`.
 
 ## Configuration
 
@@ -83,8 +217,10 @@ Important variables:
 - `WASM_DEPLOY_INGRESS_HA_LEASE_REFRESH_SECS`
 - `WASM_DEPLOY_INGRESS_REQUIRE_SIGNATURE`
 - `WASM_DEPLOY_INGRESS_ALLOWED_ISSUERS`
+- `WASM_DEPLOY_INGRESS_ALLOWED_IDENTITIES`
 - `WASM_DEPLOY_INGRESS_ALLOWED_REPOSITORIES`
 - `WASM_DEPLOY_INGRESS_ALLOWED_NAMESPACES`
+- `WASM_DEPLOY_INGRESS_REQUIRE_OCI_DIGEST_REFS`
 
 Today there is no dedicated TOML config loader for this binary. The production shape is an environment file plus a systemd unit.
 
@@ -92,6 +228,7 @@ See:
 
 - [config/deploy-ingress.env.example](../../config/deploy-ingress.env.example)
 - [systemd/wasm-deploy-ingress.service](../../systemd/wasm-deploy-ingress.service)
+- [docs/deploy-ingress-operations.md](../../docs/deploy-ingress-operations.md)
 
 ## Security Model
 
@@ -102,12 +239,56 @@ See:
 - runtime application secrets are not resolved or injected here
 - digest verification is mandatory for URL-based artifacts
 - OCI references are resolved and verified before `DeployApp` is published
+- hardened mode can require digest-pinned OCI refs only
 - remote artifact fetch is capped at `64 MiB`
 - optional Ed25519-signed artifact metadata can be required by policy
+- Cosign-style signed payloads can also be verified with a public key via
+  `algorithm = "cosign-ed25519"`
+- Sigstore bundles can be verified via `algorithm = "sigstore-bundle"`
 - signature policy can restrict:
   - issuer
+  - identity
   - repository
   - namespace
+
+### Production Auth Guidance
+
+- enable auth on every public or shared-network deploy-ingress instance
+- keep the write token scoped to CI and deployment automation only
+- give the read token only to operator tooling that needs verification lookups
+- terminate TLS in front of deploy ingress or run it directly with a TLS-capable ingress layer
+- rotate read and write tokens independently
+- treat `WASM_CTL_AUTH_TOKEN` as a deploy secret in CI, not as a node bootstrap secret
+
+Recommended topology:
+
+1. public HTTPS ingress or load balancer in front of the deploy API
+2. private artifact port reachability from nodes
+3. write token available only to CI deploy jobs
+4. read token available only to operator diagnostics
+5. shared KEK and shared JetStream for HA ingress instances
+
+For full operating procedures, token rotation, KEK rotation, and failover expectations, see [docs/deploy-ingress-operations.md](../../docs/deploy-ingress-operations.md).
+
+`cosign-ed25519` is a narrower interoperability mode:
+
+- deploy ingress verifies the supplied signature against the supplied public key
+- the payload must contain Cosign-style digest and identity fields
+- issuer/repository/namespace are still enforced through the normal policy engine
+
+It does not yet implement Fulcio certificate validation or Rekor transparency-log verification.
+
+`sigstore-bundle` is the stronger interoperability mode:
+
+- deploy ingress verifies a Sigstore bundle against Sigstore’s production trust root
+- verification includes certificate and transparency-log checks through the upstream verifier
+- current policy binding for this mode is issuer + identity
+
+Repository/namespace allowlists remain native-signature policy knobs and are not currently derived from Sigstore bundle identity material.
+
+If `WASM_DEPLOY_INGRESS_REQUIRE_OCI_DIGEST_REFS=true`, tag refs such as
+`oci://ghcr.io/org/app:v1` are rejected and callers must use digest-pinned refs
+such as `oci://ghcr.io/org/app@sha256:...`.
 
 ## HA Behavior
 

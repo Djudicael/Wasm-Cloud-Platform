@@ -150,6 +150,7 @@ struct OciReference {
     registry: String,
     repository: String,
     reference: String,
+    is_digest: bool,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -271,7 +272,12 @@ fn parse_oci_reference(reference: &str) -> Result<OciReference, PlatformError> {
         registry: registry.to_string(),
         repository: repository.to_string(),
         reference: reference_value.to_string(),
+        is_digest: at_index.is_some(),
     })
+}
+
+pub fn oci_reference_is_digest_pinned(reference: &str) -> Result<bool, PlatformError> {
+    Ok(parse_oci_reference(reference)?.is_digest)
 }
 
 async fn send_authenticated_get(

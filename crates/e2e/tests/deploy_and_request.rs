@@ -250,6 +250,197 @@ async fn wait_for_deploy_ingress_role(
 }
 
 #[tokio::test]
+async fn test_deploy_ingress_auth_enforces_read_write_boundaries() {
+    let nats_port = reserve_test_port().expect("Failed to reserve NATS port");
+    let deploy_port = reserve_test_port().expect("Failed to reserve deploy ingress port");
+    let artifact_port = reserve_test_port().expect("Failed to reserve artifact ingress port");
+
+    let nats = NatsContainer::start(nats_port)
+        .await
+        .expect("Failed to start NATS");
+    let deploy_ingress = DeployIngressProcess::start_with_env(
+        "deploy-ingress-auth",
+        &nats.url,
+        deploy_port,
+        artifact_port,
+        &[
+            ("WASM_DEPLOY_INGRESS_HA_ENABLED", "false"),
+            ("WASM_DEPLOY_INGRESS_AUTH_ENABLED", "true"),
+            (
+                "WASM_DEPLOY_INGRESS_AUTH_READ_TOKEN",
+                "read-token-1234567890",
+            ),
+            (
+                "WASM_DEPLOY_INGRESS_AUTH_WRITE_TOKEN",
+                "write-token-1234567890",
+            ),
+        ],
+    )
+    .await
+    .expect("Failed to start deploy ingress");
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .expect("Failed to build HTTP client");
+    let deploy_url = format!("http://127.0.0.1:{deploy_port}");
+
+    let health = client
+        .get(format!("{deploy_url}/health"))
+        .send()
+        .await
+        .expect("Failed to query health endpoint");
+    assert_eq!(health.status(), StatusCode::OK);
+
+    let credential_body = serde_json::json!({
+        "key": "registry-reader",
+        "value": "authorization:Bearer registry-token",
+    });
+
+    let unauthorized_write = client
+        .put(format!("{deploy_url}/deploy/artifact-credentials"))
+        .json(&credential_body)
+        .send()
+        .await
+        .expect("Failed to send unauthorized write request");
+    assert_eq!(unauthorized_write.status(), StatusCode::UNAUTHORIZED);
+
+    let forbidden_write = client
+        .put(format!("{deploy_url}/deploy/artifact-credentials"))
+        .bearer_auth("read-token-1234567890")
+        .json(&credential_body)
+        .send()
+        .await
+        .expect("Failed to send read-token write request");
+    assert_eq!(forbidden_write.status(), StatusCode::FORBIDDEN);
+
+    let authorized_write = client
+        .put(format!("{deploy_url}/deploy/artifact-credentials"))
+        .bearer_auth("write-token-1234567890")
+        .json(&credential_body)
+        .send()
+        .await
+        .expect("Failed to send write-token write request");
+    assert_eq!(authorized_write.status(), StatusCode::OK);
+
+    let artifact_sha = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
+    let unauthorized_read = client
+        .get(format!(
+            "{deploy_url}/artifacts/{artifact_sha}/verification"
+        ))
+        .send()
+        .await
+        .expect("Failed to send unauthorized read request");
+    assert_eq!(unauthorized_read.status(), StatusCode::UNAUTHORIZED);
+
+    let read_token_read = client
+        .get(format!(
+            "{deploy_url}/artifacts/{artifact_sha}/verification"
+        ))
+        .bearer_auth("read-token-1234567890")
+        .send()
+        .await
+        .expect("Failed to send read-token read request");
+    assert_eq!(read_token_read.status(), StatusCode::NOT_FOUND);
+
+    let write_token_read = client
+        .get(format!(
+            "{deploy_url}/artifacts/{artifact_sha}/verification"
+        ))
+        .bearer_auth("write-token-1234567890")
+        .send()
+        .await
+        .expect("Failed to send write-token read request");
+    assert_eq!(write_token_read.status(), StatusCode::NOT_FOUND);
+
+    let deploy_with_read_token = client
+        .post(format!("{deploy_url}/deploy/intent"))
+        .bearer_auth("read-token-1234567890")
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .expect("Failed to send read-token deploy request");
+    assert_eq!(deploy_with_read_token.status(), StatusCode::FORBIDDEN);
+
+    let deploy_with_write_token = client
+        .post(format!("{deploy_url}/deploy/intent"))
+        .bearer_auth("write-token-1234567890")
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .expect("Failed to send write-token deploy request");
+    assert_eq!(
+        deploy_with_write_token.status(),
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+
+    drop(deploy_ingress);
+    drop(nats);
+}
+
+#[tokio::test]
+async fn test_deploy_ingress_rejects_malformed_auth_and_oversized_body() {
+    let nats_port = reserve_test_port().expect("Failed to reserve NATS port");
+    let deploy_port = reserve_test_port().expect("Failed to reserve deploy ingress port");
+    let artifact_port = reserve_test_port().expect("Failed to reserve artifact ingress port");
+
+    let nats = NatsContainer::start(nats_port)
+        .await
+        .expect("Failed to start NATS");
+    let deploy_ingress = DeployIngressProcess::start_with_env(
+        "deploy-ingress-edge-auth",
+        &nats.url,
+        deploy_port,
+        artifact_port,
+        &[
+            ("WASM_DEPLOY_INGRESS_HA_ENABLED", "false"),
+            ("WASM_DEPLOY_INGRESS_AUTH_ENABLED", "true"),
+            (
+                "WASM_DEPLOY_INGRESS_AUTH_READ_TOKEN",
+                "read-token-1234567890",
+            ),
+            (
+                "WASM_DEPLOY_INGRESS_AUTH_WRITE_TOKEN",
+                "write-token-1234567890",
+            ),
+        ],
+    )
+    .await
+    .expect("Failed to start deploy ingress");
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .expect("Failed to build HTTP client");
+    let deploy_url = format!("http://127.0.0.1:{deploy_port}");
+    let artifact_sha = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
+
+    let malformed_auth = client
+        .get(format!(
+            "{deploy_url}/artifacts/{artifact_sha}/verification"
+        ))
+        .header(reqwest::header::AUTHORIZATION, "Token not-a-bearer-token")
+        .send()
+        .await
+        .expect("Failed to send malformed auth request");
+    assert_eq!(malformed_auth.status(), StatusCode::UNAUTHORIZED);
+
+    let oversized_body = "x".repeat(300 * 1024);
+    let oversized = client
+        .post(format!("{deploy_url}/deploy/intent"))
+        .bearer_auth("write-token-1234567890")
+        .header(reqwest::header::CONTENT_TYPE, "application/json")
+        .body(oversized_body)
+        .send()
+        .await
+        .expect("Failed to send oversized request");
+    assert_eq!(oversized.status(), StatusCode::PAYLOAD_TOO_LARGE);
+
+    drop(deploy_ingress);
+    drop(nats);
+}
+
+#[tokio::test]
 async fn test_deploy_and_serve_http() {
     let nats_port = reserve_test_port().expect("Failed to reserve NATS port");
     let proxy_port = reserve_test_port().expect("Failed to reserve proxy port");
@@ -340,10 +531,18 @@ async fn test_deploy_and_serve_http() {
 
     // 9. Test another endpoint
     eprintln!("Sending HTTP request to /health");
-    let health_response = send_request(node.proxy_port, "test-app.local", "/health")
-        .await
-        .expect("Failed to send health request");
-
+    let mut health_response = None;
+    for _ in 0..10 {
+        let response = send_request(node.proxy_port, "test-app.local", "/health")
+            .await
+            .expect("Failed to send health request");
+        if response.status() == 200 {
+            health_response = Some(response);
+            break;
+        }
+        sleep(Duration::from_millis(250)).await;
+    }
+    let health_response = health_response.expect("App did not return 200 for /health in time");
     assert_eq!(health_response.status(), 200);
 
     // Cleanup
@@ -950,6 +1149,7 @@ async fn test_deploy_and_serve_http_via_oci_artifact_ref() {
     let signed_claims = serde_json::to_vec(&serde_json::json!({
         "sha256": wasm_hash,
         "issuer": "https://token.actions.githubusercontent.com",
+        "identity": serde_json::Value::Null,
         "repository": "example-org/hello-axum",
         "namespace": "default",
     }))
@@ -1136,6 +1336,7 @@ async fn test_deploy_via_oci_artifact_ref_rejected_by_signature_policy() {
     let signed_claims = serde_json::to_vec(&serde_json::json!({
         "sha256": wasm_hash,
         "issuer": "https://token.actions.githubusercontent.com",
+        "identity": serde_json::Value::Null,
         "repository": "example-org/hello-axum",
         "namespace": "default",
     }))
@@ -1228,6 +1429,139 @@ async fn test_deploy_via_oci_artifact_ref_rejected_by_signature_policy() {
         .and_then(|v| v.as_str())
         .unwrap_or_default()
         .contains("repository claim 'example-org/hello-axum' is not allowed"));
+
+    node.stop().ok();
+    deploy_ingress.stop().ok();
+}
+
+#[tokio::test]
+async fn test_deploy_via_oci_tag_ref_rejected_by_digest_pin_policy() {
+    use tokio::time::sleep;
+
+    let nats_port = reserve_test_port().expect("Failed to reserve NATS port");
+    let proxy_port = reserve_test_port().expect("Failed to reserve proxy port");
+    let artifact_port = reserve_test_port().expect("Failed to reserve artifact port");
+    let admin_port = reserve_test_port().expect("Failed to reserve admin port");
+
+    let nats = NatsContainer::start(nats_port)
+        .await
+        .expect("Failed to start NATS");
+    let bus = nats.connect().await.expect("Failed to connect to NATS");
+    bus.setup_jetstream()
+        .await
+        .expect("Failed to setup JetStream");
+
+    let node = NodeProcess::start_with_admin(
+        "test-node-oci-digest-policy-0",
+        &nats.url,
+        proxy_port,
+        artifact_port,
+        admin_port,
+    )
+    .await
+    .expect("Failed to start node");
+
+    let deploy_port = reserve_test_port().expect("Failed to reserve deploy ingress port");
+    let deploy_artifact_port = reserve_test_port().expect("Failed to reserve deploy artifact port");
+    let deploy_ingress = DeployIngressProcess::start_with_env(
+        "test-deploy-ingress-digest-policy-0",
+        &nats.url,
+        deploy_port,
+        deploy_artifact_port,
+        &[("WASM_DEPLOY_INGRESS_REQUIRE_OCI_DIGEST_REFS", "true")],
+    )
+    .await
+    .expect("Failed to start deploy ingress");
+    wait_for_deploy_intent_ready(deploy_ingress.deploy_port)
+        .await
+        .expect("Deploy intent route did not become ready");
+
+    let wasm_path = find_hello_axum_wasm().expect("hello_axum.wasm not found");
+    let wasm_bytes = std::fs::read(&wasm_path).expect("Failed to read hello-axum.wasm");
+    let (_registry_handle, registry_port, wasm_hash) = start_mock_oci_registry(wasm_bytes)
+        .await
+        .expect("Failed to start local OCI registry");
+
+    let node_api = format!("http://127.0.0.1:{}", node.admin_port);
+    let deploy_api = format!("http://127.0.0.1:{}", deploy_ingress.deploy_port);
+
+    run_ctl_async(
+        vec![
+            "secrets".to_string(),
+            "set-artifact-credential".to_string(),
+            "--key".to_string(),
+            "ghcr-reader".to_string(),
+            "--value".to_string(),
+            "authorization:Bearer registry-token".to_string(),
+        ],
+        nats.url.clone(),
+        node_api.clone(),
+        deploy_api.clone(),
+    )
+    .await
+    .expect("Failed to store artifact credential via wasm-ctl");
+
+    sleep(Duration::from_secs(1)).await;
+
+    let deploy_result = run_ctl_async(
+        vec![
+            "deploy".to_string(),
+            "--app".to_string(),
+            "hello-axum-oci-digest-policy".to_string(),
+            "--version".to_string(),
+            "v1".to_string(),
+            "--artifact-ref".to_string(),
+            format!("oci://127.0.0.1:{registry_port}/example-org/hello-axum:v1"),
+            "--artifact-credential".to_string(),
+            "ghcr-reader".to_string(),
+        ],
+        nats.url.clone(),
+        node_api.clone(),
+        deploy_api.clone(),
+    )
+    .await;
+
+    let error = deploy_result.expect_err("Deploy should be rejected by OCI digest pin policy");
+    assert!(
+        error
+            .contains("deploy-ingress policy requires OCI artifact references to be digest-pinned"),
+        "unexpected deploy error: {error}"
+    );
+
+    let verification = reqwest::Client::new()
+        .get(format!(
+            "{}/artifacts/{}/verification",
+            deploy_api, wasm_hash
+        ))
+        .send()
+        .await
+        .expect("Failed to query deploy-ingress verification record");
+    assert_eq!(verification.status(), 404);
+
+    let expected_reference = format!("oci://127.0.0.1:{registry_port}/example-org/hello-axum:v1");
+    let audit_records = read_audit_records(&deploy_ingress.audit_path)
+        .expect("Failed to read deploy-ingress audit records");
+    let rejected = audit_records
+        .iter()
+        .find(|record| {
+            record.get("event").and_then(|v| v.as_str()) == Some("deploy_intent_rejected")
+        })
+        .expect("Missing deploy_intent_rejected audit record");
+    assert_eq!(
+        rejected.get("app_id").and_then(|v| v.as_str()),
+        Some("default/hello-axum-oci-digest-policy:v1")
+    );
+    assert_eq!(
+        rejected
+            .get("artifact_source_reference")
+            .and_then(|v| v.as_str()),
+        Some(expected_reference.as_str())
+    );
+    assert!(rejected
+        .get("message")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .contains("digest-pinned"));
 
     node.stop().ok();
     deploy_ingress.stop().ok();

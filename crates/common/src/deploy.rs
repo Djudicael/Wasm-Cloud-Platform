@@ -10,7 +10,11 @@ pub struct ArtifactSignature {
     pub public_key: String,
     pub signature: String,
     #[serde(default)]
+    pub payload: Option<String>,
+    #[serde(default)]
     pub issuer: Option<String>,
+    #[serde(default)]
+    pub identity: Option<String>,
     #[serde(default)]
     pub repository: Option<String>,
     #[serde(default)]
@@ -99,6 +103,8 @@ pub struct ArtifactVerificationRecord {
     pub algorithm: Option<String>,
     #[serde(default)]
     pub issuer: Option<String>,
+    #[serde(default)]
+    pub identity: Option<String>,
     #[serde(default)]
     pub repository: Option<String>,
     #[serde(default)]
