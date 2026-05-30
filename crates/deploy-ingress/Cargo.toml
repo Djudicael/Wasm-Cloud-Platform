@@ -24,6 +24,7 @@ sha2 = { workspace = true }
 async-nats = { workspace = true }
 base64 = "0.22"
 ed25519-dalek = "2"
+sigstore-verify = "0.8.0"
 
 common = { version = "0.1.0", path = "../common" }
 storage = { version = "0.1.0", path = "../storage" }

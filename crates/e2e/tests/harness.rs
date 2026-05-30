@@ -149,6 +149,44 @@ pub struct DeployIngressProcess {
     process: Child,
 }
 
+fn advertised_node_host() -> String {
+    static HOSTNAME: OnceLock<String> = OnceLock::new();
+    HOSTNAME
+        .get_or_init(|| {
+            let ip_output = Command::new("sh")
+                .arg("-c")
+                .arg("hostname -I 2>/dev/null")
+                .output()
+                .ok();
+
+            let non_loopback_ip = ip_output
+                .and_then(|out| String::from_utf8(out.stdout).ok())
+                .and_then(|value| {
+                    value
+                        .split_whitespace()
+                        .find(|candidate| {
+                            candidate
+                                .parse::<std::net::IpAddr>()
+                                .ok()
+                                .is_some_and(|ip| {
+                                    !ip.is_loopback() && matches!(ip, std::net::IpAddr::V4(_))
+                                })
+                        })
+                        .map(str::to_string)
+                });
+
+            non_loopback_ip.unwrap_or_else(|| {
+                let output = Command::new("hostname").output().ok();
+                output
+                    .and_then(|out| String::from_utf8(out.stdout).ok())
+                    .map(|value| value.trim().to_string())
+                    .filter(|value| !value.is_empty())
+                    .unwrap_or_else(|| "localhost".to_string())
+            })
+        })
+        .clone()
+}
+
 impl NodeProcess {
     #[allow(dead_code)]
     /// Start a wasm-node process (use start_with_admin for custom admin port)
@@ -173,6 +211,7 @@ impl NodeProcess {
         let deploy_port = reserve_test_port()?;
         let temp_dir = tempfile::tempdir()?;
         let db_path = temp_dir.path().join("node.db");
+        let advertised_host = advertised_node_host();
 
         let node_binary = find_node_binary()?;
 
@@ -196,6 +235,8 @@ impl NodeProcess {
             .arg(artifact_port.to_string())
             .arg("--deploy-ingress-port")
             .arg(deploy_port.to_string())
+            .arg("--admin-advertised-host")
+            .arg(&advertised_host)
             .arg("--db-path")
             .arg(&db_path)
             .env("RUST_LOG", "debug")
@@ -258,6 +299,7 @@ impl NodeProcess {
         _temp_dir: TempDir,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let deploy_port = reserve_test_port()?;
+        let advertised_host = advertised_node_host();
         let node_binary = find_node_binary()?;
 
         eprintln!("Restarting node {} with existing DB", node_id);
@@ -277,6 +319,8 @@ impl NodeProcess {
             .arg(artifact_port.to_string())
             .arg("--deploy-ingress-port")
             .arg(deploy_port.to_string())
+            .arg("--admin-advertised-host")
+            .arg(&advertised_host)
             .arg("--db-path")
             .arg(&db_path)
             .env("RUST_LOG", "debug")
@@ -876,10 +920,25 @@ pub async fn upload_and_authorize_artifact_for_node(
 
     upload_artifact(node.artifact_port, wasm_path, &sha256).await?;
 
+    let manifests =
+        authorize_artifact_for_audiences(node, &sha256, &[node.node_id.clone()]).await?;
+
     let artifact_url = format!(
         "http://127.0.0.1:{}/artifacts/{}",
         node.artifact_port, sha256
     );
+
+    Ok((artifact_url, sha256, size_bytes, manifests))
+}
+
+pub async fn authorize_artifact_for_audiences(
+    node: &NodeProcess,
+    sha256: &str,
+    audiences: &[String],
+) -> Result<
+    Vec<common::artifact_transfer::ArtifactManifestAudienceBinding>,
+    Box<dyn std::error::Error>,
+> {
     let authorize_url = format!(
         "http://127.0.0.1:{}/artifacts/{}/authorize",
         node.artifact_port, sha256
@@ -888,7 +947,7 @@ pub async fn upload_and_authorize_artifact_for_node(
     let response = reqwest::Client::new()
         .post(&authorize_url)
         .json(&ArtifactManifestBatchRequest {
-            audiences: vec![node.node_id.clone()],
+            audiences: audiences.to_vec(),
         })
         .send()
         .await?;
@@ -902,12 +961,10 @@ pub async fn upload_and_authorize_artifact_for_node(
         .into());
     }
 
-    let manifests = response
+    Ok(response
         .json::<ArtifactManifestBatchResponse>()
         .await?
-        .manifests;
-
-    Ok((artifact_url, sha256, size_bytes, manifests))
+        .manifests)
 }
 
 /// Build a default AppConfig for testing
@@ -945,11 +1002,32 @@ pub async fn deploy_app(
     size_bytes: u64,
     config: common::types::AppConfig,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    deploy_app_with_manifests(
+        bus,
+        app_id,
+        artifact_url,
+        expected_hash,
+        size_bytes,
+        config,
+        Vec::new(),
+    )
+    .await
+}
+
+pub async fn deploy_app_with_manifests(
+    bus: &NatsBus,
+    app_id: &str,
+    artifact_url: String,
+    expected_hash: String,
+    size_bytes: u64,
+    config: common::types::AppConfig,
+    artifact_transfer_manifests: Vec<common::artifact_transfer::ArtifactManifestAudienceBinding>,
+) -> Result<(), Box<dyn std::error::Error>> {
     let event = Event::DeployApp {
         app_id: common::types::AppId(app_id.to_string()),
         config,
         artifact_url: artifact_url.clone(),
-        artifact_transfer_manifests: vec![],
+        artifact_transfer_manifests,
         expected_hash: Some(expected_hash.clone()),
         size_bytes,
     };

@@ -55,13 +55,25 @@ pub struct DeployArgs {
     #[arg(long)]
     artifact_public_key: Option<String>,
 
+    /// Signature verification algorithm: ed25519 or cosign-ed25519
+    #[arg(long, default_value = "ed25519")]
+    artifact_signature_algorithm: String,
+
     /// Base64-encoded Ed25519 signature over the artifact claims payload
     #[arg(long)]
     artifact_signature: Option<String>,
 
+    /// Optional signature payload. Required for cosign-ed25519 mode.
+    #[arg(long)]
+    artifact_signature_payload: Option<String>,
+
     /// Optional signature issuer claim
     #[arg(long)]
     artifact_issuer: Option<String>,
+
+    /// Optional signature identity claim
+    #[arg(long)]
+    artifact_identity: Option<String>,
 
     /// Optional signature repository claim
     #[arg(long)]
@@ -208,14 +220,39 @@ enum ArtifactInput {
 fn build_artifact_signature(args: &DeployArgs) -> Result<Option<ArtifactSignature>> {
     match (&args.artifact_public_key, &args.artifact_signature) {
         (None, None) => Ok(None),
-        (Some(public_key), Some(signature)) => Ok(Some(ArtifactSignature {
-            algorithm: "ed25519".to_string(),
-            public_key: public_key.clone(),
-            signature: signature.clone(),
-            issuer: args.artifact_issuer.clone(),
-            repository: args.artifact_repository.clone(),
-            namespace: args.artifact_namespace.clone(),
-        })),
+        (Some(public_key), Some(signature)) => {
+            let algorithm = args.artifact_signature_algorithm.trim().to_lowercase();
+            if algorithm != "ed25519"
+                && algorithm != "cosign-ed25519"
+                && algorithm != "sigstore-bundle"
+            {
+                anyhow::bail!(
+                    "--artifact-signature-algorithm must be one of ed25519, cosign-ed25519, or sigstore-bundle"
+                );
+            }
+            if (algorithm == "cosign-ed25519" || algorithm == "sigstore-bundle")
+                && args.artifact_signature_payload.is_none()
+            {
+                anyhow::bail!(
+                    "--artifact-signature-payload is required when --artifact-signature-algorithm is cosign-ed25519 or sigstore-bundle"
+                );
+            }
+            if algorithm == "sigstore-bundle" && args.artifact_identity.is_none() {
+                anyhow::bail!(
+                    "--artifact-identity is required when --artifact-signature-algorithm=sigstore-bundle"
+                );
+            }
+            Ok(Some(ArtifactSignature {
+                algorithm,
+                public_key: public_key.clone(),
+                signature: signature.clone(),
+                payload: args.artifact_signature_payload.clone(),
+                issuer: args.artifact_issuer.clone(),
+                identity: args.artifact_identity.clone(),
+                repository: args.artifact_repository.clone(),
+                namespace: args.artifact_namespace.clone(),
+            }))
+        }
         _ => anyhow::bail!(
             "--artifact-public-key and --artifact-signature must be provided together"
         ),
@@ -1103,6 +1140,71 @@ mod tests {
                 assert!(source.url.is_empty());
                 assert!(source.sha256.is_empty());
                 assert_eq!(source.credential_ref.as_deref(), Some("ghcr-reader"));
+            }
+            ArtifactInput::LocalPath(_) => panic!("expected remote artifact input"),
+        }
+    }
+
+    #[test]
+    fn test_build_artifact_signature_accepts_cosign_payload_mode() {
+        let parsed = DeployCliTestHarness::parse_from([
+            "wasm-ctl",
+            "--app",
+            "api",
+            "--artifact-ref",
+            "oci://ghcr.io/example-org/example-app@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            "--artifact-public-key",
+            "cHVibGljLWtleQ==",
+            "--artifact-signature",
+            "c2lnbmF0dXJl",
+            "--artifact-signature-algorithm",
+            "cosign-ed25519",
+            "--artifact-signature-payload",
+            "{\"critical\":{\"identity\":{\"docker-reference\":\"ghcr.io/example-org/example-app\"},\"image\":{\"docker-manifest-digest\":\"sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"},\"type\":\"cosign container image signature\"}}",
+        ]);
+
+        let resolved = resolve_artifact_input(&parsed.args, None).unwrap();
+        match resolved {
+            ArtifactInput::Remote(source) => {
+                let signature = source.signature.expect("signature missing");
+                assert_eq!(signature.algorithm, "cosign-ed25519");
+                assert!(signature.payload.is_some());
+            }
+            ArtifactInput::LocalPath(_) => panic!("expected remote artifact input"),
+        }
+    }
+
+    #[test]
+    fn test_build_artifact_signature_accepts_sigstore_bundle_mode() {
+        let parsed = DeployCliTestHarness::parse_from([
+            "wasm-ctl",
+            "--app",
+            "api",
+            "--artifact-url",
+            "https://artifacts.example.com/api.wasm",
+            "--sha256",
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            "--artifact-public-key",
+            "cHVibGljLWtleQ==",
+            "--artifact-signature",
+            "c2lnbmF0dXJl",
+            "--artifact-signature-algorithm",
+            "sigstore-bundle",
+            "--artifact-signature-payload",
+            "{\"mediaType\":\"application/vnd.dev.sigstore.bundle+json;version=0.3\"}",
+            "--artifact-identity",
+            "user@example.com",
+            "--artifact-issuer",
+            "https://github.com/login/oauth",
+        ]);
+
+        let resolved = resolve_artifact_input(&parsed.args, None).unwrap();
+        match resolved {
+            ArtifactInput::Remote(source) => {
+                let signature = source.signature.expect("signature missing");
+                assert_eq!(signature.algorithm, "sigstore-bundle");
+                assert!(signature.payload.is_some());
+                assert_eq!(signature.identity.as_deref(), Some("user@example.com"));
             }
             ArtifactInput::LocalPath(_) => panic!("expected remote artifact input"),
         }
