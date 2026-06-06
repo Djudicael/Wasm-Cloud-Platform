@@ -23,7 +23,7 @@ reqwest = { workspace = true }
 serde = { workspace = true }
 messaging = { version = "0.1.0", path = "../messaging" }
 dashmap = { workspace = true }
-rand = "0.8"
+rand = "0.10"
 hex = { workspace = true }
 chrono = { workspace = true }
 jsonwebtoken = "9"
