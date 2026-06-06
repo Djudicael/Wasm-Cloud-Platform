@@ -1,3 +1,9 @@
+//! Cluster event handling entrypoint.
+//!
+//! The event dispatcher stays here while heavier domain logic lives in focused
+//! submodules for deploy ingestion, bootstrap, cluster runtime updates, and
+//! upgrade/drain behavior.
+
 use common::{
     artifact_transfer::{
         ArtifactManifestAudienceBinding, ArtifactTransferAuthority,
@@ -14,48 +20,38 @@ use proxy::router::HostRouter;
 use proxy::upstream::UpstreamRegistry;
 use reqwest::Url;
 use runtime::WasmRuntime;
-use secrets::{
-    encrypt_for_peer, BootstrapKeyPair, SecretProvider, SecretTransportEntry,
-    SecretTransportEnvelope, SecretTransportPayload,
-};
+use secrets::{BootstrapKeyPair, SecretProvider, SecretTransportEntry};
 use sha2::Digest;
-use std::collections::HashMap;
 use std::sync::Arc;
 use storage::Store;
 use supervisor::Supervisor;
 use tokio::sync::Mutex;
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 
+mod bootstrap;
+mod cluster_runtime;
 mod deploy_intent;
+mod upgrade_runtime;
 
+use bootstrap::BootstrapContext;
+pub(crate) use bootstrap::{apply_secret_update, BootstrapSessionState};
+use cluster_runtime::ClusterRuntimeContext;
+#[allow(dead_code)]
+pub(crate) const BOOTSTRAP_APPLIED_META_KEY: &str = bootstrap::BOOTSTRAP_APPLIED_META_KEY;
+#[allow(dead_code)]
+pub(crate) const BOOTSTRAP_PENDING_META_KEY: &str = bootstrap::BOOTSTRAP_PENDING_META_KEY;
 #[cfg(test)]
 pub(crate) use deploy_intent::artifact_credentials_app_id;
-use deploy_intent::validate_peer_artifact_url;
 pub use deploy_intent::{
     ingest_remote_artifact, oci_reference_is_digest_pinned, process_deploy_intent,
     DeployIntentContext,
 };
 #[cfg(test)]
 use deploy_intent::{
-    is_loopback_artifact_url, normalized_host_architecture, MAX_REMOTE_ARTIFACT_BYTES,
+    is_loopback_artifact_url, normalized_host_architecture, validate_peer_artifact_url,
+    MAX_REMOTE_ARTIFACT_BYTES,
 };
-
-pub(crate) const BOOTSTRAP_PENDING_META_KEY: &str = "bootstrap.pending_session";
-pub(crate) const BOOTSTRAP_APPLIED_META_KEY: &str = "bootstrap.applied_session";
-
-pub(crate) struct BootstrapSessionState {
-    pub session_id: String,
-    pub nonce: String,
-    pub keypair: BootstrapKeyPair,
-    pub applied: bool,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-struct BootstrapSessionRecord {
-    session_id: String,
-    nonce: String,
-    applied_at_ms: Option<u64>,
-}
+use upgrade_runtime::UpgradeContext;
 
 fn now_unix_ms() -> u64 {
     std::time::SystemTime::now()
@@ -82,119 +78,6 @@ fn extract_proxy_host(address: &str) -> Option<String> {
     Url::parse(&format!("http://{address}"))
         .ok()
         .and_then(|parsed| parsed.host_str().map(str::to_string))
-}
-
-fn decode_plaintext_secret(envelope: &SecretTransportEnvelope) -> Result<String, PlatformError> {
-    if envelope.version != SecretTransportEnvelope::VERSION_1 {
-        return Err(PlatformError::messaging(format!(
-            "unsupported secret transport version {}",
-            envelope.version
-        )));
-    }
-
-    match &envelope.payload {
-        SecretTransportPayload::PlaintextUtf8V1 { value } => Ok(value.clone()),
-        other => Err(PlatformError::messaging(format!(
-            "unexpected secret payload variant for secret rotation: {:?}",
-            other
-        ))),
-    }
-}
-
-fn decrypt_node_transport_secret(
-    keypair: &BootstrapKeyPair,
-    envelope: &SecretTransportEnvelope,
-) -> Result<String, PlatformError> {
-    if envelope.version != SecretTransportEnvelope::VERSION_1 {
-        return Err(PlatformError::messaging(format!(
-            "unsupported secret transport version {}",
-            envelope.version
-        )));
-    }
-
-    let ciphertext = match &envelope.payload {
-        SecretTransportPayload::NodeTransportCiphertextV1 { ciphertext } => ciphertext,
-        other => {
-            return Err(PlatformError::messaging(format!(
-                "unexpected node transport secret payload variant: {:?}",
-                other
-            )))
-        }
-    };
-
-    let plaintext_bytes = keypair.decrypt(ciphertext)?;
-    String::from_utf8(plaintext_bytes)
-        .map_err(|e| PlatformError::encryption_with_msg("node transport secret not valid UTF-8", e))
-}
-
-fn decrypt_bootstrap_secret(
-    keypair: &BootstrapKeyPair,
-    envelope: &SecretTransportEnvelope,
-) -> Result<String, PlatformError> {
-    if envelope.version != SecretTransportEnvelope::VERSION_1 {
-        return Err(PlatformError::messaging(format!(
-            "unsupported bootstrap secret transport version {}",
-            envelope.version
-        )));
-    }
-
-    let ciphertext = match &envelope.payload {
-        SecretTransportPayload::BootstrapPeerCiphertextV1 { ciphertext } => ciphertext,
-        other => {
-            return Err(PlatformError::messaging(format!(
-                "unexpected bootstrap secret payload variant: {:?}",
-                other
-            )))
-        }
-    };
-
-    let plaintext_bytes = keypair.decrypt(ciphertext)?;
-    String::from_utf8(plaintext_bytes)
-        .map_err(|e| PlatformError::encryption_with_msg("bootstrap secret not valid UTF-8", e))
-}
-
-async fn apply_secret_update<S: SecretProvider + ?Sized>(
-    secret_provider: &S,
-    transport_keypair: &BootstrapKeyPair,
-    app_id: &AppId,
-    key: &str,
-    secret: &SecretTransportEnvelope,
-) -> Result<(), PlatformError> {
-    let plaintext = match &secret.payload {
-        SecretTransportPayload::PlaintextUtf8V1 { .. } => decode_plaintext_secret(secret)?,
-        SecretTransportPayload::NodeTransportCiphertextV1 { .. } => {
-            decrypt_node_transport_secret(transport_keypair, secret)?
-        }
-        other => {
-            return Err(PlatformError::messaging(format!(
-                "unexpected secret payload variant for secret rotation: {:?}",
-                other
-            )))
-        }
-    };
-    secret_provider.set(app_id, key, &plaintext).await
-}
-
-fn persist_applied_bootstrap_session(
-    store: &Store,
-    session_id: &str,
-    nonce: &str,
-) -> Result<(), PlatformError> {
-    let record = BootstrapSessionRecord {
-        session_id: session_id.to_string(),
-        nonce: nonce.to_string(),
-        applied_at_ms: Some(now_unix_ms()),
-    };
-    let json = serde_json::to_string(&record).map_err(|e| {
-        PlatformError::storage_with_msg("failed to serialize bootstrap metadata", e)
-    })?;
-    store
-        .save_meta(BOOTSTRAP_APPLIED_META_KEY, &json)
-        .map_err(PlatformError::storage_source)?;
-    store
-        .delete_meta(BOOTSTRAP_PENDING_META_KEY)
-        .map_err(PlatformError::storage_source)?;
-    Ok(())
 }
 
 pub struct EventDispatcher {
@@ -247,73 +130,23 @@ impl EventDispatcher {
                 .await
             }
             Event::RemoveApp { app_id } => self.handle_remove(app_id).await,
-            Event::RouteAdd { route } => {
-                self.store.save_route(&route)?;
-                self.host_router
-                    .add_route(
-                        route.host.clone(),
-                        route.path_prefix.clone(),
-                        route.app_id.clone(),
-                        route.strip_prefix,
-                    )
-                    .await;
-                info!(host = %route.host, app = %route.app_id.0, "route added");
-                if let Some(ref webhook) = self.dns_webhook {
-                    webhook
-                        .notify_route_change("add", &route.host, &route.app_id.0)
-                        .await;
-                }
-                Ok(())
-            }
-            Event::RouteRemove { host } => {
-                // Load route to get app_id and path_prefix for webhook before deleting.
-                // A missing pre-delete lookup is not fatal — it only affects webhook context.
-                let existing = self.store.load_route(&host).ok().flatten();
-                let app_id = existing.as_ref().map(|r| r.app_id.clone());
-                let path_prefix = existing
-                    .as_ref()
-                    .map(|r| r.path_prefix.clone())
-                    .unwrap_or_default();
-                self.store.delete_route(&host)?;
-                self.host_router.remove_route(&host, &path_prefix).await;
-                info!(host, "route removed");
-                if let Some(ref webhook) = self.dns_webhook {
-                    if let Some(app_id) = app_id {
-                        webhook
-                            .notify_route_change("remove", &host, &app_id.0)
-                            .await;
-                    }
-                }
-                Ok(())
-            }
+            Event::RouteAdd { route } => self.handle_route_add(route).await,
+            Event::RouteRemove { host } => self.handle_route_remove(host).await,
             Event::InstanceReady {
                 app_id,
                 addr,
                 node_id,
             } => {
-                // Only register if it's from a DIFFERENT node
-                // (our own instances are registered directly by the Supervisor)
-                if node_id != self.our_node_id() {
-                    self.upstream
-                        .add(
-                            &app_id,
-                            proxy::upstream::UpstreamEndpoint { addr, h2c: false },
-                        )
-                        .await;
-                    info!(app = %app_id.0, %addr, from_node = %node_id, "remote instance registered");
-                }
-                Ok(())
+                self.handle_remote_instance_ready(app_id, addr, node_id)
+                    .await
             }
             Event::InstanceDead {
                 app_id,
                 addr,
                 node_id,
             } => {
-                if node_id != self.our_node_id() {
-                    self.upstream.remove(&app_id, &addr).await;
-                    info!(app = %app_id.0, %addr, from_node = %node_id, "remote instance deregistered");
-                }
-                Ok(())
+                self.handle_remote_instance_dead(app_id, addr, node_id)
+                    .await
             }
             Event::SecretUpdate {
                 app_id,
@@ -349,41 +182,13 @@ impl EventDispatcher {
                 active_instances,
                 proxy_address,
             } => {
-                let mut cluster_node =
-                    merge_cluster_node_record(self.store.load_cluster_node(&node_id)?, &node_id);
-                cluster_node.last_seen_unix_secs = now_unix_secs();
-                cluster_node.proxy_address = Some(proxy_address.clone());
-                cluster_node.active_instances = Some(active_instances);
-                self.store.save_cluster_node(&cluster_node)?;
-
-                // Update node table for cross-node routing decisions
-                use proxy::node_table::NodeEntry;
-                use std::time::{SystemTime, UNIX_EPOCH};
-                let now = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs();
-                let entry = NodeEntry {
-                    node_id: node_id.clone(),
-                    proxy_address,
-                    fuel_used_percent: fuel_budget_used_percent,
+                self.handle_node_load(
+                    node_id,
+                    fuel_budget_used_percent,
                     active_instances,
-                    last_seen: now,
-                    health_status: common::health::NodeHealthStatus::Healthy,
-                };
-                self.node_table.update(entry).await;
-
-                // Update DNS webhook with node IPs for webhook notifications
-                if let Some(ref webhook) = self.dns_webhook {
-                    let nodes = self.node_table.nodes.read().await;
-                    let ips: Vec<String> = nodes
-                        .values()
-                        .filter_map(|n| extract_proxy_host(&n.proxy_address))
-                        .collect();
-                    drop(nodes);
-                    webhook.set_node_ips(ips).await;
-                }
-                Ok(())
+                    proxy_address,
+                )
+                .await
             }
             Event::NodeJoined {
                 node_id,
@@ -474,43 +279,12 @@ impl EventDispatcher {
                 node_id,
                 pressure_level,
             } => {
-                if node_id == self.node_id {
-                    // Our own pressure events are handled directly by the
-                    // eBPF ActionDispatcher. Also mark ourselves unhealthy in
-                    // the routing table so the local proxy can shed traffic.
-                    warn!(
-                        pressure_level,
-                        "local node under pressure — excluding self from least-loaded routing"
-                    );
-                    self.node_table.mark_unhealthy(&node_id).await;
-                } else {
-                    // A peer node is under pressure — stop steering traffic to it.
-                    warn!(
-                        node = %node_id,
-                        pressure_level,
-                        "peer node under pressure — removing from routing"
-                    );
-                    self.node_table.mark_unhealthy(&node_id).await;
-                    if pressure_level >= 2 {
-                        // Critical pressure: also remove all upstream entries
-                        tracing::warn!(
-                            node = %node_id,
-                            "peer node under CRITICAL pressure — removing all upstream entries"
-                        );
-                    }
-                }
-                Ok(())
+                self.handle_node_under_pressure(node_id, pressure_level)
+                    .await
             }
 
             Event::NodePressureRecovered { node_id } => {
-                if node_id == self.node_id {
-                    info!("our node pressure recovered");
-                    self.node_table.mark_healthy(&node_id).await;
-                } else {
-                    info!(node = %node_id, "peer node pressure recovered — restoring in routing");
-                    self.node_table.mark_healthy(&node_id).await;
-                }
-                Ok(())
+                self.handle_node_pressure_recovered(node_id).await
             }
 
             Event::SecurityIncident {
@@ -559,22 +333,13 @@ impl EventDispatcher {
                     accepting_requests,
                     "node health status changed"
                 );
-                // Update our node table with the new health status
-                let health_status = match status.as_str() {
-                    "healthy" => common::health::NodeHealthStatus::Healthy,
-                    "degraded" => common::health::NodeHealthStatus::Degraded,
-                    "unhealthy" => common::health::NodeHealthStatus::Unhealthy,
-                    _ => common::health::NodeHealthStatus::Degraded,
-                };
-                self.node_table.update_health(&node_id, health_status).await;
-                let mut cluster_node =
-                    merge_cluster_node_record(self.store.load_cluster_node(&node_id)?, &node_id);
-                cluster_node.last_seen_unix_secs = now_unix_secs();
-                cluster_node.health_status = health_status;
-                cluster_node.active_instances = Some(active_instances);
-                cluster_node.accepting_requests = Some(accepting_requests);
-                self.store.save_cluster_node(&cluster_node)?;
-                Ok(())
+                self.handle_node_health_changed(
+                    node_id,
+                    status,
+                    active_instances,
+                    accepting_requests,
+                )
+                .await
             }
 
             Event::NodeHealthSnapshot {
@@ -597,41 +362,15 @@ impl EventDispatcher {
                     memory_used_mb,
                     "node health snapshot received"
                 );
-                // Update node table health status from snapshot
-                let health_status = match status.as_str() {
-                    "healthy" => common::health::NodeHealthStatus::Healthy,
-                    "degraded" => common::health::NodeHealthStatus::Degraded,
-                    "unhealthy" => common::health::NodeHealthStatus::Unhealthy,
-                    _ => common::health::NodeHealthStatus::Degraded,
-                };
-                self.node_table.update_health(&node_id, health_status).await;
-                let mut cluster_node =
-                    merge_cluster_node_record(self.store.load_cluster_node(&node_id)?, &node_id);
-                cluster_node.last_seen_unix_secs = now_unix_secs();
-                cluster_node.health_status = health_status;
-                cluster_node.active_instances = Some(active_instances);
-                cluster_node.deployed_apps = Some(deployed_apps);
-                self.store.save_cluster_node(&cluster_node)?;
-                Ok(())
+                self.handle_node_health_snapshot(node_id, status, active_instances, deployed_apps)
+                    .await
             }
 
             Event::GatewayConfigUpdate { app_id, config } => {
-                info!(app = %app_id.0, "received gateway config update");
-                self.store.save_gateway_config(&app_id.0, &config)?;
-                // Keep the in-memory gateway cache in sync so the internal
-                // proxy can enforce endpoint policies without reloading from disk.
-                if let Some(ref gw) = self.gateway {
-                    gw.set_route_config(&app_id.0, config).await;
-                }
-                Ok(())
+                self.handle_gateway_config_update(app_id, config).await
             }
             Event::GatewayConfigRemove { app_id } => {
-                info!(app = %app_id.0, "received gateway config remove");
-                self.store.delete_gateway_config(&app_id.0)?;
-                if let Some(ref gw) = self.gateway {
-                    gw.remove_route_config(&app_id.0).await;
-                }
-                Ok(())
+                self.handle_gateway_config_remove(app_id).await
             }
             // ── Configuration Hot-Reload ──────────────────────────────────
             Event::ConfigHotReload { node_id, changes } => {
@@ -768,105 +507,30 @@ impl EventDispatcher {
             tracing::debug!(new_node = %new_node_id, "ignoring our own NodeJoined event");
             return Ok(());
         }
-
-        validate_peer_artifact_url(&new_node_id, &peer_artifact_url)?;
-
-        let mut cluster_node =
-            merge_cluster_node_record(self.store.load_cluster_node(&new_node_id)?, &new_node_id);
-        let now_secs = now_unix_secs();
-        cluster_node.last_seen_unix_secs = now_secs;
-        cluster_node.joined_at_unix_secs =
-            Some(cluster_node.joined_at_unix_secs.unwrap_or(now_secs));
-        cluster_node.artifact_server_url = Some(peer_artifact_url.clone());
-        cluster_node.protocol_version = Some(protocol_version);
-        cluster_node.binary_version = Some(binary_version.clone());
-        self.store.save_cluster_node(&cluster_node)?;
-
-        info!(
-            new_node = %new_node_id,
-            our_node = %self.node_id,
-            "sending state snapshot to new node"
-        );
-
-        // 1. Collect all configs
-        let app_ids = self.store.list_apps()?;
-        let mut configs = Vec::with_capacity(app_ids.len());
-        for id in &app_ids {
-            if let Some(config) = self.store.load_config(id)? {
-                configs.push(config);
-            }
-        }
-
-        // 2. Collect all routes
-        let routes = self.store.list_routes()?;
-
-        // 3. Encrypt secrets for each app using the canonical transport envelope
-        let mut encrypted_secrets: Vec<SecretTransportEntry> = Vec::new();
-        for config in &configs {
-            let keys = self.secret_provider.list_keys(&config.id).await?;
-            for key in keys {
-                let value = self.secret_provider.get(&config.id, &key).await?;
-                let encrypted = encrypt_for_peer(&peer_public_key, value.as_bytes())?;
-                encrypted_secrets.push(SecretTransportEntry {
-                    app_id: config.id.0.clone(),
-                    key,
-                    envelope: SecretTransportEnvelope::bootstrap_peer_ciphertext(encrypted),
-                });
-            }
-        }
-
-        // 4. Collect gateway policy state and artifact hashes
-        let gateway_configs = self.store.list_gateway_configs()?;
-        let mut api_keys = Vec::new();
-        let mut artifact_hashes = Vec::new();
-        let mut artifact_fetches = Vec::new();
-        for config in &configs {
-            if let Some(hash) = self.store.get_artifact_sha256(&config.id)? {
-                artifact_hashes.push((config.id.0.clone(), hash.clone()));
-                artifact_fetches.push(BootstrapArtifactFetchAuthorization {
-                    app_id: config.id.0.clone(),
-                    sha256: hash.clone(),
-                    artifact_url: format!("{}/artifacts/{}", self.artifact_server_url, hash),
-                    artifact_transfer_manifest: Some(
-                        self.artifact_transfer_authority
-                            .issue_read_manifest_for_audience(&hash, &new_node_id),
-                    ),
-                });
-            }
-            let keys = self.store.load_api_keys(&config.id.0)?;
-            if !keys.is_empty() {
-                api_keys.push((config.id.0.clone(), keys));
-            }
-        }
-
-        // 5. Publish the snapshot event.
-        // Bootstrap coordination is explicit: every eligible existing node may respond,
-        // but the joining node accepts only the first valid session/nonce-matching
-        // snapshot and ignores duplicates for the same session afterwards.
-        let event = Event::StateSnapshot {
-            for_node_id: new_node_id.clone(),
+        bootstrap::handle_node_joined(
+            BootstrapContext {
+                supervisor: &self.supervisor,
+                upstream: &self.upstream,
+                host_router: &self.host_router,
+                store: &self.store,
+                runtime: &self.runtime,
+                node_id: &self.node_id,
+                artifact_server_url: &self.artifact_server_url,
+                artifact_transfer_authority: &self.artifact_transfer_authority,
+                secret_provider: &self.secret_provider,
+                bootstrap_session: self.bootstrap_session.as_ref(),
+                bus: &self.bus,
+                gateway: self.gateway.as_ref(),
+            },
+            new_node_id,
             bootstrap_session_id,
             bootstrap_nonce,
-            configs,
-            routes,
-            encrypted_secrets,
-            gateway_configs,
-            api_keys,
-            artifact_fetches,
-            artifact_hashes: artifact_hashes.clone(),
-        };
-
-        info!(
-            new_node = %new_node_id,
-            apps = artifact_hashes.len(),
-            fetch_manifests = artifact_hashes.len(),
-            peer_artifact_url = %peer_artifact_url,
-            "snapshot prepared with signed artifact fetch authorizations"
-        );
-
-        // Publish the snapshot event via NATS
-        self.bus.publish(&event).await?;
-        Ok(())
+            peer_artifact_url,
+            peer_public_key,
+            protocol_version,
+            binary_version,
+        )
+        .await
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -882,311 +546,211 @@ impl EventDispatcher {
         artifact_fetches: Vec<BootstrapArtifactFetchAuthorization>,
         artifact_hashes: Vec<(String, String)>,
     ) -> Result<(), PlatformError> {
-        info!(
-            session = %bootstrap_session_id,
-            apps = configs.len(),
-            routes = routes.len(),
-            secrets = encrypted_secrets.len(),
-            "received state snapshot"
-        );
-
-        let Some(bootstrap_session) = self.bootstrap_session.as_ref() else {
-            tracing::warn!(
-                session = %bootstrap_session_id,
-                "ignoring snapshot because this node is not awaiting bootstrap"
-            );
-            return Ok(());
-        };
-
-        let mut bootstrap_state = bootstrap_session.lock().await;
-        if bootstrap_state.applied {
-            tracing::info!(
-                session = %bootstrap_session_id,
-                "ignoring duplicate snapshot after bootstrap already completed"
-            );
-            return Ok(());
-        }
-        if bootstrap_state.session_id != bootstrap_session_id
-            || bootstrap_state.nonce != bootstrap_nonce
-        {
-            tracing::warn!(
-                expected_session = %bootstrap_state.session_id,
-                received_session = %bootstrap_session_id,
-                "ignoring stale or mismatched bootstrap snapshot"
-            );
-            return Ok(());
-        }
-
-        // 1. Store configs
-        for config in &configs {
-            self.store.save_config(config)?;
-        }
-
-        // 2. Store routes and load into HostRouter
-        for route in &routes {
-            self.store.save_route(route)?;
-            self.host_router
-                .add_route(
-                    route.host.clone(),
-                    route.path_prefix.clone(),
-                    route.app_id.clone(),
-                    route.strip_prefix,
-                )
-                .await;
-        }
-
-        // 3. Import gateway policy state before secrets/artifacts so the node's
-        // routing/auth policy converges with the rest of the cluster during bootstrap.
-        for (app_id, config) in gateway_configs {
-            self.store.save_gateway_config(&app_id, &config)?;
-            if let Some(ref gw) = self.gateway {
-                gw.set_route_config(&app_id, config).await;
-            }
-        }
-
-        for (app_id, keys) in api_keys {
-            self.store.save_api_keys(&app_id, &keys)?;
-            if !keys.is_empty() {
-                let validator = proxy::gateway::api_key::ApiKeyValidator::new(keys);
-                if let Some(ref gw) = self.gateway {
-                    gw.set_api_key_validator(&app_id, validator).await;
-                }
-            }
-        }
-
-        // 4. Decrypt and store secrets
-        for SecretTransportEntry {
-            app_id: app_id_str,
-            key,
-            envelope,
-        } in encrypted_secrets
-        {
-            let app_id = AppId(app_id_str.clone());
-            let plaintext = decrypt_bootstrap_secret(&bootstrap_state.keypair, &envelope)?;
-            self.secret_provider.set(&app_id, &key, &plaintext).await?;
-            info!(app = app_id_str, key, "secret decrypted and stored");
-        }
-
-        // 5. Store artifact hashes
-        for (app_id_str, sha256) in &artifact_hashes {
-            let app_id = AppId(app_id_str.clone());
-            self.store.save_artifact_hash(&app_id, sha256)?;
-        }
-
-        // 6. Fetch or locate artifacts, then compile them.
-        let artifact_fetches_by_sha: HashMap<String, BootstrapArtifactFetchAuthorization> =
-            artifact_fetches
-                .into_iter()
-                .map(|fetch| (fetch.sha256.clone(), fetch))
-                .collect();
-
-        for (app_id_str, sha256) in artifact_hashes {
-            let app_id = AppId(app_id_str.clone());
-
-            let artifact = if let Some(fetch) = artifact_fetches_by_sha.get(&sha256) {
-                match fetch_artifact(
-                    &fetch.artifact_url,
-                    Some(self.node_id.as_str()),
-                    fetch.artifact_transfer_manifest.as_ref(),
-                    &sha256,
-                )
-                .await
-                {
-                    Ok(raw) => {
-                        self.store.save_raw_wasm(&sha256, &raw)?;
-                        info!(
-                            app = %app_id_str,
-                            sha256,
-                            url = %fetch.artifact_url,
-                            "artifact fetched from peer via signed bootstrap manifest"
-                        );
-                        Some(raw)
-                    }
-                    Err(e) => {
-                        warn!(
-                            app = %app_id_str,
-                            sha256,
-                            url = %fetch.artifact_url,
-                            error = %e,
-                            "failed to fetch artifact from bootstrap snapshot authorization"
-                        );
-                        None
-                    }
-                }
-            } else {
-                // Compatibility fallback for older peers that still push artifacts.
-                let mut attempts = 0;
-                loop {
-                    if let Ok(Some(raw)) = self.store.load_raw_wasm(&sha256) {
-                        break Some(raw);
-                    }
-                    if attempts >= 50 {
-                        break None;
-                    }
-                    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-                    attempts += 1;
-                }
-            };
-
-            if let Some(raw) = artifact {
-                let runtime = self.runtime.clone();
-                let store = self.store.clone();
-                let app_id_clone = app_id.clone();
-
-                tokio::task::spawn_blocking(move || match runtime.compile(&raw) {
-                    Ok(compiled) => {
-                        if let Err(e) = store.store_artifact(&app_id_clone, &compiled) {
-                            error!(app = %app_id_str, error = %e, "failed to store compiled artifact");
-                        } else {
-                            info!(app = %app_id_str, "artifact compiled from snapshot");
-                        }
-                    }
-                    Err(e) => {
-                        error!(app = %app_id_str, error = %e, "compilation failed");
-                    }
-                });
-            } else {
-                warn!(
-                    app = app_id_str,
-                    sha256, "artifact not yet available, will compile on first request"
-                );
-            }
-        }
-
-        bootstrap_state.applied = true;
-        drop(bootstrap_state);
-
-        persist_applied_bootstrap_session(&self.store, &bootstrap_session_id, &bootstrap_nonce)?;
-
-        info!(session = %bootstrap_session_id, "state snapshot import complete");
-        Ok(())
+        bootstrap::handle_state_snapshot(
+            BootstrapContext {
+                supervisor: &self.supervisor,
+                upstream: &self.upstream,
+                host_router: &self.host_router,
+                store: &self.store,
+                runtime: &self.runtime,
+                node_id: &self.node_id,
+                artifact_server_url: &self.artifact_server_url,
+                artifact_transfer_authority: &self.artifact_transfer_authority,
+                secret_provider: &self.secret_provider,
+                bootstrap_session: self.bootstrap_session.as_ref(),
+                bus: &self.bus,
+                gateway: self.gateway.as_ref(),
+            },
+            bootstrap_session_id,
+            bootstrap_nonce,
+            configs,
+            routes,
+            encrypted_secrets,
+            gateway_configs,
+            api_keys,
+            artifact_fetches,
+            artifact_hashes,
+        )
+        .await
     }
 
     async fn handle_node_upgrade(&self, event: Event) {
-        use crate::upgrade::{
-            download_and_verify, handle_upgrade_event, verify_upgrade_signature, UpgradeAction,
-        };
-
-        // Collect all node IDs in the cluster for rolling upgrade ordering
-        let mut cluster_nodes: Vec<String> = self
-            .store
-            .list_cluster_nodes()
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|node| !node.is_stale(self.cluster_node_stale_after_secs))
-            .map(|node| node.node_id)
-            .collect();
-        if !cluster_nodes.contains(&self.node_id) {
-            cluster_nodes.push(self.node_id.clone());
-        }
-
-        if let Err(e) = verify_upgrade_signature(&event, self.upgrade_signing_public_key.as_deref())
-        {
-            error!(error = %e, "upgrade signature verification failed");
-            return;
-        }
-
-        match handle_upgrade_event(&event, &self.node_id, &cluster_nodes) {
-            Ok(UpgradeAction::NotAnUpgradeEvent) => {
-                warn!("handle_node_upgrade called with non-upgrade event");
-            }
-            Ok(UpgradeAction::NotTargeted) => {
-                info!("upgrade not targeted at this node");
-            }
-            Ok(UpgradeAction::WaitForPredecessor { predecessor }) => {
-                info!(
-                    predecessor,
-                    "waiting for predecessor node to complete upgrade"
-                );
-                // Store upgrade intent and wait for NodeUpgradeComplete event
-            }
-            Ok(UpgradeAction::IncompatibleVersion) => {
-                error!("upgrade version is incompatible with this node's protocol version");
-            }
-            Ok(UpgradeAction::ProceedWithUpgrade) => {
-                if let Event::NodeUpgrade {
-                    binary_url,
-                    binary_sha256,
-                    new_protocol_version,
-                    new_binary_version,
-                    ..
-                } = event
-                {
-                    info!(
-                        url = %binary_url,
-                        version = %new_binary_version,
-                        protocol = new_protocol_version,
-                        "proceeding with upgrade"
-                    );
-
-                    // Download and verify the new binary
-                    let install_dir = std::path::PathBuf::from("/opt/wasm-cloud");
-                    match download_and_verify(&binary_url, &binary_sha256, &install_dir, "node")
-                        .await
-                    {
-                        Ok(new_binary_path) => {
-                            info!(path = ?new_binary_path, "new binary downloaded, verified, and activated");
-
-                            info!("release links updated, initiating graceful shutdown");
-
-                            // Publish draining event
-                            let drain_event = Event::NodeDraining {
-                                node_id: self.node_id.clone(),
-                                drain_timeout_secs: 30,
-                            };
-
-                            if let Err(e) = self.bus.publish(&drain_event).await {
-                                error!(error = %e, "failed to publish draining event");
-                            }
-
-                            // Begin graceful shutdown
-                            self.begin_graceful_shutdown(30).await;
-
-                            // Publish upgrade complete event
-                            let complete_event = Event::NodeUpgradeComplete {
-                                node_id: self.node_id.clone(),
-                                new_binary_version,
-                                new_protocol_version,
-                            };
-
-                            if let Err(e) = self.bus.publish(&complete_event).await {
-                                error!(error = %e, "failed to publish upgrade complete event");
-                            }
-
-                            // Exit process - systemd will restart with new binary
-                            info!("exiting for upgrade, expecting systemd restart");
-                            std::process::exit(0);
-                        }
-                        Err(e) => {
-                            error!(error = %e, "failed to download or verify new binary");
-                        }
-                    }
-                }
-            }
-            Err(e) => {
-                error!(error = %e, "upgrade event handling failed");
-            }
-        }
+        upgrade_runtime::handle_node_upgrade(
+            UpgradeContext {
+                supervisor: &self.supervisor,
+                store: &self.store,
+                node_id: &self.node_id,
+                cluster_node_stale_after_secs: self.cluster_node_stale_after_secs,
+                upgrade_signing_public_key: self.upgrade_signing_public_key.as_deref(),
+                bus: &self.bus,
+            },
+            event,
+        )
+        .await
     }
 
     async fn begin_graceful_shutdown(&self, timeout_secs: u64) {
-        tracing::info!("Beginning graceful shutdown with {}s timeout", timeout_secs);
+        upgrade_runtime::begin_graceful_shutdown(&self.supervisor, timeout_secs).await;
+    }
 
-        // 1. Stop accepting new connections via backpressure signal
-        //    TODO: Add backpressure_signal field to EventDispatcher so we can
-        //    call backpressure.set_rejecting() here. For now, the proxy will
-        //    continue accepting connections until the process exits.
+    fn cluster_runtime_context(&self) -> ClusterRuntimeContext<'_> {
+        ClusterRuntimeContext {
+            host_router: &self.host_router,
+            store: &self.store,
+            dns_webhook: self.dns_webhook.as_ref(),
+            node_table: &self.node_table,
+            gateway: self.gateway.as_ref(),
+        }
+    }
 
-        // 2. Wait for existing requests to drain
-        tokio::time::sleep(tokio::time::Duration::from_secs(timeout_secs)).await;
+    async fn handle_route_add(&self, route: common::types::Route) -> Result<(), PlatformError> {
+        cluster_runtime::handle_route_add(self.cluster_runtime_context(), route).await
+    }
 
-        // 3. Kill all running instances
-        tracing::info!("drain timeout elapsed, stopping all instances");
-        self.supervisor
-            .shutdown_all(tokio::time::Duration::from_secs(timeout_secs))
-            .await;
+    async fn handle_route_remove(&self, host: String) -> Result<(), PlatformError> {
+        cluster_runtime::handle_route_remove(self.cluster_runtime_context(), host).await
+    }
 
-        tracing::info!("graceful shutdown complete");
+    async fn handle_node_load(
+        &self,
+        node_id: String,
+        fuel_budget_used_percent: f32,
+        active_instances: u32,
+        proxy_address: String,
+    ) -> Result<(), PlatformError> {
+        cluster_runtime::handle_node_load(
+            self.cluster_runtime_context(),
+            node_id,
+            fuel_budget_used_percent,
+            active_instances,
+            proxy_address,
+        )
+        .await
+    }
+
+    async fn handle_node_health_changed(
+        &self,
+        node_id: String,
+        status: String,
+        active_instances: u32,
+        accepting_requests: bool,
+    ) -> Result<(), PlatformError> {
+        cluster_runtime::handle_node_health_changed(
+            self.cluster_runtime_context(),
+            node_id,
+            status,
+            active_instances,
+            accepting_requests,
+        )
+        .await
+    }
+
+    async fn handle_node_health_snapshot(
+        &self,
+        node_id: String,
+        status: String,
+        active_instances: u32,
+        deployed_apps: u32,
+    ) -> Result<(), PlatformError> {
+        cluster_runtime::handle_node_health_snapshot(
+            self.cluster_runtime_context(),
+            node_id,
+            status,
+            active_instances,
+            deployed_apps,
+        )
+        .await
+    }
+
+    async fn handle_gateway_config_update(
+        &self,
+        app_id: AppId,
+        config: common::types::GatewayRouteConfig,
+    ) -> Result<(), PlatformError> {
+        cluster_runtime::handle_gateway_config_update(
+            self.cluster_runtime_context(),
+            app_id,
+            config,
+        )
+        .await
+    }
+
+    async fn handle_gateway_config_remove(&self, app_id: AppId) -> Result<(), PlatformError> {
+        cluster_runtime::handle_gateway_config_remove(self.cluster_runtime_context(), app_id).await
+    }
+
+    /// Register a peer-owned instance with the local upstream table.
+    ///
+    /// Local instances are tracked directly by the supervisor, so this only
+    /// handles cross-node announcements.
+    async fn handle_remote_instance_ready(
+        &self,
+        app_id: AppId,
+        addr: std::net::SocketAddr,
+        node_id: String,
+    ) -> Result<(), PlatformError> {
+        if node_id != self.our_node_id() {
+            self.upstream
+                .add(
+                    &app_id,
+                    proxy::upstream::UpstreamEndpoint { addr, h2c: false },
+                )
+                .await;
+            info!(app = %app_id.0, %addr, from_node = %node_id, "remote instance registered");
+        }
+        Ok(())
+    }
+
+    async fn handle_remote_instance_dead(
+        &self,
+        app_id: AppId,
+        addr: std::net::SocketAddr,
+        node_id: String,
+    ) -> Result<(), PlatformError> {
+        if node_id != self.our_node_id() {
+            self.upstream.remove(&app_id, &addr).await;
+            info!(app = %app_id.0, %addr, from_node = %node_id, "remote instance deregistered");
+        }
+        Ok(())
+    }
+
+    async fn handle_node_under_pressure(
+        &self,
+        node_id: String,
+        pressure_level: u32,
+    ) -> Result<(), PlatformError> {
+        if node_id == self.node_id {
+            warn!(
+                pressure_level,
+                "local node under pressure — excluding self from least-loaded routing"
+            );
+            self.node_table.mark_unhealthy(&node_id).await;
+        } else {
+            warn!(
+                node = %node_id,
+                pressure_level,
+                "peer node under pressure — removing from routing"
+            );
+            self.node_table.mark_unhealthy(&node_id).await;
+            if pressure_level >= 2 {
+                tracing::warn!(
+                    node = %node_id,
+                    "peer node under CRITICAL pressure — removing all upstream entries"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    async fn handle_node_pressure_recovered(&self, node_id: String) -> Result<(), PlatformError> {
+        if node_id == self.node_id {
+            info!("our node pressure recovered");
+            self.node_table.mark_healthy(&node_id).await;
+        } else {
+            info!(node = %node_id, "peer node pressure recovered — restoring in routing");
+            self.node_table.mark_healthy(&node_id).await;
+        }
+        Ok(())
     }
 }
 
