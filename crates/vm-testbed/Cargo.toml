@@ -20,12 +20,12 @@ serde_json = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
 anyhow = { workspace = true }
-tempfile = "3"
+tempfile = "3.27.0"
 uuid = { workspace = true, features = ["v4"] }
 chrono = { workspace = true }
 thiserror = { workspace = true }
 clap = { workspace = true, features = ["derive", "env"] }
-which = "6"
+which = "8.0.2"
 
 # Re-use existing E2E test infrastructure
 e2e = { version = "0.1.0", path = "../e2e" }
@@ -36,7 +36,7 @@ hex = { workspace = true }
 
 [dev-dependencies]
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
-assert_cmd = "2"
+assert_cmd = "2.2.2"
 async-nats = { workspace = true }
 
 [[bin]]

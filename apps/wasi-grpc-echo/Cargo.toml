@@ -9,9 +9,9 @@ build = "build.rs"
 crate-type = ["cdylib"]
 
 [dependencies]
-prost = "0.14.1"
-wit-bindgen = "0.51"
+prost = "0.14.3"
+wit-bindgen = "0.57.1"
 
 [build-dependencies]
-prost-build = "0.14.1"
-protoc-bin-vendored = "3.1.0"
+prost-build = "0.14.3"
+protoc-bin-vendored = "3.2.0"

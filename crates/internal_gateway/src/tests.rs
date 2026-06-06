@@ -5,6 +5,7 @@ use http::HeaderValue;
 use hyper::service::service_fn;
 use jsonwebtoken::{DecodingKey, EncodingKey};
 use rsa::pkcs1::EncodeRsaPrivateKey;
+use rsa::rand_core::OsRng;
 use rsa::{traits::PublicKeyParts, RsaPrivateKey, RsaPublicKey};
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
@@ -67,7 +68,7 @@ async fn setup_gateway_with(
 }
 
 async fn test_gateway_with_provider() -> (Arc<proxy::gateway::Gateway>, String, String) {
-    let mut rng = rand::thread_rng();
+    let mut rng = OsRng;
     let private_key = RsaPrivateKey::new(&mut rng, 2048).unwrap();
     let public_key = RsaPublicKey::from(&private_key);
 

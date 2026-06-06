@@ -17,9 +17,7 @@ pub struct SymmetricKey(pub [u8; 32]);
 impl SymmetricKey {
     /// Generate a new random key using the operating system's CSPRNG.
     pub fn generate() -> Self {
-        use rand::RngCore;
-        let mut key = [0u8; 32];
-        rand::rngs::OsRng.fill_bytes(&mut key);
+        let key: [u8; 32] = rand::random();
         Self::from_bytes(key)
     }
 

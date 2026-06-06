@@ -8,8 +8,8 @@ build = "build.rs"
 [dependencies]
 
 [build-dependencies]
-tonic-prost-build = "0.14.2"
-protoc-bin-vendored = "3.1.0"
+tonic-prost-build = "0.14.6"
+protoc-bin-vendored = "3.2.0"
 
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
 tokio = { workspace = true }

@@ -138,13 +138,18 @@ fn load_kek_from_vault_kv(
         mount,
         secret_path.trim_start_matches('/')
     );
-    let response = ureq::get(&request_url)
-        .set("X-Vault-Token", token.trim())
-        .timeout(std::time::Duration::from_secs(5))
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_global(Some(std::time::Duration::from_secs(5)))
+        .build()
+        .into();
+    let mut response = agent
+        .get(&request_url)
+        .header("X-Vault-Token", token.trim())
         .call()
         .map_err(|e| anyhow::anyhow!("failed to fetch seal key from Vault KV: {e}"))?;
     let body = response
-        .into_string()
+        .body_mut()
+        .read_to_string()
         .map_err(|e| anyhow::anyhow!("failed to read Vault KV response body: {e}"))?;
     let json: serde_json::Value = serde_json::from_str(&body)
         .map_err(|e| anyhow::anyhow!("failed to parse Vault KV response JSON: {e}"))?;
@@ -232,13 +237,18 @@ fn load_kek_from_vault_transit(
         use base64::Engine as _;
         base64::engine::general_purpose::STANDARD.encode(context.as_bytes())
     };
-    let response = ureq::post(&request_url)
-        .set("X-Vault-Token", token.trim())
-        .timeout(std::time::Duration::from_secs(5))
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_global(Some(std::time::Duration::from_secs(5)))
+        .build()
+        .into();
+    let mut response = agent
+        .post(&request_url)
+        .header("X-Vault-Token", token.trim())
         .send_json(serde_json::json!({ "input": input }))
         .map_err(|e| anyhow::anyhow!("failed to derive seal key from Vault transit: {e}"))?;
     let body = response
-        .into_string()
+        .body_mut()
+        .read_to_string()
         .map_err(|e| anyhow::anyhow!("failed to read Vault transit response body: {e}"))?;
     let json: serde_json::Value = serde_json::from_str(&body)
         .map_err(|e| anyhow::anyhow!("failed to parse Vault transit response JSON: {e}"))?;
@@ -697,27 +707,22 @@ async fn serve_admin_app(
         let rustls_config = axum_server::tls_rustls::RustlsConfig::from_pem_file(cert, key)
             .await
             .map_err(|e| anyhow::anyhow!("admin TLS config error: {e}"))?;
+        let bind_addr: std::net::SocketAddr = admin_addr
+            .parse()
+            .map_err(|e| anyhow::anyhow!("invalid admin bind address: {e}"))?;
         info!(addr = %admin_addr, "admin API listening with TLS");
-        axum_server::bind_rustls(
-            admin_addr
-                .parse()
-                .map_err(|e| anyhow::anyhow!("invalid admin bind address: {e}"))?,
-            rustls_config,
-        )
-        .serve(admin_app.into_make_service_with_connect_info::<std::net::SocketAddr>())
-        .await
-        .map_err(|e| anyhow::anyhow!("admin HTTPS server error: {e}"))?;
+        axum_server::bind_rustls(bind_addr, rustls_config)
+            .serve(admin_app.into_make_service())
+            .await
+            .map_err(|e| anyhow::anyhow!("admin HTTPS server error: {e}"))?;
     } else {
         let listener = tokio::net::TcpListener::bind(&admin_addr)
             .await
             .map_err(|e| anyhow::anyhow!("admin API bind failed: {e}"))?;
         info!(addr = %admin_addr, "admin API listening");
-        axum::serve(
-            listener,
-            admin_app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-        )
-        .await
-        .map_err(|e| anyhow::anyhow!("admin HTTP server error: {e}"))?;
+        axum::serve(listener, admin_app.into_make_service())
+            .await
+            .map_err(|e| anyhow::anyhow!("admin HTTP server error: {e}"))?;
     }
     Ok(())
 }

@@ -13,7 +13,7 @@ tokio = { workspace = true }
 tracing = { workspace = true }
 common = { version = "0.1.0", path = "../common" }
 storage = { version = "0.1.0", path = "../storage" }
-async-trait = "0.1"
+async-trait = "0.1.89"
 chrono = { workspace = true }
 reqwest = { workspace = true }
 

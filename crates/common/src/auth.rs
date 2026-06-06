@@ -262,9 +262,7 @@ impl AuthConfig {
     ///
     /// Returns a 32-byte hex string (64 characters) generated with `OsRng`.
     pub fn generate_token() -> String {
-        use rand::RngCore;
-        let mut bytes = [0u8; 32];
-        rand::thread_rng().fill_bytes(&mut bytes);
+        let bytes: [u8; 32] = rand::random();
         hex::encode(bytes)
     }
 

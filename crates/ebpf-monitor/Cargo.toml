@@ -10,17 +10,17 @@ ebpf = ["dep:aya", "dep:aya-log"]
 
 [dependencies]
 aya = { version = "0.13.1", optional = true }
-aya-log = { version = "0.2", optional = true }
+aya-log = { version = "0.2.1", optional = true }
 common = { version = "0.1.0", path = "../common" }
 metrics = { version = "0.1.0", path = "../metrics" }
-prometheus = { version = "0.14", features = ["process"] }
-tokio = { version = "1.52", features = ["full"] }
+prometheus = { version = "0.14.0", features = ["process"] }
+tokio = { version = "1.52.3", features = ["full"] }
 tracing = "0.1"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 anyhow = "1.0"
 thiserror = { workspace = true }
-libc = "0.2"
+libc = "0.2.186"
 
 [dev-dependencies]
-tokio = { version = "1.52", features = ["full", "test-util"] }
+tokio = { version = "1.52.3", features = ["full", "test-util"] }

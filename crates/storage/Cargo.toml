@@ -19,17 +19,17 @@ hex = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 prometheus = { workspace = true }
 async-nats = { workspace = true }
-futures = "0.3"
-fs2 = "0.4"
+futures = "0.3.32"
+fs2 = "0.4.3"
 
 [target.'cfg(unix)'.dependencies]
-libc = "0.2"
+libc = "0.2.186"
 
 [target.'cfg(windows)'.dependencies]
-winapi = { version = "0.3", features = ["fileapi", "minwindef"] }
+winapi = { version = "0.3.9", features = ["fileapi", "minwindef"] }
 
 [dev-dependencies]
 tempfile = "3.27.0"
 tokio = { workspace = true, features = ["full"] }
-reqwest = { version = "0.13.3", features = ["rustls", "json"], default-features = false }
+reqwest = { version = "0.13.4", features = ["rustls", "json"], default-features = false }
 messaging = { version = "0.1.0", path = "../messaging" }

@@ -35,9 +35,10 @@ async fn test_full_gateway_pipeline_authenticated_route() {
     // Generate a test RSA key pair
     use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
     use rsa::pkcs1::EncodeRsaPrivateKey;
+    use rsa::rand_core::OsRng;
     use rsa::{traits::PublicKeyParts, RsaPrivateKey, RsaPublicKey};
 
-    let mut rng = rand::thread_rng();
+    let mut rng = OsRng;
     let private_key = RsaPrivateKey::new(&mut rng, 2048).unwrap();
     let public_key = RsaPublicKey::from(&private_key);
 

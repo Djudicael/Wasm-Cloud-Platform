@@ -15,15 +15,15 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }
 async-nats = { workspace = true }
-reqwest = { version = "0.13.3", features = ["rustls", "json", "stream"], default-features = false }
+reqwest = { version = "0.13.4", features = ["rustls", "json", "stream"], default-features = false }
 sha2 = { workspace = true }
 hex = { workspace = true }
 ed25519-dalek = "2.2.0"
-indicatif = "0.17"
-colored = "2"
-tabled = "0.15"
-rpassword = "7"
-futures = "0.3"
+indicatif = "0.18.4"
+colored = "3.1.1"
+tabled = "0.21.0"
+rpassword = "7.5.4"
+futures = "0.3.32"
 chrono = { workspace = true }
 common = { version = "0.1.0", path = "../common" }
 messaging = { version = "0.1.0", path = "../messaging" }
@@ -31,7 +31,7 @@ secrets = { version = "0.1.0", path = "../secrets" }
 storage = { version = "0.1.0", path = "../storage" }
 billing = { version = "0.1.0", path = "../billing" }
 ipnet = "2.12.0"
-toml = "0.8"
+toml = "0.9.8"
 
 [dev-dependencies]
 axum = { workspace = true }

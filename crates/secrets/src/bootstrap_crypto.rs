@@ -7,11 +7,10 @@
 //! node can decrypt them.
 
 use chacha20poly1305::{
-    aead::{Aead, AeadCore, KeyInit},
+    aead::{Aead, AeadCore, KeyInit, OsRng},
     ChaCha20Poly1305, Nonce,
 };
 use common::error::PlatformError;
-use rand::rngs::OsRng;
 use x25519_dalek::{EphemeralSecret, PublicKey, StaticSecret};
 
 /// X25519 keypair for bootstrap secret transfer.
@@ -24,7 +23,7 @@ pub struct BootstrapKeyPair {
 impl BootstrapKeyPair {
     /// Generate a new keypair for this bootstrap session.
     pub fn generate() -> Self {
-        let secret = StaticSecret::random_from_rng(OsRng);
+        let secret = StaticSecret::from(rand::random::<[u8; 32]>());
         let public = PublicKey::from(&secret);
         BootstrapKeyPair { secret, public }
     }
@@ -84,7 +83,8 @@ pub fn encrypt_for_peer(
     peer_public_bytes: &[u8],
     plaintext: &[u8],
 ) -> Result<Vec<u8>, PlatformError> {
-    let ephemeral = EphemeralSecret::random_from_rng(OsRng);
+    let mut rng = OsRng;
+    let ephemeral = EphemeralSecret::random_from_rng(&mut rng);
     let ephemeral_public = PublicKey::from(&ephemeral);
 
     let peer_public =
@@ -94,7 +94,7 @@ pub fn encrypt_for_peer(
 
     let shared = ephemeral.diffie_hellman(&peer_public);
     let cipher = ChaCha20Poly1305::new(shared.as_bytes().into());
-    let nonce = ChaCha20Poly1305::generate_nonce(&mut OsRng);
+    let nonce = ChaCha20Poly1305::generate_nonce(&mut rng);
 
     // Prepend ephemeral public key so receiver can derive the shared secret
     let mut out = ephemeral_public.as_bytes().to_vec();
