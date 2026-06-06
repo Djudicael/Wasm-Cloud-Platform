@@ -83,6 +83,12 @@ fn route(path: &str) -> (u16, &'static str, String, bool) {
 
     match base_path {
         "/" => (200, "text/plain", "Hello from wasip2!".to_string(), false),
+        "/app-health" => (
+            200,
+            "application/json",
+            r#"{"status":"healthy"}"#.to_string(),
+            false,
+        ),
         "/health" => (
             200,
             "application/json",
@@ -250,6 +256,7 @@ async fn main() {
 
     let app = Router::new()
         .route("/", get(|| async { "Hello from native!" }))
+        .route("/app-health", get(|| async { r#"{"status":"healthy"}"# }))
         .route("/health", get(|| async { r#"{"status":"healthy"}"# }));
 
     let port = std::env::var("PORT").unwrap_or_else(|_| "8080".to_string());

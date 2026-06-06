@@ -529,21 +529,23 @@ async fn test_deploy_and_serve_http() {
 
     eprintln!("✓ Response: {}", body);
 
-    // 9. Test another endpoint
-    eprintln!("Sending HTTP request to /health");
-    let mut health_response = None;
+    // 9. Test an app-specific endpoint that does not collide with the proxy's
+    // own readiness endpoint on /health.
+    eprintln!("Sending HTTP request to /app-health");
+    let mut app_health_response = None;
     for _ in 0..10 {
-        let response = send_request(node.proxy_port, "test-app.local", "/health")
+        let response = send_request(node.proxy_port, "test-app.local", "/app-health")
             .await
-            .expect("Failed to send health request");
+            .expect("Failed to send app health request");
         if response.status() == 200 {
-            health_response = Some(response);
+            app_health_response = Some(response);
             break;
         }
         sleep(Duration::from_millis(250)).await;
     }
-    let health_response = health_response.expect("App did not return 200 for /health in time");
-    assert_eq!(health_response.status(), 200);
+    let app_health_response =
+        app_health_response.expect("App did not return 200 for /app-health in time");
+    assert_eq!(app_health_response.status(), 200);
 
     // Cleanup
     node.stop().ok();
