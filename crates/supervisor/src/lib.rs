@@ -1,4 +1,5 @@
 pub mod audit;
+mod command_runtime;
 pub mod config_validator;
 pub mod db_proxy;
 pub mod deployment;
@@ -62,9 +63,9 @@ fn gettid() -> u32 {
     0
 }
 
-// ── Supervisor Command Interface ──────────────────────────────────────────────
-
-/// Commands that external subsystems (eBPF monitor, admin API) can send
+// ---------------------------------------------------------------------
+// Supervisor Command Interface
+// ---------------------------------------------------------------------
 /// to the supervisor for immediate action.
 ///
 /// These commands are processed asynchronously by the supervisor's command
@@ -108,7 +109,7 @@ pub struct Supervisor {
     internal_gateway_port: u16,
     env_resolver: Arc<dyn Fn(&AppConfig, u16) -> Vec<(String, String)> + Send + Sync>,
 
-    /// Map of app_id → instance pool
+    /// Map of `app_id` to instance pool.
     pools: Arc<RwLock<HashMap<String, InstancePool>>>,
 
     /// Channel to publish events to NATS
@@ -386,7 +387,7 @@ impl Supervisor {
     fn send_billing_record(&self, input: billing::BillingInput) {
         if let Some(ref tx) = self.billing_tx {
             if let Err(e) = tx.try_send(input) {
-                warn!(error = %e, "billing channel full — dropping record");
+                warn!(error = %e, "billing channel full - dropping record");
             }
         }
     }
@@ -581,7 +582,7 @@ impl Supervisor {
                             if !dest.ip().is_loopback() {
                                 tracing::info!(
                                     dest = %dest,
-                                    "[SOCKET DEBUG] external connection — allowed"
+                                    "[SOCKET DEBUG] external connection - allowed"
                                 );
                                 return true;
                             }
@@ -597,7 +598,7 @@ impl Supervisor {
 
                             // Defense-in-depth cross-namespace check for known app ports.
                             // Internal gateway port is allowed without namespace check.
-                            // The gateway port (9080) is open to all namespaces —
+                            // The gateway port (9080) is open to all namespaces -
                             // namespace isolation relies on service discovery only.
                             if dest.port() != internal_gateway_port {
                                 let interceptor =
@@ -617,7 +618,7 @@ impl Supervisor {
                                     ConnectDecision::Allow(_) => {
                                         tracing::info!(
                                             dest = %dest,
-                                            "[SOCKET DEBUG] same-namespace connection — allowed"
+                                            "[SOCKET DEBUG] same-namespace connection - allowed"
                                         );
                                         true
                                     }
@@ -633,7 +634,7 @@ impl Supervisor {
                             } else {
                                 tracing::info!(
                                     dest = %dest,
-                                    "[SOCKET DEBUG] internal gateway port — allowed"
+                                    "[SOCKET DEBUG] internal gateway port - allowed"
                                 );
                                 true
                             }
@@ -652,7 +653,7 @@ impl Supervisor {
                         _ => {
                             tracing::info!(
                                 use_type = ?use_type,
-                                "[SOCKET DEBUG] other socket use — allowed"
+                                "[SOCKET DEBUG] other socket use - allowed"
                             );
                             true
                         }
@@ -678,7 +679,7 @@ impl Supervisor {
         // shutdown_rx, so sending on shutdown_tx alone does not interrupt execution.
         // Graceful shutdown relies on the HTTP /_platform/shutdown endpoint instead.
         // To fully wire this, the run loop would need to be restructured to use
-        // tokio::select! or a polling-based approach — a non-trivial refactor since
+        // tokio::select! or a polling-based approach - a non-trivial refactor since
         // wasmtime::Store::call_async is not yet supported for blocking WASI _start.
         let app_id_clone = app_id.clone();
         let instance_id = InstanceId(uuid::Uuid::new_v4());
@@ -892,14 +893,14 @@ impl Supervisor {
             })
             .await;
 
-        // TODO(step-33): eBPF coordination — the instance's host PID should be
+        // TODO(step-33): eBPF coordination - the instance host PID should be
         // registered in the eBPF MONITORED_PIDS map so the kernel-level monitor
         // can enforce per-process limits (defense in depth behind WASI layer).
         // Additionally, the PolicyCounters from the instance's PolicyEnforcer
         // should be exported to the eBPF metrics pipeline so that kernel-level
         // observations (e.g. actual syscall counts) can be cross-referenced with
         // WASI-layer denials. This is an integration gap, not a library limitation
-        // — both the eBPF monitor (Step 30) and the PolicyEnforcer exist, they
+        // Both the eBPF monitor (Step 30) and the PolicyEnforcer exist; they
         // just need to be wired together. The PID is available from the
         // spawn_blocking task via std::thread::current().id() or by tracking the
         // tokio task's thread after it starts.
@@ -913,7 +914,7 @@ impl Supervisor {
     ///
     /// If `health_interval_rx` was set via [`set_health_interval_rx`], the
     /// loop reads the interval from the watch channel on every tick and
-    /// resets the timer when it changes — no restart required.
+    /// resets the timer when it changes - no restart required.
     ///
     /// If no watch receiver was provided, a default 5-second interval is
     /// used (backward-compatible behaviour).
@@ -965,7 +966,9 @@ impl Supervisor {
             Self::export_policy_metrics_from_pools(&policy_metrics, &mut pools);
         }
 
-        // ── Stale TID cleanup ──
+        // -----------------------------------------------------------------
+        // Stale TID cleanup
+        // -----------------------------------------------------------------
         if let Some(ref ns_map) = self.namespace_map {
             let removed = ns_map.cleanup_stale_tids();
             if removed > 0 {
@@ -1425,14 +1428,14 @@ impl Supervisor {
             app = %app_id.0,
             instance = %instance_id.0,
             reason,
-            "Wasm trap — killing instance"
+            "Wasm trap - killing instance"
         );
 
         // 1. Kill the instance
         self.kill_instance(app_id, instance_id).await.ok();
 
         // 2. Increment trap counter in metrics
-        // (handled by metrics module — see step 11)
+        // (handled by metrics module - see step 11)
 
         // 3. If trap rate exceeds threshold, suspend the app
         // (see step 12: scaling)
@@ -1449,9 +1452,9 @@ impl Supervisor {
         self.service_registry.clone()
     }
 
-    // ── Command Loop (for eBPF monitor / admin API integration) ───────────
-
-    /// Start the background command processing loop.
+    // -----------------------------------------------------------------
+    // Command Loop (for eBPF monitor / admin API integration)
+    // -----------------------------------------------------------------
     ///
     /// Listens for [`SupervisorCommand`] messages on the command channel
     /// and dispatches them to the appropriate supervisor methods. This
@@ -1461,59 +1464,7 @@ impl Supervisor {
     ///
     /// Should be called once during startup, after `start_health_loop`.
     pub fn start_command_loop(self: Arc<Self>) {
-        let rx = self.command_rx.lock().unwrap().take();
-        if rx.is_none() {
-            warn!("supervisor command loop already started — ignoring duplicate call");
-            return;
-        }
-        let mut rx = rx.unwrap();
-
-        let supervisor = self.clone();
-        tokio::spawn(async move {
-            info!("supervisor command loop started");
-            while let Some(cmd) = rx.recv().await {
-                match cmd {
-                    SupervisorCommand::KillLargestInstance { reason } => {
-                        supervisor.kill_largest_instance(&reason).await;
-                    }
-                    SupervisorCommand::PruneIdleInstances {
-                        idle_threshold_secs,
-                    } => {
-                        supervisor.prune_idle_instances(idle_threshold_secs).await;
-                    }
-                    SupervisorCommand::RemoveAppFromUpstream { app_id } => {
-                        let pools = supervisor.pools.read().await;
-                        if let Some(pool) = pools.get(&app_id.0) {
-                            for addr in pool.ready_addrs() {
-                                supervisor.upstream_registry.remove(&app_id, &addr).await;
-                            }
-                        }
-                        info!(app = %app_id.0, "removed app from upstream via command");
-                    }
-                    SupervisorCommand::KillInstance {
-                        app_id,
-                        instance_id,
-                        reason,
-                    } => {
-                        info!(
-                            app = %app_id.0,
-                            instance = %instance_id.0,
-                            reason,
-                            "killing instance via supervisor command"
-                        );
-                        if let Err(e) = supervisor.kill_instance(&app_id, &instance_id).await {
-                            warn!(
-                                app = %app_id.0,
-                                instance = %instance_id.0,
-                                error = %e,
-                                "failed to kill instance via command"
-                            );
-                        }
-                    }
-                }
-            }
-            warn!("supervisor command loop exited — no more senders");
-        });
+        command_runtime::start_command_loop(self);
     }
 
     /// Kill the instance consuming the most memory.
@@ -1522,38 +1473,7 @@ impl Supervisor {
     /// highest `ram_bytes` in its billing info. Used by the eBPF monitor
     /// when critical memory pressure or OOM is detected.
     pub async fn kill_largest_instance(&self, reason: &str) {
-        let mut largest: Option<(AppId, InstanceId, u64)> = None;
-
-        let pools = self.pools.read().await;
-        for (app_id_str, pool) in pools.iter() {
-            for inst in &pool.instances {
-                if matches!(inst.state, InstanceState::Ready { .. }) {
-                    let ram = inst.billing_info.ram_bytes;
-                    if largest.is_none() || ram > largest.as_ref().unwrap().2 {
-                        largest = Some((AppId(app_id_str.clone()), inst.id.clone(), ram));
-                    }
-                }
-            }
-        }
-        drop(pools);
-
-        match largest {
-            Some((app_id, instance_id, ram)) => {
-                warn!(
-                    app = %app_id.0,
-                    instance = %instance_id.0,
-                    ram_bytes = ram,
-                    reason,
-                    "killing largest instance (memory pressure recovery)"
-                );
-                if let Err(e) = self.kill_instance(&app_id, &instance_id).await {
-                    warn!(error = %e, "failed to kill largest instance");
-                }
-            }
-            None => {
-                info!(reason, "no instances to kill for memory pressure recovery");
-            }
-        }
+        command_runtime::kill_largest_instance(self, reason).await;
     }
 
     /// Kill all idle instances across all apps.
@@ -1562,97 +1482,18 @@ impl Supervisor {
     /// more than `idle_threshold_secs` seconds. Used by the eBPF monitor
     /// when FD exhaustion is approaching the hard limit.
     pub async fn prune_idle_instances(&self, idle_threshold_secs: u64) {
-        let mut total_pruned = 0usize;
-
-        let app_ids = {
-            let pools = self.pools.read().await;
-            pools.keys().cloned().collect::<Vec<_>>()
-        };
-
-        for app_id_str in app_ids {
-            let app_id = AppId(app_id_str.clone());
-            let idle_ids = {
-                let pools = self.pools.read().await;
-                pools
-                    .get(&app_id_str)
-                    .map(|p| p.idle_instance_ids(idle_threshold_secs))
-                    .unwrap_or_default()
-            };
-
-            for instance_id in idle_ids {
-                info!(
-                    app = %app_id.0,
-                    instance = %instance_id.0,
-                    idle_threshold_secs,
-                    "pruning idle instance (FD pressure recovery)"
-                );
-                if let Err(e) = self.kill_instance(&app_id, &instance_id).await {
-                    warn!(
-                        app = %app_id.0,
-                        instance = %instance_id.0,
-                        error = %e,
-                        "failed to prune idle instance"
-                    );
-                } else {
-                    total_pruned += 1;
-                }
-            }
-        }
-
-        if total_pruned > 0 {
-            info!(total_pruned, idle_threshold_secs, "pruned idle instances");
-        } else {
-            info!(idle_threshold_secs, "no idle instances to prune");
-        }
+        command_runtime::prune_idle_instances(self, idle_threshold_secs).await;
     }
 
     /// Gracefully shutdown all instances across all apps.
     /// Used during node shutdown (SIGTERM).
     pub async fn shutdown_all(&self, timeout: Duration) {
-        tracing::info!("shutting down all instances");
-
-        let app_ids = self.list_app_ids().await;
-        for app_id in app_ids {
-            // Drain app (remove from upstream)
-            if let Err(e) = self.drain_app(&app_id, timeout).await {
-                tracing::warn!(app = %app_id.0, error = %e, "drain failed");
-            }
-
-            // Gracefully kill all instances
-            let instance_ids: Vec<InstanceId> = {
-                let pools = self.pools.read().await;
-                pools
-                    .get(&app_id.0)
-                    .map(|p| p.instances.iter().map(|i| i.id.clone()).collect())
-                    .unwrap_or_default()
-            };
-
-            for instance_id in instance_ids {
-                if let Err(e) = self
-                    .kill_instance_gracefully(
-                        &app_id,
-                        &instance_id,
-                        timeout / 3,     // drain timeout
-                        timeout * 2 / 3, // grace timeout
-                    )
-                    .await
-                {
-                    tracing::warn!(
-                        app = %app_id.0,
-                        instance = %instance_id.0,
-                        error = %e,
-                        "graceful shutdown failed"
-                    );
-                }
-            }
-        }
-
-        tracing::info!("all instances shutdown complete");
+        command_runtime::shutdown_all(self, timeout).await;
     }
 }
 
 // -----------------------------------------------------------------------------
-// InstanceCountProvider — bridges Supervisor to health checks
+// InstanceCountProvider bridges Supervisor to health checks
 // -----------------------------------------------------------------------------
 
 use common::health::AppHealthSummary;

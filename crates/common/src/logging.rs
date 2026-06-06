@@ -1,14 +1,14 @@
 //! Structured logging for the Wasm Cloud Platform.
 //!
 //! This module provides:
-//! - `NodeLogRecord` — the canonical JSON schema for all node-level logs
-//! - `NodeJsonFormatter` — a custom `tracing-subscriber` formatter emitting that schema
-//! - `init_logging()` — one-shot initialisation of the global subscriber
-//! - `LogReloadHandle` — runtime log-level changes without restart
-//! - `SamplingLayer` — rate-limits INFO/DEBUG/TRACE while keeping WARN/ERROR at 100 %
-//! - `AuditLogger` — non-blocking, separate-channel audit events
-//! - `RotatingFileWriter` — size-based log rotation with optional gzip
-//! - Configuration types (`LoggingConfig`, `LogForwarderConfig`, …)
+//! - `NodeLogRecord` - the canonical JSON schema for all node-level logs
+//! - `NodeJsonFormatter` - a custom `tracing-subscriber` formatter emitting that schema
+//! - `init_logging()` - one-shot initialisation of the global subscriber
+//! - `LogReloadHandle` - runtime log-level changes without restart
+//! - `SamplingLayer` - rate-limits INFO/DEBUG/TRACE while keeping WARN/ERROR at 100 %
+//! - `AuditLogger` - non-blocking, separate-channel audit events
+//! - `RotatingFileWriter` - size-based log rotation with optional gzip
+//! - Configuration types (`LoggingConfig`, `LogForwarderConfig`, ...)
 
 use serde::{Deserialize, Serialize};
 use std::io::Write as IoWrite;
@@ -27,7 +27,7 @@ use tracing_subscriber::{
 // -----------------------------------------------------------------------------
 
 /// The standard envelope for all node-level structured log records.
-/// This is what the JSON formatter emits — one JSON object per line.
+/// This is what the JSON formatter emits - one JSON object per line.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NodeLogRecord {
     /// ISO-8601 timestamp with timezone (UTC).
@@ -191,7 +191,7 @@ where
             .unwrap_or_else(|| serde_json::Value::String(String::new()));
         record.insert("message".to_string(), message);
 
-        // Known correlation fields — extract from visitor.fields
+        // Known correlation fields - extract from visitor.fields
         for key in &["app_id", "instance_id", "trace_id", "span_id"] {
             if let Some(value) = visitor.fields.remove(*key) {
                 record.insert(key.to_string(), value);
@@ -262,7 +262,7 @@ impl Visit for FieldCollector {
     }
 
     fn record_f64(&mut self, field: &Field, value: f64) {
-        // serde_json doesn't support NaN/Inf — convert to string
+        // serde_json doesn't support NaN/Inf - convert to strings for safety
         if value.is_finite() {
             if let Some(n) = serde_json::Number::from_f64(value) {
                 self.fields
@@ -578,7 +578,7 @@ impl<S: Subscriber> Layer<S> for SamplingLayer {
 pub struct AuditLogRecord {
     /// ISO-8601 timestamp.
     pub timestamp: String,
-    /// Always "audit" — distinguishes from operational logs.
+    /// Always "audit" - distinguishes from operational logs.
     pub log_type: String,
     /// The action that was performed.
     pub action: String,
@@ -852,7 +852,7 @@ impl RotatingFileWriter {
         let oldest = format!("{}.{}", self.path.display(), self.config.max_files);
         let _ = std::fs::remove_file(&oldest);
 
-        // Shift rotated files: .N → .N+1
+        // Shift rotated files: .N -> .N+1
         for i in (1..self.config.max_files).rev() {
             let from = format!("{}.{}", self.path.display(), i);
             let to = format!("{}.{}", self.path.display(), i + 1);
@@ -916,101 +916,5 @@ impl RotatingFileWriter {
 // -----------------------------------------------------------------------------
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::path::PathBuf;
-
-    #[test]
-    fn test_logging_config_default() {
-        let config = LoggingConfig::default();
-        assert_eq!(config.format, LogFormat::Json);
-        assert_eq!(config.default_level, "info");
-        assert!(!config.sampling_enabled);
-    }
-
-    #[test]
-    fn test_log_rotation_config_default() {
-        let config = LogRotationConfig::default();
-        assert_eq!(config.max_file_size_bytes, 100 * 1024 * 1024);
-        assert_eq!(config.max_files, 10);
-        assert!(config.compress);
-    }
-
-    #[test]
-    fn test_sampling_layer_rates() {
-        let layer = SamplingLayer::new(2, 10, 100);
-        // WARN/ERROR are always enabled — counters should not affect them
-        assert!(layer.info_counter.load(Ordering::Relaxed) == 0);
-        // After setting rates, the counters and rates should match
-        layer.set_rates(5, 20, 200);
-        assert_eq!(layer.info_rate.load(Ordering::Relaxed), 5);
-        assert_eq!(layer.debug_rate.load(Ordering::Relaxed), 20);
-        assert_eq!(layer.trace_rate.load(Ordering::Relaxed), 200);
-    }
-
-    #[test]
-    fn test_node_log_record_serialize() {
-        let record = NodeLogRecord {
-            timestamp: "2026-04-05T12:00:00Z".to_string(),
-            level: "INFO".to_string(),
-            target: "test".to_string(),
-            span: None,
-            message: "hello".to_string(),
-            node_id: "node-0".to_string(),
-            app_id: Some("app:v1".to_string()),
-            instance_id: None,
-            trace_id: None,
-            span_id: None,
-            fields: serde_json::Map::new(),
-            source_file: None,
-            source_line: None,
-        };
-        let json = serde_json::to_string(&record).unwrap();
-        assert!(json.contains("\"node_id\":\"node-0\""));
-        assert!(json.contains("\"app_id\":\"app:v1\""));
-    }
-
-    #[test]
-    fn test_field_collector() {
-        let mut collector = FieldCollector::default();
-        // Insert directly to test the map behaviour.
-        collector.fields.insert(
-            "app_id".to_string(),
-            serde_json::Value::String("my-app".to_string()),
-        );
-        collector.fields.insert(
-            "status".to_string(),
-            serde_json::Value::Number(200u64.into()),
-        );
-        assert_eq!(
-            collector.fields.get("app_id"),
-            Some(&serde_json::Value::String("my-app".to_string()))
-        );
-        assert_eq!(
-            collector.fields.get("status"),
-            Some(&serde_json::Value::Number(200u64.into()))
-        );
-    }
-
-    #[test]
-    fn test_build_log_writer_opens_file_output() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("app.log");
-
-        let writer = build_log_writer(&LogOutput::File { path: path.clone() });
-        assert!(writer.is_ok());
-        assert!(path.exists());
-    }
-
-    #[test]
-    fn test_build_log_writer_reports_file_open_failure() {
-        let path = PathBuf::from("/definitely-missing-parent-dir/child/app.log");
-
-        let err = match build_log_writer(&LogOutput::File { path: path.clone() }) {
-            Ok(_) => panic!("expected file-open failure"),
-            Err(err) => err,
-        };
-        assert!(err.contains("failed to open log file"));
-        assert!(err.contains(&path.display().to_string()));
-    }
-}
+#[path = "logging_tests.rs"]
+mod logging_tests;

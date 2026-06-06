@@ -8,6 +8,7 @@ mod helpers;
 mod request_filter;
 #[cfg(test)]
 mod tests;
+mod upstream_selection;
 
 use super::{
     backpressure::BackpressureSignal, gateway::Gateway, metrics::RateLimitMetrics,
@@ -79,66 +80,7 @@ pub struct WasmProxy {
 
 impl WasmProxy {
     async fn select_upstream(&self, app_id: &AppId) -> Option<crate::upstream::UpstreamEndpoint> {
-        // 1. Try local instances first (fastest path)
-        if let Some(endpoint) = self.upstream.next(app_id).await {
-            return Some(endpoint);
-        }
-
-        // 2. Check if local node is overloaded
-        if self.node_is_overloaded().await {
-            // 3. Find a remote node with capacity
-            if let Some(node) = self
-                .node_table
-                .least_loaded_other_node(&self.local_node_id)
-                .await
-            {
-                match tokio::net::lookup_host(&node.proxy_address).await {
-                    Ok(mut addrs) => {
-                        if let Some(addr) = addrs.next() {
-                            return Some(crate::upstream::UpstreamEndpoint { addr, h2c: false });
-                        }
-                        tracing::warn!(
-                            node = %node.node_id,
-                            proxy_address = %node.proxy_address,
-                            "remote node advertised no resolvable proxy address"
-                        );
-                    }
-                    Err(error) => {
-                        tracing::warn!(
-                            node = %node.node_id,
-                            proxy_address = %node.proxy_address,
-                            error = %error,
-                            "failed to resolve remote node proxy address"
-                        );
-                    }
-                }
-            }
-        }
-
-        // 4. Cold start on local node (last resort)
-        tracing::info!(app_id = %app_id.0, "cold start on local node");
-        (self.cold_start)(app_id.clone()).await?;
-        self.upstream.next(app_id).await.or_else(|| {
-            tracing::warn!(app_id = %app_id.0, "cold start returned no registered upstream");
-            None
-        })
-    }
-
-    /// Check whether the local node is overloaded and should shed traffic
-    /// to other nodes in the cluster.
-    ///
-    async fn node_is_overloaded(&self) -> bool {
-        let unhealthy = self.node_table.is_unhealthy(&self.local_node_id).await;
-        if unhealthy {
-            return true;
-        }
-
-        let nodes = self.node_table.nodes.read().await;
-        let Some(local) = nodes.get(&self.local_node_id) else {
-            return false;
-        };
-        local.health_status == common::health::NodeHealthStatus::Unhealthy
-            || local.fuel_used_percent >= REMOTE_STEER_FUEL_THRESHOLD_PERCENT
+        upstream_selection::select_upstream(self, app_id).await
     }
 }
 
