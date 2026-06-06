@@ -25,5 +25,5 @@ http-body-util = "0.1"
 futures = "0.3"
 
 [dev-dependencies]
-wat = "1.246.2"
+wat = "1.251.0"
 tempfile = "3"
