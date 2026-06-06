@@ -579,6 +579,54 @@ fn ensure_helper_binary_built_once(
         .map_err(|err| -> Box<dyn std::error::Error> { err.clone().into() })
 }
 
+fn ensure_wasm_package_built_once(
+    package_name: &'static str,
+    workspace_root: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    static HELLO_AXUM_BUILD: OnceLock<Result<(), String>> = OnceLock::new();
+    static ECHO_SERVICE_BUILD: OnceLock<Result<(), String>> = OnceLock::new();
+    static POSTGRES_APP_BUILD: OnceLock<Result<(), String>> = OnceLock::new();
+    static HTTP_HELLO_COMPONENT_BUILD: OnceLock<Result<(), String>> = OnceLock::new();
+    static WASI_GRPC_ECHO_BUILD: OnceLock<Result<(), String>> = OnceLock::new();
+
+    let cell = match package_name {
+        "hello-axum" => &HELLO_AXUM_BUILD,
+        "echo-service" => &ECHO_SERVICE_BUILD,
+        "postgres-app" => &POSTGRES_APP_BUILD,
+        "http-hello-component" => &HTTP_HELLO_COMPONENT_BUILD,
+        "wasi-grpc-echo" => &WASI_GRPC_ECHO_BUILD,
+        _ => return Err(format!("unsupported wasm package: {package_name}").into()),
+    };
+
+    let result = cell.get_or_init(|| {
+        eprintln!("Building {}.wasm...", package_name);
+        match std::process::Command::new("cargo")
+            .args([
+                "build",
+                "--release",
+                "--target",
+                "wasm32-wasip2",
+                "-p",
+                package_name,
+            ])
+            .current_dir(workspace_root)
+            .status()
+        {
+            Ok(status) if status.success() => Ok(()),
+            Ok(status) => Err(format!("failed to build {}: {}", package_name, status)),
+            Err(err) => Err(format!(
+                "failed to spawn cargo build for {}: {}",
+                package_name, err
+            )),
+        }
+    });
+
+    result
+        .as_ref()
+        .map(|_| ())
+        .map_err(|err| -> Box<dyn std::error::Error> { err.clone().into() })
+}
+
 pub fn run_ctl(
     args: &[&str],
     nats_url: &str,
@@ -625,42 +673,8 @@ pub async fn run_ctl_async(
 pub fn find_hello_axum_wasm() -> Result<PathBuf, Box<dyn std::error::Error>> {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
     let workspace_root = Path::new(manifest_dir).parent().unwrap().parent().unwrap();
-
     let wasm_path = workspace_root.join("target/wasm32-wasip2/release/hello-axum.wasm");
-
-    // Check if needs rebuild
-    let needs_rebuild = if !wasm_path.exists() {
-        true
-    } else {
-        let wasm_modified = std::fs::metadata(&wasm_path)?.modified()?;
-        let main_modified =
-            std::fs::metadata(workspace_root.join("apps/hello-axum/src/main.rs"))?.modified()?;
-        wasm_modified < main_modified
-    };
-
-    if needs_rebuild {
-        eprintln!("⚠️ Building hello-axum.wasm...");
-
-        let output = std::process::Command::new("cargo")
-            .args([
-                "build",
-                "--release",
-                "--target",
-                "wasm32-wasip2",
-                "-p",
-                "hello-axum",
-            ])
-            .current_dir(workspace_root)
-            .output()?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            eprintln!("Build error: {}", stderr);
-            return Err(format!("Failed to build hello-axum: {}", stderr).into());
-        }
-
-        eprintln!("Build stdout: {}", String::from_utf8_lossy(&output.stdout));
-    }
+    ensure_wasm_package_built_once("hello-axum", workspace_root)?;
 
     if wasm_path.exists() {
         Ok(wasm_path)
@@ -674,42 +688,8 @@ pub fn find_hello_axum_wasm() -> Result<PathBuf, Box<dyn std::error::Error>> {
 pub fn find_echo_service_wasm() -> Result<PathBuf, Box<dyn std::error::Error>> {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
     let workspace_root = Path::new(manifest_dir).parent().unwrap().parent().unwrap();
-
     let wasm_path = workspace_root.join("target/wasm32-wasip2/release/echo-service.wasm");
-
-    // Check if needs rebuild
-    let needs_rebuild = if !wasm_path.exists() {
-        true
-    } else {
-        let wasm_modified = std::fs::metadata(&wasm_path)?.modified()?;
-        let main_modified =
-            std::fs::metadata(workspace_root.join("apps/echo-service/src/main.rs"))?.modified()?;
-        wasm_modified < main_modified
-    };
-
-    if needs_rebuild {
-        eprintln!("⚠️ Building echo-service.wasm...");
-
-        let output = std::process::Command::new("cargo")
-            .args([
-                "build",
-                "--release",
-                "--target",
-                "wasm32-wasip2",
-                "-p",
-                "echo-service",
-            ])
-            .current_dir(workspace_root)
-            .output()?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            eprintln!("Build error: {}", stderr);
-            return Err(format!("Failed to build echo-service: {}", stderr).into());
-        }
-
-        eprintln!("Build stdout: {}", String::from_utf8_lossy(&output.stdout));
-    }
+    ensure_wasm_package_built_once("echo-service", workspace_root)?;
 
     if wasm_path.exists() {
         Ok(wasm_path)
@@ -723,41 +703,8 @@ pub fn find_echo_service_wasm() -> Result<PathBuf, Box<dyn std::error::Error>> {
 pub fn find_postgres_app_wasm() -> Result<PathBuf, Box<dyn std::error::Error>> {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
     let workspace_root = Path::new(manifest_dir).parent().unwrap().parent().unwrap();
-
     let wasm_path = workspace_root.join("target/wasm32-wasip2/release/postgres-app.wasm");
-
-    let needs_rebuild = if !wasm_path.exists() {
-        true
-    } else {
-        let wasm_modified = std::fs::metadata(&wasm_path)?.modified()?;
-        let main_modified =
-            std::fs::metadata(workspace_root.join("apps/postgres-app/src/main.rs"))?.modified()?;
-        wasm_modified < main_modified
-    };
-
-    if needs_rebuild {
-        eprintln!("⚠️ Building postgres-app.wasm...");
-
-        let output = std::process::Command::new("cargo")
-            .args([
-                "build",
-                "--release",
-                "--target",
-                "wasm32-wasip2",
-                "-p",
-                "postgres-app",
-            ])
-            .current_dir(workspace_root)
-            .output()?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            eprintln!("Build error: {}", stderr);
-            return Err(format!("Failed to build postgres-app: {}", stderr).into());
-        }
-
-        eprintln!("Build stdout: {}", String::from_utf8_lossy(&output.stdout));
-    }
+    ensure_wasm_package_built_once("postgres-app", workspace_root)?;
 
     if wasm_path.exists() {
         Ok(wasm_path)
@@ -771,42 +718,8 @@ pub fn find_postgres_app_wasm() -> Result<PathBuf, Box<dyn std::error::Error>> {
 pub fn find_http_hello_component_wasm() -> Result<PathBuf, Box<dyn std::error::Error>> {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
     let workspace_root = Path::new(manifest_dir).parent().unwrap().parent().unwrap();
-
     let wasm_path = workspace_root.join("target/wasm32-wasip2/release/http_hello_component.wasm");
-
-    let needs_rebuild = if !wasm_path.exists() {
-        true
-    } else {
-        let wasm_modified = std::fs::metadata(&wasm_path)?.modified()?;
-        let main_modified =
-            std::fs::metadata(workspace_root.join("apps/http-hello-component/src/lib.rs"))?
-                .modified()?;
-        wasm_modified < main_modified
-    };
-
-    if needs_rebuild {
-        eprintln!("⚠️ Building http-hello-component.wasm...");
-
-        let output = std::process::Command::new("cargo")
-            .args([
-                "build",
-                "--release",
-                "--target",
-                "wasm32-wasip2",
-                "-p",
-                "http-hello-component",
-            ])
-            .current_dir(workspace_root)
-            .output()?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            eprintln!("Build error: {}", stderr);
-            return Err(format!("Failed to build http-hello-component: {}", stderr).into());
-        }
-
-        eprintln!("Build stdout: {}", String::from_utf8_lossy(&output.stdout));
-    }
+    ensure_wasm_package_built_once("http-hello-component", workspace_root)?;
 
     if wasm_path.exists() {
         Ok(wasm_path)
@@ -818,49 +731,8 @@ pub fn find_http_hello_component_wasm() -> Result<PathBuf, Box<dyn std::error::E
 pub fn find_wasi_grpc_echo_wasm() -> Result<PathBuf, Box<dyn std::error::Error>> {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
     let workspace_root = Path::new(manifest_dir).parent().unwrap().parent().unwrap();
-
     let wasm_path = workspace_root.join("target/wasm32-wasip2/release/wasi_grpc_echo.wasm");
-
-    let needs_rebuild = if !wasm_path.exists() {
-        true
-    } else {
-        let wasm_modified = std::fs::metadata(&wasm_path)?.modified()?;
-        let source_files = [
-            workspace_root.join("apps/wasi-grpc-echo/src/lib.rs"),
-            workspace_root.join("apps/wasi-grpc-echo/proto/echo.proto"),
-            workspace_root.join("apps/wasi-grpc-echo/wit/world.wit"),
-        ];
-        let mut stale = false;
-        for path in source_files {
-            let modified = std::fs::metadata(path)?.modified()?;
-            if wasm_modified < modified {
-                stale = true;
-                break;
-            }
-        }
-        stale
-    };
-
-    if needs_rebuild {
-        eprintln!("Building wasi-grpc-echo.wasm...");
-
-        let output = std::process::Command::new("cargo")
-            .args([
-                "build",
-                "--release",
-                "--target",
-                "wasm32-wasip2",
-                "-p",
-                "wasi-grpc-echo",
-            ])
-            .current_dir(workspace_root)
-            .output()?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(format!("Failed to build wasi-grpc-echo: {}", stderr).into());
-        }
-    }
+    ensure_wasm_package_built_once("wasi-grpc-echo", workspace_root)?;
 
     if wasm_path.exists() {
         Ok(wasm_path)

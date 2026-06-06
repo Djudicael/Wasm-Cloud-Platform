@@ -35,7 +35,7 @@ async-nats    = { workspace = true }
 sha2          = { workspace = true }
 hex           = { workspace = true }
 
-# Unix signals (SIGTERM for graceful node shutdown) — Linux/WSL only
+# Unix signals (SIGTERM for graceful node shutdown) - Linux/WSL only
 libc          = "0.2"
 
 # Temp directories (per-node redb isolation)
@@ -50,7 +50,7 @@ chrono        = { workspace = true, features = ["serde"] }
 # UUID (unique test run identifiers)
 uuid          = { workspace = true, features = ["v4"] }
 
-# Local crates — types, events, storage, supervisor
+# Local crates - types, events, storage, supervisor
 common        = { version = "0.1.0", path = "../common" }
 messaging     = { version = "0.1.0", path = "../messaging" }
 storage       = { version = "0.1.0", path = "../storage" }
@@ -85,7 +85,7 @@ protoc-bin-vendored = "3.1.0"
 [features]
 default = []
 
-# Chaos tests require Linux (WSL) — Unix signals, tc, iptables.
+# Chaos tests require Linux (WSL) - Unix signals, tc, iptables.
 # Enable this feature when running chaos tests inside WSL.
 chaos-linux = []
 

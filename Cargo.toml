@@ -31,7 +31,7 @@ license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
 # Async
-tokio        = { version = "1.52", features = ["full"] }
+tokio        = { version = "1.52.3", features = ["full"] }
 
 # Serialization
 serde        = { version = "1.0", features = ["derive"] }
@@ -47,18 +47,18 @@ tracing               = "0.1"
 tracing-subscriber    = { version = "0.3", features = ["env-filter", "json"] }
 
 # Wasm runtime
-wasmtime              = "45.0.0"
-wasmtime-wasi         = "45.0.0"
-wasmtime-wasi-http    = "45.0.0"
+wasmtime              = "45.0.1"
+wasmtime-wasi         = "45.0.1"
+wasmtime-wasi-http    = "45.0.1"
 
 # Proxy
-pingora               = "0.8"
-pingora-proxy         = "0.8"
-pingora-load-balancing = "0.8"
-pingora-core          = "0.8"
+pingora               = "0.8.1"
+pingora-proxy         = "0.8.1"
+pingora-load-balancing = "0.8.1"
+pingora-core          = "0.8.1"
 
 # Storage
-redb = "4.0"
+redb = "4.1.0"
 
 # Messaging
 async-nats = "0.48"
@@ -67,20 +67,20 @@ async-nats = "0.48"
 aes-gcm          = "0.10"
 
 # Metrics
-prometheus      = { version = "0.14", features = ["process"] }
+prometheus      = { version = "0.14.0", features = ["process"] }
 
 # HTTP (admin API)
-axum = "0.8"
+axum = "0.8.9"
 
 # CLI
-clap = { version = "4", features = ["derive", "env"] }
+clap = { version = "4.6.1", features = ["derive", "env"] }
 
 # Utils
 uuid   = { version = "1", features = ["v4", "serde"] }
-chrono = { version = "0.4", features = ["serde"] }
+chrono = { version = "0.4.45", features = ["serde"] }
 
 # Testing
-reqwest = { version = "0.13.3", features = ["json"] }
+reqwest = { version = "0.13.4", features = ["json"] }
 
 # Crypto
 sha2 = "0.11"
@@ -90,11 +90,11 @@ hex = "0.4"
 url = "2"
 
 # Concurrent
-dashmap = "6.1"
+dashmap = "6.2.1"
 
 # eBPF monitoring
 aya = "0.12"
-aya-log = "0.2"
+aya-log = "0.2.1"
 
 [profile.release]
 opt-level = "s"

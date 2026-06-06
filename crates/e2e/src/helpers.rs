@@ -13,6 +13,7 @@ use messaging::NatsBus;
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::OnceLock;
 use std::time::Duration;
 use tracing::{info, warn};
 
@@ -599,45 +600,7 @@ pub fn find_hello_axum_wasm() -> Result<PathBuf, String> {
         .unwrap_or(Path::new("."));
 
     let wasm_path = workspace_root.join("target/wasm32-wasip2/release/hello-axum.wasm");
-
-    // Check if needs rebuild
-    let needs_rebuild = if !wasm_path.exists() {
-        true
-    } else {
-        let wasm_modified = std::fs::metadata(&wasm_path)
-            .ok()
-            .and_then(|m| m.modified().ok());
-        let src_modified = std::fs::metadata(workspace_root.join("apps/hello-axum/src/main.rs"))
-            .ok()
-            .and_then(|m| m.modified().ok());
-
-        match (wasm_modified, src_modified) {
-            (Some(wasm), Some(src)) => wasm < src,
-            _ => false,
-        }
-    };
-
-    if needs_rebuild {
-        info!("building hello-axum.wasm...");
-
-        let output = std::process::Command::new("cargo")
-            .args([
-                "build",
-                "--release",
-                "--target",
-                "wasm32-wasip2",
-                "-p",
-                "hello-axum",
-            ])
-            .current_dir(workspace_root)
-            .output()
-            .map_err(|e| format!("failed to run cargo build: {e}"))?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(format!("failed to build hello-axum: {stderr}"));
-        }
-    }
+    ensure_wasm_package_built_once("hello-axum", workspace_root)?;
 
     if wasm_path.exists() {
         Ok(wasm_path)
@@ -657,50 +620,53 @@ pub fn find_echo_service_wasm() -> Result<PathBuf, String> {
         .unwrap_or(Path::new("."));
 
     let wasm_path = workspace_root.join("target/wasm32-wasip2/release/echo-service.wasm");
-
-    let needs_rebuild = if !wasm_path.exists() {
-        true
-    } else {
-        let wasm_modified = std::fs::metadata(&wasm_path)
-            .ok()
-            .and_then(|m| m.modified().ok());
-        let src_modified = std::fs::metadata(workspace_root.join("apps/echo-service/src/main.rs"))
-            .ok()
-            .and_then(|m| m.modified().ok());
-
-        match (wasm_modified, src_modified) {
-            (Some(wasm), Some(src)) => wasm < src,
-            _ => false,
-        }
-    };
-
-    if needs_rebuild {
-        info!("building echo-service.wasm...");
-
-        let output = std::process::Command::new("cargo")
-            .args([
-                "build",
-                "--release",
-                "--target",
-                "wasm32-wasip2",
-                "-p",
-                "echo-service",
-            ])
-            .current_dir(workspace_root)
-            .output()
-            .map_err(|e| format!("failed to run cargo build: {e}"))?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(format!("failed to build echo-service: {stderr}"));
-        }
-    }
+    ensure_wasm_package_built_once("echo-service", workspace_root)?;
 
     if wasm_path.exists() {
         Ok(wasm_path)
     } else {
         Err("build succeeded but echo-service.wasm not found".to_string())
     }
+}
+
+fn ensure_wasm_package_built_once(
+    package_name: &'static str,
+    workspace_root: &Path,
+) -> Result<(), String> {
+    static HELLO_AXUM_BUILD: OnceLock<Result<(), String>> = OnceLock::new();
+    static ECHO_SERVICE_BUILD: OnceLock<Result<(), String>> = OnceLock::new();
+
+    let cell = match package_name {
+        "hello-axum" => &HELLO_AXUM_BUILD,
+        "echo-service" => &ECHO_SERVICE_BUILD,
+        _ => return Err(format!("unsupported wasm package: {package_name}")),
+    };
+
+    let result = cell.get_or_init(|| {
+        info!("building {}.wasm...", package_name);
+
+        match std::process::Command::new("cargo")
+            .args([
+                "build",
+                "--release",
+                "--target",
+                "wasm32-wasip2",
+                "-p",
+                package_name,
+            ])
+            .current_dir(workspace_root)
+            .status()
+        {
+            Ok(status) if status.success() => Ok(()),
+            Ok(status) => Err(format!("failed to build {}: {}", package_name, status)),
+            Err(e) => Err(format!(
+                "failed to run cargo build for {}: {e}",
+                package_name
+            )),
+        }
+    });
+
+    result.clone()
 }
 
 // ── Billing Helpers ──────────────────────────────────────────────────

@@ -4,7 +4,7 @@ version = "0.1.0"
 license.workspace = true
 edition = "2021"
 
-# No [lib] section — this is a binary (wasi:cli/run)
+# No [lib] section - this is a binary (wasi:cli/run)
 # The wasm32-wasip2 target uses std::net directly, no axum/tokio needed.
 
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
