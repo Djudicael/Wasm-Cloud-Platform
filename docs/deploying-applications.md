@@ -428,13 +428,15 @@ Runtime app secrets stay separate. CI should not send plaintext `DATABASE_URL`, 
 # Route external traffic to the app
 wasm-ctl routes add \
   --host api.example.com \
-  --app hello-api:v1 \
-  --path-prefix /
+  --app hello-api:v1
 
 # The app is now reachable at:
 curl http://api.example.com/
 # → Hello from Wasm!
 ```
+
+This is still useful for manual operations, but manifest deploys can now create
+the public route bindings automatically.
 
 ---
 
@@ -469,6 +471,9 @@ profile = "http_api"
 wasm-ctl deploy --manifest ./hello-api.toml
 ```
 
+If the manifest contains `gateway.host` or `[[gateway.routes]]`, the deploy
+command now publishes the matching route bindings as part of the deploy flow.
+
 ### Full manifest with gateway config
 
 ```toml
@@ -495,9 +500,20 @@ allow_dns = true
 max_outbound_connections = 50
 allowed_cidrs = ["10.0.0.0/8"]
 
-# External hostname
+# Backward-compatible default route for "/"
 [gateway]
 host = "api-users.example.com"
+
+# Additional host/path bindings published during deploy
+[[gateway.routes]]
+host = "api.example.com"
+path_prefix = "/v2"
+strip_prefix = false
+
+[[gateway.routes]]
+host = "api.example.com"
+path_prefix = "/internal"
+strip_prefix = true
 
 # Auth: JWT + roles
 [gateway.auth]
@@ -579,6 +595,45 @@ name = "partner-integration"
 key_hash = "sha256$def456..."
 scopes = ["/api/public", "/api/users"]
 ```
+
+### Route bindings in manifests
+
+Public ingress bindings can now be declared directly in the deploy manifest.
+
+Supported shapes:
+
+- `gateway.host = "app.example.com"` creates the default route for `/`
+- `[[gateway.routes]]` creates explicit `host + path_prefix` bindings
+
+Example:
+
+```toml
+[gateway]
+host = "www.example.com"
+
+[[gateway.routes]]
+host = "api.example.com"
+path_prefix = "/v1"
+strip_prefix = false
+
+[[gateway.routes]]
+host = "api.example.com"
+path_prefix = "/internal"
+strip_prefix = true
+```
+
+Behavior:
+
+- `Host: www.example.com` with any path routes to the app through `/`
+- `Host: api.example.com` with `/v1/...` routes to the same app
+- `strip_prefix = true` means the upstream app receives `/...` after the
+  matched prefix is removed
+
+Route declarations are validated during deploy:
+
+- host must be non-empty
+- duplicate `host + path_prefix` entries in one manifest are rejected
+- path prefixes are normalized so `v1` becomes `/v1`
 
 ### Manifest overrides
 

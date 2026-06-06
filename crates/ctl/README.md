@@ -70,6 +70,23 @@ wasm-ctl deploy \
   --artifact-credential ghcr-reader
 ```
 
+Manifest-driven deploys can now publish public route bindings as part of the
+deploy itself. Both of these shapes are supported:
+
+```toml
+[gateway]
+host = "www.example.com"
+
+[[gateway.routes]]
+host = "api.example.com"
+path_prefix = "/v1"
+strip_prefix = false
+```
+
+`gateway.host` is kept as the compatibility shorthand for the default `/`
+route. `[[gateway.routes]]` supports additional host and path bindings for the
+same app.
+
 If deploy ingress is running with `WASM_DEPLOY_INGRESS_REQUIRE_OCI_DIGEST_REFS=true`,
 mutable OCI tag refs like `oci://...:v1` are rejected and callers must use
 digest-pinned refs.

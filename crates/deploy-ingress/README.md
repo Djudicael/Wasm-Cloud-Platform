@@ -77,6 +77,16 @@ Minimum request shape:
     "id": "hello-api:v1",
     "namespace": "default"
   },
+  "routes": [
+    {
+      "host": "api.example.com",
+      "app_id": "hello-api:v1",
+      "path_prefix": "/v1",
+      "strip_prefix": false,
+      "created_at": 1760000000,
+      "updated_at": 1760000000
+    }
+  ],
   "artifact": {
     "url": "https://artifacts.example.com/hello-api.wasm",
     "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
@@ -96,9 +106,13 @@ Success response:
   "source_node_id": "deploy-ingress-0",
   "artifact_transfer_manifests": [],
   "gateway_config_published": false,
+  "route_count": 1,
   "api_key_count": 0
 }
 ```
+
+`routes` is optional. When present, deploy-ingress publishes one `RouteAdd`
+event per entry after the `DeployApp` event is accepted.
 
 Primary status codes:
 
