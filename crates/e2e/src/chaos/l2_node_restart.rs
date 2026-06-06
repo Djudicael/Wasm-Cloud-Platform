@@ -101,6 +101,10 @@ pub async fn test_l2_node_restart_recovery() -> TestReport {
     let admin_addr = fixture.node(0).admin_addr_str();
     let proxy_addr = fixture.node(0).proxy_addr_str();
 
+    // Trigger the initial cold start so the app has a real running instance
+    // before we measure crash-and-restart recovery.
+    let _ = verifier::verify_proxy_request_any_2xx(&proxy_addr, host).await;
+
     // Wait for the app to have a running instance
     let step =
         match verifier::wait_for_app_instances(&admin_addr, app_id, 1, Duration::from_secs(30))
@@ -299,6 +303,10 @@ pub async fn test_l2_node_graceful_restart_recovery() -> TestReport {
 
     let admin_addr = fixture.node(0).admin_addr_str();
     let proxy_addr = fixture.node(0).proxy_addr_str();
+
+    // Trigger the initial cold start so the graceful restart scenario starts
+    // from a node that is already serving a real instance.
+    let _ = verifier::verify_proxy_request_any_2xx(&proxy_addr, host).await;
 
     let step =
         match verifier::wait_for_app_instances(&admin_addr, app_id, 1, Duration::from_secs(30))

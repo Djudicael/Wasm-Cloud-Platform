@@ -158,6 +158,7 @@ fn init_tracing() {
 // ── L1: Instance Crash Recovery ──────────────────────────────────────
 
 #[tokio::test]
+#[ignore = "slow chaos scenario; run explicitly in Linux/WSL CI"]
 async fn test_l1_instance_crash() {
     init_tracing();
     let mut report = chaos::l1_instance_crash::test_l1_instance_crash_recovery().await;
@@ -172,6 +173,7 @@ async fn test_l1_instance_crash() {
 // ── L2: Node Process Restart Recovery ────────────────────────────────
 
 #[tokio::test]
+#[ignore = "slow chaos scenario; run explicitly in Linux/WSL CI"]
 async fn test_l2_node_restart() {
     init_tracing();
     let mut report = chaos::l2_node_restart::test_l2_node_restart_recovery().await;
@@ -184,6 +186,7 @@ async fn test_l2_node_restart() {
 }
 
 #[tokio::test]
+#[ignore = "slow chaos scenario; run explicitly in Linux/WSL CI"]
 async fn test_l2_node_graceful_restart() {
     init_tracing();
     let mut report = chaos::l2_node_restart::test_l2_node_graceful_restart_recovery().await;
@@ -198,6 +201,7 @@ async fn test_l2_node_graceful_restart() {
 // ── L3: Redb Corruption Recovery ─────────────────────────────────────
 
 #[tokio::test]
+#[ignore = "slow chaos scenario; run explicitly in Linux/WSL CI"]
 async fn test_l3_redb_corruption() {
     init_tracing();
     let mut report = chaos::l3_redb_corruption::test_l3_redb_corruption_recovery().await;
@@ -210,6 +214,7 @@ async fn test_l3_redb_corruption() {
 }
 
 #[tokio::test]
+#[ignore = "slow chaos scenario; run explicitly in Linux/WSL CI"]
 async fn test_l3_critical_corruption_full_rebootstrap() {
     init_tracing();
     let mut report =
@@ -227,6 +232,7 @@ async fn test_l3_critical_corruption_full_rebootstrap() {
 // ── L4: Full Node Rebuild Recovery ───────────────────────────────────
 
 #[tokio::test]
+#[ignore = "slow chaos scenario; run explicitly in Linux/WSL CI"]
 async fn test_l4_full_rebuild() {
     init_tracing();
     let mut report = chaos::l4_full_rebuild::test_l4_full_rebuild_recovery().await;
@@ -239,6 +245,7 @@ async fn test_l4_full_rebuild() {
 }
 
 #[tokio::test]
+#[ignore = "slow chaos scenario; run explicitly in Linux/WSL CI"]
 async fn test_l4_rebuilt_node_receives_new_deployments() {
     init_tracing();
     let mut report = chaos::l4_full_rebuild::test_l4_rebuilt_node_receives_new_deployments().await;
@@ -253,6 +260,7 @@ async fn test_l4_rebuilt_node_receives_new_deployments() {
 // ── L5: NATS Partition Recovery ──────────────────────────────────────
 
 #[tokio::test]
+#[ignore = "slow chaos scenario; run explicitly in Linux/WSL CI"]
 async fn test_l5_nats_partition() {
     init_tracing();
     let mut report = chaos::l5_nats_partition::test_l5_nats_partition_recovery().await;
@@ -265,6 +273,7 @@ async fn test_l5_nats_partition() {
 }
 
 #[tokio::test]
+#[ignore = "slow chaos scenario; run explicitly in Linux/WSL CI"]
 async fn test_l5_partition_event_delivery_after_recovery() {
     init_tracing();
     let mut report =
@@ -278,6 +287,7 @@ async fn test_l5_partition_event_delivery_after_recovery() {
 }
 
 #[tokio::test]
+#[ignore = "slow chaos scenario; run explicitly in Linux/WSL CI"]
 async fn test_l5_degraded_mode_no_new_deploys() {
     init_tracing();
     let mut report = chaos::l5_nats_partition::test_l5_degraded_mode_no_new_deploys().await;
@@ -292,6 +302,7 @@ async fn test_l5_degraded_mode_no_new_deploys() {
 // ── L6: Multi-Node Failure Recovery ──────────────────────────────────
 
 #[tokio::test]
+#[ignore = "slow chaos scenario; run explicitly in Linux/WSL CI"]
 async fn test_l6_multi_node_failure() {
     init_tracing();
     let mut report = chaos::l6_multi_node_failure::test_l6_multi_node_failure_recovery().await;
@@ -304,6 +315,7 @@ async fn test_l6_multi_node_failure() {
 }
 
 #[tokio::test]
+#[ignore = "slow chaos scenario; run explicitly in Linux/WSL CI"]
 async fn test_l6_survivor_receives_new_deployments() {
     init_tracing();
     let mut report =
@@ -317,6 +329,7 @@ async fn test_l6_survivor_receives_new_deployments() {
 }
 
 #[tokio::test]
+#[ignore = "slow chaos scenario; run explicitly in Linux/WSL CI"]
 async fn test_l6_sequential_node_failures() {
     init_tracing();
     let mut report = chaos::l6_multi_node_failure::test_l6_sequential_node_failures().await;
@@ -331,6 +344,7 @@ async fn test_l6_sequential_node_failures() {
 // ── Full Suite ───────────────────────────────────────────────────────
 
 #[tokio::test]
+#[ignore = "slow aggregate chaos suite; run explicitly in Linux/WSL CI"]
 async fn test_chaos_full_suite() {
     init_tracing();
     // Check the environment before running the full suite
@@ -356,6 +370,7 @@ async fn test_chaos_full_suite() {
 }
 
 #[tokio::test]
+#[ignore = "slow aggregate chaos suite; run explicitly in Linux/WSL CI"]
 async fn test_chaos_basic_suite() {
     init_tracing();
     // Basic suite: L1–L2 only (no CAP_NET_ADMIN needed)
