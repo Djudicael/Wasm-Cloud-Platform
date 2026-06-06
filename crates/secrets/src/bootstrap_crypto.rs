@@ -84,7 +84,7 @@ pub fn encrypt_for_peer(
     plaintext: &[u8],
 ) -> Result<Vec<u8>, PlatformError> {
     let mut rng = OsRng;
-    let ephemeral = EphemeralSecret::random_from_rng(&mut rng);
+    let ephemeral = EphemeralSecret::random_from_rng(rng);
     let ephemeral_public = PublicKey::from(&ephemeral);
 
     let peer_public =

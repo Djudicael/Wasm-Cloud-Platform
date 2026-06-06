@@ -24,6 +24,6 @@ futures = "0.3.32"
 
 [dev-dependencies]
 base64 = "0.22.1"
-jsonwebtoken = "10.4.0"
+jsonwebtoken = { workspace = true }
 rand = "0.10.1"
 rsa = "0.9.10"

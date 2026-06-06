@@ -6,7 +6,9 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use harness::{reserve_test_port, NatsContainer, NodeProcess};
+use harness::{
+    reserve_test_port, NatsContainer, NodeLaunchOptions, NodeProcess, RestartNodeOptions,
+};
 use serde_json::json;
 use std::sync::Arc;
 
@@ -163,8 +165,10 @@ async fn test_node_starts_and_restarts_with_vault_kv_key_source() {
         proxy_port,
         artifact_port,
         admin_port,
-        &extra_args,
-        &extra_env,
+        NodeLaunchOptions {
+            extra_args: &extra_args,
+            extra_env: &extra_env,
+        },
     )
     .await
     .expect("node should start with vault-kv key source");
@@ -176,11 +180,15 @@ async fn test_node_starts_and_restarts_with_vault_kv_key_source() {
         &nats.url,
         reserve_test_port().expect("reserve restart proxy port"),
         reserve_test_port().expect("reserve restart artifact port"),
-        reserve_test_port().expect("reserve restart admin port"),
-        db_path,
-        temp_dir,
-        &extra_args,
-        &extra_env,
+        RestartNodeOptions {
+            admin_port: reserve_test_port().expect("reserve restart admin port"),
+            db_path,
+            temp_dir,
+            launch: NodeLaunchOptions {
+                extra_args: &extra_args,
+                extra_env: &extra_env,
+            },
+        },
     )
     .await
     .expect("node should restart with vault-kv key source");
@@ -230,8 +238,10 @@ async fn test_node_starts_and_restarts_with_vault_transit_key_source() {
         proxy_port,
         artifact_port,
         admin_port,
-        &extra_args,
-        &extra_env,
+        NodeLaunchOptions {
+            extra_args: &extra_args,
+            extra_env: &extra_env,
+        },
     )
     .await
     .expect("node should start with vault-transit key source");
@@ -243,11 +253,15 @@ async fn test_node_starts_and_restarts_with_vault_transit_key_source() {
         &nats.url,
         reserve_test_port().expect("reserve restart proxy port"),
         reserve_test_port().expect("reserve restart artifact port"),
-        reserve_test_port().expect("reserve restart admin port"),
-        db_path,
-        temp_dir,
-        &extra_args,
-        &extra_env,
+        RestartNodeOptions {
+            admin_port: reserve_test_port().expect("reserve restart admin port"),
+            db_path,
+            temp_dir,
+            launch: NodeLaunchOptions {
+                extra_args: &extra_args,
+                extra_env: &extra_env,
+            },
+        },
     )
     .await
     .expect("node should restart with vault-transit key source");

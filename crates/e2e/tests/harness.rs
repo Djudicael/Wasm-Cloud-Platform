@@ -46,6 +46,30 @@ pub struct FileServer {
     pub url: String,
 }
 
+#[derive(Default)]
+pub struct NodeLaunchOptions<'a> {
+    pub extra_args: &'a [&'a str],
+    pub extra_env: &'a [(&'a str, &'a str)],
+}
+
+pub struct RestartNodeOptions<'a> {
+    pub admin_port: u16,
+    pub db_path: PathBuf,
+    pub temp_dir: TempDir,
+    pub launch: NodeLaunchOptions<'a>,
+}
+
+struct NodeSpawn<'a> {
+    node_id: &'a str,
+    nats_url: &'a str,
+    proxy_port: u16,
+    artifact_port: u16,
+    admin_port: u16,
+    deploy_port: u16,
+    db_path: &'a Path,
+    launch: NodeLaunchOptions<'a>,
+}
+
 impl NatsContainer {
     /// Start a NATS container with JetStream enabled
     pub async fn start(port: u16) -> Result<Self, Box<dyn std::error::Error>> {
@@ -214,8 +238,7 @@ impl NodeProcess {
             proxy_port,
             artifact_port,
             admin_port,
-            &[],
-            &[],
+            NodeLaunchOptions::default(),
         )
         .await
     }
@@ -227,23 +250,21 @@ impl NodeProcess {
         proxy_port: u16,
         artifact_port: u16,
         admin_port: u16,
-        extra_args: &[&str],
-        extra_env: &[(&str, &str)],
+        launch: NodeLaunchOptions<'_>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let deploy_port = reserve_test_port()?;
         let temp_dir = tempfile::tempdir()?;
         let db_path = temp_dir.path().join("node.db");
-        let process = Self::spawn_process(
+        let process = Self::spawn_process(NodeSpawn {
             node_id,
             nats_url,
             proxy_port,
             artifact_port,
             admin_port,
             deploy_port,
-            &db_path,
-            extra_args,
-            extra_env,
-        )?;
+            db_path: &db_path,
+            launch,
+        })?;
         wait_for_node_ready(admin_port, proxy_port, artifact_port).await?;
 
         eprintln!("✓ Node startup wait complete");
@@ -260,52 +281,42 @@ impl NodeProcess {
         })
     }
 
-    fn spawn_process(
-        node_id: &str,
-        nats_url: &str,
-        proxy_port: u16,
-        artifact_port: u16,
-        admin_port: u16,
-        deploy_port: u16,
-        db_path: &Path,
-        extra_args: &[&str],
-        extra_env: &[(&str, &str)],
-    ) -> Result<Child, Box<dyn std::error::Error>> {
+    fn spawn_process(spawn: NodeSpawn<'_>) -> Result<Child, Box<dyn std::error::Error>> {
         let advertised_host = advertised_node_host();
 
         let node_binary = find_node_binary()?;
 
         eprintln!(
             "Starting node {} (proxy:{}, artifact:{}, admin:{})",
-            node_id, proxy_port, artifact_port, admin_port
+            spawn.node_id, spawn.proxy_port, spawn.artifact_port, spawn.admin_port
         );
 
         let mut command = Command::new(&node_binary);
         command
             .arg("--node-id")
-            .arg(node_id)
+            .arg(spawn.node_id)
             .arg("--nats-url")
-            .arg(nats_url)
+            .arg(spawn.nats_url)
             .arg("--proxy-port")
-            .arg(proxy_port.to_string())
+            .arg(spawn.proxy_port.to_string())
             .arg("--proxy-https-port")
             .arg("0")
             .arg("--admin-port")
-            .arg(admin_port.to_string())
+            .arg(spawn.admin_port.to_string())
             .arg("--artifact-port")
-            .arg(artifact_port.to_string())
+            .arg(spawn.artifact_port.to_string())
             .arg("--deploy-ingress-port")
-            .arg(deploy_port.to_string())
+            .arg(spawn.deploy_port.to_string())
             .arg("--admin-advertised-host")
             .arg(&advertised_host)
             .arg("--db-path")
-            .arg(db_path)
-            .args(extra_args)
+            .arg(spawn.db_path)
+            .args(spawn.launch.extra_args)
             .env("RUST_LOG", "debug")
             .stdout(Stdio::inherit())
             .stderr(Stdio::inherit());
 
-        for (key, value) in extra_env {
+        for (key, value) in spawn.launch.extra_env {
             command.env(key, value);
         }
 
@@ -356,11 +367,12 @@ impl NodeProcess {
             nats_url,
             proxy_port,
             artifact_port,
-            admin_port,
-            db_path,
-            _temp_dir,
-            &[],
-            &[],
+            RestartNodeOptions {
+                admin_port,
+                db_path,
+                temp_dir: _temp_dir,
+                launch: NodeLaunchOptions::default(),
+            },
         )
         .await
     }
@@ -371,38 +383,33 @@ impl NodeProcess {
         nats_url: &str,
         proxy_port: u16,
         artifact_port: u16,
-        admin_port: u16,
-        db_path: PathBuf,
-        _temp_dir: TempDir,
-        extra_args: &[&str],
-        extra_env: &[(&str, &str)],
+        options: RestartNodeOptions<'_>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let deploy_port = reserve_test_port()?;
         eprintln!("Restarting node {} with existing DB", node_id);
 
-        let process = Self::spawn_process(
+        let process = Self::spawn_process(NodeSpawn {
             node_id,
             nats_url,
             proxy_port,
             artifact_port,
-            admin_port,
+            admin_port: options.admin_port,
             deploy_port,
-            &db_path,
-            extra_args,
-            extra_env,
-        )?;
+            db_path: &options.db_path,
+            launch: options.launch,
+        })?;
 
-        wait_for_node_ready(admin_port, proxy_port, artifact_port).await?;
+        wait_for_node_ready(options.admin_port, proxy_port, artifact_port).await?;
         eprintln!("✓ Node restart complete");
 
         Ok(NodeProcess {
             node_id: node_id.to_string(),
             proxy_port,
             artifact_port,
-            admin_port,
+            admin_port: options.admin_port,
             deploy_port,
-            db_path,
-            _temp_dir,
+            db_path: options.db_path,
+            _temp_dir: options.temp_dir,
             process,
         })
     }

@@ -26,7 +26,7 @@ dashmap = { workspace = true }
 rand = "0.10.1"
 hex = { workspace = true }
 chrono = { workspace = true }
-jsonwebtoken = "10.4.0"
+jsonwebtoken = { workspace = true }
 async-nats = { workspace = true }
 http = "1.4.1"
 sha2 = { workspace = true }
