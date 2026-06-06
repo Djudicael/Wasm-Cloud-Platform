@@ -128,7 +128,6 @@ fn test_prune_old_metrics_performance() {
         .unwrap()
         .as_secs();
     // Insert 1000 old buckets
-    let start = std::time::Instant::now();
     for i in 0..1000 {
         let bucket = MetricBucket {
             app_id: format!("perf-app-{i}"),
@@ -144,6 +143,7 @@ fn test_prune_old_metrics_performance() {
         store.write_metric_bucket(&bucket).unwrap();
     }
 
+    let start = std::time::Instant::now();
     let removed = store.prune_old_metrics(1440).unwrap();
     assert_eq!(removed, 1000);
 

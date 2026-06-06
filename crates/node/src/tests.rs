@@ -47,8 +47,18 @@ fn spawn_mock_vault_kv_server(
                     break;
                 }
             }
-            let request_text = String::from_utf8_lossy(&request);
-            let ok = request_text.contains(&format!("X-Vault-Token: {expected_token}\r\n"));
+            let header_end = request
+                .windows(4)
+                .position(|window| window == b"\r\n\r\n")
+                .map(|index| index + 4)
+                .unwrap();
+            let header_text = String::from_utf8_lossy(&request[..header_end]).into_owned();
+            let ok = header_text.lines().any(|line| {
+                line.strip_prefix("x-vault-token:")
+                    .or_else(|| line.strip_prefix("X-Vault-Token:"))
+                    .map(str::trim)
+                    == Some(expected_token)
+            });
             let body = if ok {
                 serde_json::json!({
                     "request_id": "test",
@@ -111,11 +121,12 @@ fn spawn_mock_vault_transit_server(
                 .position(|window| window == b"\r\n\r\n")
                 .map(|index| index + 4)
                 .unwrap();
-            let header_text = String::from_utf8_lossy(&request[..header_end]);
+            let header_text = String::from_utf8_lossy(&request[..header_end]).into_owned();
             let content_length = header_text
                 .lines()
                 .find_map(|line| {
-                    line.strip_prefix("Content-Length:")
+                    line.strip_prefix("content-length:")
+                        .or_else(|| line.strip_prefix("Content-Length:"))
                         .map(str::trim)
                         .and_then(|value| value.parse::<usize>().ok())
                 })
@@ -127,9 +138,26 @@ fn spawn_mock_vault_transit_server(
                 }
                 request.extend_from_slice(&buffer[..read]);
             }
-            let request_text = String::from_utf8_lossy(&request);
-            let ok = request_text.contains(&format!("X-Vault-Token: {expected_token}\r\n"))
-                && request_text.contains(expected_input);
+            let has_token = header_text.lines().any(|line| {
+                line.strip_prefix("x-vault-token:")
+                    .or_else(|| line.strip_prefix("X-Vault-Token:"))
+                    .map(str::trim)
+                    == Some(expected_token)
+            });
+            let body_json: Option<serde_json::Value> = std::str::from_utf8(&request[header_end..])
+                .ok()
+                .and_then(|body| serde_json::from_str(body).ok());
+            let expected_input_value = expected_input
+                .strip_prefix("\"input\":\"")
+                .and_then(|value| value.strip_suffix('"'));
+            let has_expected_input = expected_input_value.is_some_and(|expected| {
+                body_json
+                    .as_ref()
+                    .and_then(|json| json.get("input"))
+                    .and_then(|value| value.as_str())
+                    == Some(expected)
+            });
+            let ok = has_token && has_expected_input;
             let body = if ok {
                 serde_json::json!({
                     "data": {
