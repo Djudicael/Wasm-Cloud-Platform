@@ -1,5 +1,6 @@
 use super::*;
 use std::path::PathBuf;
+use std::sync::atomic::Ordering;
 
 #[test]
 fn test_logging_config_default() {
@@ -20,9 +21,8 @@ fn test_log_rotation_config_default() {
 #[test]
 fn test_sampling_layer_rates() {
     let layer = SamplingLayer::new(2, 10, 100);
-    // WARN/ERROR are always enabled Ã¢â‚¬â€ counters should not affect them
+    // WARN/ERROR are always enabled - counters should not affect them.
     assert!(layer.info_counter.load(Ordering::Relaxed) == 0);
-    // After setting rates, the counters and rates should match
     layer.set_rates(5, 20, 200);
     assert_eq!(layer.info_rate.load(Ordering::Relaxed), 5);
     assert_eq!(layer.debug_rate.load(Ordering::Relaxed), 20);
@@ -54,7 +54,6 @@ fn test_node_log_record_serialize() {
 #[test]
 fn test_field_collector() {
     let mut collector = FieldCollector::default();
-    // Insert directly to test the map behaviour.
     collector.fields.insert(
         "app_id".to_string(),
         serde_json::Value::String("my-app".to_string()),

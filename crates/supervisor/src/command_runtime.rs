@@ -11,12 +11,16 @@ use tracing::{info, warn};
 use crate::{Supervisor, SupervisorCommand};
 
 pub(crate) fn start_command_loop(supervisor: Arc<Supervisor>) {
-    let rx = supervisor.command_rx.lock().unwrap().take();
-    if rx.is_none() {
+    let Ok(mut guard) = supervisor.command_rx.lock() else {
+        warn!("supervisor command loop mutex poisoned - command loop not started");
+        return;
+    };
+
+    let Some(mut rx) = guard.take() else {
         warn!("supervisor command loop already started - ignoring duplicate call");
         return;
-    }
-    let mut rx = rx.unwrap();
+    };
+    drop(guard);
 
     tokio::spawn(async move {
         info!("supervisor command loop started");
