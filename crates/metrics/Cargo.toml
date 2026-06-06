@@ -15,7 +15,7 @@ tracing.workspace = true
 storage = { version = "0.1.0", path = "../storage" }
 opentelemetry = { version = "0.21.0", features = ["trace", "metrics"] }
 opentelemetry-otlp = { version = "0.14.0", features = ["tonic"] }
-opentelemetry_sdk = { version = "0.21.0", features = ["rt-tokio"] }
+opentelemetry_sdk = { version = "0.32.1", features = ["rt-tokio"] }
 tracing-opentelemetry = "0.22.0"
 tracing-subscriber.workspace = true
 async-nats.workspace = true
