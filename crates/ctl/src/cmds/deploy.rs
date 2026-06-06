@@ -528,6 +528,7 @@ fn build_deploy_payload(
 ) -> Result<(
     AppConfig,
     Option<common::types::GatewayRouteConfig>,
+    Vec<common::types::Route>,
     Vec<common::types::ApiKeyRecord>,
 )> {
     Ok(if let Some(manifest) = manifest {
@@ -560,6 +561,7 @@ fn build_deploy_payload(
         (
             config,
             manifest.to_gateway_config(),
+            manifest.to_routes(app_id)?,
             manifest.api_keys.clone(),
         )
     } else {
@@ -582,7 +584,7 @@ fn build_deploy_payload(
             policy,
             namespace: namespace.to_string(),
         };
-        (config, gateway_config, Vec::new())
+        (config, gateway_config, Vec::new(), Vec::new())
     })
 }
 
@@ -642,7 +644,7 @@ pub async fn run(
         } else {
             artifact.sha256.clone()
         };
-        let (config, gateway_config, api_keys) =
+        let (config, gateway_config, routes, api_keys) =
             build_deploy_payload(&args, manifest.as_ref(), &app_id, &namespace)?;
 
         println!("{}", "Deploying application:".bold());
@@ -662,6 +664,7 @@ pub async fn run(
                 app_id: app_id.clone(),
                 config,
                 gateway_config,
+                routes,
                 api_keys,
                 artifact: *artifact,
             },
@@ -681,6 +684,14 @@ pub async fn run(
                 "{} Gateway config published for {}",
                 "OK".green(),
                 response.app_id.0.cyan()
+            );
+        }
+        if response.route_count > 0 {
+            println!(
+                "{} Route bindings published for {} ({})",
+                "OK".green(),
+                response.app_id.0.cyan(),
+                response.route_count
             );
         }
         if response.api_key_count > 0 {
@@ -765,7 +776,7 @@ pub async fn run(
             }
         };
 
-    let (config, gateway_config, api_keys) =
+    let (config, gateway_config, routes, api_keys) =
         build_deploy_payload(&args, manifest.as_ref(), &app_id, &namespace)?;
 
     if target_node_ids.is_empty() {
@@ -794,6 +805,20 @@ pub async fn run(
             "{} Gateway config published for {}",
             "OK".green(),
             app_id.0.cyan()
+        );
+    }
+
+    let route_count = routes.len();
+    for route in routes {
+        let route_event = Event::RouteAdd { route };
+        bus.publish(&route_event).await?;
+    }
+    if route_count > 0 {
+        println!(
+            "{} Route bindings published for {} ({})",
+            "OK".green(),
+            app_id.0.cyan(),
+            route_count
         );
     }
 
@@ -1004,9 +1029,9 @@ pub async fn remove(app_id_str: &str, bus: &NatsBus) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_gateway_config, load_cluster_node_registry, remote_source_from_oci_reference,
-        request_per_node_manifests, resolve_artifact_input, select_target_node_ids, ArtifactInput,
-        DeployArgs,
+        build_deploy_payload, build_gateway_config, load_cluster_node_registry,
+        remote_source_from_oci_reference, request_per_node_manifests, resolve_artifact_input,
+        select_target_node_ids, ArtifactInput, DeployArgs,
     };
     use axum::{
         extract::State,
@@ -1021,6 +1046,7 @@ mod tests {
         health::NodeHealthStatus,
         types::ClusterNodeRecord,
     };
+    use std::collections::HashMap;
     use std::sync::Arc;
     use tokio::sync::Mutex;
 
@@ -1208,6 +1234,59 @@ mod tests {
             }
             ArtifactInput::LocalPath(_) => panic!("expected remote artifact input"),
         }
+    }
+
+    #[test]
+    fn test_build_deploy_payload_extracts_manifest_routes() {
+        let parsed = DeployCliTestHarness::parse_from([
+            "wasm-ctl",
+            "--manifest",
+            "app.toml",
+            "--artifact-url",
+            "https://artifacts.example.com/api.wasm",
+            "--sha256",
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        ]);
+        let manifest = super::super::manifest::DeployManifest {
+            app: super::super::manifest::AppManifestSection {
+                name: "api".to_string(),
+                version: "v1".to_string(),
+                namespace: "tenant-a".to_string(),
+                description: String::new(),
+                wasm_artifact: String::new(),
+                wasm_bind_port: 8080,
+            },
+            fuel: super::super::manifest::FuelManifestSection::default(),
+            policy: None,
+            gateway: Some(super::super::manifest::GatewayManifestSection {
+                host: Some("api.example.com".to_string()),
+                routes: vec![super::super::manifest::RouteManifestSection {
+                    host: "api.example.com".to_string(),
+                    path_prefix: "/v1".to_string(),
+                    strip_prefix: true,
+                }],
+                auth: None,
+                cors: None,
+                rate_limit: None,
+                circuit_breaker: None,
+                transform: None,
+                endpoints: Vec::new(),
+            }),
+            env: HashMap::new(),
+            secrets: HashMap::new(),
+            api_keys: Vec::new(),
+            artifact: None,
+        };
+        let app_id = common::types::AppId::new_namespaced("tenant-a", "api", "v1");
+
+        let (_config, _gateway, routes, _api_keys) =
+            build_deploy_payload(&parsed.args, Some(&manifest), &app_id, "tenant-a").unwrap();
+
+        assert_eq!(routes.len(), 2);
+        assert_eq!(routes[0].host, "api.example.com");
+        assert_eq!(routes[0].path_prefix, "/");
+        assert_eq!(routes[1].path_prefix, "/v1");
+        assert!(routes[1].strip_prefix);
     }
 
     #[tokio::test]

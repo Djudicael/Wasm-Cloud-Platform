@@ -323,6 +323,15 @@ async fn process_deploy_intent(
         false
     };
 
+    for route in &request.routes {
+        state
+            .bus
+            .publish(&Event::RouteAdd {
+                route: route.clone(),
+            })
+            .await?;
+    }
+
     if !request.api_keys.is_empty() {
         state
             .store
@@ -348,6 +357,7 @@ async fn process_deploy_intent(
             "size_bytes": ingress.size_bytes,
             "artifact_verification": verification,
             "gateway_config_published": gateway_config_published,
+            "route_count": request.routes.len(),
             "api_key_count": request.api_keys.len(),
             "artifact_source_reference": request.artifact.reference,
             "artifact_source_url": request.artifact.url,
@@ -362,6 +372,7 @@ async fn process_deploy_intent(
         source_node_id: ingress.source_node_id,
         artifact_transfer_manifests,
         gateway_config_published,
+        route_count: request.routes.len(),
         api_key_count: request.api_keys.len(),
     })
 }
@@ -461,6 +472,19 @@ fn validate_deploy_intent_request(
         return Err(PlatformError::config_validation(
             "remote HTTP artifact sources require sha256",
         ));
+    }
+    for route in &request.routes {
+        if route.app_id != request.app_id {
+            return Err(PlatformError::config_validation(format!(
+                "deploy intent route host {} targets app_id {} instead of {}",
+                route.host, route.app_id.0, request.app_id.0
+            )));
+        }
+        if route.host.trim().is_empty() {
+            return Err(PlatformError::config_validation(
+                "deploy intent route host cannot be empty",
+            ));
+        }
     }
     if artifact_reference_policy.require_oci_digest_refs {
         if let Some(reference) = request.artifact.reference.as_deref() {

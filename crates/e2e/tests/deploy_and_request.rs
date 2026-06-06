@@ -1023,6 +1023,7 @@ async fn test_promoted_deploy_ingress_fanout_covers_multiple_active_nodes() {
         app_id: common::types::AppId(deployed_app_id.to_string()),
         config: build_app_config(deployed_app_id, 100_000_000, 100, 4),
         gateway_config: None,
+        routes: vec![],
         api_keys: vec![],
         artifact: common::deploy::RemoteArtifactSource {
             reference: Some(format!(

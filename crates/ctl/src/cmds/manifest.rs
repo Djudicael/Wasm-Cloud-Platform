@@ -1,7 +1,7 @@
 // crates/ctl/src/cmds/manifest.rs
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// Full deployment manifest schema.
 /// Single source of truth for deploying an app on the WASI Cloud Platform.
@@ -123,6 +123,9 @@ pub struct GatewayManifestSection {
     pub host: Option<String>,
 
     #[serde(default)]
+    pub routes: Vec<RouteManifestSection>,
+
+    #[serde(default)]
     pub auth: Option<GatewayAuthManifest>,
 
     #[serde(default)]
@@ -139,6 +142,15 @@ pub struct GatewayManifestSection {
 
     #[serde(default)]
     pub endpoints: Vec<EndpointRuleManifest>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct RouteManifestSection {
+    pub host: String,
+    #[serde(default = "default_path_prefix")]
+    pub path_prefix: String,
+    #[serde(default)]
+    pub strip_prefix: bool,
 }
 
 /// Endpoint rule for manifest parsing (with flattened auth for TOML compatibility).
@@ -161,6 +173,10 @@ pub struct EndpointRuleManifest {
 
 fn default_auth_policy() -> String {
     "inherit".to_string()
+}
+
+fn default_path_prefix() -> String {
+    "/".to_string()
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -257,6 +273,68 @@ impl DeployManifest {
                 .collect(),
         })
     }
+
+    /// Build public route bindings from the manifest gateway section.
+    pub fn to_routes(&self, app_id: &common::types::AppId) -> Result<Vec<common::types::Route>> {
+        let Some(gw) = self.gateway.as_ref() else {
+            return Ok(Vec::new());
+        };
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_secs())
+            .unwrap_or(0);
+        let mut declared_routes = Vec::new();
+        if let Some(host) = gw.host.as_ref() {
+            declared_routes.push(RouteManifestSection {
+                host: host.clone(),
+                path_prefix: default_path_prefix(),
+                strip_prefix: false,
+            });
+        }
+        declared_routes.extend(gw.routes.iter().cloned());
+
+        let mut seen = HashSet::new();
+        let mut routes = Vec::with_capacity(declared_routes.len());
+        for route in declared_routes {
+            let host = route.host.trim().to_ascii_lowercase();
+            if host.is_empty() {
+                anyhow::bail!("gateway route host cannot be empty");
+            }
+
+            let path_prefix = normalize_path_prefix(&route.path_prefix);
+            let route_key = format!("{host}|{path_prefix}");
+            if !seen.insert(route_key) {
+                anyhow::bail!(
+                    "duplicate gateway route for host '{}' and path prefix '{}'",
+                    host,
+                    path_prefix
+                );
+            }
+
+            routes.push(common::types::Route {
+                host,
+                app_id: app_id.clone(),
+                path_prefix,
+                strip_prefix: route.strip_prefix,
+                created_at: now,
+                updated_at: now,
+            });
+        }
+
+        Ok(routes)
+    }
+}
+
+fn normalize_path_prefix(path_prefix: &str) -> String {
+    let trimmed = path_prefix.trim();
+    if trimmed.is_empty() || trimmed == "/" {
+        "/".to_string()
+    } else if trimmed.starts_with('/') {
+        trimmed.to_string()
+    } else {
+        format!("/{trimmed}")
+    }
 }
 
 /// Reconstruct a manifest from an AppConfig and gateway config (for `app manifest` command).
@@ -280,6 +358,7 @@ pub fn manifest_from_config(
 
     let gateway = gateway_config.map(|cfg| GatewayManifestSection {
         host: None,
+        routes: Vec::new(),
         auth: match &cfg.auth {
             common::types::AuthPolicy::None => None,
             common::types::AuthPolicy::Authenticated => Some(GatewayAuthManifest {
@@ -412,6 +491,7 @@ required_scopes = ["admin:users"]
         let manifest: DeployManifest = toml::from_str(toml).unwrap();
         let gw = manifest.gateway.as_ref().unwrap();
         assert_eq!(gw.host, Some("api.example.com".to_string()));
+        assert!(gw.routes.is_empty());
         let auth = gw.auth.as_ref().unwrap();
         assert_eq!(auth.policy, "roles");
         assert_eq!(auth.allowed_roles, vec!["admin", "user"]);
@@ -468,6 +548,7 @@ required_scopes = ["admin:users"]
             policy: None,
             gateway: Some(GatewayManifestSection {
                 host: Some("api.example.com".to_string()),
+                routes: Vec::new(),
                 auth: Some(GatewayAuthManifest {
                     policy: "authenticated".to_string(),
                     allowed_roles: vec![],
@@ -503,6 +584,75 @@ required_scopes = ["admin:users"]
         assert!(!gw.rate_limit.as_ref().unwrap().distributed);
         assert_eq!(gw.endpoints.len(), 1);
         assert_eq!(gw.endpoints[0].required_scopes, vec!["status:read"]);
+    }
+
+    #[test]
+    fn test_manifest_to_routes_supports_host_and_explicit_routes() {
+        let toml = r#"
+[app]
+name = "api-users"
+version = "v2"
+namespace = "tenant-a"
+
+[gateway]
+host = "API.EXAMPLE.COM"
+
+[[gateway.routes]]
+host = "api.example.com"
+path_prefix = "/v1"
+strip_prefix = true
+"#;
+
+        let manifest: DeployManifest = toml::from_str(toml).unwrap();
+        let app_id = common::types::AppId::new_namespaced("tenant-a", "api-users", "v2");
+        let routes = manifest.to_routes(&app_id).unwrap();
+
+        assert_eq!(routes.len(), 2);
+        assert_eq!(routes[0].host, "api.example.com");
+        assert_eq!(routes[0].path_prefix, "/");
+        assert!(!routes[0].strip_prefix);
+        assert_eq!(routes[1].host, "api.example.com");
+        assert_eq!(routes[1].path_prefix, "/v1");
+        assert!(routes[1].strip_prefix);
+    }
+
+    #[test]
+    fn test_manifest_to_routes_rejects_duplicate_host_and_prefix() {
+        let toml = r#"
+[app]
+name = "api-users"
+version = "v2"
+
+[gateway]
+host = "api.example.com"
+
+[[gateway.routes]]
+host = "api.example.com"
+path_prefix = "/"
+"#;
+
+        let manifest: DeployManifest = toml::from_str(toml).unwrap();
+        let app_id = common::types::AppId::new_namespaced("default", "api-users", "v2");
+        let err = manifest.to_routes(&app_id).unwrap_err().to_string();
+        assert!(err.contains("duplicate gateway route"));
+    }
+
+    #[test]
+    fn test_manifest_to_routes_normalizes_path_prefix() {
+        let toml = r#"
+[app]
+name = "api-users"
+version = "v2"
+
+[[gateway.routes]]
+host = "api.example.com"
+path_prefix = "v1"
+"#;
+
+        let manifest: DeployManifest = toml::from_str(toml).unwrap();
+        let app_id = common::types::AppId::new_namespaced("default", "api-users", "v2");
+        let routes = manifest.to_routes(&app_id).unwrap();
+        assert_eq!(routes[0].path_prefix, "/v1");
     }
 
     #[test]

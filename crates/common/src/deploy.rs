@@ -1,5 +1,5 @@
 use crate::artifact_transfer::ArtifactManifestAudienceBinding;
-use crate::types::{ApiKeyRecord, AppConfig, AppId, GatewayRouteConfig};
+use crate::types::{ApiKeyRecord, AppConfig, AppId, GatewayRouteConfig, Route};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -64,6 +64,8 @@ pub struct DeployIntentRequest {
     #[serde(default)]
     pub gateway_config: Option<GatewayRouteConfig>,
     #[serde(default)]
+    pub routes: Vec<Route>,
+    #[serde(default)]
     pub api_keys: Vec<ApiKeyRecord>,
     pub artifact: RemoteArtifactSource,
 }
@@ -79,6 +81,8 @@ pub struct DeployIntentResponse {
     pub artifact_transfer_manifests: Vec<ArtifactManifestAudienceBinding>,
     #[serde(default)]
     pub gateway_config_published: bool,
+    #[serde(default)]
+    pub route_count: usize,
     #[serde(default)]
     pub api_key_count: usize,
 }
