@@ -117,9 +117,12 @@ fn base_config_with_policy(policy: PolicyConfig) -> AppConfig {
 
 fn find_hello_axum_component_path() -> Option<PathBuf> {
     let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let target_root = std::env::var_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| workspace_root.join("target"));
     let candidates = [
-        workspace_root.join("target/wasm32-wasip2/release/hello-axum.wasm"),
-        workspace_root.join("target/wasm32-wasip2/release/hello_axum.wasm"),
+        target_root.join("wasm32-wasip2/release/hello-axum.wasm"),
+        target_root.join("wasm32-wasip2/release/hello_axum.wasm"),
     ];
 
     candidates.into_iter().find(|path| path.exists())
@@ -170,51 +173,23 @@ fn test_list_hello_axum_exports() {
         table: ResourceTable::new(),
     };
     let mut store = wasmtime::Store::new(&runtime.engine, state);
+    crate::limits::configure_store(&mut store, FuelQuota(500_000_000))
+        .expect("Failed to configure test store limits");
 
     let instance = linker
         .instantiate(&mut store, &component)
         .expect("Failed to instantiate");
 
-    // Try to find the wasi:cli/run@0.2.6 interface
-    println!("\n=== Looking for wasi:cli/run@0.2.6 ===");
-    let interface_idx = instance.get_export_index(&mut store, None, "wasi:cli/run@0.2.6");
-    println!("Interface index: {:?}", interface_idx);
-
-    if let Some(idx) = interface_idx {
-        println!("\n=== Looking for run function inside interface ===");
-        let func_idx = instance.get_export_index(&mut store, Some(&idx), "run");
-        println!("Function index: {:?}", func_idx);
-
-        // Unwrap the Option and use the index directly
-        if let Some(func_export_idx) = func_idx {
-            // Try to get the function using the index directly
-            if let Some(func) = instance.get_func(&mut store, func_export_idx) {
-                println!("Found run function! Type: {:?}", func.ty(&store));
-
-                // Try typed call
-                match func.typed::<(), (Result<(), ()>,)>(&store) {
-                    Ok(typed) => {
-                        println!("Typed call created successfully!");
-                        match typed.call(&mut store, ()) {
-                            Ok((result,)) => {
-                                println!("Call succeeded, result: {:?}", result);
-                            }
-                            Err(e) => {
-                                println!("Call failed: {}", e);
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        println!("Failed to create typed call: {}", e);
-                    }
-                }
-            } else {
-                println!("Could not get func from func_idx");
-            }
-        }
-    } else {
-        println!("Could not find wasi:cli/run@0.2.6 interface");
-    }
+    let interface_idx = instance
+        .get_export_index(&mut store, None, "wasi:cli/run@0.2.6")
+        .expect("hello-axum does not export wasi:cli/run@0.2.6");
+    let function_idx = instance
+        .get_export_index(&mut store, Some(&interface_idx), "run")
+        .expect("wasi:cli/run@0.2.6 does not export run");
+    assert!(
+        instance.get_func(&mut store, function_idx).is_some(),
+        "wasi:cli/run@0.2.6#run is not a function"
+    );
 }
 
 #[test]

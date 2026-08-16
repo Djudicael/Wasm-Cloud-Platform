@@ -19,11 +19,11 @@ hex = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 prometheus = { workspace = true }
 async-nats = { workspace = true }
-futures = "0.3.32"
+futures = "0.3.34"
 fs2 = "0.4.3"
 
 [target.'cfg(unix)'.dependencies]
-libc = "0.2.186"
+libc = "0.2.189"
 
 [target.'cfg(windows)'.dependencies]
 winapi = { version = "0.3.9", features = ["fileapi", "minwindef"] }

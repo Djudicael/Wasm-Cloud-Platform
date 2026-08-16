@@ -1,0 +1,4 @@
+interface:
+  display_name: "Provision MicroVM Testbed"
+  short_description: "Start a local Firecracker platform testbed"
+  default_prompt: "Use $provision-microvm-testbed to ask for the platform-node count and start the requested local topology in WSL."

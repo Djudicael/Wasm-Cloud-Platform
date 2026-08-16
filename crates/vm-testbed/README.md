@@ -92,7 +92,29 @@ sudo cargo test -p vm-testbed --test single_node_deploy -- --nocapture
 sudo cargo test -p vm-testbed --test vm_chaos -- --nocapture --test-threads=1
 ```
 
-### 4. Use the CLI
+### 4. Run a complete local lifecycle
+
+The repository scripts provide the same stable entrypoints used by the agent skills:
+
+```bash
+bash scripts/vm/provision-testbed.sh --profile single-node
+bash scripts/vm/deploy-test-application.sh
+bash scripts/vm/destroy-testbed.sh
+```
+
+Pass the same `--state-file` value to all three scripts when using a non-default state path.
+
+For a production-like local edge topology, choose the platform-node count explicitly:
+
+```bash
+bash scripts/vm/provision-testbed.sh --preset production-like --nodes 3
+```
+
+This starts one NATS microVM plus three platform microVMs, each with its built-in reverse proxy, and a host HAProxy front door at `127.0.0.1:8088`. Override the listener with `--front-door-bind HOST:PORT`, or disable it with `--front-door none`. HAProxy must already be installed in Linux/WSL. Deployment verification automatically uses the recorded front door, and the destroy script stops that exact process.
+
+The preset is a production-like rehearsal rather than a production deployment: it does not provide production TLS, an external secrets backend, monitoring/alerting, or highly available NATS.
+
+### 5. Use the CLI directly
 
 ```bash
 # Bring up a detached single-node manual topology

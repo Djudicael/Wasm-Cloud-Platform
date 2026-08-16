@@ -1,5 +1,5 @@
 use aes_gcm::{
-    aead::{Aead, AeadCore, KeyInit, OsRng},
+    aead::{Aead, Generate, KeyInit},
     Aes256Gcm, Nonce,
 };
 use common::error::PlatformError;
@@ -47,7 +47,7 @@ impl std::fmt::Debug for EncryptedBlob {
 pub fn encrypt(key: &SymmetricKey, plaintext: &[u8]) -> Result<EncryptedBlob, PlatformError> {
     let cipher = Aes256Gcm::new_from_slice(key.as_bytes())
         .map_err(|e| PlatformError::encryption(e.to_string()))?;
-    let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
+    let nonce = Nonce::generate();
     let ciphertext = cipher
         .encrypt(&nonce, plaintext)
         .map_err(|e| PlatformError::encryption(e.to_string()))?;
@@ -63,11 +63,12 @@ pub fn decrypt(key: &SymmetricKey, blob: &EncryptedBlob) -> Result<Vec<u8>, Plat
         return Err(PlatformError::encryption("blob too short"));
     }
     let (nonce_bytes, ciphertext) = blob.0.split_at(12);
-    let nonce = Nonce::from_slice(nonce_bytes);
+    let nonce = Nonce::try_from(nonce_bytes)
+        .map_err(|_| PlatformError::encryption("invalid nonce length"))?;
     let cipher = Aes256Gcm::new_from_slice(key.as_bytes())
         .map_err(|e| PlatformError::encryption(e.to_string()))?;
     cipher
-        .decrypt(nonce, ciphertext)
+        .decrypt(&nonce, ciphertext)
         .map_err(|e| PlatformError::encryption(e.to_string()))
 }
 

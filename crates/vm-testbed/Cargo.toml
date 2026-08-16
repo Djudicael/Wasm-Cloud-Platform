@@ -25,7 +25,7 @@ uuid = { workspace = true, features = ["v4"] }
 chrono = { workspace = true }
 thiserror = { workspace = true }
 clap = { workspace = true, features = ["derive", "env"] }
-which = "8.0.2"
+which = "8.0.5"
 
 # Re-use existing E2E test infrastructure
 e2e = { version = "0.1.0", path = "../e2e" }

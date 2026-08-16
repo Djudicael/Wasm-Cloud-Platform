@@ -1,0 +1,4 @@
+interface:
+  display_name: "Destroy MicroVM Testbed"
+  short_description: "Safely tear down the local microVM testbed"
+  default_prompt: "Use $destroy-microvm-testbed to tear down the local platform test environment."

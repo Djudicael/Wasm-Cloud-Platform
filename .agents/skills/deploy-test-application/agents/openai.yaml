@@ -1,0 +1,4 @@
+interface:
+  display_name: "Deploy Test Application"
+  short_description: "Build, deploy, and verify a Wasm test app"
+  default_prompt: "Use $deploy-test-application to deploy and verify an application in the local testbed."
