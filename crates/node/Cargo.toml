@@ -20,13 +20,13 @@ tempfile = "3.27.0"
 
 [dependencies]
 argon2 = "0.5.3"
-base64 = "0.22.1"
-aws-config = "1.8.18"
-aws-sdk-kms = "1.110.0"
-ureq = { version = "3.3.0", features = ["json"] }
+base64 = "0.23.1"
+aws-config = "1.10.1"
+aws-sdk-kms = "1.114.0"
+ureq = { version = "3.4.0", features = ["json"] }
 hex = { workspace = true }
 sha2 = { workspace = true }
-ed25519-dalek = "2.2.0"
+ed25519-dalek = "3.0.0"
 chrono = { workspace = true }
 tokio = { workspace = true }
 reqwest = { workspace = true }
@@ -34,13 +34,13 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 clap = { workspace = true, features = ["env"] }
 anyhow = { workspace = true }
-futures = "0.3.32"
+futures = "0.3.34"
 axum = { workspace = true }
 axum-server = { version = "0.8.0", features = ["tls-rustls"] }
-rustls = "0.23.40"
+rustls = "0.23.43"
 serde = { workspace = true }
 serde_json = { workspace = true }
-toml = "0.9.8"
+toml = "1.1.4"
 common = { version = "0.1.0", path = "../common" }
 storage = { version = "0.1.0", path = "../storage" }
 runtime = { version = "0.1.0", path = "../runtime" }

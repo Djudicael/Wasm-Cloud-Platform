@@ -36,7 +36,7 @@ sha2          = { workspace = true }
 hex           = { workspace = true }
 
 # Unix signals (SIGTERM for graceful node shutdown) - Linux/WSL only
-libc          = "0.2.186"
+libc          = "0.2.189"
 
 # Temp directories (per-node redb isolation)
 tempfile      = "3.27.0"
@@ -59,8 +59,8 @@ supervisor    = { version = "0.1.0", path = "../supervisor" }
 [dev-dependencies]
 # Tracing subscriber (test log initialization)
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
-base64 = "0.22.1"
-ed25519-dalek = "2.2.0"
+base64 = "0.23.1"
+ed25519-dalek = "3.0.0"
 
 # CLI assertion helpers
 assert_cmd    = "2.2.2"
@@ -73,10 +73,10 @@ runtime       = { version = "0.1.0", path = "../runtime" }
 billing       = { version = "0.1.0", path = "../billing" }
 tonic = { version = "0.14.6", features = ["transport"] }
 tonic-prost = "0.14.6"
-prost = "0.14.3"
+prost = "0.14.4"
 tower = "0.5.3"
 hyper-util = { version = "0.1.20", features = ["tokio"] }
-tokio-stream = "0.1.18"
+tokio-stream = "0.1.19"
 
 [build-dependencies]
 tonic-prost-build = "0.14.6"

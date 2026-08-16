@@ -8,7 +8,7 @@ edition = "2021"
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }
-async-trait = "0.1.89"
+async-trait = "0.1.92"
 tokio = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
@@ -24,8 +24,8 @@ messaging = { version = "0.1.0", path = "../messaging" }
 proxy = { version = "0.1.0", path = "../proxy" }
 uuid.workspace = true
 reqwest = { workspace = true }
-libc = "0.2.186"
+libc = "0.2.189"
 
 [dev-dependencies]
 tempfile = "3.27.0"
-wat = "1.251.0"
+wat = "1.256.0"

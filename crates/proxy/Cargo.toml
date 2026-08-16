@@ -13,8 +13,8 @@ pingora-core = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 common = { version = "0.1.0", path = "../common" }
-async-trait = "0.1.89"
-futures = "0.3.32"
+async-trait = "0.1.92"
+futures = "0.3.34"
 axum.workspace = true
 serde_json.workspace = true
 storage = { version = "0.1.0", path = "../storage" }
@@ -23,16 +23,16 @@ reqwest = { workspace = true }
 serde = { workspace = true }
 messaging = { version = "0.1.0", path = "../messaging" }
 dashmap = { workspace = true }
-rand = "0.10.1"
+rand = "0.10.2"
 hex = { workspace = true }
 chrono = { workspace = true }
 jsonwebtoken = { workspace = true }
 async-nats = { workspace = true }
-http = "1.4.1"
+http = "1.5.0"
 sha2 = { workspace = true }
 
 [dev-dependencies]
 tower = "0.5.3"
 rsa = "0.9.10"
-base64 = "0.22.1"
+base64 = "0.23.1"
 e2e = { version = "0.1.0", path = "../e2e" }

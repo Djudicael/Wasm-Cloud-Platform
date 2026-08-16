@@ -7,7 +7,7 @@
 //! node can decrypt them.
 
 use chacha20poly1305::{
-    aead::{Aead, AeadCore, KeyInit, OsRng},
+    aead::{Aead, Generate, KeyInit},
     ChaCha20Poly1305, Nonce,
 };
 use common::error::PlatformError;
@@ -57,9 +57,10 @@ impl BootstrapKeyPair {
         let cipher = ChaCha20Poly1305::new(shared.as_bytes().into());
 
         // Extract nonce and ciphertext
-        let nonce = Nonce::from_slice(&ciphertext[32..44]);
+        let nonce = Nonce::try_from(&ciphertext[32..44])
+            .map_err(|_| PlatformError::encryption("Invalid nonce length"))?;
         cipher
-            .decrypt(nonce, &ciphertext[44..])
+            .decrypt(&nonce, &ciphertext[44..])
             .map_err(|e| PlatformError::encryption(format!("Decryption failed: {}", e)))
     }
 
@@ -83,8 +84,8 @@ pub fn encrypt_for_peer(
     peer_public_bytes: &[u8],
     plaintext: &[u8],
 ) -> Result<Vec<u8>, PlatformError> {
-    let mut rng = OsRng;
-    let ephemeral = EphemeralSecret::random_from_rng(rng);
+    let mut rng = rand::rng();
+    let ephemeral = EphemeralSecret::random_from_rng(&mut rng);
     let ephemeral_public = PublicKey::from(&ephemeral);
 
     let peer_public =
@@ -94,7 +95,7 @@ pub fn encrypt_for_peer(
 
     let shared = ephemeral.diffie_hellman(&peer_public);
     let cipher = ChaCha20Poly1305::new(shared.as_bytes().into());
-    let nonce = ChaCha20Poly1305::generate_nonce(&mut rng);
+    let nonce = Nonce::generate();
 
     // Prepend ephemeral public key so receiver can derive the shared secret
     let mut out = ephemeral_public.as_bytes().to_vec();

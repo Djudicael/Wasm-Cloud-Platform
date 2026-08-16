@@ -15,15 +15,15 @@ supervisor = { version = "0.1.0", path = "../supervisor" }
 proxy = { version = "0.1.0", path = "../proxy" }
 ebpf-monitor = { version = "0.1.0", path = "../ebpf-monitor" }
 chrono = { workspace = true }
-http = "1.4.1"
-hyper = { version = "1.10.1", features = ["client", "http1", "http2"] }
+http = "1.5.0"
+hyper = { version = "1.11.0", features = ["client", "http1", "http2"] }
 hyper-util = { version = "0.1.20", features = ["tokio"] }
 tower = "0.5.3"
-tower-http = { version = "0.6.11", features = ["trace"] }
-futures = "0.3.32"
+tower-http = { version = "0.7.0", features = ["trace"] }
+futures = "0.3.34"
 
 [dev-dependencies]
-base64 = "0.22.1"
+base64 = "0.23.1"
 jsonwebtoken = { workspace = true }
-rand = "0.10.1"
+rand = "0.10.2"
 rsa = "0.9.10"

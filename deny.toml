@@ -6,17 +6,13 @@ version = 2
 yanked = "warn"
 ignore = [
     # transitive unmaintained crates without practical replacements in the current graph
-    "RUSTSEC-2025-0141", # bincode
     "RUSTSEC-2025-0069", # daemonize via pingora
     "RUSTSEC-2024-0388", # derivative via pingora
-    "RUSTSEC-2024-0384", # instant via wstd / wasi-pg-client
-    "RUSTSEC-2025-0119", # number_prefix via indicatif
-    "RUSTSEC-2024-0370", # proc-macro-error via tabled
-    "RUSTSEC-2025-0134", # rustls-pemfile via axum-server
+    "RUSTSEC-2024-0384", # instant via wstd / wasi-pg-client 0.2
+    "RUSTSEC-2026-0173", # proc-macro-error2 via pingora and tabled
 
     # upstream stacks currently pin these vulnerable or otherwise flagged crates
     "RUSTSEC-2024-0437", # protobuf via pingora-core/prometheus 0.13
-    "RUSTSEC-2026-0097", # rand 0.8 ecosystem-wide
     "RUSTSEC-2023-0071", # rsa via jsonwebtoken dev-dep
     "RUSTSEC-2026-0098", # rustls-webpki URI constraints
     "RUSTSEC-2026-0099", # rustls-webpki wildcard constraint acceptance
