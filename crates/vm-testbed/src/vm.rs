@@ -43,7 +43,7 @@
 //! ```
 
 use crate::firecracker::{FirecrackerClient, FirecrackerError};
-use crate::network::{create_tap, guest_mac, remove_tap};
+use crate::network::{create_tap, guest_mac_for_id, remove_tap};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
@@ -134,9 +134,28 @@ impl MicroVm {
         let run_dir = std::env::temp_dir().join(format!("vm-testbed-{}", config.id));
         std::fs::create_dir_all(&run_dir)?;
 
+        // Every Firecracker guest needs its own writable root filesystem. Sharing
+        // one ext4 image between concurrent VMMs corrupts the filesystem and also
+        // leaks runtime state between otherwise isolated test nodes.
+        let instance_rootfs = run_dir.join("rootfs.ext4");
+        let copy_status = Command::new("cp")
+            .args(["--reflink=auto", "--sparse=always", "--"])
+            .arg(&config.rootfs_path)
+            .arg(&instance_rootfs)
+            .status()?;
+        if !copy_status.success() {
+            return Err(VmError::Process(format!(
+                "failed to clone rootfs {} for {}",
+                config.rootfs_path.display(),
+                config.id
+            )));
+        }
+
         let api_socket = run_dir.join("firecracker.sock");
         let firecracker_log = run_dir.join("firecracker.log");
         let firecracker_metrics = run_dir.join("metrics.json");
+        let serial_log = run_dir.join("serial.log");
+        let stderr_log = run_dir.join("firecracker.stderr.log");
 
         // Clean up stale socket
         let _ = std::fs::remove_file(&api_socket);
@@ -147,13 +166,22 @@ impl MicroVm {
         info!(%firecracker_str, "Using Firecracker binary");
 
         // 4. Start Firecracker VMM
-        let mut cmd = Command::new(&firecracker_bin);
-        cmd.arg("--api-sock")
+        // Detach the VMM from the invoking WSL/terminal session. Otherwise a
+        // completed provisioning command closes its PTY and the kernel sends
+        // SIGHUP to Firecracker, leaving a valid-looking but stale state file.
+        let mut cmd = Command::new("setsid");
+        let serial_output = std::fs::File::create(&serial_log)?;
+        let stderr_output = std::fs::File::create(&stderr_log)?;
+        cmd.arg(&firecracker_bin)
+            .arg("--api-sock")
             .arg(&api_socket)
             .arg("--id")
             .arg(&config.id)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+            // Firecracker writes the guest serial console to stdout. Leaving
+            // this as an unread pipe eventually stalls a verbose guest boot.
+            .stdout(Stdio::from(serial_output))
+            .stderr(Stdio::from(stderr_output))
+            .stdin(Stdio::null());
 
         // Optional: jailer for extra security (not required for testing)
         // cmd.arg("--seccomp-level").arg("2");
@@ -179,17 +207,18 @@ impl MicroVm {
             .map_err(VmError::Firecracker)?;
 
         // 8. Configure boot source
+        let boot_args = format!(
+            "console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda rw init=/sbin/init wcp.node_id={} wcp.ip={} wcp.gateway={}",
+            config.id, config.ip, config.gateway
+        );
         client
-            .set_boot_source(
-                &config.kernel_path,
-                "console=ttyS0 reboot=k panic=1 pci=off quiet",
-            )
+            .set_boot_source(&config.kernel_path, &boot_args)
             .await
             .map_err(VmError::Firecracker)?;
 
         // 9. Attach rootfs
         client
-            .attach_drive("rootfs", &config.rootfs_path, true)
+            .attach_drive("rootfs", &instance_rootfs, true)
             .await
             .map_err(VmError::Firecracker)?;
 
@@ -202,7 +231,7 @@ impl MicroVm {
         }
 
         // 11. Add network interface
-        let mac = guest_mac(parse_index_from_id(&config.id));
+        let mac = guest_mac_for_id(&config.id);
         client
             .add_network_interface("eth0", &mac, &config.tap_device)
             .await
@@ -439,24 +468,4 @@ fn find_firecracker_binary() -> PathBuf {
         "Firecracker binary not found. Set FIRECRACKER_PATH or install firecracker.\n\
          See: https://github.com/firecracker-microvm/firecracker/blob/main/docs/getting-started.md"
     );
-}
-
-/// Parse a numeric index from a VM ID like "node-1" or "nats-0".
-fn parse_index_from_id(id: &str) -> u8 {
-    id.rsplit_once('-')
-        .and_then(|(_, num)| num.parse::<u8>().ok())
-        .unwrap_or(0)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_parse_index_from_id() {
-        assert_eq!(parse_index_from_id("node-1"), 1);
-        assert_eq!(parse_index_from_id("node-255"), 255);
-        assert_eq!(parse_index_from_id("nats-0"), 0);
-        assert_eq!(parse_index_from_id("no-number"), 0);
-    }
 }

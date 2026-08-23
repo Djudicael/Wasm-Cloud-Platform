@@ -1,0 +1,62 @@
+{
+  "name": "oidc-local",
+  "profile": "ChaosReady",
+  "bridge_name": "br-oidc-local",
+  "subnet": "172.20.0.0/24",
+  "gateway": "172.20.0.1",
+  "nats_url": "nats://172.20.0.10:4222",
+  "kernel_path": "/var/lib/wasm-cloud-platform-test/vmlinux-6.1.102",
+  "node_rootfs_path": "/var/lib/wasm-cloud-platform-test/wasm-node-rootfs-epoch-30s.ext4",
+  "node_data_drive_path": null,
+  "node_memory_mb": 2048,
+  "node_vcpus": 2,
+  "next_node_index": 10,
+  "nats": {
+    "id": "oidc-local-nats",
+    "pid": 1928,
+    "ip": "172.20.0.10",
+    "tap_device": "tap-1c01671c4df",
+    "admin_addr": "172.20.0.10:9090",
+    "artifact_addr": "172.20.0.10:9091",
+    "proxy_addr": "172.20.0.10:8080"
+  },
+  "nodes": [
+    {
+      "id": "oidc-local-node-6",
+      "pid": 285654,
+      "ip": "172.20.0.18",
+      "tap_device": "tap-4ec7aeb8bc0",
+      "admin_addr": "172.20.0.18:9090",
+      "artifact_addr": "172.20.0.18:9091",
+      "proxy_addr": "172.20.0.18:8080"
+    },
+    {
+      "id": "oidc-local-node-7",
+      "pid": 285738,
+      "ip": "172.20.0.19",
+      "tap_device": "tap-1512ca02e10",
+      "admin_addr": "172.20.0.19:9090",
+      "artifact_addr": "172.20.0.19:9091",
+      "proxy_addr": "172.20.0.19:8080"
+    },
+    {
+      "id": "oidc-local-node-9",
+      "pid": 285799,
+      "ip": "172.20.0.21",
+      "tap_device": "tap-2bc78000f41",
+      "admin_addr": "172.20.0.21:9090",
+      "artifact_addr": "172.20.0.21:9091",
+      "proxy_addr": "172.20.0.21:8080"
+    }
+  ],
+  "services": [
+    {
+      "id": "oidc-postgres",
+      "kind": "postgresql",
+      "pid": 3608,
+      "ip": "172.20.0.20",
+      "port": 5432,
+      "tap_device": "tap-64d1efee6b4"
+    }
+  ]
+}

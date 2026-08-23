@@ -40,13 +40,14 @@ https://dl-cdn.alpinelinux.org/alpine/v${ALPINE_VERSION}/main
 https://dl-cdn.alpinelinux.org/alpine/v${ALPINE_VERSION}/community
 EOF
 
-apk add --root "$ROOTFS_DIR" --initdb --no-cache \
+sudo cp -L /etc/resolv.conf "$ROOTFS_DIR/etc/resolv.conf"
+sudo chroot "$ROOTFS_DIR" /sbin/apk add --no-cache \
     alpine-base \
     openrc \
     iproute2 \
     curl \
-    ca-certificates \
-    2>/dev/null || true
+    ca-certificates
+sudo chown -R "$(id -u):$(id -g)" "$ROOTFS_DIR"
 
 # Download NATS binary
 echo "Downloading NATS Server $NATS_VERSION..."
@@ -119,17 +120,23 @@ chmod +x "$ROOTFS_DIR/etc/init.d/nats-server"
 mkdir -p "$ROOTFS_DIR/etc/runlevels/default"
 ln -sf /etc/init.d/nats-server "$ROOTFS_DIR/etc/runlevels/default/nats-server"
 
-# Create /etc/inittab
-cat > "$ROOTFS_DIR/etc/inittab" << 'EOF'
-::sysinit:/sbin/openrc sysinit
-::sysinit:/sbin/openrc boot
-::wait:/sbin/openrc default
-
-ttyS0::respawn:/sbin/getty -L ttyS0 115200 vt100
-
-::ctrlaltdel:/sbin/reboot
-::shutdown:/sbin/openrc shutdown
+# Use a small deterministic PID 1 for this disposable service VM. This avoids
+# depending on distribution runlevels and makes the configured address match
+# the testbed's NATS convention exactly.
+rm -f "$ROOTFS_DIR/sbin/init"
+cat > "$ROOTFS_DIR/sbin/init" << 'EOF'
+#!/bin/sh
+mount -t proc proc /proc
+mount -t sysfs sysfs /sys
+mount -t devtmpfs devtmpfs /dev 2>/dev/null || true
+ip link set lo up
+ip link set eth0 up
+ip address add 172.20.0.10/24 dev eth0
+ip route replace default via 172.20.0.1 dev eth0
+mkdir -p /var/lib/nats /var/log
+exec /usr/local/bin/nats-server -c /etc/nats/nats-server.conf
 EOF
+chmod +x "$ROOTFS_DIR/sbin/init"
 
 # Set hostname
 echo "nats-vm" > "$ROOTFS_DIR/etc/hostname"

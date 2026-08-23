@@ -391,7 +391,9 @@ jobs:
         run: cargo install cargo-audit --version 0.22.1 --locked
 
       - name: Run security audit
-        run: cargo audit --deny warnings
+        # Pingora 0.8.1 still pulls the unmaintained proc-macro-error2 through
+        # cf-rustracing-jaeger. Keep this explicit and remove it when Pingora does.
+        run: cargo audit --deny warnings --ignore RUSTSEC-2026-0173
         timeout-minutes: 5
 
   # Job 10: Dependency policy checks

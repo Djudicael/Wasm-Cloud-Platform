@@ -1,4 +1,6 @@
 /target
+.oidc-vm-testbed-state.json
+.oidc-vm-testbed-state.json.oidc-secrets/
 .env
 /crates/**/target
 /assets

@@ -21,7 +21,7 @@ pub(crate) struct Args {
     #[arg(long, default_value = "8080")]
     pub(crate) proxy_port: u16,
 
-    #[arg(long, default_value = "8443")]
+    #[arg(long, default_value = "0")]
     pub(crate) proxy_https_port: u16,
 
     #[arg(long)]

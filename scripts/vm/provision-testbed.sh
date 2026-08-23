@@ -74,7 +74,9 @@ case "$preset" in
       echo "The production-like preset requires --nodes COUNT (minimum 3)." >&2
       exit 2
     }
-    node_memory=${node_memory:-1024}
+    # Two non-trivial WASI services (for example an API and admin UI) can push a
+    # 1 GiB guest below the node's default free-memory backpressure threshold.
+    node_memory=${node_memory:-2048}
     node_vcpus=${node_vcpus:-2}
     front_door=${front_door:-haproxy}
     ;;
@@ -123,7 +125,11 @@ cd "$repo_root"
 command -v sudo >/dev/null || { echo "sudo is required for TAP/bridge management." >&2; exit 1; }
 command -v python3 >/dev/null || { echo "python3 is required to read and write testbed state." >&2; exit 1; }
 if [[ "$front_door" == haproxy ]]; then
-  command -v haproxy >/dev/null || {
+  haproxy_bin=$(command -v haproxy || true)
+  if [[ -z "$haproxy_bin" && -x /usr/sbin/haproxy ]]; then
+    haproxy_bin=/usr/sbin/haproxy
+  fi
+  [[ -n "$haproxy_bin" ]] || {
     echo "HAProxy is required for --front-door haproxy. Install it in WSL/Linux or use --front-door none." >&2
     exit 1
   }
@@ -201,8 +207,8 @@ PY
     done
   } > "$haproxy_config"
 
-  haproxy -c -f "$haproxy_config"
-  haproxy -db -f "$haproxy_config" > "$haproxy_log" 2>&1 &
+  "$haproxy_bin" -c -f "$haproxy_config"
+  setsid "$haproxy_bin" -db -f "$haproxy_config" </dev/null > "$haproxy_log" 2>&1 &
   haproxy_pid=$!
   cleanup_failed_front_door() {
     kill "$haproxy_pid" 2>/dev/null || true

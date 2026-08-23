@@ -21,8 +21,8 @@ tempfile = "3.27.0"
 [dependencies]
 argon2 = "0.5.3"
 base64 = "0.23.1"
-aws-config = "1.10.1"
-aws-sdk-kms = "1.114.0"
+aws-config = "1.11.0"
+aws-sdk-kms = { version = "1.116.0", default-features = false, features = ["default-https-client", "rt-tokio"] }
 ureq = { version = "3.4.0", features = ["json"] }
 hex = { workspace = true }
 sha2 = { workspace = true }

@@ -21,12 +21,15 @@ use std::task::{Context, Poll};
 use std::time::Instant;
 use wasmtime::component::{Component, Instance, Linker, ResourceTable};
 use wasmtime::{Engine, Store};
+use wasmtime_wasi::p2::add_to_linker_async as add_wasi_to_linker_async;
 use wasmtime_wasi::p2::add_to_linker_sync as add_wasi_to_linker_sync;
 use wasmtime_wasi::{DirPerms, FilePerms, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 use wasmtime_wasi_http::p2::bindings::http::types::Scheme;
 use wasmtime_wasi_http::p2::bindings::ProxyPre;
 use wasmtime_wasi_http::p2::body::HyperOutgoingBody;
-use wasmtime_wasi_http::p2::{add_only_http_to_linker_sync, WasiHttpCtxView, WasiHttpView};
+use wasmtime_wasi_http::p2::{
+    add_only_http_to_linker_async, add_only_http_to_linker_sync, WasiHttpCtxView, WasiHttpView,
+};
 use wasmtime_wasi_http::WasiHttpCtx;
 
 const WASI_CLI_RUN_INTERFACES: &[&str] = &[
@@ -167,6 +170,15 @@ fn build_runtime_linker(engine: &Engine) -> Result<Linker<StoreState>, PlatformE
     Ok(linker)
 }
 
+fn build_async_http_linker(engine: &Engine) -> Result<Linker<StoreState>, PlatformError> {
+    let mut linker = Linker::new(engine);
+    add_wasi_to_linker_async(&mut linker)
+        .map_err(|e| PlatformError::runtime(format!("wasi linker error: {e}")))?;
+    add_only_http_to_linker_async(&mut linker)
+        .map_err(|e| PlatformError::runtime(format!("wasi:http linker error: {e}")))?;
+    Ok(linker)
+}
+
 /// Store state for WASI Preview 2
 pub struct StoreState {
     pub ctx: WasiCtx,
@@ -174,6 +186,12 @@ pub struct StoreState {
     pub table: ResourceTable,
     pub limiter: MemoryLimiter,
     pub policy_enforcer: PolicyEnforcer,
+}
+
+impl Drop for StoreState {
+    fn drop(&mut self) {
+        self.policy_enforcer.release_tracked_outbound_connections();
+    }
 }
 
 impl std::fmt::Debug for StoreState {
@@ -404,7 +422,7 @@ impl PreparedModule {
                 }
             };
 
-            let linker = match build_runtime_linker(&engine) {
+            let linker = match build_async_http_linker(&engine) {
                 Ok(linker) => linker,
                 Err(err) => {
                     return ExecutionStats {
@@ -502,9 +520,8 @@ impl PreparedModule {
                                                 tokio::sync::oneshot::channel::<()>();
 
                                             let app_id_for_handle = app_id_for_request.clone();
-                                            let runtime_handle = tokio::runtime::Handle::current();
-                                            let handle = tokio::task::spawn_blocking(move || {
-                                                let result = runtime_handle.block_on(async {
+                                            let handle = tokio::spawn(async move {
+                                                let result = async {
                                                     let state = build_store_state(
                                                         &config,
                                                         env_vars.as_ref().clone(),
@@ -531,7 +548,8 @@ impl PreparedModule {
                                                         .map_err(|e| std::io::Error::other(e.to_string()))?;
 
                                                     let proxy = pre
-                                                        .instantiate(&mut store)
+                                                        .instantiate_async(&mut store)
+                                                        .await
                                                         .map_err(|e| std::io::Error::other(e.to_string()))?;
                                                     proxy
                                                         .wasi_http_incoming_handler()
@@ -540,10 +558,11 @@ impl PreparedModule {
                                                         .map_err(|e| std::io::Error::other(e.to_string()))?;
 
                                                     Ok::<(), std::io::Error>(())
-                                                });
+                                                }
+                                                .await;
 
-                                                if let Ok(true) = response_started_rx.blocking_recv() {
-                                                    let _ = body_complete_rx.blocking_recv();
+                                                if let Ok(true) = response_started_rx.await {
+                                                    let _ = body_complete_rx.await;
                                                 }
 
                                                 if let Err(err) = &result {

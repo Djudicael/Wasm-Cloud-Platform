@@ -7,7 +7,7 @@
 //!
 //! ```rust,no_run
 //! use vm_testbed::cluster::ClusterFixture;
-//! use vm_testbed::vm::VmConfig;
+//! use std::time::Duration;
 //!
 //! #[tokio::main]
 //! async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -17,8 +17,8 @@
 //!     cluster.start_nats(256, 1).await?;
 //!
 //!     // Start 3 wasm-node VMs
-//!     for i in 0..3 {
-//!         cluster.start_node(i, 512, 2).await?;
+//!     for _ in 0..3 {
+//!         cluster.start_node(512, 2).await?;
 //!     }
 //!
 //!     // Wait for all nodes to be healthy
@@ -31,7 +31,7 @@
 //! }
 //! ```
 
-use crate::network::{allocate_ip, setup_network, teardown_network};
+use crate::network::{allocate_ip, setup_network, tap_name_for_id, teardown_network};
 use crate::vm::{MicroVm, VmConfig, VmError};
 use serde_json::json;
 use std::collections::HashMap;
@@ -134,10 +134,11 @@ impl ClusterFixture {
             info!("Starting NATS microVM");
 
             let ip = "172.20.0.10".to_string();
-            let tap = format!("tap-{}-nats", self.name);
+            let vm_id = format!("{}-nats", self.name);
+            let tap = tap_name_for_id(&vm_id);
 
             let config = VmConfig {
-                id: format!("{}-nats", self.name),
+                id: vm_id,
                 kernel_path: self.kernel_path.clone(),
                 rootfs_path: self.nats_rootfs.clone(),
                 data_drive_path: None,
@@ -187,7 +188,7 @@ impl ClusterFixture {
         let node_id = format!("{}-node-{}", self.name, index);
         let ip = allocate_ip(&self.subnet, index + 10) // +10 to avoid NATS IP
             .map_err(|e| ClusterError::Network(format!("{e}")))?;
-        let tap = format!("tap-{}-{}", self.name, node_id);
+        let tap = tap_name_for_id(&node_id);
 
         info!(%node_id, %ip, "Starting wasm-node microVM");
 
@@ -208,6 +209,8 @@ impl ClusterFixture {
                 "node_config": {
                     "node_id": node_id,
                     "nats_url": nats_url,
+                    "ip": ip,
+                    "gateway": self.gateway,
                     "proxy_port": 8080,
                     "admin_port": 9090,
                     "artifact_port": 9091,

@@ -36,6 +36,7 @@
 
 use std::process::Command;
 use std::str::FromStr;
+use std::{collections::hash_map::DefaultHasher, hash::Hash, hash::Hasher};
 use tracing::{debug, info};
 
 /// Default bridge name for the Wasm testbed network.
@@ -295,6 +296,30 @@ pub fn guest_mac(index: u8) -> String {
     format!("AA:FC:00:00:00:{:02X}", index + 1)
 }
 
+/// Generate a stable locally-administered MAC address from a VM identifier.
+///
+/// VM identifiers are more reliable than numeric suffixes: service names such
+/// as `nats` and `postgres` otherwise collapse to the same MAC as `node-0`.
+pub fn guest_mac_for_id(id: &str) -> String {
+    let mut hasher = DefaultHasher::new();
+    id.hash(&mut hasher);
+    let hash = hasher.finish();
+    format!(
+        "02:FC:{:02X}:{:02X}:{:02X}:{:02X}",
+        (hash >> 24) as u8,
+        (hash >> 16) as u8,
+        (hash >> 8) as u8,
+        hash as u8
+    )
+}
+
+/// Generate a Linux-compatible TAP name (IFNAMSIZ permits 15 visible bytes).
+pub fn tap_name_for_id(id: &str) -> String {
+    let mut hasher = DefaultHasher::new();
+    id.hash(&mut hasher);
+    format!("tap-{:011x}", hasher.finish() & 0x7ff_ffff_ffff)
+}
+
 // ── Convenience: Full Setup / Teardown ───────────────────────────────
 
 /// Set up the complete network environment for microVM testing.
@@ -370,6 +395,20 @@ mod tests {
         assert_eq!(guest_mac(0), "AA:FC:00:00:00:01");
         assert_eq!(guest_mac(1), "AA:FC:00:00:00:02");
         assert_eq!(guest_mac(254), "AA:FC:00:00:00:FF");
+    }
+
+    #[test]
+    fn test_guest_mac_for_id_is_stable_and_distinct() {
+        assert_eq!(guest_mac_for_id("node-0"), guest_mac_for_id("node-0"));
+        assert_ne!(guest_mac_for_id("node-0"), guest_mac_for_id("nats"));
+        assert!(guest_mac_for_id("postgres").starts_with("02:FC:"));
+    }
+
+    #[test]
+    fn test_tap_name_for_id_fits_linux_limit() {
+        let tap = tap_name_for_id("a-very-long-cluster-node-identifier");
+        assert_eq!(tap.len(), 15);
+        assert_eq!(tap, tap_name_for_id("a-very-long-cluster-node-identifier"));
     }
 
     #[test]

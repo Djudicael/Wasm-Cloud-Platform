@@ -356,16 +356,24 @@ impl EventDispatcher {
         } else {
             // 2. Fetch from the source node
             info!(url = %artifact_url, "fetching artifact via HTTP");
-            let targeted_manifest = artifact_transfer_manifests
+            let Some(targeted_manifest) = artifact_transfer_manifests
                 .iter()
                 .find(|binding| binding.audience_node_id == self.node_id)
                 .map(|binding| &binding.artifact_transfer_manifest)
-                .ok_or_else(|| {
-                    PlatformError::messaging(format!(
-                        "deploy event missing audience-bound artifact manifest for node {} (artifact {})",
-                        self.node_id, sha256
-                    ))
-                })?;
+            else {
+                // Durable consumers replay historical deployments when a new node joins.
+                // A missing audience binding means that this node was not active when the
+                // artifact was published, so it was not an intended transfer target. NAKing
+                // cannot make an authorization appear and can eventually stall later control
+                // events behind an unprocessable message.
+                info!(
+                    app = %app_id.0,
+                    artifact = %sha256,
+                    node = %self.node_id,
+                    "skipping deploy event not authorized for this node"
+                );
+                return Ok(());
+            };
             let bytes = fetch_artifact(
                 &artifact_url,
                 Some(self.node_id.as_str()),
@@ -626,6 +634,20 @@ impl EventDispatcher {
         node_id: String,
     ) -> Result<(), PlatformError> {
         if node_id != self.our_node_id() {
+            // Runtime instances bind to the guest loopback interface. A loopback
+            // address announced by another node refers to that peer's namespace,
+            // not ours; registering it locally can collide with a local instance
+            // using the same port and route traffic to the wrong protocol socket.
+            // Cross-node steering uses the peer's advertised node proxy instead.
+            if addr.ip().is_loopback() {
+                info!(
+                    app = %app_id.0,
+                    %addr,
+                    from_node = %node_id,
+                    "ignoring peer-local instance address"
+                );
+                return Ok(());
+            }
             self.upstream
                 .add(
                     &app_id,
@@ -644,6 +666,9 @@ impl EventDispatcher {
         node_id: String,
     ) -> Result<(), PlatformError> {
         if node_id != self.our_node_id() {
+            if addr.ip().is_loopback() {
+                return Ok(());
+            }
             self.upstream.remove(&app_id, &addr).await;
             info!(app = %app_id.0, %addr, from_node = %node_id, "remote instance deregistered");
         }

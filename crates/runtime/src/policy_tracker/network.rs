@@ -57,6 +57,8 @@ impl PolicyEnforcer {
                 .compare_exchange(current, current + 1, Ordering::AcqRel, Ordering::Acquire)
                 .is_ok()
             {
+                self.local_outbound_connections_active
+                    .fetch_add(1, Ordering::AcqRel);
                 break;
             }
         }
@@ -73,6 +75,15 @@ impl PolicyEnforcer {
 
     /// Record that an outbound connection was closed.
     pub fn record_outbound_disconnect(&self) {
+        let local_prev = self
+            .local_outbound_connections_active
+            .fetch_sub(1, Ordering::AcqRel);
+        if local_prev == 0 {
+            self.local_outbound_connections_active
+                .store(0, Ordering::Release);
+            return;
+        }
+
         let prev = self
             .counters
             .outbound_connections_active

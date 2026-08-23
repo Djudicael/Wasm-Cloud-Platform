@@ -294,7 +294,20 @@ impl NatsBus {
 
         let quarantine_client = self.client.clone();
         tokio::spawn(async move {
-            while let Some(Ok(msg)) = messages.next().await {
+            while let Some(message) = messages.next().await {
+                let msg = match message {
+                    Ok(msg) => msg,
+                    Err(error) => {
+                        // A transient pull-consumer error must not silently terminate the
+                        // node's control plane. The message stream can continue yielding
+                        // after an item-level error.
+                        tracing::warn!(
+                            error = %error,
+                            "JetStream consumer stream error; continuing"
+                        );
+                        continue;
+                    }
+                };
                 match Self::deserialize_event(&msg.payload) {
                     Ok(event) => match handler(event).await {
                         Ok(()) => {
