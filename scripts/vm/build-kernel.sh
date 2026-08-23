@@ -20,6 +20,7 @@
 #   - flex
 #   - libssl-dev
 #   - libelf-dev
+#   - dwarves (pahole, for BTF)
 
 set -euo pipefail
 
@@ -37,7 +38,7 @@ echo "=== Building Linux Kernel $VERSION for Firecracker ==="
 # Install dependencies
 echo "Checking dependencies..."
 MISSING=""
-for pkg in build-essential bc bison flex libssl-dev libelf-dev; do
+for pkg in build-essential bc bison flex libssl-dev libelf-dev dwarves; do
     if ! dpkg -s "$pkg" 2>/dev/null | grep -q '^Status:.*installed'; then
         MISSING="$MISSING $pkg"
     fi
@@ -76,6 +77,37 @@ make tinyconfig
 cat >> .config << 'EOF'
 # 64-bit kernel
 CONFIG_64BIT=y
+CONFIG_SMP=y
+CONFIG_NR_CPUS=64
+CONFIG_MULTIUSER=y
+CONFIG_BINFMT_ELF=y
+CONFIG_BINFMT_SCRIPT=y
+CONFIG_HIGH_RES_TIMERS=y
+CONFIG_POSIX_TIMERS=y
+CONFIG_FUTEX=y
+CONFIG_FUTEX_PI=y
+CONFIG_EPOLL=y
+CONFIG_SIGNALFD=y
+CONFIG_TIMERFD=y
+CONFIG_EVENTFD=y
+CONFIG_AIO=y
+CONFIG_IO_URING=y
+CONFIG_INOTIFY_USER=y
+CONFIG_MEMBARRIER=y
+CONFIG_RSEQ=y
+CONFIG_SYSVIPC=y
+CONFIG_SYSVIPC_SYSCTL=y
+CONFIG_POSIX_MQUEUE=y
+CONFIG_SHMEM=y
+CONFIG_TMPFS=y
+CONFIG_TMPFS_POSIX_ACL=y
+
+# KVM/Firecracker paravirtual clock. Firecracker does not provide a legacy PIT,
+# HPET, or ACPI PM timer, so a tinyconfig kernel otherwise stalls while trying
+# to calibrate an unstable TSC.
+CONFIG_HYPERVISOR_GUEST=y
+CONFIG_PARAVIRT=y
+CONFIG_KVM_GUEST=y
 
 # Essential subsystem support
 CONFIG_BLOCK=y
@@ -91,12 +123,18 @@ CONFIG_ATA_BMDMA=y
 CONFIG_ATA_PIIX=y
 CONFIG_NET=y
 CONFIG_INET=y
+CONFIG_UNIX=y
 CONFIG_NETDEVICES=y
+CONFIG_VIRTIO_MENU=y
+CONFIG_VIRTIO=y
 CONFIG_VIRTIO_NET=y
 CONFIG_VIRTIO_BLK=y
 CONFIG_VIRTIO_PCI=y
 CONFIG_VIRTIO_MMIO=y
+CONFIG_VIRTIO_MMIO_CMDLINE_DEVICES=y
 CONFIG_VIRTIO_CONSOLE=y
+CONFIG_PRINTK=y
+CONFIG_EARLY_PRINTK=y
 CONFIG_SERIAL_8250=y
 CONFIG_SERIAL_8250_CONSOLE=y
 CONFIG_TTY=y
@@ -126,10 +164,9 @@ CONFIG_CGROUP_BPF=y
 CONFIG_BPF_EVENTS=y
 
 # BTF support (required for modern eBPF)
-CONFIG_DEBUG_INFO=y
+CONFIG_DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT=y
 CONFIG_DEBUG_INFO_BTF=y
 CONFIG_DEBUG_INFO_BTF_MODULES=y
-CONFIG_PAHOLE_HAS_SPLIT_BTF=y
 
 # Enable BPF LSM (optional but recommended)
 CONFIG_BPF_LSM=y
@@ -202,7 +239,6 @@ CONFIG_MEMORY_HOTPLUG=y
 CONFIG_MEMORY_HOTREMOVE=y
 
 # Disable unnecessary debug options to reduce size
-CONFIG_DEBUG_KERNEL=n
 CONFIG_DEBUG_FS=n
 CONFIG_KALLSYMS=n
 CONFIG_KALLSYMS_ALL=n
@@ -221,6 +257,53 @@ EOF
 # Update config
 make olddefconfig
 
+# Firecracker's x86 legacy transport advertises its virtio devices through
+# `virtio_mmio.device=...` kernel arguments. Merely enabling VIRTIO_MMIO is not
+# sufficient: without CMDLINE_DEVICES the kernel boots but never discovers the
+# root disk or network adapter.
+for required_config in \
+    CONFIG_SMP=y \
+    CONFIG_MULTIUSER=y \
+    CONFIG_BINFMT_ELF=y \
+    CONFIG_BINFMT_SCRIPT=y \
+    CONFIG_HIGH_RES_TIMERS=y \
+    CONFIG_POSIX_TIMERS=y \
+    CONFIG_FUTEX=y \
+    CONFIG_EPOLL=y \
+    CONFIG_SIGNALFD=y \
+    CONFIG_TIMERFD=y \
+    CONFIG_EVENTFD=y \
+    CONFIG_SYSVIPC=y \
+    CONFIG_SHMEM=y \
+    CONFIG_TMPFS=y \
+    CONFIG_HYPERVISOR_GUEST=y \
+    CONFIG_PARAVIRT=y \
+    CONFIG_KVM_GUEST=y \
+    CONFIG_PARAVIRT_CLOCK=y \
+    CONFIG_BLOCK=y \
+    CONFIG_VIRTIO_MENU=y \
+    CONFIG_VIRTIO=y \
+    CONFIG_VIRTIO_BLK=y \
+    CONFIG_VIRTIO_NET=y \
+    CONFIG_VIRTIO_MMIO=y \
+    CONFIG_VIRTIO_MMIO_CMDLINE_DEVICES=y \
+    CONFIG_UNIX=y \
+    CONFIG_EXT4_FS=y \
+    CONFIG_PRINTK=y \
+    CONFIG_SERIAL_8250_CONSOLE=y \
+    CONFIG_DEBUG_INFO=y \
+    CONFIG_DEBUG_INFO_BTF=y; do
+    grep -qx "$required_config" .config || {
+        echo "Required Firecracker kernel setting is missing after olddefconfig: $required_config" >&2
+        exit 1
+    }
+done
+configured_nr_cpus=$(sed -n 's/^CONFIG_NR_CPUS=//p' .config)
+if [[ -z "$configured_nr_cpus" || "$configured_nr_cpus" -lt 2 ]]; then
+    echo "Firecracker validation requires CONFIG_NR_CPUS >= 2; got ${configured_nr_cpus:-unset}." >&2
+    exit 1
+fi
+
 # Build kernel
 echo "Building kernel with $JOBS parallel jobs..."
 make -j"$JOBS" vmlinux
@@ -228,7 +311,15 @@ make -j"$JOBS" vmlinux
 # Copy output
 OUTPUT="$OUTPUT_DIR/vmlinux-$SHORT_VERSION"
 cp "vmlinux" "$OUTPUT"
-strip "$OUTPUT"  # Reduce size
+# Remove ordinary DWARF while retaining the compact BTF section needed by the
+# guest eBPF tooling. A plain `strip` silently removes BTF as well.
+strip --strip-debug --keep-section=.BTF "$OUTPUT"
+readelf -S "$OUTPUT" | grep '[.]BTF' >/dev/null || {
+    echo "Built kernel is missing its required BTF section." >&2
+    exit 1
+}
+cp .config "$OUTPUT.config"
+echo "7" > "$OUTPUT.schema"
 
 echo ""
 echo "=== Kernel build complete ==="
@@ -237,4 +328,4 @@ echo "Size: $(du -h "$OUTPUT" | cut -f1)"
 echo ""
 echo "Verify eBPF/BTF support:"
 file "$OUTPUT"
-readelf -S "$OUTPUT" | grep -i btf || echo "WARNING: BTF section not found"
+readelf -S "$OUTPUT" | grep -i btf

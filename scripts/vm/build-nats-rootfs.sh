@@ -69,6 +69,7 @@ chmod +x "$ROOTFS_DIR/usr/local/bin/nats-server"
 
 # Create directories
 mkdir -p "$ROOTFS_DIR"/{etc/nats,var/lib/nats,run/nats,proc,sys,dev,tmp}
+echo "2" > "$ROOTFS_DIR/etc/nats/image-schema-version"
 
 # Create NATS config
 cat > "$ROOTFS_DIR/etc/nats/nats-server.conf" << 'EOF'

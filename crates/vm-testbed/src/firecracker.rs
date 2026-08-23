@@ -445,6 +445,26 @@ impl FirecrackerClient {
         Self::check_status(resp).await
     }
 
+    /// Configure a file for guest 8250 serial-console output.
+    ///
+    /// Configure this before starting the instance so guest kernel and PID 1
+    /// failures are available independently from Firecracker's own logs.
+    pub async fn configure_serial_output(
+        &self,
+        serial_out_path: impl AsRef<Path>,
+    ) -> Result<(), FirecrackerError> {
+        let path = serial_out_path.as_ref().to_string_lossy().to_string();
+        let body = json!({ "serial_out_path": path });
+
+        let resp = self
+            .request(reqwest::Method::PUT, "/serial")
+            .json(&body)
+            .send()
+            .await?;
+
+        Self::check_status(resp).await
+    }
+
     // =====================================================================
     // MMDS (Metadata Service)
     // =====================================================================

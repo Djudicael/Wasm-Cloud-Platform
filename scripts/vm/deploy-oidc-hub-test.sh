@@ -40,7 +40,11 @@ for command_name in cargo npm openssl curl python3; do
 done
 
 state_file=$(python3 -c 'import os, sys; print(os.path.abspath(sys.argv[1]))' "$state_file")
-secret_dir="${state_file}.oidc-secrets"
+secret_root="${XDG_RUNTIME_DIR:-/tmp}/wasm-cloud-platform-oidc-secrets-$(id -u)"
+state_key=$(printf '%s' "$state_file" | sha256sum | cut -d' ' -f1)
+secret_dir="$secret_root/$state_key"
+mkdir -p "$secret_root"
+chmod 700 "$secret_root"
 mkdir -p "$secret_dir"
 chmod 700 "$secret_dir"
 if [[ ! -s "$secret_dir/rsa.pem" ]]; then
@@ -120,8 +124,11 @@ scripts/vm/deploy-test-application.sh \
 scripts/vm/configure-oidc-test-gateway.sh --state-file "$state_file"
 
 front_door=${public_url#http://}
-login_payload=$(mktemp)
-trap 'rm -f "$login_payload"' EXIT
+response_dir=$(mktemp -d)
+chmod 700 "$response_dir"
+login_payload="$response_dir/login-payload"
+trap 'rm -rf -- "$response_dir"' EXIT
+: > "$login_payload"
 chmod 600 "$login_payload"
 python3 - "$admin_email" "$admin_password" > "$login_payload" <<'PY'
 import json, sys
@@ -129,15 +136,15 @@ print(json.dumps({"email": sys.argv[1], "password": sys.argv[2], "client_id": "a
 PY
 deadline=$((SECONDS + 120))
 while ((SECONDS < deadline)); do
-  frontend_status=$(curl -sS -o /tmp/oidc-frontend-response -w '%{http_code}' --max-time 5 "$public_url/" || true)
-  ready_status=$(curl -sS -o /tmp/oidc-ready-response -w '%{http_code}' --max-time 5 "$public_url/health/ready" || true)
-  discovery_status=$(curl -sS -o /tmp/oidc-discovery-response -w '%{http_code}' --max-time 5 "$public_url/.well-known/openid-configuration" || true)
-  spa_status=$(curl -sS -o /tmp/oidc-spa-response -w '%{http_code}' --max-time 5 "$public_url/realms/master" || true)
-  login_status=$(curl -sS -o /tmp/oidc-login-response -w '%{http_code}' --max-time 5 "$public_url/realms/master/login" || true)
-  login_api_status=$(curl -sS -o /tmp/oidc-login-api-response -w '%{http_code}' --max-time 30 \
+  frontend_status=$(curl -sS -o "$response_dir/frontend-response" -w '%{http_code}' --max-time 5 "$public_url/" || true)
+  ready_status=$(curl -sS -o "$response_dir/ready-response" -w '%{http_code}' --max-time 5 "$public_url/health/ready" || true)
+  discovery_status=$(curl -sS -o "$response_dir/discovery-response" -w '%{http_code}' --max-time 5 "$public_url/.well-known/openid-configuration" || true)
+  spa_status=$(curl -sS -o "$response_dir/spa-response" -w '%{http_code}' --max-time 5 "$public_url/realms/master" || true)
+  login_status=$(curl -sS -o "$response_dir/login-response" -w '%{http_code}' --max-time 5 "$public_url/realms/master/login" || true)
+  login_api_status=$(curl -sS -o "$response_dir/login-api-response" -w '%{http_code}' --max-time 30 \
     -H 'Content-Type: application/json' --data-binary "@$login_payload" "$public_url/oidc/login" || true)
   ready_ok=false
-  if [[ "$ready_status" == 200 ]] && python3 - /tmp/oidc-ready-response <<'PY'
+  if [[ "$ready_status" == 200 ]] && python3 - "$response_dir/ready-response" <<'PY'
 import json, sys
 with open(sys.argv[1], encoding="utf-8") as stream:
     readiness = json.load(stream)
@@ -148,7 +155,7 @@ PY
     ready_ok=true
   fi
   login_api_ok=false
-  if [[ "$login_api_status" == 200 ]] && python3 - /tmp/oidc-login-api-response <<'PY'
+  if [[ "$login_api_status" == 200 ]] && python3 - "$response_dir/login-api-response" <<'PY'
 import json, sys
 with open(sys.argv[1], encoding="utf-8") as stream:
     response = json.load(stream)
@@ -159,7 +166,7 @@ PY
     login_api_ok=true
   fi
   if [[ "$frontend_status" == 200 && "$ready_ok" == true && "$discovery_status" == 200 && "$spa_status" == 200 && "$login_status" == 200 && "$login_api_ok" == true ]]; then
-    python3 - "$public_url" /tmp/oidc-discovery-response <<'PY'
+    python3 - "$public_url" "$response_dir/discovery-response" <<'PY'
 import json, sys
 expected, path = sys.argv[1:]
 with open(path, encoding="utf-8") as stream:

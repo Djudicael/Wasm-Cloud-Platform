@@ -27,6 +27,21 @@ repo_root=$(git rev-parse --show-toplevel 2>/dev/null) || { echo "Run inside the
 cd "$repo_root"
 [[ -f "$state_file" ]] || { echo "Missing topology state: $state_file" >&2; exit 1; }
 [[ -f "$rootfs" ]] || { echo "Missing PostgreSQL rootfs: $rootfs" >&2; exit 1; }
+[[ -f assets/vmlinux-6.1.schema && $(<assets/vmlinux-6.1.schema) == 7 ]] || {
+  echo "assets/vmlinux-6.1 is stale or incompatible (expected kernel schema 7)." >&2
+  echo "Rebuild it with: scripts/vm/build-kernel.sh" >&2
+  exit 1
+}
+command -v debugfs >/dev/null || {
+  echo "debugfs is required to validate the PostgreSQL image." >&2
+  exit 1
+}
+postgres_image_schema=$(debugfs -R 'cat /etc/postgresql-image-schema-version' "$rootfs" 2>/dev/null || true)
+[[ "$postgres_image_schema" == 3 ]] || {
+  echo "$rootfs is stale or incompatible (expected PostgreSQL image schema 3)." >&2
+  echo "Rebuild it with: scripts/vm/build-postgres-rootfs.sh" >&2
+  exit 1
+}
 
 target_dir=${CARGO_TARGET_DIR:-/tmp/wasm-cloud-platform-target}
 CARGO_TARGET_DIR="$target_dir" cargo build -p vm-testbed --bin vm-testbed-cli

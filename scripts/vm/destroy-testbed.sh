@@ -66,6 +66,11 @@ if [[ ! -f "$state_file" ]]; then
   exit 0
 fi
 
+state_file=$(python3 -c 'import os, sys; print(os.path.abspath(sys.argv[1]))' "$state_file")
+oidc_secret_root="${XDG_RUNTIME_DIR:-/tmp}/wasm-cloud-platform-oidc-secrets-$(id -u)"
+oidc_state_key=$(printf '%s' "$state_file" | sha256sum | cut -d' ' -f1)
+oidc_secret_dir="$oidc_secret_root/$oidc_state_key"
+
 command -v sudo >/dev/null || { echo "sudo is required for TAP/bridge cleanup." >&2; exit 1; }
 sudo -v
 target_dir=${CARGO_TARGET_DIR:-/tmp/wasm-cloud-platform-target}
@@ -77,14 +82,14 @@ if [[ -e "$state_file" ]]; then
   echo "Teardown returned but the state file remains: $state_file" >&2
   exit 1
 fi
-oidc_secret_dir="${state_file}.oidc-secrets"
-expected_secret_dir=$(python3 -c 'import os, sys; print(os.path.abspath(sys.argv[1]))' "${state_file}.oidc-secrets")
 if [[ -d "$oidc_secret_dir" ]]; then
+  expected_secret_dir="$oidc_secret_root/$oidc_state_key"
   [[ "$(python3 -c 'import os, sys; print(os.path.abspath(sys.argv[1]))' "$oidc_secret_dir")" == "$expected_secret_dir" ]] || {
     echo "OIDC secret directory does not match the selected state file; refusing cleanup." >&2
     exit 1
   }
   rm -rf -- "$expected_secret_dir"
+  rmdir --ignore-fail-on-non-empty "$oidc_secret_root" 2>/dev/null || true
   echo "Removed the local OIDC test credentials and signing keys."
 fi
 echo "Testbed destroyed and state removed: $state_file"

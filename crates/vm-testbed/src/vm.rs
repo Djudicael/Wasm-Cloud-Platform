@@ -199,6 +199,10 @@ impl MicroVm {
         // 6. Configure logging
         let _ = client.configure_logging(&firecracker_log, "Info").await;
         let _ = client.configure_metrics(&firecracker_metrics).await;
+        client
+            .configure_serial_output(&serial_log)
+            .await
+            .map_err(VmError::Firecracker)?;
 
         // 7. Configure machine
         client

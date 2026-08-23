@@ -29,7 +29,10 @@ cleanup() {
   if mountpoint -q "$work_dir/mount" 2>/dev/null; then
     sudo umount "$work_dir/mount"
   fi
-  rm -rf -- "$work_dir"
+  # `postgres` owns files created inside the chroot. Use the same privilege
+  # boundary used for chroot and mount operations so the EXIT trap cannot turn
+  # an otherwise successful image build into a failure on WSL/Linux.
+  sudo rm -rf -- "$work_dir"
 }
 trap cleanup EXIT
 
@@ -51,6 +54,13 @@ sudo cp -L /etc/resolv.conf "$rootfs_dir/etc/resolv.conf"
 sudo chroot "$rootfs_dir" /sbin/apk add --no-cache \
   alpine-base openrc iproute2 postgresql postgresql-client postgresql17-contrib \
   su-exec ca-certificates
+postgres_bin=/usr/libexec/postgresql17
+for executable in initdb postgres pg_isready psql createdb; do
+  sudo chroot "$rootfs_dir" test -x "$postgres_bin/$executable" || {
+    echo "PostgreSQL package is missing $postgres_bin/$executable." >&2
+    exit 1
+  }
+done
 sudo chown -R "$(id -u):$(id -g)" "$rootfs_dir"
 
 mkdir -p \
@@ -63,12 +73,13 @@ mkdir -p \
   "$rootfs_dir/dev" \
   "$rootfs_dir/tmp"
 sudo chroot "$rootfs_dir" chown -R postgres:postgres /var/lib/postgresql /run/postgresql
+echo "3" > "$rootfs_dir/etc/postgresql-image-schema-version"
 
 cat > "$rootfs_dir/etc/init.d/postgresql-testbed" <<'EOF'
 #!/sbin/openrc-run
 
 description="PostgreSQL for the Wasm Cloud Platform local testbed"
-command="/usr/bin/postgres"
+command="/usr/libexec/postgresql17/postgres"
 command_args="-D /var/lib/postgresql/data"
 command_user="postgres:postgres"
 command_background=true
@@ -82,7 +93,7 @@ start_pre() {
   checkpath -d -m 0700 -o postgres:postgres /var/lib/postgresql/data
   checkpath -d -m 0755 -o postgres:postgres /run/postgresql
   if [ ! -s /var/lib/postgresql/data/PG_VERSION ]; then
-    su-exec postgres initdb --encoding=UTF8 --locale=C -D /var/lib/postgresql/data
+    su-exec postgres /usr/libexec/postgresql17/initdb --encoding=UTF8 --locale=C -D /var/lib/postgresql/data
     cat >> /var/lib/postgresql/data/postgresql.conf <<'CONFIG'
 listen_addresses = '*'
 port = 5432
@@ -100,7 +111,7 @@ HBA
 
 start_post() {
   for _ in $(seq 1 60); do
-    su-exec postgres pg_isready -q && break
+    su-exec postgres /usr/libexec/postgresql17/pg_isready -q && break
     sleep 0.25
   done
   /usr/local/bin/init-oidc-database
@@ -112,11 +123,11 @@ ln -s /etc/init.d/postgresql-testbed "$rootfs_dir/etc/runlevels/default/postgres
 cat > "$rootfs_dir/usr/local/bin/init-oidc-database" <<EOF
 #!/bin/sh
 set -eu
-if ! su-exec postgres psql -tAc "SELECT 1 FROM pg_roles WHERE rolname = '$POSTGRES_USER'" | grep -q 1; then
-  su-exec postgres psql -v ON_ERROR_STOP=1 -c "CREATE ROLE $POSTGRES_USER LOGIN PASSWORD '$POSTGRES_PASSWORD'"
+if ! su-exec postgres /usr/libexec/postgresql17/psql -tAc "SELECT 1 FROM pg_roles WHERE rolname = '$POSTGRES_USER'" | grep -q 1; then
+  su-exec postgres /usr/libexec/postgresql17/psql -v ON_ERROR_STOP=1 -c "CREATE ROLE $POSTGRES_USER LOGIN PASSWORD '$POSTGRES_PASSWORD'"
 fi
-if ! su-exec postgres psql -tAc "SELECT 1 FROM pg_database WHERE datname = '$POSTGRES_DATABASE'" | grep -q 1; then
-  su-exec postgres createdb --owner "$POSTGRES_USER" "$POSTGRES_DATABASE"
+if ! su-exec postgres /usr/libexec/postgresql17/psql -tAc "SELECT 1 FROM pg_database WHERE datname = '$POSTGRES_DATABASE'" | grep -q 1; then
+  su-exec postgres /usr/libexec/postgresql17/createdb --owner "$POSTGRES_USER" "$POSTGRES_DATABASE"
 fi
 EOF
 chmod +x "$rootfs_dir/usr/local/bin/init-oidc-database"
@@ -129,6 +140,62 @@ ttyS0::respawn:/sbin/getty -L ttyS0 115200 vt100
 ::ctrlaltdel:/sbin/reboot
 ::shutdown:/sbin/openrc shutdown
 EOF
+
+# Use a deterministic PID 1 for the disposable PostgreSQL service VM. It owns
+# network setup and first-boot initialization instead of depending on OpenRC
+# runlevel ordering.
+rm -f "$rootfs_dir/sbin/init"
+cat > "$rootfs_dir/sbin/init" <<'EOF'
+#!/bin/sh
+set -eu
+mount -t proc proc /proc
+mount -t sysfs sysfs /sys
+mount -t devtmpfs devtmpfs /dev 2>/dev/null || true
+mount -t tmpfs tmpfs /run
+mkdir -p /run/postgresql /var/lib/postgresql/data
+chown postgres:postgres /run/postgresql /var/lib/postgresql /var/lib/postgresql/data
+ip link set lo up
+ip link set eth0 up
+ip address add 172.20.0.20/24 dev eth0
+ip route replace default via 172.20.0.1 dev eth0
+
+if [ ! -s /var/lib/postgresql/data/PG_VERSION ]; then
+  su-exec postgres /usr/libexec/postgresql17/initdb --encoding=UTF8 --locale=C -D /var/lib/postgresql/data
+  cat >> /var/lib/postgresql/data/postgresql.conf <<'CONFIG'
+listen_addresses = '*'
+port = 5432
+password_encryption = 'scram-sha-256'
+max_connections = 200
+shared_buffers = '128MB'
+CONFIG
+  cat > /var/lib/postgresql/data/pg_hba.conf <<'HBA'
+local all all trust
+host all all 172.20.0.0/24 scram-sha-256
+HBA
+  chown postgres:postgres /var/lib/postgresql/data/postgresql.conf /var/lib/postgresql/data/pg_hba.conf
+fi
+
+su-exec postgres /usr/libexec/postgresql17/postgres -D /var/lib/postgresql/data &
+postgres_pid=$!
+trap 'kill -TERM "$postgres_pid" 2>/dev/null || true' TERM INT
+for attempt in $(seq 1 120); do
+  su-exec postgres /usr/libexec/postgresql17/pg_isready -q && break
+  if ! kill -0 "$postgres_pid" 2>/dev/null; then
+    wait "$postgres_pid"
+    exit $?
+  fi
+  sleep 0.25
+done
+su-exec postgres /usr/libexec/postgresql17/pg_isready -q || {
+  echo "PostgreSQL did not become ready during first-boot initialization." >&2
+  kill -TERM "$postgres_pid" 2>/dev/null || true
+  wait "$postgres_pid" || true
+  exit 1
+}
+/usr/local/bin/init-oidc-database
+wait "$postgres_pid"
+EOF
+chmod +x "$rootfs_dir/sbin/init"
 
 printf '%s\n' postgres-vm > "$rootfs_dir/etc/hostname"
 cat > "$rootfs_dir/etc/network/interfaces" <<'EOF'

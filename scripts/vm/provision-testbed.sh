@@ -134,8 +134,6 @@ if [[ "$front_door" == haproxy ]]; then
     exit 1
   }
 fi
-sudo -v
-
 if [[ -e "$state_file" ]]; then
   echo "State file already exists: $state_file" >&2
   echo "Inspect or destroy the existing testbed before provisioning another one." >&2
@@ -160,7 +158,33 @@ for required in assets/vmlinux-6.1 assets/wasm-node-rootfs.ext4 assets/nats-root
     exit 1
   }
 done
+kernel_image_schema=
+if [[ -f assets/vmlinux-6.1.schema ]]; then
+  kernel_image_schema=$(<assets/vmlinux-6.1.schema)
+fi
+if [[ "$kernel_image_schema" != 7 ]]; then
+  echo "assets/vmlinux-6.1 is stale or incompatible (expected kernel schema 7)." >&2
+  echo "Rebuild it with: scripts/vm/build-kernel.sh" >&2
+  exit 1
+fi
+command -v debugfs >/dev/null || {
+  echo "debugfs is required to validate VM images (Ubuntu/WSL: sudo apt-get install e2fsprogs)." >&2
+  exit 1
+}
+nats_image_schema=$(debugfs -R 'cat /etc/nats/image-schema-version' assets/nats-rootfs.ext4 2>/dev/null || true)
+if [[ "$nats_image_schema" != 2 ]]; then
+  echo "assets/nats-rootfs.ext4 is stale or incompatible (expected image schema 2)." >&2
+  echo "Rebuild it with: scripts/vm/build-nats-rootfs.sh" >&2
+  exit 1
+fi
+node_image_schema=$(debugfs -R 'cat /etc/wasm-node/image-schema-version' assets/wasm-node-rootfs.ext4 2>/dev/null || true)
+if [[ "$node_image_schema" != 2 ]]; then
+  echo "assets/wasm-node-rootfs.ext4 is stale or incompatible (expected image schema 2)." >&2
+  echo "Rebuild it with: scripts/vm/build-node-rootfs.sh" >&2
+  exit 1
+fi
 command -v firecracker >/dev/null || { echo "firecracker is missing; re-run with --prepare-assets." >&2; exit 1; }
+sudo -v
 
 target_dir=${CARGO_TARGET_DIR:-/tmp/wasm-cloud-platform-target}
 CARGO_TARGET_DIR="$target_dir" cargo build -p vm-testbed --bin vm-testbed-cli

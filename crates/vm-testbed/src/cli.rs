@@ -1055,25 +1055,43 @@ async fn down_from_state(state_file: &Path) -> Result<()> {
 }
 
 async fn print_runtime_status(state: &PersistedClusterState) -> Result<()> {
-    for vm in state.nats.iter().chain(state.nodes.iter()) {
+    if let Some(nats) = &state.nats {
+        let alive = process_alive(nats.pid);
+        let nats_addr = state
+            .nats_url
+            .strip_prefix("nats://")
+            .unwrap_or(&state.nats_url);
+        let tcp_status = match tokio::time::timeout(
+            Duration::from_secs(2),
+            tokio::net::TcpStream::connect(nats_addr),
+        )
+        .await
+        {
+            Ok(Ok(_)) => "connected",
+            Ok(Err(_)) => "unreachable",
+            Err(_) => "timeout",
+        };
+        println!(
+            "{} pid={} alive={} nats={} tcp={}",
+            nats.id, nats.pid, alive, state.nats_url, tcp_status
+        );
+    }
+
+    for vm in &state.nodes {
         let alive = process_alive(vm.pid);
-        if vm.admin_addr.ends_with(":9090") {
-            let health = reqwest::Client::builder()
-                .timeout(Duration::from_secs(2))
-                .build()?
-                .get(format!("http://{}/healthz", vm.admin_addr))
-                .send()
-                .await
-                .ok()
-                .map(|resp| resp.status().to_string())
-                .unwrap_or_else(|| "unreachable".to_string());
-            println!(
-                "{} pid={} alive={} admin={} proxy={} health={}",
-                vm.id, vm.pid, alive, vm.admin_addr, vm.proxy_addr, health
-            );
-        } else {
-            println!("{} pid={} alive={}", vm.id, vm.pid, alive);
-        }
+        let health = reqwest::Client::builder()
+            .timeout(Duration::from_secs(2))
+            .build()?
+            .get(format!("http://{}/healthz", vm.admin_addr))
+            .send()
+            .await
+            .ok()
+            .map(|resp| resp.status().to_string())
+            .unwrap_or_else(|| "unreachable".to_string());
+        println!(
+            "{} pid={} alive={} admin={} proxy={} health={}",
+            vm.id, vm.pid, alive, vm.admin_addr, vm.proxy_addr, health
+        );
     }
     for service in &state.services {
         println!(
