@@ -586,7 +586,7 @@ impl Drop for DeployIngressProcess {
 fn find_node_binary() -> Result<PathBuf, Box<dyn std::error::Error>> {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
     let workspace_root = Path::new(manifest_dir).parent().unwrap().parent().unwrap();
-    let debug_binary = workspace_root.join("target/debug/wasm-node");
+    let debug_binary = cargo_target_dir(workspace_root).join("debug/wasm-node");
     ensure_helper_binary_built_once("wasm-node", workspace_root, &["build", "-p", "node"])?;
     Ok(debug_binary)
 }
@@ -595,7 +595,7 @@ fn find_node_binary() -> Result<PathBuf, Box<dyn std::error::Error>> {
 pub fn find_ctl_binary() -> Result<PathBuf, Box<dyn std::error::Error>> {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
     let workspace_root = Path::new(manifest_dir).parent().unwrap().parent().unwrap();
-    let debug_binary = workspace_root.join("target/debug/wasm-ctl");
+    let debug_binary = cargo_target_dir(workspace_root).join("debug/wasm-ctl");
     ensure_helper_binary_built_once("wasm-ctl", workspace_root, &["build", "-p", "ctl"])?;
     Ok(debug_binary)
 }
@@ -603,13 +603,26 @@ pub fn find_ctl_binary() -> Result<PathBuf, Box<dyn std::error::Error>> {
 fn find_deploy_ingress_binary() -> Result<PathBuf, Box<dyn std::error::Error>> {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
     let workspace_root = Path::new(manifest_dir).parent().unwrap().parent().unwrap();
-    let debug_binary = workspace_root.join("target/debug/wasm-deploy-ingress");
+    let debug_binary = cargo_target_dir(workspace_root).join("debug/wasm-deploy-ingress");
     ensure_helper_binary_built_once(
         "wasm-deploy-ingress",
         workspace_root,
         &["build", "-p", "deploy-ingress"],
     )?;
     Ok(debug_binary)
+}
+
+fn cargo_target_dir(workspace_root: &Path) -> PathBuf {
+    std::env::var_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .map(|path| {
+            if path.is_absolute() {
+                path
+            } else {
+                workspace_root.join(path)
+            }
+        })
+        .unwrap_or_else(|| workspace_root.join("target"))
 }
 
 fn ensure_helper_binary_built_once(
@@ -744,7 +757,7 @@ pub async fn run_ctl_async(
 pub fn find_hello_axum_wasm() -> Result<PathBuf, Box<dyn std::error::Error>> {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
     let workspace_root = Path::new(manifest_dir).parent().unwrap().parent().unwrap();
-    let wasm_path = workspace_root.join("target/wasm32-wasip2/release/hello-axum.wasm");
+    let wasm_path = cargo_target_dir(workspace_root).join("wasm32-wasip2/release/hello-axum.wasm");
     ensure_wasm_package_built_once("hello-axum", workspace_root)?;
 
     if wasm_path.exists() {
@@ -759,7 +772,8 @@ pub fn find_hello_axum_wasm() -> Result<PathBuf, Box<dyn std::error::Error>> {
 pub fn find_echo_service_wasm() -> Result<PathBuf, Box<dyn std::error::Error>> {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
     let workspace_root = Path::new(manifest_dir).parent().unwrap().parent().unwrap();
-    let wasm_path = workspace_root.join("target/wasm32-wasip2/release/echo-service.wasm");
+    let wasm_path =
+        cargo_target_dir(workspace_root).join("wasm32-wasip2/release/echo-service.wasm");
     ensure_wasm_package_built_once("echo-service", workspace_root)?;
 
     if wasm_path.exists() {
@@ -774,7 +788,8 @@ pub fn find_echo_service_wasm() -> Result<PathBuf, Box<dyn std::error::Error>> {
 pub fn find_postgres_app_wasm() -> Result<PathBuf, Box<dyn std::error::Error>> {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
     let workspace_root = Path::new(manifest_dir).parent().unwrap().parent().unwrap();
-    let wasm_path = workspace_root.join("target/wasm32-wasip2/release/postgres-app.wasm");
+    let wasm_path =
+        cargo_target_dir(workspace_root).join("wasm32-wasip2/release/postgres-app.wasm");
     ensure_wasm_package_built_once("postgres-app", workspace_root)?;
 
     if wasm_path.exists() {
@@ -789,7 +804,8 @@ pub fn find_postgres_app_wasm() -> Result<PathBuf, Box<dyn std::error::Error>> {
 pub fn find_http_hello_component_wasm() -> Result<PathBuf, Box<dyn std::error::Error>> {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
     let workspace_root = Path::new(manifest_dir).parent().unwrap().parent().unwrap();
-    let wasm_path = workspace_root.join("target/wasm32-wasip2/release/http_hello_component.wasm");
+    let wasm_path =
+        cargo_target_dir(workspace_root).join("wasm32-wasip2/release/http_hello_component.wasm");
     ensure_wasm_package_built_once("http-hello-component", workspace_root)?;
 
     if wasm_path.exists() {
@@ -802,7 +818,8 @@ pub fn find_http_hello_component_wasm() -> Result<PathBuf, Box<dyn std::error::E
 pub fn find_wasi_grpc_echo_wasm() -> Result<PathBuf, Box<dyn std::error::Error>> {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
     let workspace_root = Path::new(manifest_dir).parent().unwrap().parent().unwrap();
-    let wasm_path = workspace_root.join("target/wasm32-wasip2/release/wasi_grpc_echo.wasm");
+    let wasm_path =
+        cargo_target_dir(workspace_root).join("wasm32-wasip2/release/wasi_grpc_echo.wasm");
     ensure_wasm_package_built_once("wasi-grpc-echo", workspace_root)?;
 
     if wasm_path.exists() {

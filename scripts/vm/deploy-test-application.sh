@@ -10,8 +10,14 @@ Usage: deploy-test-application.sh [options]
   --manifest PATH        Cargo manifest to build for wasm32-wasip2
   --wasm PATH            prebuilt Wasm component (skips the app build)
   --route-host HOST      route and HTTP Host header (default: hello.local)
+  --route-path PATH      route prefix; repeat for multiple prefixes (default: /)
+  --health-path PATH     runtime health path, or none (default: /health)
+  --env KEY=VALUE        application environment variable; repeat as needed
+  --verify-path PATH     HTTP path used for verification (default: /)
   --state-file PATH      testbed state (default: .vm-testbed-state.json)
   --timeout SECONDS      verification timeout (default: 90)
+  --fuel UNITS           per-request Wasm fuel quota (default: 500000000)
+  --max-outbound-connections N  simultaneous outbound TCP limit (default: 100)
 EOF
 }
 
@@ -23,6 +29,12 @@ wasm=
 route_host=hello.local
 state_file=.vm-testbed-state.json
 timeout=90
+fuel=500000000
+max_outbound_connections=100
+route_paths=()
+health_path=/health
+env_vars=()
+verify_path=/
 
 while (($#)); do
   case "$1" in
@@ -32,8 +44,14 @@ while (($#)); do
     --manifest) manifest=${2:?missing manifest}; shift 2 ;;
     --wasm) wasm=${2:?missing Wasm path}; shift 2 ;;
     --route-host) route_host=${2:?missing host}; shift 2 ;;
+    --route-path) route_paths+=("${2:?missing route path}"); shift 2 ;;
+    --health-path) health_path=${2:?missing health path}; shift 2 ;;
+    --env) env_vars+=("${2:?missing environment variable}"); shift 2 ;;
+    --verify-path) verify_path=${2:?missing verification path}; shift 2 ;;
     --state-file) state_file=${2:?missing state path}; shift 2 ;;
     --timeout) timeout=${2:?missing timeout}; shift 2 ;;
+    --fuel) fuel=${2:?missing fuel quota}; shift 2 ;;
+    --max-outbound-connections) max_outbound_connections=${2:?missing limit}; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown argument: $1" >&2; usage >&2; exit 2 ;;
   esac
@@ -45,12 +63,10 @@ cd "$repo_root"
 [[ -f "$state_file" ]] || { echo "Missing state file: $state_file" >&2; exit 1; }
 command -v curl >/dev/null || { echo "curl is required for verification." >&2; exit 1; }
 command -v python3 >/dev/null || { echo "python3 is required to read testbed state." >&2; exit 1; }
-sudo -v
-
 target_dir=${CARGO_TARGET_DIR:-/tmp/wasm-cloud-platform-target}
 CARGO_TARGET_DIR="$target_dir" cargo build -p vm-testbed --bin vm-testbed-cli
 cli="$target_dir/debug/vm-testbed-cli"
-sudo -E "$cli" status --state-file "$state_file"
+"$cli" status --state-file "$state_file"
 
 if [[ -z "$wasm" ]]; then
   [[ -n "$manifest" ]] || manifest="apps/$app/Cargo.toml"
@@ -61,15 +77,25 @@ if [[ -z "$wasm" ]]; then
 fi
 [[ -f "$wasm" ]] || { echo "Missing Wasm artifact: $wasm" >&2; exit 1; }
 
-sudo -E "$cli" deploy-app \
+deploy_args=(deploy-app \
   --state-file "$state_file" \
   --app "$app" \
   --version "$version" \
   --namespace "$namespace" \
   --wasm "$wasm" \
-  --route-host "$route_host"
+  --route-host "$route_host" \
+  --fuel "$fuel" \
+  --health-check-path "$health_path")
+deploy_args+=(--max-outbound-connections "$max_outbound_connections")
+for route_path in "${route_paths[@]}"; do
+  deploy_args+=(--route-path "$route_path")
+done
+for env_var in "${env_vars[@]}"; do
+  deploy_args+=(--env "$env_var")
+done
+"$cli" "${deploy_args[@]}"
 
-proxy_addr=$(sudo python3 - "$state_file" <<'PY'
+proxy_addr=$(python3 - "$state_file" <<'PY'
 import json, sys
 with open(sys.argv[1], encoding="utf-8") as stream:
     state = json.load(stream)
@@ -110,9 +136,9 @@ response_file=$(mktemp)
 trap 'rm -f "$response_file"' EXIT
 while ((SECONDS < deadline)); do
   status=$(curl --silent --show-error --output "$response_file" --write-out '%{http_code}' \
-    --max-time 5 --header "Host: $route_host" "http://$proxy_addr/" || true)
+    --max-time 5 --header "Host: $route_host" "http://$proxy_addr$verify_path" || true)
   if [[ "$status" =~ ^2[0-9][0-9]$ ]]; then
-    echo "Verified $namespace:$app:$version through $verification_target at http://$proxy_addr/ (Host: $route_host)"
+    echo "Verified $namespace:$app:$version through $verification_target at http://$proxy_addr$verify_path (Host: $route_host)"
     cat "$response_file"
     printf '\n'
     exit 0

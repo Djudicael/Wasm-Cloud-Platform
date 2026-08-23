@@ -7,6 +7,16 @@ use wasmtime::{ResourceLimiter, Store};
 use crate::policy_tracker::{PolicyCounters, PolicyEnforcer};
 
 /// Apply resource limits to a Store before creating an Instance.
+///
+/// The engine epoch advances every 10 ms. Production requests therefore get a
+/// 30-second coarse wall-clock ceiling while fuel remains the fine-grained CPU
+/// limit. A 100 ms deadline interrupted legitimate CPU-heavy work such as
+/// Argon2 password verification.
+#[cfg(not(test))]
+pub const EPOCH_DEADLINE_TICKS: u64 = 3_000;
+
+// Keep interruption tests fast without weakening the production deadline.
+#[cfg(test)]
 pub const EPOCH_DEADLINE_TICKS: u64 = 10;
 
 pub fn configure_store<T>(store: &mut Store<T>, fuel: FuelQuota) -> Result<(), PlatformError> {

@@ -913,8 +913,9 @@ pub fn find_node_binary() -> String {
         .and_then(|p| p.parent())
         .unwrap_or(Path::new("."));
 
-    let debug_binary = workspace_root.join("target/debug/wasm-node");
-    let release_binary = workspace_root.join("target/release/wasm-node");
+    let target_dir = cargo_target_dir(workspace_root);
+    let debug_binary = target_dir.join("debug/wasm-node");
+    let release_binary = target_dir.join("release/wasm-node");
 
     // Prefer debug binary — it's what `cargo build` produces by default
     // and is always fresher than a potentially stale release build.
@@ -928,7 +929,20 @@ pub fn find_node_binary() -> String {
 
     // Fall back — the caller will get a clear error from Command::new
     warn!("wasm-node binary not found, will attempt to build");
-    "target/debug/wasm-node".to_string()
+    debug_binary.to_string_lossy().to_string()
+}
+
+fn cargo_target_dir(workspace_root: &Path) -> PathBuf {
+    std::env::var_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .map(|path| {
+            if path.is_absolute() {
+                path
+            } else {
+                workspace_root.join(path)
+            }
+        })
+        .unwrap_or_else(|| workspace_root.join("target"))
 }
 
 #[cfg(test)]

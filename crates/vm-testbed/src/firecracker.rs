@@ -22,7 +22,7 @@
 //!
 //! #[tokio::main]
 //! async fn main() -> Result<(), Box<dyn std::error::Error>> {
-//!     let client = FirecrackerClient::connect("/tmp/firecracker-node1.sock").await?;
+//!     let client = FirecrackerClient::new("/tmp/firecracker-node1.sock");
 //!
 //!     client.configure_machine(2, 512).await?;
 //!     client.set_boot_source("/opt/kernels/vmlinux-6.1", "console=ttyS0 reboot=k panic=1 pci=off").await?;
@@ -74,9 +74,14 @@ impl FirecrackerClient {
     pub fn new(socket_path: impl AsRef<Path>) -> Self {
         let socket = socket_path.as_ref().to_string_lossy().to_string();
         // Firecracker listens on a Unix socket, but reqwest needs a URL.
-        // We use a dummy localhost URL and configure the connector below.
+        // The URL host is deliberately a dummy value: ClientBuilder routes all
+        // requests through this Unix-domain socket instead of TCP.
+        let client = Client::builder()
+            .unix_socket(socket.clone())
+            .build()
+            .expect("building the Firecracker Unix-socket HTTP client cannot fail");
         Self {
-            client: Client::new(),
+            client,
             api_url: "http://localhost".to_string(),
             socket_path: socket,
         }

@@ -1,6 +1,6 @@
 use axum::{
     body::Bytes,
-    extract::{ConnectInfo, Path, State},
+    extract::{ConnectInfo, DefaultBodyLimit, Path, State},
     http::{HeaderMap, StatusCode},
     routing::{get, post, put},
     Json, Router,
@@ -420,6 +420,7 @@ pub fn artifact_router(
         .route("/artifacts/{sha256}", get(get_artifact))
         .route("/artifacts/{sha256}", put(put_artifact))
         .route("/artifacts/{sha256}/authorize", post(authorize_artifact))
+        .layer(DefaultBodyLimit::max(MAX_ARTIFACT_SIZE))
         .with_state(state)
 }
 

@@ -1,6 +1,7 @@
 use anyhow::{anyhow, bail, Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use common::artifact_transfer::{ArtifactManifestBatchRequest, ArtifactManifestBatchResponse};
+use common::policy::{NetworkPolicyConfig, PolicyConfig};
 use common::types::{AppConfig, AppId, FuelQuota, MemoryPages, Route};
 use messaging::{events::Event, NatsBus};
 use serde::{Deserialize, Serialize};
@@ -86,12 +87,42 @@ enum Commands {
         state_file: PathBuf,
     },
 
+    /// Restart one detached platform node from the configured rootfs image.
+    RestartNode {
+        #[arg(short, long)]
+        id: String,
+        #[arg(long, default_value = ".vm-testbed-state.json")]
+        state_file: PathBuf,
+    },
+
     /// Scale a detached topology to the requested node count.
     Scale {
         #[arg(long, default_value = ".vm-testbed-state.json")]
         state_file: PathBuf,
         #[arg(long)]
         nodes: usize,
+    },
+
+    /// Add a non-platform service microVM to a detached topology.
+    AddService {
+        #[arg(long, default_value = ".vm-testbed-state.json")]
+        state_file: PathBuf,
+        #[arg(long)]
+        id: String,
+        #[arg(long)]
+        kind: String,
+        #[arg(long)]
+        ip: String,
+        #[arg(long)]
+        port: u16,
+        #[arg(long)]
+        rootfs: PathBuf,
+        #[arg(long, default_value = "512")]
+        memory: usize,
+        #[arg(long, default_value = "1")]
+        vcpus: usize,
+        #[arg(long, default_value = "120")]
+        timeout: u64,
     },
 
     /// Kill one VM from a detached topology.
@@ -126,6 +157,9 @@ enum Commands {
         wasm: PathBuf,
         #[arg(long)]
         route_host: Option<String>,
+        /// Route path prefix; repeat to attach multiple prefixes to this app.
+        #[arg(long = "route-path")]
+        route_paths: Vec<String>,
         #[arg(long)]
         target_node: Option<String>,
         #[arg(long, default_value = "500000000")]
@@ -134,10 +168,15 @@ enum Commands {
         memory_mb: u32,
         #[arg(long, default_value = "10")]
         max_instances: u32,
+        #[arg(long, default_value = "100")]
+        max_outbound_connections: u32,
         #[arg(long, default_value = "300")]
         idle_timeout: u64,
         #[arg(long, default_value = "8080")]
         bind_port: u16,
+        /// Runtime health path, or `none` for apps without a health endpoint.
+        #[arg(long, default_value = "/health")]
+        health_check_path: String,
         #[arg(long = "env", value_parser = parse_env_var)]
         env_vars: Vec<(String, String)>,
         #[arg(long = "secret")]
@@ -208,6 +247,16 @@ struct PersistedVm {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+struct PersistedService {
+    id: String,
+    kind: String,
+    pid: u32,
+    ip: String,
+    port: u16,
+    tap_device: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct PersistedClusterState {
     name: String,
     profile: TopologyProfile,
@@ -223,6 +272,8 @@ struct PersistedClusterState {
     next_node_index: u8,
     nats: Option<PersistedVm>,
     nodes: Vec<PersistedVm>,
+    #[serde(default)]
+    services: Vec<PersistedService>,
 }
 
 struct DeployRequest {
@@ -231,12 +282,15 @@ struct DeployRequest {
     namespace: String,
     wasm: PathBuf,
     route_host: Option<String>,
+    route_paths: Vec<String>,
     target_node: Option<String>,
     fuel: u64,
     memory_mb: u32,
     max_instances: u32,
+    max_outbound_connections: u32,
     idle_timeout: u64,
     bind_port: u16,
+    health_check_path: Option<String>,
     env_vars: Vec<(String, String)>,
     secret_keys: Vec<String>,
 }
@@ -321,6 +375,16 @@ async fn main() -> Result<()> {
             println!("Removed {}", id);
         }
 
+        Commands::RestartNode { id, state_file } => {
+            let mut state = read_state(&state_file)?;
+            let vm = restart_node_from_state(&mut state, &id).await?;
+            write_state(&state_file, &state)?;
+            println!(
+                "Restarted {} admin={} proxy={} pid={}",
+                vm.id, vm.admin_addr, vm.proxy_addr, vm.pid
+            );
+        }
+
         Commands::Scale { state_file, nodes } => {
             let mut state = read_state(&state_file)?;
             let default_memory = state.node_memory_mb;
@@ -328,6 +392,7 @@ async fn main() -> Result<()> {
             while state.nodes.len() < nodes {
                 let vm = spawn_node_from_state(&mut state, default_memory, default_vcpus).await?;
                 println!("Added {}", vm.id);
+                write_state(&state_file, &state)?;
             }
             while state.nodes.len() > nodes {
                 let victim = state
@@ -337,8 +402,40 @@ async fn main() -> Result<()> {
                     .ok_or_else(|| anyhow!("no nodes available to remove"))?;
                 remove_node_from_state(&mut state, &victim).await?;
                 println!("Removed {}", victim);
+                write_state(&state_file, &state)?;
             }
+        }
+
+        Commands::AddService {
+            state_file,
+            id,
+            kind,
+            ip,
+            port,
+            rootfs,
+            memory,
+            vcpus,
+            timeout,
+        } => {
+            let mut state = read_state(&state_file)?;
+            let service = spawn_service_from_state(
+                &state,
+                id,
+                kind,
+                ip,
+                port,
+                rootfs,
+                memory,
+                vcpus,
+                Duration::from_secs(timeout),
+            )
+            .await?;
+            state.services.push(service.clone());
             write_state(&state_file, &state)?;
+            println!(
+                "Added service {} kind={} address={}:{} pid={}",
+                service.id, service.kind, service.ip, service.port, service.pid
+            );
         }
 
         Commands::Kill { id, state_file } => {
@@ -348,13 +445,21 @@ async fn main() -> Result<()> {
                 .iter()
                 .chain(state.nodes.iter())
                 .find(|vm| vm.id == id)
+                .map(|vm| (vm.id.as_str(), vm.pid))
+                .or_else(|| {
+                    state
+                        .services
+                        .iter()
+                        .find(|service| service.id == id)
+                        .map(|service| (service.id.as_str(), service.pid))
+                })
                 .ok_or_else(|| anyhow!("VM {id} not found in {}", state_file.display()))?;
-            signal_pid(vm.pid, "-TERM")?;
+            signal_pid(vm.1, "-TERM")?;
             sleep(Duration::from_secs(1)).await;
-            if process_alive(vm.pid) {
-                signal_pid(vm.pid, "-KILL")?;
+            if process_alive(vm.1) {
+                signal_pid(vm.1, "-KILL")?;
             }
-            println!("Killed {} (pid {})", vm.id, vm.pid);
+            println!("Killed {} (pid {})", vm.0, vm.1);
         }
 
         Commands::Health { ip, port } => {
@@ -377,12 +482,15 @@ async fn main() -> Result<()> {
             namespace,
             wasm,
             route_host,
+            route_paths,
             target_node,
             fuel,
             memory_mb,
             max_instances,
+            max_outbound_connections,
             idle_timeout,
             bind_port,
+            health_check_path,
             env_vars,
             secret_keys,
         } => {
@@ -395,12 +503,18 @@ async fn main() -> Result<()> {
                     namespace,
                     wasm,
                     route_host,
+                    route_paths,
                     target_node,
                     fuel,
                     memory_mb,
                     max_instances,
+                    max_outbound_connections,
                     idle_timeout,
                     bind_port,
+                    health_check_path: match health_check_path.as_str() {
+                        "none" => None,
+                        path => Some(path.to_string()),
+                    },
                     env_vars,
                     secret_keys,
                 },
@@ -427,7 +541,7 @@ async fn main() -> Result<()> {
         } => {
             let kernel_path = kernel.unwrap_or_else(find_kernel);
             let rootfs_path = rootfs.unwrap_or_else(find_node_rootfs);
-            let tap = format!("tap-{id}");
+            let tap = network::tap_name_for_id(&id);
 
             let config = VmConfig {
                 id: id.clone(),
@@ -444,6 +558,8 @@ async fn main() -> Result<()> {
                     "node_config": {
                         "node_id": id,
                         "nats_url": nats_url,
+                        "ip": ip,
+                        "gateway": "172.20.0.1",
                     }
                 })),
             };
@@ -486,7 +602,80 @@ fn detach_cluster_state(
         next_node_index: cluster.node_count() as u8,
         nats,
         nodes: nodes.into_values().collect(),
+        services: Vec::new(),
     })
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn spawn_service_from_state(
+    state: &PersistedClusterState,
+    id: String,
+    kind: String,
+    ip: String,
+    port: u16,
+    rootfs: PathBuf,
+    memory_mb: usize,
+    vcpus: usize,
+    timeout: Duration,
+) -> Result<PersistedService> {
+    if state.services.iter().any(|service| service.id == id) {
+        bail!("service {id} already exists");
+    }
+    if state.nodes.iter().any(|node| node.ip == ip)
+        || state.nats.iter().any(|nats| nats.ip == ip)
+        || state.services.iter().any(|service| service.ip == ip)
+    {
+        bail!("IP address {ip} is already recorded in the topology");
+    }
+    let rootfs = rootfs
+        .canonicalize()
+        .with_context(|| format!("service rootfs does not exist: {}", rootfs.display()))?;
+    let config = VmConfig {
+        id: id.clone(),
+        kernel_path: state.kernel_path.clone(),
+        rootfs_path: rootfs,
+        data_drive_path: None,
+        memory_mb,
+        vcpus,
+        ip: ip.clone(),
+        gateway: state.gateway.clone(),
+        bridge_name: state.bridge_name.clone(),
+        tap_device: network::tap_name_for_id(&id),
+        mmds_data: Some(serde_json::json!({
+            "service_config": {
+                "id": id,
+                "kind": kind,
+                "ip": ip,
+                "gateway": state.gateway,
+                "port": port,
+            }
+        })),
+    };
+    let mut vm = MicroVm::spawn(config).await?;
+    wait_for_tcp(&vm.config.ip, port, timeout).await?;
+    let service = PersistedService {
+        id: vm.config.id.clone(),
+        kind,
+        pid: vm.pid(),
+        ip: vm.config.ip.clone(),
+        port,
+        tap_device: vm.config.tap_device.clone(),
+    };
+    vm.disable_cleanup_on_drop();
+    Ok(service)
+}
+
+async fn wait_for_tcp(ip: &str, port: u16, timeout: Duration) -> Result<()> {
+    let started = std::time::Instant::now();
+    loop {
+        if tokio::net::TcpStream::connect((ip, port)).await.is_ok() {
+            return Ok(());
+        }
+        if started.elapsed() >= timeout {
+            bail!("service at {ip}:{port} did not become reachable within {timeout:?}");
+        }
+        sleep(Duration::from_millis(500)).await;
+    }
 }
 
 fn detach_vm_state(vm: &mut MicroVm) -> PersistedVm {
@@ -498,7 +687,7 @@ fn detach_vm_state(vm: &mut MicroVm) -> PersistedVm {
         ip: vm.config.ip.clone(),
         tap_device: vm.config.tap_device.clone(),
         admin_addr: admin_addr.clone(),
-        artifact_addr: admin_addr,
+        artifact_addr: format!("{}:9091", vm.config.ip),
         proxy_addr: vm.proxy_addr(),
     }
 }
@@ -508,16 +697,24 @@ async fn spawn_node_from_state(
     memory_mb: usize,
     vcpus: usize,
 ) -> Result<PersistedVm> {
-    let index = state.next_node_index;
-    state.next_node_index = state
-        .next_node_index
-        .checked_add(1)
-        .ok_or_else(|| anyhow!("node index space exhausted"))?;
+    let (index, ip) = loop {
+        let index = state.next_node_index;
+        state.next_node_index = state
+            .next_node_index
+            .checked_add(1)
+            .ok_or_else(|| anyhow!("node index space exhausted"))?;
+        let ip = network::allocate_ip(&state.subnet, index + 10)
+            .map_err(|e| anyhow!("failed to allocate IP: {e}"))?;
+        let in_use = state.nats.iter().any(|vm| vm.ip == ip)
+            || state.nodes.iter().any(|vm| vm.ip == ip)
+            || state.services.iter().any(|service| service.ip == ip);
+        if !in_use {
+            break (index, ip);
+        }
+    };
 
     let node_id = format!("{}-node-{}", state.name, index);
-    let ip = network::allocate_ip(&state.subnet, index + 10)
-        .map_err(|e| anyhow!("failed to allocate IP: {e}"))?;
-    let tap = format!("tap-{}-{}", state.name, node_id);
+    let tap = network::tap_name_for_id(&node_id);
 
     let config = VmConfig {
         id: node_id.clone(),
@@ -534,6 +731,8 @@ async fn spawn_node_from_state(
             "node_config": {
                 "node_id": node_id,
                 "nats_url": state.nats_url,
+                "ip": ip,
+                "gateway": state.gateway,
                 "proxy_port": 8080,
                 "admin_port": 9090,
                 "artifact_port": 9091,
@@ -566,17 +765,79 @@ async fn remove_node_from_state(state: &mut PersistedClusterState, id: &str) -> 
     Ok(())
 }
 
+async fn restart_node_from_state(
+    state: &mut PersistedClusterState,
+    id: &str,
+) -> Result<PersistedVm> {
+    let index = state
+        .nodes
+        .iter()
+        .position(|vm| vm.id == id)
+        .ok_or_else(|| anyhow!("node {id} not found"))?;
+    let previous = state.nodes[index].clone();
+
+    if process_alive(previous.pid) {
+        let _ = signal_pid(previous.pid, "-TERM");
+        sleep(Duration::from_secs(2)).await;
+        if process_alive(previous.pid) {
+            let _ = signal_pid(previous.pid, "-KILL");
+        }
+    }
+    network::remove_tap(&previous.tap_device)
+        .map_err(|error| anyhow!("failed to remove TAP {}: {error}", previous.tap_device))?;
+
+    let config = VmConfig {
+        id: previous.id.clone(),
+        kernel_path: state.kernel_path.clone(),
+        rootfs_path: state.node_rootfs_path.clone(),
+        data_drive_path: state.node_data_drive_path.clone(),
+        memory_mb: state.node_memory_mb,
+        vcpus: state.node_vcpus,
+        ip: previous.ip.clone(),
+        gateway: state.gateway.clone(),
+        bridge_name: state.bridge_name.clone(),
+        tap_device: previous.tap_device.clone(),
+        mmds_data: Some(serde_json::json!({
+            "node_config": {
+                "node_id": previous.id,
+                "nats_url": state.nats_url,
+                "ip": previous.ip,
+                "gateway": state.gateway,
+                "proxy_port": 8080,
+                "admin_port": 9090,
+                "artifact_port": 9091,
+            }
+        })),
+    };
+
+    let mut vm = MicroVm::spawn(config).await?;
+    vm.wait_for_health(Duration::from_secs(120)).await?;
+    let persisted = detach_vm_state(&mut vm);
+    state.nodes[index] = persisted.clone();
+    Ok(persisted)
+}
+
 async fn deploy_app_to_state(state: &PersistedClusterState, req: DeployRequest) -> Result<()> {
     let node = select_target_vm(state, req.target_node.as_deref())?;
     let mut bus = NatsBus::connect(&state.nats_url).await?;
     bus.set_node_id("vm-testbed-cli".to_string());
-    let http = reqwest::Client::new();
+    let mut http_builder = reqwest::Client::builder();
+    if let Ok(token) = std::env::var("WASM_CTL_AUTH_TOKEN") {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            reqwest::header::AUTHORIZATION,
+            reqwest::header::HeaderValue::from_str(&format!("Bearer {token}"))
+                .context("WASM_CTL_AUTH_TOKEN contains invalid header characters")?,
+        );
+        http_builder = http_builder.default_headers(headers);
+    }
+    let http = http_builder.build()?;
 
     let wasm_bytes = tokio::fs::read(&req.wasm)
         .await
         .with_context(|| format!("failed to read {}", req.wasm.display()))?;
     let sha = hex::encode(sha2::Sha256::digest(&wasm_bytes));
-    let upload_url = format!("http://{}/artifacts/{}", node.admin_addr, sha);
+    let upload_url = format!("http://{}/artifacts/{}", node.artifact_addr, sha);
     let upload_resp = http
         .put(&upload_url)
         .body(wasm_bytes.clone())
@@ -598,7 +859,8 @@ async fn deploy_app_to_state(state: &PersistedClusterState, req: DeployRequest) 
         if peers.is_empty() {
             (Vec::new(), Vec::new())
         } else {
-            let authorize_url = format!("http://{}/artifacts/{}/authorize", node.admin_addr, sha);
+            let authorize_url =
+                format!("http://{}/artifacts/{}/authorize", node.artifact_addr, sha);
             let response = http
                 .post(&authorize_url)
                 .json(&ArtifactManifestBatchRequest {
@@ -617,7 +879,14 @@ async fn deploy_app_to_state(state: &PersistedClusterState, req: DeployRequest) 
     };
 
     let app_id = AppId::new_namespaced(&req.namespace, &req.app, &req.version);
-    let artifact_url = format!("http://{}/artifacts/{}", node.admin_addr, sha);
+    let artifact_url = format!("http://{}/artifacts/{}", node.artifact_addr, sha);
+    let policy = PolicyConfig {
+        network: Some(NetworkPolicyConfig {
+            max_outbound_connections: Some(req.max_outbound_connections),
+            ..NetworkPolicyConfig::default()
+        }),
+        ..PolicyConfig::default()
+    };
     let config = AppConfig {
         id: app_id.clone(),
         fuel_quota: FuelQuota(req.fuel),
@@ -628,11 +897,11 @@ async fn deploy_app_to_state(state: &PersistedClusterState, req: DeployRequest) 
         env_vars: req.env_vars.into_iter().collect(),
         secret_keys: req.secret_keys,
         extended_limits: None,
-        health_check_path: Some("/health".to_string()),
+        health_check_path: req.health_check_path,
         db_max_connections: None,
         rate_limit: None,
         tenant_id: None,
-        policy: None,
+        policy: Some(policy),
         namespace: req.namespace.clone(),
     };
 
@@ -651,18 +920,28 @@ async fn deploy_app_to_state(state: &PersistedClusterState, req: DeployRequest) 
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs();
-        bus.publish(&Event::RouteAdd {
-            route: Route {
-                host: host.clone(),
-                app_id: app_id.clone(),
-                path_prefix: "/".to_string(),
-                strip_prefix: false,
-                created_at: now,
-                updated_at: now,
-            },
-        })
-        .await?;
-        println!("Route added: {} -> {}", host, app_id.0);
+        let route_paths = if req.route_paths.is_empty() {
+            vec!["/".to_string()]
+        } else {
+            req.route_paths
+        };
+        for path_prefix in route_paths {
+            if !path_prefix.starts_with('/') {
+                bail!("route path must start with '/': {path_prefix}");
+            }
+            bus.publish(&Event::RouteAdd {
+                route: Route {
+                    host: host.clone(),
+                    app_id: app_id.clone(),
+                    path_prefix: path_prefix.clone(),
+                    strip_prefix: false,
+                    created_at: now,
+                    updated_at: now,
+                },
+            })
+            .await?;
+            println!("Route added: {host}{path_prefix} -> {}", app_id.0);
+        }
     }
 
     println!(
@@ -737,14 +1016,36 @@ async fn down_from_state(state_file: &Path) -> Result<()> {
             let _ = signal_pid(vm.pid, "-TERM");
         }
     }
+    for service in &state.services {
+        if process_alive(service.pid) {
+            let _ = signal_pid(service.pid, "-TERM");
+        }
+    }
     sleep(Duration::from_secs(1)).await;
     for vm in state.nats.iter().chain(state.nodes.iter()) {
         if process_alive(vm.pid) {
             let _ = signal_pid(vm.pid, "-KILL");
         }
     }
+    for service in &state.services {
+        if process_alive(service.pid) {
+            let _ = signal_pid(service.pid, "-KILL");
+        }
+    }
 
     network::teardown_network(&state.bridge_name, &state.subnet)?;
+    for id in state
+        .nats
+        .iter()
+        .map(|vm| vm.id.as_str())
+        .chain(state.nodes.iter().map(|vm| vm.id.as_str()))
+        .chain(state.services.iter().map(|service| service.id.as_str()))
+    {
+        let run_dir = std::env::temp_dir().join(format!("vm-testbed-{id}"));
+        if run_dir.starts_with(std::env::temp_dir()) {
+            let _ = std::fs::remove_dir_all(run_dir);
+        }
+    }
     if state_file.exists() {
         std::fs::remove_file(state_file)?;
     }
@@ -773,6 +1074,17 @@ async fn print_runtime_status(state: &PersistedClusterState) -> Result<()> {
         } else {
             println!("{} pid={} alive={}", vm.id, vm.pid, alive);
         }
+    }
+    for service in &state.services {
+        println!(
+            "{} kind={} pid={} alive={} address={}:{}",
+            service.id,
+            service.kind,
+            service.pid,
+            process_alive(service.pid),
+            service.ip,
+            service.port
+        );
     }
     Ok(())
 }
@@ -806,11 +1118,7 @@ fn read_state(path: &Path) -> Result<PersistedClusterState> {
 }
 
 fn process_alive(pid: u32) -> bool {
-    Command::new("kill")
-        .args(["-0", &pid.to_string()])
-        .status()
-        .map(|status| status.success())
-        .unwrap_or(false)
+    Path::new("/proc").join(pid.to_string()).exists()
 }
 
 fn signal_pid(pid: u32, signal: &str) -> Result<()> {

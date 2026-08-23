@@ -80,7 +80,7 @@ async fn test_get_config_returns_cold_and_hot() {
     let nats = NatsContainer::start(14229)
         .await
         .expect("NATS start failed");
-    let node = NodeProcess::start_with_admin("config-test-get", &nats.url, 18080, 19091, 19090)
+    let node = NodeProcess::start_with_admin("config-test-get", &nats.url, 18080, 20091, 19090)
         .await
         .expect("node start failed");
 
@@ -134,7 +134,7 @@ async fn test_patch_config_updates_hot_fields() {
     let nats = NatsContainer::start(14230)
         .await
         .expect("NATS start failed");
-    let node = NodeProcess::start_with_admin("config-test-patch", &nats.url, 18081, 19092, 19091)
+    let node = NodeProcess::start_with_admin("config-test-patch", &nats.url, 18081, 20092, 19091)
         .await
         .expect("node start failed");
 
@@ -193,7 +193,7 @@ async fn test_patch_config_multiple_fields() {
     let nats = NatsContainer::start(14231)
         .await
         .expect("NATS start failed");
-    let node = NodeProcess::start_with_admin("config-test-multi", &nats.url, 18082, 19093, 19092)
+    let node = NodeProcess::start_with_admin("config-test-multi", &nats.url, 18082, 20093, 19092)
         .await
         .expect("node start failed");
 
@@ -229,7 +229,7 @@ async fn test_patch_config_no_changes_returns_error() {
     let nats = NatsContainer::start(14232)
         .await
         .expect("NATS start failed");
-    let node = NodeProcess::start_with_admin("config-test-empty", &nats.url, 18083, 19094, 19093)
+    let node = NodeProcess::start_with_admin("config-test-empty", &nats.url, 18083, 20094, 19093)
         .await
         .expect("node start failed");
 
@@ -253,7 +253,7 @@ async fn test_patch_config_invalid_value_rejected() {
     let nats = NatsContainer::start(14233)
         .await
         .expect("NATS start failed");
-    let node = NodeProcess::start_with_admin("config-test-invalid", &nats.url, 18084, 19095, 19094)
+    let node = NodeProcess::start_with_admin("config-test-invalid", &nats.url, 18084, 20095, 19094)
         .await
         .expect("node start failed");
 
@@ -296,7 +296,7 @@ async fn test_delete_config_resets_to_defaults() {
     let nats = NatsContainer::start(14234)
         .await
         .expect("NATS start failed");
-    let node = NodeProcess::start_with_admin("config-test-reset", &nats.url, 18085, 19096, 19095)
+    let node = NodeProcess::start_with_admin("config-test-reset", &nats.url, 18085, 20096, 19095)
         .await
         .expect("node start failed");
 
@@ -344,7 +344,7 @@ async fn test_config_persistence_across_restart() {
     let nats = NatsContainer::start(14235)
         .await
         .expect("NATS start failed");
-    let node = NodeProcess::start_with_admin("config-test-persist", &nats.url, 18086, 19097, 19096)
+    let node = NodeProcess::start_with_admin("config-test-persist", &nats.url, 18086, 20097, 19096)
         .await
         .expect("node start failed");
 
@@ -373,7 +373,7 @@ async fn test_config_persistence_across_restart() {
         "config-test-persist",
         &nats.url,
         18086,
-        19097,
+        20097,
         19096,
         db_path,
         temp_dir,
@@ -402,7 +402,7 @@ async fn test_log_level_change_takes_effect() {
         .await
         .expect("NATS start failed");
     let node =
-        NodeProcess::start_with_admin("config-test-loglevel", &nats.url, 18087, 19098, 19097)
+        NodeProcess::start_with_admin("config-test-loglevel", &nats.url, 18087, 20098, 19097)
             .await
             .expect("node start failed");
 
@@ -438,7 +438,7 @@ async fn test_gc_interval_change_accepted() {
     let nats = NatsContainer::start(14237)
         .await
         .expect("NATS start failed");
-    let node = NodeProcess::start_with_admin("config-test-gc", &nats.url, 18088, 19099, 19098)
+    let node = NodeProcess::start_with_admin("config-test-gc", &nats.url, 18088, 20099, 19098)
         .await
         .expect("node start failed");
 
@@ -465,7 +465,7 @@ async fn test_health_interval_change_accepted() {
     let nats = NatsContainer::start(14238)
         .await
         .expect("NATS start failed");
-    let node = NodeProcess::start_with_admin("config-test-health", &nats.url, 18089, 19100, 19099)
+    let node = NodeProcess::start_with_admin("config-test-health", &nats.url, 18089, 20100, 19099)
         .await
         .expect("node start failed");
 
@@ -492,7 +492,7 @@ async fn test_ebpf_threshold_change_accepted() {
     let nats = NatsContainer::start(14239)
         .await
         .expect("NATS start failed");
-    let node = NodeProcess::start_with_admin("config-test-ebpf", &nats.url, 18090, 19101, 19100)
+    let node = NodeProcess::start_with_admin("config-test-ebpf", &nats.url, 18090, 20101, 19100)
         .await
         .expect("node start failed");
 

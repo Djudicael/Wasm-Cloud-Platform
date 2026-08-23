@@ -12,6 +12,10 @@ use super::PolicyCounters;
 pub struct PolicyEnforcer {
     pub policy: InstancePolicy,
     pub counters: Arc<PolicyCounters>,
+    /// Connections reserved by this store. The public counters may be shared by
+    /// many short-lived WASI HTTP stores, so store teardown must release only
+    /// the reservations owned by that store.
+    pub(super) local_outbound_connections_active: Arc<AtomicU32>,
     /// Pre-parsed allowed CIDRs, parsed once at construction.
     pub(super) allowed_cidrs_parsed: Vec<ipnet::IpNet>,
     /// Pre-parsed denied CIDRs, parsed once at construction.
@@ -39,6 +43,7 @@ impl PolicyEnforcer {
         PolicyEnforcer {
             policy,
             counters,
+            local_outbound_connections_active: Arc::new(AtomicU32::new(0)),
             allowed_cidrs_parsed,
             denied_cidrs_parsed,
         }
@@ -88,6 +93,8 @@ impl PolicyEnforcer {
     }
 
     pub fn reset_active_counters(&self) {
+        self.local_outbound_connections_active
+            .store(0, Ordering::Release);
         self.counters
             .outbound_connections_active
             .store(0, Ordering::Release);
@@ -95,6 +102,22 @@ impl PolicyEnforcer {
             .inbound_connections_active
             .store(0, Ordering::Release);
         self.counters.open_fds.store(0, Ordering::Release);
+    }
+
+    /// Release outbound reservations owned by this store without disturbing
+    /// concurrent stores that share the aggregate policy counters.
+    pub(crate) fn release_tracked_outbound_connections(&self) {
+        let owned = self
+            .local_outbound_connections_active
+            .swap(0, Ordering::AcqRel);
+        if owned == 0 {
+            return;
+        }
+        let _ = self.counters.outbound_connections_active.fetch_update(
+            Ordering::AcqRel,
+            Ordering::Acquire,
+            |current| Some(current.saturating_sub(owned)),
+        );
     }
 
     /// Check if an IP address falls within any of the given pre-parsed CIDRs.

@@ -1,5 +1,6 @@
 use std::net::IpAddr;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 use common::policy::{FilesystemPolicy, InstancePolicy, NetworkPolicy};
 
@@ -415,6 +416,36 @@ fn test_reset_active_counters_clears_only_live_resource_counts() {
         1
     );
     assert_eq!(enforcer.counters.fd_open_total.load(Ordering::Relaxed), 1);
+}
+
+#[test]
+fn test_release_tracked_connections_preserves_other_store_reservations() {
+    let counters = Arc::new(PolicyCounters::new());
+    let first = PolicyEnforcer::with_counters(make_policy(), counters.clone());
+    let second = PolicyEnforcer::with_counters(make_policy(), counters.clone());
+
+    first
+        .check_outbound_tcp_connect("93.184.216.34".parse().unwrap(), 443)
+        .unwrap();
+    second
+        .check_outbound_tcp_connect("93.184.216.35".parse().unwrap(), 443)
+        .unwrap();
+    assert_eq!(
+        counters.outbound_connections_active.load(Ordering::Relaxed),
+        2
+    );
+
+    first.release_tracked_outbound_connections();
+    assert_eq!(
+        counters.outbound_connections_active.load(Ordering::Relaxed),
+        1
+    );
+
+    second.release_tracked_outbound_connections();
+    assert_eq!(
+        counters.outbound_connections_active.load(Ordering::Relaxed),
+        0
+    );
 }
 
 #[test]

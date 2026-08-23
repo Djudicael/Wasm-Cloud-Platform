@@ -77,4 +77,14 @@ if [[ -e "$state_file" ]]; then
   echo "Teardown returned but the state file remains: $state_file" >&2
   exit 1
 fi
+oidc_secret_dir="${state_file}.oidc-secrets"
+expected_secret_dir=$(python3 -c 'import os, sys; print(os.path.abspath(sys.argv[1]))' "${state_file}.oidc-secrets")
+if [[ -d "$oidc_secret_dir" ]]; then
+  [[ "$(python3 -c 'import os, sys; print(os.path.abspath(sys.argv[1]))' "$oidc_secret_dir")" == "$expected_secret_dir" ]] || {
+    echo "OIDC secret directory does not match the selected state file; refusing cleanup." >&2
+    exit 1
+  }
+  rm -rf -- "$expected_secret_dir"
+  echo "Removed the local OIDC test credentials and signing keys."
+fi
 echo "Testbed destroyed and state removed: $state_file"

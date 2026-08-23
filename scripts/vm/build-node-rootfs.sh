@@ -17,15 +17,24 @@
 set -euo pipefail
 
 OUTPUT_DIR="${OUTPUT_DIR:-./assets}"
-ROOTFS_SIZE_MB="${ROOTFS_SIZE_MB:-512}"
-ALPINE_VERSION="${ALPINE_VERSION:-3.19}"
+ROOTFS_SIZE_MB="${ROOTFS_SIZE_MB:-2048}"
+UBUNTU_RELEASE="${UBUNTU_RELEASE:-noble}"
 
 echo "=== Building wasm-node rootfs ==="
 
 # Ensure wasm-node is built
-echo "Building wasm-node binary..."
-cargo build --release --bin wasm-node
-cargo build --release --bin wasm-ctl
+BUILD_TARGET_DIR="${CARGO_TARGET_DIR:-target}"
+if [[ "${SKIP_RUST_BUILD:-false}" == true ]]; then
+    [[ -x "$BUILD_TARGET_DIR/release/wasm-node" && -x "$BUILD_TARGET_DIR/release/wasm-ctl" ]] || {
+        echo "SKIP_RUST_BUILD=true but release binaries are missing from $BUILD_TARGET_DIR/release." >&2
+        exit 1
+    }
+    echo "Reusing existing release binaries from $BUILD_TARGET_DIR/release."
+else
+    echo "Building wasm-node binary..."
+    cargo build --release --bin wasm-node
+    cargo build --release --bin wasm-ctl
+fi
 
 # Create working directory
 WORK_DIR="$(mktemp -d)"
@@ -34,38 +43,20 @@ trap "rm -rf $WORK_DIR" EXIT
 ROOTFS_DIR="$WORK_DIR/rootfs"
 mkdir -p "$ROOTFS_DIR"
 
-# Download Alpine mini rootfs
-echo "Downloading Alpine $ALPINE_VERSION mini rootfs..."
-curl -fsSL \
-    "https://dl-cdn.alpinelinux.org/alpine/v${ALPINE_VERSION}/releases/$(uname -m)/alpine-minirootfs-${ALPINE_VERSION}.0-$(uname -m).tar.gz" \
-    -o "$WORK_DIR/alpine-rootfs.tar.gz"
-
-tar xzf "$WORK_DIR/alpine-rootfs.tar.gz" -C "$ROOTFS_DIR"
-
-# Install packages inside the rootfs
-echo "Installing packages..."
-mkdir -p "$ROOTFS_DIR/etc/apk"
-cat > "$ROOTFS_DIR/etc/apk/repositories" << EOF
-https://dl-cdn.alpinelinux.org/alpine/v${ALPINE_VERSION}/main
-https://dl-cdn.alpinelinux.org/alpine/v${ALPINE_VERSION}/community
-EOF
-
-# Use apk to install packages in the rootfs
-apk add --root "$ROOTFS_DIR" --initdb --no-cache \
-    alpine-base \
-    openrc \
-    iproute2 \
-    iptables \
-    curl \
-    ca-certificates \
-    libelf \
-    elfutils-dev \
-    zlib \
-    libgcc \
-    musl \
-    2>/dev/null || {
-    echo "Warning: Some packages may have failed to install, continuing..."
+# Match the glibc ABI used for the native Rust build. Alpine/gcompat cannot
+# provide newer glibc symbols such as __isoc23_sscanf.
+command -v debootstrap >/dev/null || {
+    echo "debootstrap is required (Ubuntu/WSL: sudo apt-get install debootstrap)." >&2
+    exit 1
 }
+echo "Creating minimal Ubuntu $UBUNTU_RELEASE rootfs..."
+sudo debootstrap \
+    --variant=minbase \
+    --include=ca-certificates,curl,iproute2,iptables,libelf1t64 \
+    "$UBUNTU_RELEASE" \
+    "$ROOTFS_DIR" \
+    http://archive.ubuntu.com/ubuntu
+sudo chown -R "$(id -u):$(id -g)" "$ROOTFS_DIR"
 
 # Create necessary directories
 mkdir -p "$ROOTFS_DIR/etc/wasm-node"
@@ -82,8 +73,8 @@ mkdir -p "$ROOTFS_DIR/run"
 
 # Install wasm-node binaries
 echo "Installing wasm-node binaries..."
-cp "target/release/wasm-node" "$ROOTFS_DIR/usr/local/bin/"
-cp "target/release/wasm-ctl" "$ROOTFS_DIR/usr/local/bin/"
+cp "$BUILD_TARGET_DIR/release/wasm-node" "$ROOTFS_DIR/usr/local/bin/"
+cp "$BUILD_TARGET_DIR/release/wasm-ctl" "$ROOTFS_DIR/usr/local/bin/"
 chmod +x "$ROOTFS_DIR/usr/local/bin/"{wasm-node,wasm-ctl}
 
 # Create default config
@@ -99,7 +90,6 @@ url = "nats://172.20.0.10:4222"
 
 [proxy]
 http_port = 8080
-https_port = 0
 
 [admin]
 port = 9090
@@ -119,90 +109,91 @@ format = "json"
 stub_enabled = true
 stub_port = 15353
 
+[auth]
+trusted_proxies = ["172.20.0.1/32"]
+
 [health]
 check_interval_secs = 2
 EOF
 
-# Create init script for openrc
-cat > "$ROOTFS_DIR/etc/init.d/wasm-node" << 'EOF'
-#!/sbin/openrc-run
-
-description="Wasm Cloud Platform Node"
-
-command="/usr/local/bin/wasm-node"
-command_args="--config /etc/wasm-node/config.toml"
-command_background=true
-pidfile="/run/wasm-node.pid"
-
-depend() {
-    need net
-    after firewall
-}
-
-start_pre() {
-    checkpath -d -m 0755 -o root:root /var/lib/wasm-node
-    checkpath -d -m 0755 -o root:root /var/log/wasm-node
-    checkpath -d -m 0755 -o root:root /run/wasm-node
-}
-EOF
-chmod +x "$ROOTFS_DIR/etc/init.d/wasm-node"
-
-# Enable service at boot
-mkdir -p "$ROOTFS_DIR/etc/runlevels/default"
-ln -sf /etc/init.d/wasm-node "$ROOTFS_DIR/etc/runlevels/default/wasm-node"
-
-# Create /etc/inittab for serial console
-cat > "$ROOTFS_DIR/etc/inittab" << 'EOF'
-::sysinit:/sbin/openrc sysinit
-::sysinit:/sbin/openrc boot
-::wait:/sbin/openrc default
-
-ttyS0::respawn:/sbin/getty -L ttyS0 115200 vt100
-
-::ctrlaltdel:/sbin/reboot
-::shutdown:/sbin/openrc shutdown
-EOF
-
 # Set hostname
 echo "wasm-node-vm" > "$ROOTFS_DIR/etc/hostname"
-
-# Configure networking
-cat > "$ROOTFS_DIR/etc/network/interfaces" << 'EOF'
-auto lo
-iface lo inet loopback
-
-auto eth0
-iface eth0 inet static
-    address 172.20.0.2
-    netmask 255.255.255.0
-    gateway 172.20.0.1
-EOF
 
 # Create MMDS client script (for fetching config from Firecracker metadata service)
 cat > "$ROOTFS_DIR/usr/local/bin/setup-mmds-network" << 'EOF'
 #!/bin/sh
 # Fetch network config from Firecracker MMDS and apply it
 MMDS_TOKEN=$(curl -fsSL -X PUT "http://169.254.169.254/latest/api/token" -H "X-metadata-token-ttl-seconds: 21600")
-CONFIG=$(curl -fsSL -H "X-metadata-token: $MMDS_TOKEN" "http://169.254.169.254/latest/meta-data/node_config")
+CONFIG=$(curl -fsSL -H "X-metadata-token: $MMDS_TOKEN" "http://169.254.169.254/node_config")
 
 if [ -n "$CONFIG" ]; then
     echo "$CONFIG" > /etc/wasm-node/mmds-config.json
-    # Apply NATS URL from MMDS if present
+    NODE_ID=$(echo "$CONFIG" | sed -n 's/.*"node_id":"\([^"]*\)".*/\1/p')
     NATS_URL=$(echo "$CONFIG" | sed -n 's/.*"nats_url":"\([^"]*\)".*/\1/p')
+    IP_ADDRESS=$(echo "$CONFIG" | sed -n 's/.*"ip":"\([^"]*\)".*/\1/p')
+    GATEWAY=$(echo "$CONFIG" | sed -n 's/.*"gateway":"\([^"]*\)".*/\1/p')
+    if [ -n "$NODE_ID" ]; then
+        sed -i "s|node_id = .*|node_id = \"$NODE_ID\"|" /etc/wasm-node/config.toml
+        hostname "$NODE_ID"
+    fi
     if [ -n "$NATS_URL" ]; then
         sed -i "s|url = .*|url = \"$NATS_URL\"|" /etc/wasm-node/config.toml
+    fi
+    if [ -n "$IP_ADDRESS" ] && [ -n "$GATEWAY" ]; then
+        ip address flush dev eth0 scope global
+        ip address add "$IP_ADDRESS/24" dev eth0
+        ip route replace default via "$GATEWAY" dev eth0
     fi
 fi
 EOF
 chmod +x "$ROOTFS_DIR/usr/local/bin/setup-mmds-network"
 
-# Add MMDS setup to boot
-mkdir -p "$ROOTFS_DIR/etc/local.d"
-cat > "$ROOTFS_DIR/etc/local.d/mmds.start" << 'EOF'
+# Use a deliberately small PID 1 for the disposable test guest. It mounts the
+# kernel filesystems, establishes the bootstrap address needed to reach MMDS,
+# applies the per-node address/config, and then execs the platform node.
+rm -f "$ROOTFS_DIR/sbin/init"
+cat > "$ROOTFS_DIR/sbin/init" << 'EOF'
 #!/bin/sh
-/usr/local/bin/setup-mmds-network
+mount -t proc proc /proc
+mount -t sysfs sysfs /sys
+mount -t devtmpfs devtmpfs /dev 2>/dev/null || true
+ip link set lo up
+ip link set eth0 up
+NODE_ID=vm-node
+IP_ADDRESS=
+GATEWAY=172.20.0.1
+for ARGUMENT in $(cat /proc/cmdline); do
+    case "$ARGUMENT" in
+        wcp.node_id=*) NODE_ID=${ARGUMENT#wcp.node_id=} ;;
+        wcp.ip=*) IP_ADDRESS=${ARGUMENT#wcp.ip=} ;;
+        wcp.gateway=*) GATEWAY=${ARGUMENT#wcp.gateway=} ;;
+    esac
+done
+if [ -n "$IP_ADDRESS" ]; then
+    ip address flush dev eth0 scope global
+    ip address add "$IP_ADDRESS/24" dev eth0
+    ip route replace default via "$GATEWAY" dev eth0
+else
+    ip address add 172.20.0.2/24 dev eth0
+    ip route replace 169.254.169.254 dev eth0
+    /usr/local/bin/setup-mmds-network
+    NODE_ID=$(sed -n 's/^node_id = "\([^"]*\)"/\1/p' /etc/wasm-node/config.toml)
+fi
+exec /usr/local/bin/wasm-node \
+    --config /etc/wasm-node/config.toml \
+    --node-id "$NODE_ID" \
+    --db-path /var/lib/wasm-node/state.redb \
+    --nats-url nats://172.20.0.10:4222 \
+    --proxy-https-port 0 \
+    --admin-bind-address 0.0.0.0 \
+    --artifact-bind-address 0.0.0.0 \
+    --deploy-ingress-bind-address 0.0.0.0 \
+    --admin-advertised-host "$IP_ADDRESS" \
+    --auth-enabled true \
+    --auth-write-token local-test-write-token-change-me \
+    --auth-require-tls false
 EOF
-chmod +x "$ROOTFS_DIR/etc/local.d/mmds.start"
+chmod +x "$ROOTFS_DIR/sbin/init"
 
 # Create ext4 image
 echo "Creating ext4 image..."

@@ -172,9 +172,11 @@ enabled = true
 fd_soft_limit = 8192
 # FD hard limit per Wasm instance (kill at 95%).
 fd_hard_limit = 9728
-# Memory pressure low threshold (pages). 65536 pages = 4 GiB.
+# Memory pressure low threshold (base pages). At the usual 4 KiB host page size,
+# 65536 pages = 256 MiB. Confirm the host page size when tuning this threshold.
 mem_low_threshold_pages = 65536
-# Memory pressure critical threshold (pages). 16384 pages = 1 GiB.
+# Memory pressure critical threshold (base pages). At the usual 4 KiB host page
+# size, 16384 pages = 64 MiB. Confirm the host page size when tuning this threshold.
 mem_critical_threshold_pages = 16384
 # Disk I/O latency threshold for "slow" alert (nanoseconds). 50 ms.
 disk_slow_threshold_ns = 50000000

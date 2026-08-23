@@ -11,6 +11,7 @@
 #   ./assets/vmlinux-6.1
 #   ./assets/wasm-node-rootfs.ext4
 #   ./assets/nats-rootfs.ext4
+#   ./assets/postgres-rootfs.ext4
 
 set -euo pipefail
 
@@ -28,7 +29,7 @@ echo ""
 mkdir -p ./assets
 
 # Build kernel
-echo "[1/3] Building kernel..."
+echo "[1/4] Building kernel..."
 if [[ ! -f "./assets/vmlinux-6.1" ]]; then
     "$SCRIPT_DIR/build-kernel.sh"
 else
@@ -38,7 +39,7 @@ fi
 
 # Build NATS rootfs
 echo ""
-echo "[2/3] Building NATS rootfs..."
+echo "[2/4] Building NATS rootfs..."
 if [[ ! -f "./assets/nats-rootfs.ext4" ]]; then
     "$SCRIPT_DIR/build-nats-rootfs.sh"
 else
@@ -48,12 +49,19 @@ fi
 
 # Build wasm-node rootfs
 echo ""
-echo "[3/3] Building wasm-node rootfs..."
+echo "[3/4] Building wasm-node rootfs..."
 if [[ ! -f "./assets/wasm-node-rootfs.ext4" ]]; then
     "$SCRIPT_DIR/build-node-rootfs.sh"
 else
     echo "       wasm-node rootfs already exists, skipping."
     echo "       To rebuild: rm ./assets/wasm-node-rootfs.ext4 && $SCRIPT_DIR/build-node-rootfs.sh"
+fi
+
+echo "[4/4] Building PostgreSQL rootfs..."
+if [[ ! -f "./assets/postgres-rootfs.ext4" ]]; then
+    "$SCRIPT_DIR/build-postgres-rootfs.sh"
+else
+    echo "       PostgreSQL rootfs already exists, skipping."
 fi
 
 echo ""
