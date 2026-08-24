@@ -35,19 +35,29 @@ use tracing::{info, warn};
 use crate::common::{MonitorConfigMap, NsEnforceConfig, NsEnforceFlags};
 use crate::config::MonitorConfig;
 
+type AttachFn = fn(&mut Ebpf) -> Result<()>;
+type MonitorRequest = (&'static str, bool, AttachFn);
+
 /// Loaded eBPF programs, maps, and attachment links.
 ///
 /// The `Bpf` object owns the loaded eBPF object (programs + maps).
 /// The `links` vector holds the attachment links, which can be detached
 /// at runtime to stop monitoring.
 pub struct LoadedEbpf {
-    /// The loaded main eBPF object (programs + maps).
-    pub ebpf: Ebpf,
+    /// Independently compiled monitor objects. They must remain owned for as
+    /// long as their programs are attached.
+    pub monitors: Vec<LoadedMonitor>,
     /// Optional namespace enforcer eBPF object (separate ELF).
     pub ns_ebpf: Option<Ebpf>,
     /// Attachment links for each loaded program.
     /// Links can be detached to stop a specific monitor.
     pub links: Vec<String>,
+}
+
+/// One independently compiled monitor object.
+pub struct LoadedMonitor {
+    pub name: &'static str,
+    pub ebpf: Ebpf,
 }
 
 /// Load and attach all eBPF programs.
@@ -70,108 +80,58 @@ pub async fn load_and_attach(config: &MonitorConfig, node_pid: u32) -> Result<Op
         return Ok(None);
     }
 
-    info!("Loading eBPF programs...");
+    info!("Loading independently compiled eBPF monitor objects...");
 
-    // Try to load the eBPF object.
-    // In production, the BPF bytecode is embedded via include_bytes_aligned!.
-    // For development, we try loading from a file at a well-known path.
-    let mut ebpf = match load_ebpf_object() {
-        Ok(bpf) => bpf,
-        Err(e) => {
-            warn!(
-                error = %e,
-                "Failed to load eBPF object — this is expected if BPF programs \
-                 haven't been compiled yet. Falling back to userspace monitoring."
-            );
-            return Ok(None);
-        }
-    };
-
-    // Write the configuration map before attaching any programs.
-    // The eBPF programs read this map at runtime to get thresholds.
-    if let Err(e) = write_config_map(&mut ebpf, config, node_pid) {
-        warn!(
-            error = %e,
-            "Failed to write eBPF config map — falling back to userspace"
-        );
-        return Ok(None);
-    }
-
-    // Attach programs based on configuration
+    let mut monitors = Vec::new();
     let mut links = Vec::new();
 
-    if config.enable_process_tracker {
-        match attach_process_tracker(&mut ebpf) {
-            Ok(()) => {
-                info!(
-                    "Process tracker attached (tracepoint: sched_process_exec, sched_process_exit)"
-                );
-                links.push("process_tracker".to_string());
-            }
-            Err(e) => {
-                warn!(error = %e, "Failed to attach process tracker — skipping");
-            }
-        }
-    }
+    let requested: [MonitorRequest; 6] = [
+        (
+            "process_tracker",
+            config.enable_process_tracker,
+            attach_process_tracker,
+        ),
+        ("tcp_monitor", config.enable_tcp_monitor, attach_tcp_monitor),
+        ("fd_watcher", config.enable_fd_watcher, attach_fd_watcher),
+        (
+            "mem_pressure",
+            config.enable_mem_pressure,
+            attach_mem_pressure,
+        ),
+        (
+            "disk_monitor",
+            config.enable_disk_monitor,
+            attach_disk_monitor,
+        ),
+        (
+            "syscall_counter",
+            config.enable_syscall_counter,
+            attach_syscall_counter,
+        ),
+    ];
 
-    if config.enable_tcp_monitor {
-        match attach_tcp_monitor(&mut ebpf) {
-            Ok(()) => {
-                info!("TCP monitor attached (tracepoint: inet_sock_set_state)");
-                links.push("tcp_monitor".to_string());
-            }
-            Err(e) => {
-                warn!(error = %e, "Failed to attach TCP monitor — skipping");
-            }
+    for (name, enabled, attach) in requested {
+        if !enabled {
+            continue;
         }
-    }
-
-    if config.enable_fd_watcher {
-        match attach_fd_watcher(&mut ebpf) {
-            Ok(()) => {
-                info!("FD watcher attached (kprobe: fd_install, do_filp_close)");
-                links.push("fd_watcher".to_string());
+        let mut ebpf = match load_monitor_object(name) {
+            Ok(ebpf) => ebpf,
+            Err(error) => {
+                warn!(%error, monitor = name, "Failed to load eBPF monitor object — skipping");
+                continue;
             }
-            Err(e) => {
-                warn!(error = %e, "Failed to attach FD watcher — skipping");
-            }
+        };
+        if let Err(error) = write_config_map(&mut ebpf, config, node_pid) {
+            warn!(%error, monitor = name, "Failed to configure eBPF monitor — skipping");
+            continue;
         }
-    }
-
-    if config.enable_mem_pressure {
-        match attach_mem_pressure(&mut ebpf) {
-            Ok(()) => {
-                info!("Memory pressure sentinel attached (kprobe: try_to_free_pages)");
-                links.push("mem_pressure".to_string());
-            }
-            Err(e) => {
-                warn!(error = %e, "Failed to attach memory pressure sentinel — skipping");
-            }
+        if let Err(error) = attach(&mut ebpf) {
+            warn!(%error, monitor = name, "Failed to attach eBPF monitor — skipping");
+            continue;
         }
-    }
-
-    if config.enable_disk_monitor {
-        match attach_disk_monitor(&mut ebpf) {
-            Ok(()) => {
-                info!("Disk I/O monitor attached (tracepoint: block_rq_issue, block_rq_complete)");
-                links.push("disk_monitor".to_string());
-            }
-            Err(e) => {
-                warn!(error = %e, "Failed to attach disk I/O monitor — skipping");
-            }
-        }
-    }
-
-    if config.enable_syscall_counter {
-        match attach_syscall_counter(&mut ebpf) {
-            Ok(()) => {
-                info!("Syscall counter attached (tracepoint: raw_syscalls/sys_enter)");
-                links.push("syscall_counter".to_string());
-            }
-            Err(e) => {
-                warn!(error = %e, "Failed to attach syscall counter — skipping");
-            }
-        }
+        info!(monitor = name, "eBPF monitor attached");
+        links.push(name.to_string());
+        monitors.push(LoadedMonitor { name, ebpf });
     }
 
     let mut ns_ebpf = None;
@@ -180,10 +140,10 @@ pub async fn load_and_attach(config: &MonitorConfig, node_pid: u32) -> Result<Op
             Ok(mut ns_bpf) => match attach_namespace_enforcer(&mut ns_bpf) {
                 Ok(()) => {
                     info!("Namespace enforcer attached (tracepoints: sock/inet_sock_set_state, syscalls/sys_enter_sendto)");
-                    links.push("namespace_enforcer".to_string());
                     if let Err(e) = write_ns_enforce_config(&mut ns_bpf, config, node_pid) {
                         warn!(error = %e, "Failed to write NS_ENFORCE_CONFIG map — namespace enforcer may not enforce");
                     }
+                    links.push("namespace_enforcer".to_string());
                     ns_ebpf = Some(ns_bpf);
                 }
                 Err(e) => {
@@ -220,7 +180,7 @@ pub async fn load_and_attach(config: &MonitorConfig, node_pid: u32) -> Result<Op
     );
 
     Ok(Some(LoadedEbpf {
-        ebpf,
+        monitors,
         ns_ebpf,
         links,
     }))
@@ -237,15 +197,15 @@ pub async fn load_and_attach(config: &MonitorConfig, node_pid: u32) -> Result<Op
 ///
 /// If none of these work, returns an error suggesting the user compile the
 /// BPF programs first.
-fn load_ebpf_object() -> Result<Ebpf> {
+fn load_monitor_object(name: &str) -> Result<Ebpf> {
     // Strategy 1: Try loading from well-known development paths
+    let repo_path = format!("crates/ebpf-monitor/bpf/target/bpfel-unknown-none/release/{name}");
+    let crate_path = format!("bpf/target/bpfel-unknown-none/release/{name}");
+    let install_path = format!("/opt/wasm-node/ebpf/{name}.o");
     let dev_paths = [
-        // Standard aya build output location
-        "./ebpf-monitor-bpf/target/bpfel-unknown-none/release/process_tracker",
-        // Relative to crate directory
-        "../ebpf-monitor-bpf/target/bpfel-unknown-none/release/process_tracker",
-        // System installation path
-        "/opt/wasm-node/ebpf/ebpf-monitor.o",
+        repo_path.as_str(),
+        crate_path.as_str(),
+        install_path.as_str(),
     ];
 
     for path_str in &dev_paths {
@@ -258,22 +218,8 @@ fn load_ebpf_object() -> Result<Ebpf> {
         }
     }
 
-    // Strategy 2: Try include_bytes_aligned (compile-time embedded)
-    // This is the production path but requires the BPF programs to be built first.
-    // We use a runtime check because the file may not exist during development.
-    #[cfg(feature = "ebpf")]
-    {
-        // If the BPF programs were compiled and included via build.rs,
-        // we would load them here. For now, we rely on file-based loading.
-        // In production, add a build.rs that compiles BPF programs and
-        // use include_bytes_aligned! to embed them.
-    }
-
     Err(anyhow!(
-        "eBPF object not found. Compile BPF programs first:\n\
-         \tcargo build --manifest-path crates/ebpf-monitor/bpf/Cargo.toml \
-         --target bpfel-unknown-none --release\n\
-         Or install them at /opt/wasm-node/ebpf/ebpf-monitor.o"
+        "eBPF object '{name}' not found; build it or install it at {install_path}"
     ))
 }
 
@@ -283,8 +229,8 @@ fn load_ebpf_object() -> Result<Ebpf> {
 /// `namespace_enforcer` ELF binary.
 fn load_namespace_enforcer_object() -> Result<Ebpf> {
     let dev_paths = [
-        "./ebpf-monitor-bpf/target/bpfel-unknown-none/release/namespace_enforcer",
-        "../ebpf-monitor-bpf/target/bpfel-unknown-none/release/namespace_enforcer",
+        "crates/ebpf-monitor/bpf/target/bpfel-unknown-none/release/namespace_enforcer",
+        "bpf/target/bpfel-unknown-none/release/namespace_enforcer",
         "/opt/wasm-node/ebpf/namespace_enforcer.o",
     ];
 

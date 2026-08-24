@@ -2,14 +2,14 @@
 #![no_main]
 
 use aya_ebpf::{
-    cty::c_int,
     macros::{map, tracepoint},
-    maps::{Array, PerCpuArray, RingBuf},
+    maps::{Array, RingBuf},
     programs::TracePointContext,
+    EbpfContext,
 };
 use aya_log_ebpf::info;
 
-use ebpf_monitor_bpf_common::*;
+use ebpf_monitor_bpf::*;
 
 #[map]
 static CONFIG: Array<MonitorConfigMap> = Array::with_max_entries(1, 0);
@@ -34,7 +34,7 @@ pub fn sched_process_exit(ctx: TracePointContext) -> u32 {
 }
 
 fn try_sched_process_exec(ctx: TracePointContext) -> Result<u32, u32> {
-    let config = CONFIG.get(0).ok_or(0)?;
+    let config = CONFIG.get(0).ok_or(0u32)?;
     let node_pid = config.node_pid;
 
     // Read the tracepoint arguments. The format is:
@@ -48,25 +48,25 @@ fn try_sched_process_exec(ctx: TracePointContext) -> Result<u32, u32> {
     // Then we can get the parent PID from the current task's parent.
 
     let pid = ctx.pid();
-    let ppid = ctx.ppid();
+    let process_id = ctx.tgid();
 
     // Only monitor children of the wasm-node process.
-    if ppid != node_pid {
+    if process_id != node_pid {
         return Ok(0);
     }
 
-    let comm = ctx.comm();
+    let comm = ctx.command().unwrap_or([0; TASK_COMM_LEN]);
     let mut event = ProcessEvent {
         header: EventHeader {
             event_type: EventType::ProcessExec as u32,
-            timestamp_ns: aya_ebpf::helpers::bpf_ktime_get_ns(),
+            timestamp_ns: unsafe { aya_ebpf::helpers::bpf_ktime_get_ns() },
             pid,
-            tid: ctx.tid(),
+            tid: pid,
         },
         comm: [0; TASK_COMM_LEN],
         exit_code: 0,
         signal: 0,
-        ppid,
+        ppid: 0,
         cgroup_id: 0, // TODO: get cgroup_id if available
     };
 
@@ -75,23 +75,18 @@ fn try_sched_process_exec(ctx: TracePointContext) -> Result<u32, u32> {
     event.comm[..comm_len].copy_from_slice(&comm[..comm_len]);
 
     // Write to ring buffer
-    if EVENTS.reserve::<ProcessEvent>(0).is_err() {
-        return Ok(0);
+    if let Some(mut entry) = EVENTS.reserve::<ProcessEvent>(0) {
+        entry.write(event);
+        entry.submit(0);
     }
 
-    unsafe {
-        let event_ptr = EVENTS.data_ptr_mut() as *mut ProcessEvent;
-        core::ptr::write_volatile(event_ptr, event);
-        EVENTS.submit(event_ptr as *mut u8, 0);
-    }
-
-    info!(&ctx, "Process exec: pid={}, comm={:?}", pid, comm);
+    info!(&ctx, "Process exec: pid={}", pid);
 
     Ok(0)
 }
 
 fn try_sched_process_exit(ctx: TracePointContext) -> Result<u32, u32> {
-    let config = CONFIG.get(0).ok_or(0)?;
+    let config = CONFIG.get(0).ok_or(0u32)?;
     let node_pid = config.node_pid;
 
     // The tracepoint arguments for sched_process_exit include:
@@ -106,10 +101,10 @@ fn try_sched_process_exit(ctx: TracePointContext) -> Result<u32, u32> {
     // For simplicity, we'll check if the current task's parent is the node_pid.
 
     let pid = ctx.pid();
-    let ppid = ctx.ppid();
+    let process_id = ctx.tgid();
 
     // Only monitor children of the wasm-node process.
-    if ppid != node_pid {
+    if process_id != node_pid {
         return Ok(0);
     }
 
@@ -132,27 +127,23 @@ fn try_sched_process_exit(ctx: TracePointContext) -> Result<u32, u32> {
     // We can use the `TracePointContext::args` method to get the arguments as a slice of u64.
     // However, the arguments are passed as u64 values, so we can read them by index.
 
-    let args = ctx.args();
-    if args.len() < 4 {
-        return Ok(0);
-    }
+    // sched_process_exit does not expose exit status or signal. Those fields
+    // remain zero; userspace can correlate detailed process status separately.
+    let exit_code = 0i32;
+    let signal = 0i32;
 
-    let _prio = args[1] as i32;
-    let exit_code = args[2] as i32;
-    let signal = args[3] as i32;
-
-    let comm = ctx.comm();
+    let comm = ctx.command().unwrap_or([0; TASK_COMM_LEN]);
     let mut event = ProcessEvent {
         header: EventHeader {
             event_type: EventType::ProcessExit as u32,
-            timestamp_ns: aya_ebpf::helpers::bpf_ktime_get_ns(),
+            timestamp_ns: unsafe { aya_ebpf::helpers::bpf_ktime_get_ns() },
             pid,
-            tid: ctx.tid(),
+            tid: pid,
         },
         comm: [0; TASK_COMM_LEN],
         exit_code: exit_code as u32,
         signal: signal as u32,
-        ppid,
+        ppid: 0,
         cgroup_id: 0, // TODO: get cgroup_id if available
     };
 
@@ -161,27 +152,18 @@ fn try_sched_process_exit(ctx: TracePointContext) -> Result<u32, u32> {
     event.comm[..comm_len].copy_from_slice(&comm[..comm_len]);
 
     // Write to ring buffer
-    if EVENTS.reserve::<ProcessEvent>(0).is_err() {
-        return Ok(0);
-    }
-
-    unsafe {
-        let event_ptr = EVENTS.data_ptr_mut() as *mut ProcessEvent;
-        core::ptr::write_volatile(event_ptr, event);
-        EVENTS.submit(event_ptr as *mut u8, 0);
+    if let Some(mut entry) = EVENTS.reserve::<ProcessEvent>(0) {
+        entry.write(event);
+        entry.submit(0);
     }
 
     // Log OOM kills
     if signal == 9 {
-        info!(&ctx, "OOM kill detected: pid={}, comm={:?}", pid, comm);
+        info!(&ctx, "OOM kill detected: pid={}", pid);
     } else {
         info!(
             &ctx,
-            "Process exit: pid={}, comm={:?}, signal={}, exit_code={}",
-            pid,
-            comm,
-            signal,
-            exit_code
+            "Process exit: pid={}, signal={}, exit_code={}", pid, signal, exit_code
         );
     }
 

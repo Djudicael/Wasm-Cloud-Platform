@@ -32,9 +32,7 @@ use aya_ebpf::{
     maps::{Array, HashMap, RingBuf},
     programs::TracePointContext,
 };
-use aya_log_ebpf::warn;
-
-use ebpf_monitor_bpf_common::{EventHeader, EventType, MonitorConfigMap, TcpEvent, IP_ADDR_LEN};
+use ebpf_monitor_bpf::{EventHeader, EventType, MonitorConfigMap, TcpEvent, IP_ADDR_LEN};
 
 /// Configuration map (shared with all eBPF programs).
 #[map]
@@ -42,7 +40,7 @@ static CONFIG: Array<MonitorConfigMap> = Array::with_max_entries(1, 0);
 
 /// Ring buffer for sending events to userspace.
 #[map]
-static EVENTS: RingBuf = RingBuf::with_max_entries(1024 * 1024, 0); // 1 MB
+static EVENTS: RingBuf = RingBuf::with_byte_size(1024 * 1024, 0); // 1 MB
 
 /// Per-PID TCP connection counter.
 /// Key: PID, Value: current connection count.
@@ -59,7 +57,6 @@ const TCP_ESTABLISHED: u32 = 1;
 const TCP_CLOSE: u32 = 7;
 const TCP_SYN_SENT: u32 = 2;
 const TCP_FIN_WAIT1: u32 = 4;
-const TCP_FIN_WAIT2: u32 = 5;
 
 /// NATS default port.
 const NATS_PORT: u16 = 4222;
@@ -95,12 +92,12 @@ fn try_inet_sock_set_state(ctx: TracePointContext) -> Result<c_long, c_long> {
     // In aya-ebpf, the TracePointContext already skips the common header,
     // so we read from offset 0 of the args area.
 
-    let old_state: u32 = unsafe { ctx.read_at(8)? }.ok_or(0)?;
-    let new_state: u32 = unsafe { ctx.read_at(12)? }.ok_or(0)?;
-    let src_port: u16 = unsafe { ctx.read_at(16)? }.ok_or(0)?;
-    let dst_port: u16 = unsafe { ctx.read_at(18)? }.ok_or(0)?;
+    let old_state: u32 = unsafe { ctx.read_at(8)? };
+    let new_state: u32 = unsafe { ctx.read_at(12)? };
+    let src_port: u16 = unsafe { ctx.read_at(16)? };
+    let dst_port: u16 = unsafe { ctx.read_at(18)? };
 
-    let pid_tgid = unsafe { aya_ebpf::helpers::bpf_get_current_pid_tgid() };
+    let pid_tgid = aya_ebpf::helpers::bpf_get_current_pid_tgid();
     let pid = pid_tgid as u32;
 
     // Only monitor the wasm-node process and its children.
@@ -143,7 +140,7 @@ fn try_inet_sock_set_state(ctx: TracePointContext) -> Result<c_long, c_long> {
                 retransmits: 0,
                 rtt_us: 0,
             };
-            EVENTS.output(&event, 0);
+            let _ = EVENTS.output(&event, 0);
         }
     } else if new_state == TCP_CLOSE {
         // Connection closed — decrement counter
@@ -220,12 +217,10 @@ fn try_inet_sock_set_state(ctx: TracePointContext) -> Result<c_long, c_long> {
                 retransmits: retransmit_count as u32,
                 rtt_us: 0,
             };
-            EVENTS.output(&event, 0);
+            let _ = EVENTS.output(&event, 0);
 
             // Reset the retransmit counter after alerting
-            unsafe {
-                let _ = TCP_RETRANSMIT_COUNT.insert(&pid, &0, 0);
-            }
+            let _ = TCP_RETRANSMIT_COUNT.insert(&pid, &0, 0);
         }
     }
 
@@ -260,7 +255,7 @@ fn try_inet_sock_set_state(ctx: TracePointContext) -> Result<c_long, c_long> {
                 retransmits: new_count as u32,
                 rtt_us: 0,
             };
-            EVENTS.output(&event, 0);
+            let _ = EVENTS.output(&event, 0);
         }
     }
 
@@ -283,7 +278,7 @@ fn try_inet_sock_set_state(ctx: TracePointContext) -> Result<c_long, c_long> {
                 retransmits: 0,
                 rtt_us: 0,
             };
-            EVENTS.output(&event, 0);
+            let _ = EVENTS.output(&event, 0);
         } else if new_state == TCP_CLOSE {
             let event = TcpEvent {
                 header: EventHeader {
@@ -301,7 +296,7 @@ fn try_inet_sock_set_state(ctx: TracePointContext) -> Result<c_long, c_long> {
                 retransmits: 0,
                 rtt_us: 0,
             };
-            EVENTS.output(&event, 0);
+            let _ = EVENTS.output(&event, 0);
         }
     }
 

@@ -11,6 +11,7 @@
 //! - `EVENTS`: RingBuffer — events sent to userspace consumer
 
 #![no_std]
+#![no_main]
 
 use aya_ebpf::{
     macros::{map, tracepoint},
@@ -18,9 +19,7 @@ use aya_ebpf::{
     programs::TracePointContext,
     EbpfContext,
 };
-use aya_log_ebpf::info;
-
-use crate::common::{
+use ebpf_monitor_bpf::{
     EventHeader, EventType, NamespaceAuditEvent, NamespaceAuditType, NsEnforceConfig, TidIdentity,
 };
 
@@ -77,7 +76,7 @@ fn try_ns_inet_sock_set_state(ctx: TracePointContext) -> Result<(), u32> {
     //   s32 oldstate                 // old TCP state
     //   s32 newstate                 // new TCP state
 
-    let data: *const u8 = ctx.as_ptr();
+    let data = ctx.as_ptr() as *const u8;
 
     // Offsets for inet_sock_set_state tracepoint (verified on Linux 5.4+):
     // The exact layout depends on kernel version, but sport/dport are at
@@ -94,14 +93,14 @@ fn try_ns_inet_sock_set_state(ctx: TracePointContext) -> Result<(), u32> {
     // Read ports
     let sport = unsafe { *(data.add(16) as *const u16) };
     let dport = unsafe { *(data.add(18) as *const u16) };
-    let old_state = unsafe { *(data.add(24) as *const i32) as u32 };
+    let _old_state = unsafe { *(data.add(24) as *const i32) as u32 };
     let new_state = unsafe { *(data.add(28) as *const i32) as u32 };
 
     // Get current TID
-    let tid = unsafe { aya_ebpf::helpers::bpf_get_current_pid_tgid() as u32 };
+    let tid = aya_ebpf::helpers::bpf_get_current_pid_tgid() as u32;
 
     // Look up config
-    let config = match unsafe { NS_ENFORCE_CONFIG.get(0) } {
+    let config = match NS_ENFORCE_CONFIG.get(0) {
         Some(cfg) => cfg,
         None => return Ok(()),
     };
@@ -122,7 +121,7 @@ fn try_ns_inet_sock_set_state(ctx: TracePointContext) -> Result<(), u32> {
 
         if is_monitored {
             // Emit TidConnection event
-            let mut event = match unsafe { EVENTS.reserve::<EventHeader>(0) } {
+            let mut event = match EVENTS.reserve::<EventHeader>(0) {
                 Some(e) => e,
                 None => return Ok(()), // Ring buffer full
             };
@@ -130,15 +129,15 @@ fn try_ns_inet_sock_set_state(ctx: TracePointContext) -> Result<(), u32> {
             let header = EventHeader {
                 event_type: EventType::TidConnection as u32,
                 timestamp_ns: unsafe { aya_ebpf::helpers::gen::bpf_ktime_get_ns() },
-                pid: (unsafe { aya_ebpf::helpers::bpf_get_current_pid_tgid() >> 32 } as u32),
+                pid: (aya_ebpf::helpers::bpf_get_current_pid_tgid() >> 32) as u32,
                 tid,
             };
 
             event.write(header);
-            unsafe { event.submit(0) };
+            event.submit(0);
         } else {
             // Unregistered TID connected to gateway — audit event
-            let mut event = match unsafe { EVENTS.reserve::<NamespaceAuditEvent>(0) } {
+            let mut event = match EVENTS.reserve::<NamespaceAuditEvent>(0) {
                 Some(e) => e,
                 None => return Ok(()),
             };
@@ -146,7 +145,7 @@ fn try_ns_inet_sock_set_state(ctx: TracePointContext) -> Result<(), u32> {
             let header = EventHeader {
                 event_type: EventType::NamespaceAudit as u32,
                 timestamp_ns: unsafe { aya_ebpf::helpers::gen::bpf_ktime_get_ns() },
-                pid: (unsafe { aya_ebpf::helpers::bpf_get_current_pid_tgid() >> 32 } as u32),
+                pid: (aya_ebpf::helpers::bpf_get_current_pid_tgid() >> 32) as u32,
                 tid,
             };
 
@@ -161,14 +160,14 @@ fn try_ns_inet_sock_set_state(ctx: TracePointContext) -> Result<(), u32> {
             };
 
             event.write(audit);
-            unsafe { event.submit(0) };
+            event.submit(0);
         }
     } else if new_state == TCP_CLOSE {
         // Connection closed — emit TidDisconnection
         let is_monitored = unsafe { MONITORED_TIDS.get(&tid) }.is_some();
 
         if is_monitored {
-            let mut event = match unsafe { EVENTS.reserve::<EventHeader>(0) } {
+            let mut event = match EVENTS.reserve::<EventHeader>(0) {
                 Some(e) => e,
                 None => return Ok(()),
             };
@@ -176,12 +175,12 @@ fn try_ns_inet_sock_set_state(ctx: TracePointContext) -> Result<(), u32> {
             let header = EventHeader {
                 event_type: EventType::TidDisconnection as u32,
                 timestamp_ns: unsafe { aya_ebpf::helpers::gen::bpf_ktime_get_ns() },
-                pid: (unsafe { aya_ebpf::helpers::bpf_get_current_pid_tgid() >> 32 } as u32),
+                pid: (aya_ebpf::helpers::bpf_get_current_pid_tgid() >> 32) as u32,
                 tid,
             };
 
             event.write(header);
-            unsafe { event.submit(0) };
+            event.submit(0);
         }
     }
 
@@ -215,11 +214,11 @@ fn try_ns_audit_sendto(ctx: TracePointContext) -> Result<(), u32> {
     //   struct sockaddr *addr
     //   int addr_len
 
-    let data: *const u8 = ctx.as_ptr();
+    let data = ctx.as_ptr() as *const u8;
 
     // Offsets for sys_enter_sendto (x86_64):
     // These are approximate and may need adjustment per kernel version.
-    let fd = unsafe { *(data.add(8) as *const i32) };
+    let _fd = unsafe { *(data.add(8) as *const i32) };
     let buf_ptr = unsafe { *(data.add(16) as *const u64) };
     let len = unsafe { *(data.add(24) as *const u64) as usize };
 
@@ -229,7 +228,7 @@ fn try_ns_audit_sendto(ctx: TracePointContext) -> Result<(), u32> {
     }
 
     // Get current TID
-    let tid = unsafe { aya_ebpf::helpers::bpf_get_current_pid_tgid() as u32 };
+    let tid = aya_ebpf::helpers::bpf_get_current_pid_tgid() as u32;
 
     // Check if this TID is monitored
     let identity = match unsafe { MONITORED_TIDS.get(&tid) } {
@@ -238,7 +237,7 @@ fn try_ns_audit_sendto(ctx: TracePointContext) -> Result<(), u32> {
     };
 
     // Check config for forged header detection enablement
-    let config = match unsafe { NS_ENFORCE_CONFIG.get(0) } {
+    let config = match NS_ENFORCE_CONFIG.get(0) {
         Some(cfg) => cfg,
         None => return Ok(()),
     };
@@ -257,13 +256,13 @@ fn try_ns_audit_sendto(ctx: TracePointContext) -> Result<(), u32> {
 
     // Patterns to detect (case-insensitive would be better but expensive in eBPF)
     let x_namespace: [u8; 12] = *b"X-Namespace:";
-    let x_source_app: [u8; 14] = *b"X-Source-App:";
+    let x_source_app: [u8; 13] = *b"X-Source-App:";
 
     // Simple scan: read chunks and check for patterns
     let mut found = false;
     let mut chunk_start = 0usize;
 
-    while chunk_start + 14 < scan_len && chunk_start < 256 {
+    while chunk_start + 13 < scan_len && chunk_start < 256 {
         let to_read = (scan_len - chunk_start).min(32);
         if to_read < 12 {
             break;
@@ -296,9 +295,9 @@ fn try_ns_audit_sendto(ctx: TracePointContext) -> Result<(), u32> {
         }
 
         // Check for X-Source-App:
-        if to_read >= 14 {
+        if to_read >= 13 {
             let mut match_app = true;
-            for i in 0..14 {
+            for i in 0..13 {
                 if buf[i] != x_source_app[i] {
                     match_app = false;
                     break;
@@ -315,7 +314,7 @@ fn try_ns_audit_sendto(ctx: TracePointContext) -> Result<(), u32> {
 
     if found {
         // Emit forged header detection event
-        let mut event = match unsafe { EVENTS.reserve::<NamespaceAuditEvent>(0) } {
+        let mut event = match EVENTS.reserve::<NamespaceAuditEvent>(0) {
             Some(e) => e,
             None => return Ok(()),
         };
@@ -323,11 +322,11 @@ fn try_ns_audit_sendto(ctx: TracePointContext) -> Result<(), u32> {
         let header = EventHeader {
             event_type: EventType::NamespaceForgedHeader as u32,
             timestamp_ns: unsafe { aya_ebpf::helpers::gen::bpf_ktime_get_ns() },
-            pid: (unsafe { aya_ebpf::helpers::bpf_get_current_pid_tgid() >> 32 } as u32),
+            pid: (aya_ebpf::helpers::bpf_get_current_pid_tgid() >> 32) as u32,
             tid,
         };
 
-        let mut audit = NamespaceAuditEvent {
+        let audit = NamespaceAuditEvent {
             header,
             audit_type: NamespaceAuditType::ForgedHeader as u32,
             source_namespace: identity.namespace,
@@ -338,7 +337,7 @@ fn try_ns_audit_sendto(ctx: TracePointContext) -> Result<(), u32> {
         };
 
         event.write(audit);
-        unsafe { event.submit(0) };
+        event.submit(0);
     }
 
     Ok(())

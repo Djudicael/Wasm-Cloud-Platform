@@ -40,9 +40,9 @@ use aya_ebpf::{
     maps::{Array, HashMap, RingBuf},
     programs::TracePointContext,
 };
-use aya_log_ebpf::{info, warn};
+use aya_log_ebpf::warn;
 
-use ebpf_monitor_bpf_common::{DiskIoEvent, EventHeader, EventType, MonitorConfigMap};
+use ebpf_monitor_bpf::{DiskIoEvent, EventHeader, EventType, MonitorConfigMap};
 
 /// Configuration map (shared with all eBPF programs).
 #[map]
@@ -50,7 +50,7 @@ static CONFIG: Array<MonitorConfigMap> = Array::with_max_entries(1, 0);
 
 /// Ring buffer for sending events to userspace.
 #[map]
-static EVENTS: RingBuf = RingBuf::with_max_entries(512 * 1024, 0); // 512 KB
+static EVENTS: RingBuf = RingBuf::with_byte_size(512 * 1024, 0); // 512 KB
 
 /// Track I/O start time per request.
 /// Key: sector number (u64), Value: start timestamp in nanoseconds.
@@ -120,9 +120,9 @@ fn try_block_rq_issue(ctx: TracePointContext) -> Result<c_long, c_long> {
     // Note: aya-ebpf's TracePointContext already skips the common header,
     // so offset 0 here is the first tracepoint-specific field.
 
-    let dev: u32 = unsafe { ctx.read_at(0)? }.ok_or(0)?;
-    let sector: u64 = unsafe { ctx.read_at(8)? }.ok_or(0)?;
-    let nr_sector: u32 = unsafe { ctx.read_at(16)? }.ok_or(0)?;
+    let dev: u32 = unsafe { ctx.read_at(0)? };
+    let sector: u64 = unsafe { ctx.read_at(8)? };
+    let _nr_sector: u32 = unsafe { ctx.read_at(16)? };
 
     // Determine I/O type from the rwbs field.
     // The rwbs field is a string like "R", "W", "WS", "WSF", etc.
@@ -132,13 +132,13 @@ fn try_block_rq_issue(ctx: TracePointContext) -> Result<c_long, c_long> {
     //   'S' (0x53) = sync
     //   'F' (0x46) = flush
     //   'D' (0x44) = discard
-    let rwbs_first_byte: u8 = unsafe { ctx.read_at(24)? }.ok_or(0)?;
+    let rwbs_first_byte: u8 = unsafe { ctx.read_at(24)? };
     let _io_type = match rwbs_first_byte {
-        0x52 => IO_TYPE_READ,    // 'R'
-        0x57 => IO_TYPE_WRITE,   // 'W'
-        0x53 => IO_TYPE_SYNC,    // 'S'
-        0x46 => IO_TYPE_FLUSH,   // 'F'
-        0x44 => IO_TYPE_READ,    // 'D' (discard, treat as read for metrics)
+        0x52 => IO_TYPE_READ,  // 'R'
+        0x57 => IO_TYPE_WRITE, // 'W'
+        0x53 => IO_TYPE_SYNC,  // 'S'
+        0x46 => IO_TYPE_FLUSH, // 'F'
+        0x44 => IO_TYPE_READ,  // 'D' (discard, treat as read for metrics)
         _ => IO_TYPE_UNKNOWN,
     };
 
@@ -153,13 +153,11 @@ fn try_block_rq_issue(ctx: TracePointContext) -> Result<c_long, c_long> {
     let dev_key = dev;
     let pending = unsafe { PENDING_IO_COUNT.get(&dev_key).copied().unwrap_or(0) };
     if pending < MAX_PENDING_IO {
-        unsafe {
-            let _ = IO_START_TIME.insert(&sector, &now, 0);
+        let _ = IO_START_TIME.insert(&sector, &now, 0);
 
-            // Increment pending count
-            let new_count = pending + 1;
-            let _ = PENDING_IO_COUNT.insert(&dev_key, &new_count, 0);
-        }
+        // Increment pending count
+        let new_count = pending + 1;
+        let _ = PENDING_IO_COUNT.insert(&dev_key, &new_count, 0);
     }
 
     // We don't emit any events on issue — only on completion when we
@@ -198,18 +196,18 @@ fn try_block_rq_complete(ctx: TracePointContext) -> Result<c_long, c_long> {
     let config = CONFIG.get(0).ok_or(0)?;
 
     // Read tracepoint arguments (same layout as block_rq_issue)
-    let dev: u32 = unsafe { ctx.read_at(0)? }.ok_or(0)?;
-    let sector: u64 = unsafe { ctx.read_at(8)? }.ok_or(0)?;
-    let nr_sector: u32 = unsafe { ctx.read_at(16)? }.ok_or(0)?;
+    let dev: u32 = unsafe { ctx.read_at(0)? };
+    let sector: u64 = unsafe { ctx.read_at(8)? };
+    let nr_sector: u32 = unsafe { ctx.read_at(16)? };
 
     // Determine I/O type from rwbs field
-    let rwbs_first_byte: u8 = unsafe { ctx.read_at(24)? }.ok_or(0)?;
+    let rwbs_first_byte: u8 = unsafe { ctx.read_at(24)? };
     let io_type = match rwbs_first_byte {
-        0x52 => IO_TYPE_READ,    // 'R'
-        0x57 => IO_TYPE_WRITE,   // 'W'
-        0x53 => IO_TYPE_SYNC,    // 'S'
-        0x46 => IO_TYPE_FLUSH,   // 'F'
-        0x44 => IO_TYPE_READ,    // 'D' (discard)
+        0x52 => IO_TYPE_READ,  // 'R'
+        0x57 => IO_TYPE_WRITE, // 'W'
+        0x53 => IO_TYPE_SYNC,  // 'S'
+        0x46 => IO_TYPE_FLUSH, // 'F'
+        0x44 => IO_TYPE_READ,  // 'D' (discard)
         _ => IO_TYPE_UNKNOWN,
     };
 
@@ -266,7 +264,7 @@ fn try_block_rq_complete(ctx: TracePointContext) -> Result<c_long, c_long> {
                 latency_ns,
                 io_type,
             };
-            EVENTS.output(&event, 0);
+            let _ = EVENTS.output(&event, 0);
 
             warn!(
                 &ctx,

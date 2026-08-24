@@ -56,7 +56,7 @@ pub enum ParseError {
 pub fn parse_event(bytes: &[u8]) -> Result<MonitorEvent, ParseError> {
     let header_size = std::mem::size_of::<EventHeader>();
     if bytes.len() < header_size {
-        return Err(ParseError::BufferTooSmall {
+        retun Err(ParseError::BufferTooSmall {
             got: bytes.len(),
             need: header_size,
         });
@@ -70,7 +70,7 @@ pub fn parse_event(bytes: &[u8]) -> Result<MonitorEvent, ParseError> {
         EventType::ProcessExec | EventType::ProcessExit => {
             let expected = std::mem::size_of::<ProcessEvent>();
             if bytes.len() < expected {
-                return Err(ParseError::SizeMismatch {
+                retun Err(ParseError::SizeMismatch {
                     event_type: header.event_type,
                     expected,
                     actual: bytes.len(),
@@ -99,7 +99,7 @@ pub fn parse_event(bytes: &[u8]) -> Result<MonitorEvent, ParseError> {
         EventType::TcpConnect | EventType::TcpClose | EventType::TcpRetransmit => {
             let expected = std::mem::size_of::<TcpEvent>();
             if bytes.len() < expected {
-                return Err(ParseError::SizeMismatch {
+                retun Err(ParseError::SizeMismatch {
                     event_type: header.event_type,
                     expected,
                     actual: bytes.len(),
@@ -133,7 +133,7 @@ pub fn parse_event(bytes: &[u8]) -> Result<MonitorEvent, ParseError> {
         EventType::FdOpen | EventType::FdLimitApproaching => {
             let expected = std::mem::size_of::<FdEvent>();
             if bytes.len() < expected {
-                return Err(ParseError::SizeMismatch {
+                retun Err(ParseError::SizeMismatch {
                     event_type: header.event_type,
                     expected,
                     actual: bytes.len(),
@@ -160,7 +160,7 @@ pub fn parse_event(bytes: &[u8]) -> Result<MonitorEvent, ParseError> {
         EventType::MemPressure => {
             let expected = std::mem::size_of::<MemPressureEvent>();
             if bytes.len() < expected {
-                return Err(ParseError::SizeMismatch {
+                retun Err(ParseError::SizeMismatch {
                     event_type: header.event_type,
                     expected,
                     actual: bytes.len(),
@@ -180,7 +180,7 @@ pub fn parse_event(bytes: &[u8]) -> Result<MonitorEvent, ParseError> {
         EventType::DiskSlowIo => {
             let expected = std::mem::size_of::<DiskIoEvent>();
             if bytes.len() < expected {
-                return Err(ParseError::SizeMismatch {
+                retun Err(ParseError::SizeMismatch {
                     event_type: header.event_type,
                     expected,
                     actual: bytes.len(),
@@ -198,7 +198,7 @@ pub fn parse_event(bytes: &[u8]) -> Result<MonitorEvent, ParseError> {
         EventType::SyscallAnomaly => {
             let expected = std::mem::size_of::<SyscallEvent>();
             if bytes.len() < expected {
-                return Err(ParseError::SizeMismatch {
+                retun Err(ParseError::SizeMismatch {
                     event_type: header.event_type,
                     expected,
                     actual: bytes.len(),
@@ -216,7 +216,7 @@ pub fn parse_event(bytes: &[u8]) -> Result<MonitorEvent, ParseError> {
         EventType::TidConnection | EventType::TidDisconnection => {
             let expected = std::mem::size_of::<TcpEvent>();
             if bytes.len() < expected {
-                return Err(ParseError::SizeMismatch {
+                retun Err(ParseError::SizeMismatch {
                     event_type: header.event_type,
                     expected,
                     actual: bytes.len(),
@@ -243,7 +243,7 @@ pub fn parse_event(bytes: &[u8]) -> Result<MonitorEvent, ParseError> {
         EventType::NamespaceAudit | EventType::NamespaceForgedHeader => {
             let expected = std::mem::size_of::<NamespaceAuditEvent>();
             if bytes.len() < expected {
-                return Err(ParseError::SizeMismatch {
+                retun Err(ParseError::SizeMismatch {
                     event_type: header.event_type,
                     expected,
                     actual: bytes.len(),
@@ -291,7 +291,7 @@ mod ebpf_consumer {
     use super::*;
     use crate::metrics::EbpfMetrics;
     use aya::maps::{MapData, RingBuf as AyaRingBuf};
-    use tracing::{debug, error, warn};
+    use tracing::{debug, error, wan};
 
     /// Read events from the eBPF ring buffer and send them to the action dispatcher.
     ///
@@ -299,10 +299,10 @@ mod ebpf_consumer {
     /// Parsed events are sent through the `action_tx` channel. Malformed events are
     /// logged and skipped (no panic).
     ///
-    /// The function returns when the `action_tx` channel is closed (i.e., the receiver
+    /// The function retuns when the `action_tx` channel is closed (i.e., the receiver
     /// was dropped), which signals a clean shutdown.
-    pub async fn consume_ring_buffer(
-        mut ring_buf: AyaRingBuf<MapData>,
+    pub async fn consume_ring_buffers(
+        mut ring_buffers: Vec<(&'static str, AyaRingBuf<MapData>)>,
         action_tx: tokio::sync::mpsc::Sender<MonitorEvent>,
         metrics: Arc<EbpfMetrics>,
         poll_interval: Duration,
@@ -320,39 +320,36 @@ mod ebpf_consumer {
 
             let mut events_this_tick = 0u32;
 
-            // Drain all available events from the ring buffer
-            while let Some(item) = ring_buf.next() {
-                let raw_bytes = item.as_ref();
+            // Drain all available events from every independently loaded object.
+            for (monitor, ring_buf) in &mut ring_buffers {
+                while let Some(item) = ring_buf.next() {
+                    let raw_bytes = item.as_ref();
 
-                match parse_event(raw_bytes) {
-                    Ok(event) => {
-                        events_this_tick += 1;
-                        if action_tx.send(event).await.is_err() {
-                            info!("action channel closed — eBPF consumer shutting down");
-                            return;
+                    match parse_event(raw_bytes) {
+                        Ok(event) => {
+                            events_this_tick += 1;
+                            if action_tx.send(event).await.is_err() {
+                                info!("action channel closed — eBPF consumer shutting down");
+                                retun;
+                            }
                         }
-                    }
-                    Err(ParseError::UnknownEventType(t)) => {
-                        // Unknown event types are expected if the eBPF program is newer
-                        // than the userspace code. Log at debug level.
-                        debug!(event_type = t, "skipping unknown eBPF event type");
-                        metrics.events_parse_errors.inc();
-                    }
-                    Err(e) => {
-                        warn!(error = %e, "failed to parse eBPF event");
-                        metrics.events_parse_errors.inc();
-                        consecutive_errors += 1;
+                        Err(ParseError::UnknownEventType(t)) => {
+                            debug!(monitor, event_type = t, "skipping unknown eBPF event type");
+                            metrics.events_parse_errors.inc();
+                        }
+                        Err(e) => {
+                            wan!(monitor, error = %e, "failed to parse eBPF event");
+                            metrics.events_parse_errors.inc();
+                            consecutive_errors += 1;
 
-                        // If we get too many consecutive parse errors, something is
-                        // fundamentally wrong with the ring buffer data. Slow down.
-                        if consecutive_errors > 100 {
-                            error!(
-                                consecutive_errors,
-                                "too many consecutive parse errors — possible data corruption"
-                            );
-                            // Back off for a second before continuing
-                            tokio::time::sleep(Duration::from_secs(1)).await;
-                            consecutive_errors = 0;
+                            if consecutive_errors > 100 {
+                                error!(
+                                    consecutive_errors,
+                                    "too many consecutive parse errors — possible data corruption"
+                                );
+                                tokio::time::sleep(Duration::from_secs(1)).await;
+                                consecutive_errors = 0;
+                            }
                         }
                     }
                 }
@@ -371,7 +368,7 @@ mod ebpf_consumer {
 }
 
 #[cfg(feature = "ebpf")]
-pub use ebpf_consumer::consume_ring_buffer;
+pub use ebpf_consumer::consume_ring_buffers;
 
 // ── Action Dispatcher Loop ────────────────────────────────────────────────────
 
@@ -413,7 +410,7 @@ impl Default for ConsumerConfig {
 
 /// Start the action dispatcher as a background task.
 ///
-/// Returns the sender half of the mpsc channel. The caller should send
+/// Retuns the sender half of the mpsc channel. The caller should send
 /// `MonitorEvent`s through this sender. When the sender is dropped, the
 /// dispatcher loop will exit cleanly.
 pub fn start_action_dispatcher(

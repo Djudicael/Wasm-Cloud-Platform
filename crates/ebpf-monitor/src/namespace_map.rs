@@ -53,15 +53,13 @@ impl NamespaceMap {
     /// Create from a loaded eBPF object.
     ///
     /// The `MONITORED_TIDS` map is expected in the namespace enforcer eBPF
-    /// object (`ns_ebpf`). If not available, falls back to the main eBPF
-    /// object or in-process maps.
+    /// object (`ns_ebpf`). If not available, falls back to in-process maps.
     // TODO: When aya supports BPF_F_RDONLY_PROG, load the MONITORED_TIDS map
     // with read-only program access to prevent eBPF programs from mutating
     // the identity table. This is defense-in-depth — the eBPF programs
     // should never need to write to this map.
     #[cfg(feature = "ebpf")]
-    pub fn from_ebpf(ebpf: &mut aya::Ebpf, ns_ebpf: Option<&mut aya::Ebpf>) -> Self {
-        // Try the namespace enforcer object first (where MONITORED_TIDS lives)
+    pub fn from_ebpf(ns_ebpf: Option<&mut aya::Ebpf>) -> Self {
         let inner = if let Some(ns) = ns_ebpf {
             match ns.take_map("MONITORED_TIDS") {
                 Some(map) => {
@@ -72,39 +70,19 @@ impl NamespaceMap {
                             Some(hash_map)
                         }
                         Err(e) => {
-                            warn!(error = %e, "MONITORED_TIDS map wrong type — trying main eBPF object");
+                            warn!(error = %e, "MONITORED_TIDS map wrong type — using fallback");
                             None
                         }
                     }
                 }
                 None => {
-                    warn!("MONITORED_TIDS map not found in namespace enforcer — trying main eBPF object");
+                    warn!("MONITORED_TIDS map not found in namespace enforcer — using fallback");
                     None
                 }
             }
         } else {
             None
         };
-
-        // Fall back to the main eBPF object
-        let inner = inner.or_else(|| match ebpf.take_map("MONITORED_TIDS") {
-            Some(map) => {
-                match aya::maps::HashMap::<aya::maps::MapData, u32, TidIdentity>::try_from(map) {
-                    Ok(hash_map) => {
-                        info!("MONITORED_TIDS eBPF map opened from main object");
-                        Some(hash_map)
-                    }
-                    Err(e) => {
-                        warn!(error = %e, "MONITORED_TIDS map wrong type — using fallback");
-                        None
-                    }
-                }
-            }
-            None => {
-                warn!("MONITORED_TIDS map not found — using fallback");
-                None
-            }
-        });
 
         NamespaceMap {
             inner: Mutex::new(inner),

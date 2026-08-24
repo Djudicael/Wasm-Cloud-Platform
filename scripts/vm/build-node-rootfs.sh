@@ -32,9 +32,12 @@ if [[ "${SKIP_RUST_BUILD:-false}" == true ]]; then
     echo "Reusing existing release binaries from $BUILD_TARGET_DIR/release."
 else
     echo "Building wasm-node binary..."
-    cargo build --release --bin wasm-node
+    cargo build --release --bin wasm-node --features ebpf
     cargo build --release --bin wasm-ctl
 fi
+
+echo "Building eBPF programs..."
+"$(dirname "$0")/../ebpf/build-ebpf.sh"
 
 # Create working directory
 WORK_DIR="$(mktemp -d)"
@@ -71,6 +74,7 @@ mkdir -p "$ROOTFS_DIR/var/lib/wasm-node"
 mkdir -p "$ROOTFS_DIR/var/log/wasm-node"
 mkdir -p "$ROOTFS_DIR/run/wasm-node"
 mkdir -p "$ROOTFS_DIR/usr/local/bin"
+mkdir -p "$ROOTFS_DIR/opt/wasm-node/ebpf"
 mkdir -p "$ROOTFS_DIR/root"
 mkdir -p "$ROOTFS_DIR/proc"
 mkdir -p "$ROOTFS_DIR/sys"
@@ -83,6 +87,10 @@ echo "Installing wasm-node binaries..."
 cp "$BUILD_TARGET_DIR/release/wasm-node" "$ROOTFS_DIR/usr/local/bin/"
 cp "$BUILD_TARGET_DIR/release/wasm-ctl" "$ROOTFS_DIR/usr/local/bin/"
 chmod +x "$ROOTFS_DIR/usr/local/bin/"{wasm-node,wasm-ctl}
+EBPF_BUILD_DIR="./crates/ebpf-monitor/bpf/target/bpfel-unknown-none/release"
+for object in process_tracker tcp_monitor fd_watcher mem_pressure disk_monitor syscall_counter namespace_enforcer; do
+    cp "$EBPF_BUILD_DIR/$object" "$ROOTFS_DIR/opt/wasm-node/ebpf/$object.o"
+done
 
 # Create default config
 cat > "$ROOTFS_DIR/etc/wasm-node/config.toml" << 'EOF'

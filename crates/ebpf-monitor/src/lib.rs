@@ -153,6 +153,9 @@ pub struct MonitorHandle {
     _consumer_handle: Option<tokio::task::JoinHandle<()>>,
     /// Optional join handle for the fallback task.
     _fallback_handle: Option<tokio::task::JoinHandle<()>>,
+    /// Owns attached programs for the lifetime of the monitor handle.
+    #[cfg(feature = "ebpf")]
+    _loaded_ebpf: Option<loader::LoadedEbpf>,
     /// Shared metrics reference (for admin API status queries).
     metrics: Arc<EbpfMetrics>,
     /// Shared dispatcher reference (for admin API status queries).
@@ -300,10 +303,7 @@ pub async fn init(
                         .await;
                     });
 
-                    let namespace_map = Arc::new(NamespaceMap::from_ebpf(
-                        &mut loaded.ebpf,
-                        loaded.ns_ebpf.as_mut(),
-                    ));
+                    let namespace_map = Arc::new(NamespaceMap::from_ebpf(loaded.ns_ebpf.as_mut()));
 
                     // Wire the namespace map into the dispatcher so that
                     // TidConnection / TidDisconnection events update port→TID bindings.
@@ -318,6 +318,7 @@ pub async fn init(
                         ebpf_active: true,
                         _consumer_handle: None, // watchdog manages the task
                         _fallback_handle: None,
+                        _loaded_ebpf: Some(loaded),
                         metrics: metrics.clone(),
                         dispatcher: dispatcher.clone(),
                         namespace_map,
@@ -370,6 +371,8 @@ pub async fn init(
         ebpf_active: false,
         _consumer_handle: None,
         _fallback_handle: Some(fallback_handle),
+        #[cfg(feature = "ebpf")]
+        _loaded_ebpf: None,
         metrics,
         dispatcher,
         namespace_map,
@@ -405,12 +408,28 @@ async fn try_init_ebpf(
         return Err("no_ebpf_programs_attached");
     }
 
-    // Step 2: Open the ring buffer
-    let ring_buf = loaded
-        .ebpf
-        .take_map("EVENTS")
-        .and_then(|map| aya::maps::RingBuf::try_from(map).ok())
-        .ok_or("events_ring_buf_not_found")?;
+    // Step 2: Open every independently compiled object's event ring buffer.
+    let mut ring_buffers = Vec::new();
+    for monitor in &mut loaded.monitors {
+        if let Some(ring_buf) = monitor
+            .ebpf
+            .take_map("EVENTS")
+            .and_then(|map| aya::maps::RingBuf::try_from(map).ok())
+        {
+            ring_buffers.push((monitor.name, ring_buf));
+        }
+    }
+    if let Some(ns_ebpf) = loaded.ns_ebpf.as_mut() {
+        if let Some(ring_buf) = ns_ebpf
+            .take_map("EVENTS")
+            .and_then(|map| aya::maps::RingBuf::try_from(map).ok())
+        {
+            ring_buffers.push(("namespace_enforcer", ring_buf));
+        }
+    }
+    if ring_buffers.is_empty() {
+        return Err("events_ring_buffers_not_found");
+    }
 
     // Step 3: Mark eBPF as active
     metrics.mark_ebpf_active();
@@ -420,10 +439,11 @@ async fn try_init_ebpf(
 
     // Step 5: Spawn the ring buffer consumer task
     let consumer_metrics = metrics.clone();
+    let consumer_action_tx = action_tx.clone();
     let consumer_handle = tokio::spawn(async move {
-        consumer::consume_ring_buffer(
-            ring_buf,
-            action_tx.clone(),
+        consumer::consume_ring_buffers(
+            ring_buffers,
+            consumer_action_tx,
             consumer_metrics,
             Duration::from_millis(10),
         )

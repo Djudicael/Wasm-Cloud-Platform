@@ -63,9 +63,7 @@ use aya_ebpf::{
 };
 use aya_log_ebpf::{info, warn};
 
-use ebpf_monitor_bpf_common::{
-    EventHeader, EventType, MonitorConfigMap, SyscallCategory, SyscallEvent,
-};
+use ebpf_monitor_bpf::{EventHeader, EventType, MonitorConfigMap, SyscallCategory, SyscallEvent};
 
 /// Configuration map (shared with all eBPF programs).
 #[map]
@@ -73,7 +71,7 @@ static CONFIG: Array<MonitorConfigMap> = Array::with_max_entries(1, 0);
 
 /// Ring buffer for sending events to userspace.
 #[map]
-static EVENTS: RingBuf = RingBuf::with_max_entries(512 * 1024, 0); // 512 KB
+static EVENTS: RingBuf = RingBuf::with_byte_size(512 * 1024, 0); // 512 KB
 
 /// Per-PID syscall count in current sampling window.
 /// Key: PID, Value: total syscall count.
@@ -181,15 +179,14 @@ pub fn sys_enter(ctx: TracePointContext) -> c_long {
 fn try_sys_enter(ctx: TracePointContext) -> Result<c_long, c_long> {
     let config = CONFIG.get(0).ok_or(0)?;
 
-    let pid_tgid = unsafe { aya_ebpf::helpers::bpf_get_current_pid_tgid() };
+    let pid_tgid = aya_ebpf::helpers::bpf_get_current_pid_tgid();
     let pid = pid_tgid as u32;
 
     // ── Filter: only monitor wasm-node children ─────────────────────────
     // The MONITORED_PIDS map is populated by the process_tracker eBPF
     // program when it sees a new child process of the wasm-node process.
     // We also monitor the node PID itself for defense in depth.
-    let is_monitored = pid == config.node_pid
-        || unsafe { MONITORED_PIDS.get(&pid).is_some() };
+    let is_monitored = pid == config.node_pid || unsafe { MONITORED_PIDS.get(&pid).is_some() };
 
     if !is_monitored {
         return Ok(0);
@@ -199,7 +196,7 @@ fn try_sys_enter(ctx: TracePointContext) -> Result<c_long, c_long> {
     // The syscall number is the first field after the common header.
     // On x86_64, it's a 32-bit signed integer at offset 8 of the
     // tracepoint-specific data (after the 8-byte common header).
-    let syscall_nr: u64 = unsafe { ctx.read_at(8)? }.ok_or(0)?;
+    let syscall_nr: u64 = unsafe { ctx.read_at(8)? };
 
     // ── Increment total syscall count ──────────────────────────────────
     // This is the fast path — every syscall from a monitored PID
@@ -245,32 +242,26 @@ fn try_sys_enter(ctx: TracePointContext) -> Result<c_long, c_long> {
             syscall_category: category,
             count_in_window: suspicious_count,
         };
-        EVENTS.output(&event, 0);
+        let _ = EVENTS.output(&event, 0);
 
         // Log at appropriate severity based on category
         match category {
             c if c == SyscallCategory::PrivilegeEscalation as u32 => {
                 warn!(
                     &ctx,
-                    "SECURITY: Privilege escalation syscall nr={} from pid={}",
-                    syscall_nr,
-                    pid
+                    "SECURITY: Privilege escalation syscall nr={} from pid={}", syscall_nr, pid
                 );
             }
             c if c == SyscallCategory::ProcessControl as u32 => {
                 warn!(
                     &ctx,
-                    "SECURITY: Process control syscall nr={} from pid={}",
-                    syscall_nr,
-                    pid
+                    "SECURITY: Process control syscall nr={} from pid={}", syscall_nr, pid
                 );
             }
             c if c == SyscallCategory::NetworkControl as u32 => {
                 info!(
                     &ctx,
-                    "Network control syscall nr={} from pid={}",
-                    syscall_nr,
-                    pid
+                    "Network control syscall nr={} from pid={}", syscall_nr, pid
                 );
             }
             _ => {}
@@ -302,13 +293,11 @@ fn try_sys_enter(ctx: TracePointContext) -> Result<c_long, c_long> {
             syscall_category: SyscallCategory::Normal as u32,
             count_in_window: total_count,
         };
-        EVENTS.output(&event, 0);
+        let _ = EVENTS.output(&event, 0);
 
         // Reset the counter after alerting to avoid flooding the
         // ring buffer with duplicate rate-limit events.
-        unsafe {
-            let _ = SYSCALL_COUNTS.insert(&pid, &0, 0);
-        }
+        let _ = SYSCALL_COUNTS.insert(&pid, &0, 0);
     }
 
     Ok(0)
@@ -355,9 +344,7 @@ fn classify_syscall(syscall_nr: u64) -> u32 {
         // are suspicious — a Wasm instance should not be a server.
         // We classify all of them as NetworkControl and let userspace
         // decide based on the app's configuration.
-        SYS_SOCKET | SYS_BIND | SYS_LISTEN | SYS_CONNECT => {
-            SyscallCategory::NetworkControl as u32
-        }
+        SYS_SOCKET | SYS_BIND | SYS_LISTEN | SYS_CONNECT => SyscallCategory::NetworkControl as u32,
 
         // ── Normal ──────────────────────────────────────────────────
         // All other syscalls are classified as Normal. This includes:
@@ -387,9 +374,7 @@ fn classify_syscall(syscall_nr: u64) -> u32 {
 /// called from other eBPF programs if BPF-to-BPF calls are supported.
 #[inline(never)]
 pub fn register_monitored_pid(pid: u32) {
-    unsafe {
-        let _ = MONITORED_PIDS.insert(&pid, &MONITORED_PID_MARKER, 0);
-    }
+    let _ = MONITORED_PIDS.insert(&pid, &MONITORED_PID_MARKER, 0);
 }
 
 /// Unregister a PID from the monitored set.
@@ -399,19 +384,15 @@ pub fn register_monitored_pid(pid: u32) {
 /// which reduces overhead and prevents false positives from recycled PIDs.
 #[inline(never)]
 pub fn unregister_monitored_pid(pid: u32) {
-    unsafe {
-        let _ = MONITORED_PIDS.remove(&pid);
-    }
+    let _ = MONITORED_PIDS.remove(&pid);
 
     // Also clean up the per-PID counters to free map entries.
     // Note: PerCpuHashMap::remove is not available in all aya-ebpf
     // versions. If it's not available, the counters will be cleaned
     // up lazily when the PID is reused (the old count will be
     // overwritten by the new process's syscalls).
-    unsafe {
-        let _ = SYSCALL_COUNTS.remove(&pid);
-        let _ = SUSPICIOUS_COUNTS.remove(&pid);
-    }
+    let _ = SYSCALL_COUNTS.remove(&pid);
+    let _ = SUSPICIOUS_COUNTS.remove(&pid);
 }
 
 /// Get the total syscall count for a PID in the current window.

@@ -36,11 +36,11 @@ use aya_ebpf::{
     cty::c_long,
     macros::{kprobe, map},
     maps::{Array, HashMap, RingBuf},
-    programs::KProbeContext,
+    programs::ProbeContext,
 };
 use aya_log_ebpf::warn;
 
-use ebpf_monitor_bpf_common::{EventHeader, EventType, FdEvent, MonitorConfigMap};
+use ebpf_monitor_bpf::{EventHeader, EventType, FdEvent, MonitorConfigMap};
 
 /// Configuration map (shared with all eBPF programs).
 #[map]
@@ -48,7 +48,7 @@ static CONFIG: Array<MonitorConfigMap> = Array::with_max_entries(1, 0);
 
 /// Ring buffer for sending events to userspace.
 #[map]
-static EVENTS: RingBuf = RingBuf::with_max_entries(512 * 1024, 0); // 512 KB
+static EVENTS: RingBuf = RingBuf::with_byte_size(512 * 1024, 0); // 512 KB
 
 /// Per-PID FD counter.
 /// Key: PID, Value: current open FD count.
@@ -56,9 +56,6 @@ static EVENTS: RingBuf = RingBuf::with_max_entries(512 * 1024, 0); // 512 KB
 static FD_COUNT: HashMap<u32, u32> = HashMap::with_max_entries(10240, 0);
 
 /// FD type constants (matching userspace FdType enum).
-const FD_TYPE_FILE: u32 = 0;
-const FD_TYPE_SOCKET: u32 = 1;
-const FD_TYPE_PIPE: u32 = 2;
 const FD_TYPE_OTHER: u32 = 3;
 
 /// KProbe: fd_install
@@ -69,17 +66,17 @@ const FD_TYPE_OTHER: u32 = 3;
 ///
 /// Signature: `void fd_install(struct file *file, unsigned int fd)`
 #[kprobe]
-pub fn fd_install(ctx: KProbeContext) -> c_long {
+pub fn fd_install(ctx: ProbeContext) -> c_long {
     match try_fd_install(ctx) {
         Ok(ret) => ret,
         Err(ret) => ret,
     }
 }
 
-fn try_fd_install(ctx: KProbeContext) -> Result<c_long, c_long> {
+fn try_fd_install(ctx: ProbeContext) -> Result<c_long, c_long> {
     let config = CONFIG.get(0).ok_or(0)?;
 
-    let pid_tgid = unsafe { aya_ebpf::helpers::bpf_get_current_pid_tgid() };
+    let pid_tgid = aya_ebpf::helpers::bpf_get_current_pid_tgid();
     let pid = pid_tgid as u32;
 
     // fd_install(struct file *file, unsigned int fd)
@@ -119,7 +116,7 @@ fn try_fd_install(ctx: KProbeContext) -> Result<c_long, c_long> {
             current_fd_count: new_count,
             fd_soft_limit: config.fd_soft_limit,
         };
-        EVENTS.output(&event, 0);
+        let _ = EVENTS.output(&event, 0);
 
         warn!(
             &ctx,
@@ -146,7 +143,7 @@ fn try_fd_install(ctx: KProbeContext) -> Result<c_long, c_long> {
             current_fd_count: new_count,
             fd_soft_limit: config.fd_hard_limit,
         };
-        EVENTS.output(&event, 0);
+        let _ = EVENTS.output(&event, 0);
 
         warn!(
             &ctx,
@@ -171,15 +168,15 @@ fn try_fd_install(ctx: KProbeContext) -> Result<c_long, c_long> {
 /// may not always be called. On some kernels, the symbol name differs.
 /// If attachment fails, userspace should try `filp_close` as a fallback.
 #[kprobe]
-pub fn do_filp_close(ctx: KProbeContext) -> c_long {
+pub fn do_filp_close(ctx: ProbeContext) -> c_long {
     match try_do_filp_close(ctx) {
         Ok(ret) => ret,
         Err(ret) => ret,
     }
 }
 
-fn try_do_filp_close(_ctx: KProbeContext) -> Result<c_long, c_long> {
-    let pid_tgid = unsafe { aya_ebpf::helpers::bpf_get_current_pid_tgid() };
+fn try_do_filp_close(_ctx: ProbeContext) -> Result<c_long, c_long> {
+    let pid_tgid = aya_ebpf::helpers::bpf_get_current_pid_tgid();
     let pid = pid_tgid as u32;
 
     // Decrement FD count for this PID
