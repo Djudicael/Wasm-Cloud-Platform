@@ -149,6 +149,11 @@ listen local_stats
     bind 127.0.0.1:8404
     stats enable
     stats uri /stats
+
+listen local_prometheus
+    bind 127.0.0.1:8405
+    mode http
+    http-request use-service prometheus-exporter if { path /metrics }
 EOF
 } > "$temporary_config"
 
@@ -174,6 +179,7 @@ with open(path, encoding="utf-8") as stream:
     state = json.load(stream)
 state["front_door"]["pid"] = pid
 state["front_door"]["mode"] = "oidc-two-wasi"
+state["front_door"]["metrics"] = "http://127.0.0.1:8405/metrics"
 directory = os.path.dirname(os.path.abspath(path))
 fd, temporary = tempfile.mkstemp(prefix=".services-", dir=directory, text=True)
 try:

@@ -198,19 +198,13 @@ pub async fn auth_middleware(
 
 /// Determine if a path is public (no authentication required).
 ///
-/// Public endpoints are used by load balancers and Prometheus and must
-/// be accessible without credentials.
+/// Public endpoints are limited to health probes and static metadata needed by
+/// load balancers. Prometheus scrapes `/metrics` with a read-only bearer token.
 pub fn is_public_endpoint(path: &str) -> bool {
     matches!(
         path,
-        "/health"
-            | "/healthz"
-            | "/readyz"
-            | "/livez"
-            | "/_platform/health"
-            | "/status/metrics"
-            | "/favicon.ico"
-    ) || path.starts_with("/status/metrics")
+        "/health" | "/healthz" | "/readyz" | "/livez" | "/_platform/health" | "/favicon.ico"
+    )
 }
 
 /// Determine the minimum permission level required for a request.

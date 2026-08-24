@@ -17,6 +17,75 @@ cd "$repo_root"
 services_file="${state_file}.services.json"
 if [[ -f "$services_file" ]]; then
   command -v python3 >/dev/null || { echo "python3 is required to read front-door state." >&2; exit 1; }
+  state_absolute=$(python3 -c 'import os, sys; print(os.path.abspath(sys.argv[1]))' "$state_file")
+  observability_state_key=$(printf '%s' "$state_absolute" | sha256sum | cut -d' ' -f1)
+  observability_root="${XDG_RUNTIME_DIR:-/tmp}/wasm-cloud-platform-observability-$(id -u)"
+  expected_observability_dir="$observability_root/$observability_state_key"
+  mapfile -t observability_state < <(python3 - "$services_file" <<'PY'
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as stream:
+    observability = json.load(stream).get("observability") or {}
+print(observability.get("state_key", ""))
+print(observability.get("runtime_dir", ""))
+for container in observability.get("containers", []):
+    print(f'{container.get("name", "")}\t{container.get("id", "")}')
+PY
+  )
+  recorded_observability_key=${observability_state[0]:-}
+  recorded_observability_dir=${observability_state[1]:-}
+  if [[ -n "$recorded_observability_key" || -n "$recorded_observability_dir" ]]; then
+    command -v podman >/dev/null || { echo "podman is required to stop recorded observability services." >&2; exit 1; }
+    [[ "$recorded_observability_key" == "$observability_state_key" \
+      && "$recorded_observability_dir" == "$expected_observability_dir" ]] || {
+      echo "Observability state does not match the selected state file; refusing cleanup." >&2
+      exit 1
+    }
+    for record in "${observability_state[@]:2}"; do
+      IFS=$'\t' read -r container_name container_id <<< "$record"
+      [[ -n "$container_name" && "$container_id" =~ ^[a-f0-9]{64}$ ]] || {
+        echo "Invalid observability container record; refusing cleanup." >&2
+        exit 1
+      }
+      if podman container exists "$container_id"; then
+        inspected_name=$(podman inspect --format '{{.Name}}' "$container_id")
+        inspected_label=$(podman inspect --format '{{index .Config.Labels "io.wasm-cloud-platform.state"}}' "$container_id")
+        [[ "$inspected_name" == "$container_name" && "$inspected_label" == "$observability_state_key" ]] || {
+          echo "Container $container_id does not match recorded observability state; refusing cleanup." >&2
+          exit 1
+        }
+        podman rm -f "$container_id" >/dev/null
+      fi
+    done
+    if [[ -d "$recorded_observability_dir" ]]; then
+      [[ "$(python3 -c 'import os, sys; print(os.path.abspath(sys.argv[1]))' "$recorded_observability_dir")" == "$expected_observability_dir" ]] || {
+        echo "Observability runtime directory mismatch; refusing cleanup." >&2
+        exit 1
+      }
+      rm -rf -- "$expected_observability_dir"
+      rmdir --ignore-fail-on-non-empty "$observability_root" 2>/dev/null || true
+    fi
+    python3 - "$services_file" <<'PY'
+import json, os, sys, tempfile
+path = sys.argv[1]
+with open(path, encoding="utf-8") as stream:
+    state = json.load(stream)
+state.pop("observability", None)
+directory = os.path.dirname(os.path.abspath(path))
+fd, temporary = tempfile.mkstemp(prefix=".services-", dir=directory, text=True)
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as stream:
+        json.dump(state, stream, indent=2)
+        stream.write("\n")
+    os.replace(temporary, path)
+except BaseException:
+    try:
+        os.unlink(temporary)
+    except FileNotFoundError:
+        pass
+    raise
+PY
+    echo "Stopped the recorded local observability services."
+  fi
   mapfile -t front_door_state < <(python3 - "$services_file" <<'PY'
 import json, sys
 with open(sys.argv[1], encoding="utf-8") as stream:
@@ -71,12 +140,18 @@ oidc_secret_root="${XDG_RUNTIME_DIR:-/tmp}/wasm-cloud-platform-oidc-secrets-$(id
 oidc_state_key=$(printf '%s' "$state_file" | sha256sum | cut -d' ' -f1)
 oidc_secret_dir="$oidc_secret_root/$oidc_state_key"
 
-command -v sudo >/dev/null || { echo "sudo is required for TAP/bridge cleanup." >&2; exit 1; }
-sudo -v
 target_dir=${CARGO_TARGET_DIR:-/tmp/wasm-cloud-platform-target}
 CARGO_TARGET_DIR="$target_dir" cargo build -p vm-testbed --bin vm-testbed-cli
 cli="$target_dir/debug/vm-testbed-cli"
-sudo -E "$cli" down --state-file "$state_file"
+if [[ -n ${WSL_DISTRO_NAME:-} ]] && command -v wsl.exe >/dev/null; then
+  # The Windows user owns the WSL distro and can invoke its root account without
+  # placing a sudo password in automation or requiring a terminal-bound ticket.
+  wsl.exe -u root -- "$cli" down --state-file "$state_file"
+else
+  command -v sudo >/dev/null || { echo "sudo is required for TAP/bridge cleanup." >&2; exit 1; }
+  sudo -v
+  sudo -E "$cli" down --state-file "$state_file"
+fi
 
 if [[ -e "$state_file" ]]; then
   echo "Teardown returned but the state file remains: $state_file" >&2

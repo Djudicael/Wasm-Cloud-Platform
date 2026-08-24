@@ -27,7 +27,7 @@ use anyhow::{anyhow, Context, Result};
 use aya::{
     maps::Array,
     programs::{KProbe, TracePoint},
-    Bpf,
+    Ebpf,
 };
 use std::path::Path;
 use tracing::{info, warn};
@@ -42,9 +42,9 @@ use crate::config::MonitorConfig;
 /// at runtime to stop monitoring.
 pub struct LoadedEbpf {
     /// The loaded main eBPF object (programs + maps).
-    pub ebpf: Bpf,
+    pub ebpf: Ebpf,
     /// Optional namespace enforcer eBPF object (separate ELF).
-    pub ns_ebpf: Option<Bpf>,
+    pub ns_ebpf: Option<Ebpf>,
     /// Attachment links for each loaded program.
     /// Links can be detached to stop a specific monitor.
     pub links: Vec<String>,
@@ -237,7 +237,7 @@ pub async fn load_and_attach(config: &MonitorConfig, node_pid: u32) -> Result<Op
 ///
 /// If none of these work, returns an error suggesting the user compile the
 /// BPF programs first.
-fn load_ebpf_object() -> Result<Bpf> {
+fn load_ebpf_object() -> Result<Ebpf> {
     // Strategy 1: Try loading from well-known development paths
     let dev_paths = [
         // Standard aya build output location
@@ -253,7 +253,7 @@ fn load_ebpf_object() -> Result<Bpf> {
         if path.exists() {
             info!(path = %path.display(), "Loading eBPF object from file");
             let bytes = std::fs::read(path).context("failed to read eBPF object file")?;
-            let bpf = Bpf::load(&bytes).context("failed to parse eBPF object")?;
+            let bpf = Ebpf::load(&bytes).context("failed to parse eBPF object")?;
             return Ok(bpf);
         }
     }
@@ -281,7 +281,7 @@ fn load_ebpf_object() -> Result<Bpf> {
 ///
 /// Tries multiple strategies similar to `load_ebpf_object` but for the
 /// `namespace_enforcer` ELF binary.
-fn load_namespace_enforcer_object() -> Result<Bpf> {
+fn load_namespace_enforcer_object() -> Result<Ebpf> {
     let dev_paths = [
         "./ebpf-monitor-bpf/target/bpfel-unknown-none/release/namespace_enforcer",
         "../ebpf-monitor-bpf/target/bpfel-unknown-none/release/namespace_enforcer",
@@ -295,7 +295,7 @@ fn load_namespace_enforcer_object() -> Result<Bpf> {
             let bytes = std::fs::read(path)
                 .context("failed to read namespace enforcer eBPF object file")?;
             let bpf =
-                Bpf::load(&bytes).context("failed to parse namespace enforcer eBPF object")?;
+                Ebpf::load(&bytes).context("failed to parse namespace enforcer eBPF object")?;
             return Ok(bpf);
         }
     }
@@ -311,8 +311,8 @@ fn load_namespace_enforcer_object() -> Result<Bpf> {
 // ── Config Map ────────────────────────────────────────────────────────────────
 
 /// Write the configuration map that eBPF programs read at runtime.
-fn write_config_map(ebpf: &mut Bpf, config: &MonitorConfig, node_pid: u32) -> Result<()> {
-    let config_map: Array<_, MonitorConfigMap> = ebpf
+fn write_config_map(ebpf: &mut Ebpf, config: &MonitorConfig, node_pid: u32) -> Result<()> {
+    let mut config_map: Array<_, MonitorConfigMap> = ebpf
         .map_mut("CONFIG")
         .ok_or_else(|| anyhow!("CONFIG map not found in eBPF object"))?
         .try_into()
@@ -353,38 +353,38 @@ fn write_config_map(ebpf: &mut Bpf, config: &MonitorConfig, node_pid: u32) -> Re
 // ── Program Attachment Helpers ────────────────────────────────────────────────
 
 /// Attach the process tracker (sched_process_exec + sched_process_exit tracepoints).
-fn attach_process_tracker(ebpf: &mut Bpf) -> Result<()> {
+fn attach_process_tracker(ebpf: &mut Ebpf) -> Result<()> {
     attach_tracepoint(ebpf, "sched_process_exec", "sched", "sched_process_exec")?;
     attach_tracepoint(ebpf, "sched_process_exit", "sched", "sched_process_exit")?;
     Ok(())
 }
 
 /// Attach the TCP connection monitor (inet_sock_set_state tracepoint).
-fn attach_tcp_monitor(ebpf: &mut Bpf) -> Result<()> {
+fn attach_tcp_monitor(ebpf: &mut Ebpf) -> Result<()> {
     attach_tracepoint(ebpf, "inet_sock_set_state", "sock", "inet_sock_set_state")
 }
 
 /// Attach the FD watcher (fd_install + do_filp_close kprobes).
-fn attach_fd_watcher(ebpf: &mut Bpf) -> Result<()> {
+fn attach_fd_watcher(ebpf: &mut Ebpf) -> Result<()> {
     attach_kprobe(ebpf, "fd_install", "fd_install")?;
     attach_kprobe(ebpf, "do_filp_close", "do_filp_close")?;
     Ok(())
 }
 
 /// Attach the memory pressure sentinel (try_to_free_pages kprobe).
-fn attach_mem_pressure(ebpf: &mut Bpf) -> Result<()> {
+fn attach_mem_pressure(ebpf: &mut Ebpf) -> Result<()> {
     attach_kprobe(ebpf, "try_to_free_pages", "try_to_free_pages")
 }
 
 /// Attach the disk I/O monitor (block_rq_issue + block_rq_complete tracepoints).
-fn attach_disk_monitor(ebpf: &mut Bpf) -> Result<()> {
+fn attach_disk_monitor(ebpf: &mut Ebpf) -> Result<()> {
     attach_tracepoint(ebpf, "block_rq_issue", "block", "block_rq_issue")?;
     attach_tracepoint(ebpf, "block_rq_complete", "block", "block_rq_complete")?;
     Ok(())
 }
 
 /// Attach the syscall anomaly counter (raw_syscalls/sys_enter tracepoint).
-fn attach_syscall_counter(ebpf: &mut Bpf) -> Result<()> {
+fn attach_syscall_counter(ebpf: &mut Ebpf) -> Result<()> {
     attach_tracepoint(ebpf, "sys_enter", "raw_syscalls", "sys_enter")
 }
 
@@ -392,7 +392,7 @@ fn attach_syscall_counter(ebpf: &mut Bpf) -> Result<()> {
 ///
 /// Attaches `ns_inet_sock_set_state` to the `sock:inet_sock_set_state` tracepoint
 /// and `ns_audit_sendto` to the `syscalls:sys_enter_sendto` tracepoint.
-fn attach_namespace_enforcer(ebpf: &mut Bpf) -> Result<()> {
+fn attach_namespace_enforcer(ebpf: &mut Ebpf) -> Result<()> {
     attach_tracepoint(
         ebpf,
         "ns_inet_sock_set_state",
@@ -404,8 +404,8 @@ fn attach_namespace_enforcer(ebpf: &mut Bpf) -> Result<()> {
 }
 
 /// Write the NS_ENFORCE_CONFIG singleton array map.
-fn write_ns_enforce_config(ebpf: &mut Bpf, config: &MonitorConfig, node_pid: u32) -> Result<()> {
-    let config_map: Array<_, NsEnforceConfig> = ebpf
+fn write_ns_enforce_config(ebpf: &mut Ebpf, config: &MonitorConfig, node_pid: u32) -> Result<()> {
+    let mut config_map: Array<_, NsEnforceConfig> = ebpf
         .map_mut("NS_ENFORCE_CONFIG")
         .ok_or_else(|| anyhow!("NS_ENFORCE_CONFIG map not found in eBPF object"))?
         .try_into()
@@ -440,7 +440,12 @@ fn write_ns_enforce_config(ebpf: &mut Bpf, config: &MonitorConfig, node_pid: u32
 ///
 /// The program must be defined in the eBPF object with the given `program_name`.
 /// It is attached to the tracepoint identified by `category:name`.
-fn attach_tracepoint(ebpf: &mut Bpf, program_name: &str, category: &str, name: &str) -> Result<()> {
+fn attach_tracepoint(
+    ebpf: &mut Ebpf,
+    program_name: &str,
+    category: &str,
+    name: &str,
+) -> Result<()> {
     let program: &mut TracePoint = ebpf
         .program_mut(program_name)
         .ok_or_else(|| anyhow!("eBPF program '{}' not found in object", program_name))?
@@ -465,7 +470,7 @@ fn attach_tracepoint(ebpf: &mut Bpf, program_name: &str, category: &str, name: &
 ///
 /// The program must be defined in the eBPF object with the given `program_name`.
 /// It is attached to the kernel function `symbol`.
-fn attach_kprobe(ebpf: &mut Bpf, program_name: &str, symbol: &str) -> Result<()> {
+fn attach_kprobe(ebpf: &mut Ebpf, program_name: &str, symbol: &str) -> Result<()> {
     let program: &mut KProbe = ebpf
         .program_mut(program_name)
         .ok_or_else(|| anyhow!("eBPF program '{}' not found in object", program_name))?
@@ -548,12 +553,13 @@ fn get_kernel_version() -> Option<(u32, u32, u32)> {
 
     // Try uname
     let info = unsafe {
-        let mut buf: [std::os::raw::c_char; 256] = [0; 256];
-        if libc::uname(buf.as_mut_ptr()) == -1 {
+        let mut uts = std::mem::MaybeUninit::<libc::utsname>::uninit();
+        if libc::uname(uts.as_mut_ptr()) == -1 {
             return None;
         }
+        let uts = uts.assume_init();
         // Convert C string to Rust String
-        std::ffi::CStr::from_ptr(buf.as_ptr())
+        std::ffi::CStr::from_ptr(uts.release.as_ptr())
             .to_string_lossy()
             .into_owned()
     };

@@ -30,7 +30,7 @@ pub struct AuthConfig {
     pub enabled: bool,
 
     /// Read-only bearer token. Grants access to GET endpoints:
-    /// /status/*, /admin/config (GET), /health, /metrics
+    /// /status/*, /admin/config (GET), and /metrics
     #[serde(default)]
     pub read_token: Option<String>,
 

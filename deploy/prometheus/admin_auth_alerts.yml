@@ -5,7 +5,7 @@
 #
 # Prerequisites:
 #   - wasm-node must be running with auth.enabled = true
-#   - Prometheus must be scraping the admin API /status/metrics endpoint
+#   - Prometheus must scrape the admin API /metrics endpoint with a read token
 #   - The wasm_admin_auth_successes_total, wasm_admin_auth_failures_total,
 #     and wasm_admin_rate_limited_total counters must be exposed
 

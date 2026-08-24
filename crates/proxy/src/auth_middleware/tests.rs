@@ -20,7 +20,6 @@ fn test_public_endpoints() {
     assert!(is_public_endpoint("/readyz"));
     assert!(is_public_endpoint("/livez"));
     assert!(is_public_endpoint("/_platform/health"));
-    assert!(is_public_endpoint("/status/metrics"));
     assert!(is_public_endpoint("/favicon.ico"));
 }
 
@@ -31,6 +30,8 @@ fn test_non_public_endpoints() {
     assert!(!is_public_endpoint("/admin/gc/force"));
     assert!(!is_public_endpoint("/admin/auth/rotate-token"));
     assert!(!is_public_endpoint("/status/pgbouncer"));
+    assert!(!is_public_endpoint("/metrics"));
+    assert!(!is_public_endpoint("/status/metrics"));
     assert!(!is_public_endpoint("/logs/my-app"));
     assert!(!is_public_endpoint("/upstreams"));
 }
@@ -39,10 +40,7 @@ fn test_non_public_endpoints() {
 fn test_required_permission_get() {
     let get = axum::http::Method::GET;
     assert_eq!(required_permission(&get, "/admin/config"), Permission::Read);
-    assert_eq!(
-        required_permission(&get, "/status/metrics"),
-        Permission::Read
-    );
+    assert_eq!(required_permission(&get, "/metrics"), Permission::Read);
 }
 
 #[test]
@@ -345,7 +343,7 @@ fn test_auth_router(config: AuthConfig) -> axum::Router {
         .route("/healthz", get(|| async { "ok" }))
         .route("/readyz", get(|| async { "ok" }))
         .route("/livez", get(|| async { "ok" }))
-        .route("/status/metrics", get(|| async { "# metrics\n" }))
+        .route("/metrics", get(|| async { "# metrics\n" }))
         .route("/status/pgbouncer", get(|| async { "pgbouncer ok" }))
         .route("/admin/config", get(|| async { "config ok" }))
         .route("/admin/config", post(|| async { "config updated" }))
@@ -380,13 +378,7 @@ async fn test_integration_auth_disabled_allows_all() {
 
 #[tokio::test]
 async fn test_integration_public_endpoints_no_auth() {
-    for path in &[
-        "/health",
-        "/healthz",
-        "/readyz",
-        "/livez",
-        "/status/metrics",
-    ] {
+    for path in &["/health", "/healthz", "/readyz", "/livez"] {
         let app = test_auth_router(AuthConfig {
             enabled: true,
             write_token: Some("write_token_1234567890".to_string()),
@@ -405,6 +397,34 @@ async fn test_integration_public_endpoints_no_auth() {
             path
         );
     }
+}
+
+#[tokio::test]
+async fn test_integration_metrics_requires_read_auth() {
+    let config = AuthConfig {
+        enabled: true,
+        write_token: Some("write_token_1234567890".to_string()),
+        read_token: Some("read_token_1234567890".to_string()),
+        ..Default::default()
+    };
+
+    let request = axum::extract::Request::builder()
+        .uri("/metrics")
+        .body(Body::empty())
+        .unwrap();
+    let response = test_auth_router(config.clone())
+        .oneshot(request)
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+    let request = axum::extract::Request::builder()
+        .uri("/metrics")
+        .header("Authorization", "Bearer read_token_1234567890")
+        .body(Body::empty())
+        .unwrap();
+    let response = test_auth_router(config).oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
 }
 
 #[tokio::test]

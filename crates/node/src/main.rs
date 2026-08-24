@@ -1263,9 +1263,13 @@ async fn main() -> anyhow::Result<()> {
     let nats_health = Arc::new(NatsHealth::new());
     nats_health.mark_connected();
 
-    // Start NATS health watcher (updates last message timestamp periodically)
-    let _nats_watcher_handle =
-        NatsHealthWatcher::new((*nats_health).clone(), Duration::from_secs(5)).start();
+    // Actively probe NATS so health reflects server stalls as well as socket disconnect events.
+    let _nats_watcher_handle = NatsHealthWatcher::new(
+        (*nats_health).clone(),
+        bus.client().clone(),
+        Duration::from_secs(5),
+    )
+    .start();
 
     recovery::startup_integrity_check(&store, bus.client(), &config.storage).await;
 

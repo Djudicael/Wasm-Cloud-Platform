@@ -5,7 +5,7 @@ description: Provision a local Wasm Cloud Platform test environment with Firecra
 
 # Provision the microVM testbed
 
-1. Before provisioning, determine the exact positive integer number of platform nodes the user wants. If it was not supplied, ask; do not silently choose a node count on the user's behalf. Also ask which topology they want (`smoke`, `multi-node`, or `production-like`) and whether traffic should enter directly through node proxies or through HAProxy, including the desired host bind address. If they say "full" or "production-ready," clarify whether they also expect TLS, an external secrets backend, observability, or highly available NATS; the current local automation does not provision those controls.
+1. Before provisioning, determine the exact positive integer number of platform nodes the user wants. If it was not supplied, ask; do not silently choose a node count on the user's behalf. Also ask which topology they want (`smoke`, `multi-node`, or `production-like`) and whether traffic should enter directly through node proxies or through HAProxy, including the desired host bind address. If they say "full" or "production-ready," clarify whether they also expect TLS, an external secrets backend, observability, or highly available NATS; local observability is optional and the other controls remain operator responsibilities.
 2. Explain the topology before running it. Every platform node contains the built-in reverse proxy. The optional `haproxy` front door runs on the WSL/Linux host and balances requests across those node proxies. One additional NATS microVM is always created and is not included in `--nodes`. Application service VMs, such as PostgreSQL, are also separate from the platform-node count.
 3. Work from the repository root and run all build and test commands inside Linux or WSL2.
 4. Check that `/dev/kvm` exists and that the user can use `sudo`. Do not weaken KVM permissions automatically.
@@ -16,6 +16,8 @@ description: Provision a local Wasm Cloud Platform test environment with Firecra
 
 When PostgreSQL is required, build `assets/postgres-rootfs.ext4` with `bash scripts/vm/build-postgres-rootfs.sh`, then add it to the running topology with `bash scripts/vm/provision-postgres-service.sh --state-file PATH`. The service is persisted in the same VM state and must report TCP readiness before provisioning is considered successful. Do not count this service VM as a platform node.
 
-The production-like preset is a local rehearsal, not a production deployment. It does not create production TLS certificates, a persistent external secrets backend, monitoring/alerting, or a highly available NATS cluster. State these gaps rather than claiming production readiness.
+For a disposable production-validation rehearsal, add the state-scoped Prometheus, Alertmanager, exporters, and OpenTelemetry Collector with `bash scripts/vm/provision-observability.sh --state-file PATH`. It uses Podman on the WSL/Linux host, records exact container identities in the companion service state, and is not a substitute for production telemetry storage, access control, or retention.
+
+The production-like preset is a local rehearsal, not a production deployment. It does not create production TLS certificates, a persistent external secrets backend, durable production monitoring/alerting, or a highly available NATS cluster. State these gaps rather than claiming production readiness.
 
 Treat provisioning as successful only when every node passes the CLI health wait and `status` reports live processes with successful health responses. On failure, preserve logs and state for diagnosis; do not claim the environment is ready.

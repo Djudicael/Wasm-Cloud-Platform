@@ -392,10 +392,8 @@ async fn try_init_ebpf(
     ),
     &'static str,
 > {
-    use crate::common::MonitorConfigMap;
-
     // Step 1: Load and attach eBPF programs
-    let loaded = loader::load_and_attach(config, node_pid)
+    let mut loaded = loader::load_and_attach(config, node_pid)
         .await
         .map_err(|e| {
             warn!(error = %e, "Failed to load eBPF programs");
@@ -410,8 +408,8 @@ async fn try_init_ebpf(
     // Step 2: Open the ring buffer
     let ring_buf = loaded
         .ebpf
-        .map("EVENTS")
-        .and_then(|m| aya::maps::RingBuf::try_from(m).ok())
+        .take_map("EVENTS")
+        .and_then(|map| aya::maps::RingBuf::try_from(map).ok())
         .ok_or("events_ring_buf_not_found")?;
 
     // Step 3: Mark eBPF as active

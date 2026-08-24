@@ -161,6 +161,27 @@ redacted artifact with the result.
 | Local seed-secret logging | FAIL FOR PRODUCTION / ACCEPTED ONLY IN DISPOSABLE TEST | The development seeder writes the test administrator password, confidential-client secret, and one-time API key to its output. The repeat-run log was created with a restrictive umask, but production migration/seed tooling must never print credentials or tokens and must source them from an external secret manager |
 | WSL secret-file permissions | REMEDIATED | A state-adjacent directory under `/mnt/d` remained mode `0777` despite requested `0700`/`0600`, because this WSL Windows mount does not enforce those Unix mode changes. Deployment and teardown now derive one exact state-keyed directory under `$XDG_RUNTIME_DIR` (or `/tmp`) on the Linux filesystem. The live keys and credentials were moved there; verified modes are `0700` for both directories and `0600` for credentials, and the unprotected checkout copy no longer exists |
 | Verification response confidentiality | REMEDIATED | The first deployment left fixed, world-readable `/tmp/oidc-*` response files, including the seeded login token response. Those exact files were removed. Verification now uses one mode-`0700` `mktemp` directory and an exit trap removes the login payload and every HTTP response on both success and failure; a complete redeployment passed after the change |
+| Manual browser journey | PASS (USER-VALIDATED) | The operator validated the interactive frontend and application journey through the HAProxy public origin after automated readiness, discovery, SPA, and seeded-login checks passed. Negative/expiry cases remain separate automated security gates rather than being inferred from this attestation |
+| Host capacity preflight | PASS FOR CURRENT REHEARSAL | WSL exposes 24 CPUs, 15 GiB RAM plus 4 GiB swap, 683 GiB free on the Linux filesystem, and 471 GiB free on `/mnt/d`. This is sufficient for the current six microVM/process services and disposable telemetry stack; it is not production sizing evidence |
+| Release provenance snapshot | PARTIAL | Source commit is `4abbc7db5087862de0331f03a2b7904433dba727` with a dirty worktree intentionally preserved. Rust is pinned to 1.97.1. SHA-256: platform lock `8f7c549d...`, kernel `352fd0be...`, node image `932c118f...`, NATS image `76dace70...`, PostgreSQL image `811cc23f...`, frontend WASI `d2d032b3...`, backend WASI `0e9fd62b...`. A standards-based SBOM and clean promotion build are still missing |
+| Effective node configuration review | GAPS RECORDED | Unique node IDs and routable bridge addresses are correct. Local admin auth is enabled over HTTP with only a shared write token; `/metrics` requires that token. Proxy/admin TLS is disabled, key source is ephemeral `generate`, OTLP output is unset, configured memory ceiling is 4 GiB inside 2-GiB VMs, eBPF is configured enabled but the release lacks active probes, and local test credentials must not be promoted |
+| Metrics endpoint contract | FIXED / TESTED | Runtime serves authenticated `/metrics`; `/status/metrics` is absent. Stale middleware documentation/tests that treated `/status/metrics` as public were removed, Prometheus rule documentation now names `/metrics` with a read token, and all 45 proxy authentication tests pass. The live test still uses the write token because its image predates a dedicated monitoring token |
+| Disposable observability stack | PASS | State-scoped Podman services run Prometheus 3.5.0, Alertmanager 0.28.1, node-exporter 1.9.1, NATS exporter 0.17.3, PostgreSQL exporter 0.17.1, and OpenTelemetry Collector Contrib 0.130.1. Exact container IDs and the Linux-runtime configuration directory are recorded in companion state for teardown |
+| Prometheus scrape coverage | PASS | Ten live targets report `up=1`: three separately labeled platform nodes, HAProxy, NATS, PostgreSQL (`pg_up=1`), WSL host, OpenTelemetry Collector, Prometheus, and Alertmanager. HAProxy metrics bind only to `127.0.0.1:8405`; all telemetry UI/exporter binds are loopback-only |
+| Prometheus configuration/rules | PASS WITH ONE SEMANTIC GAP | `promtool check config` passes with three rule files and 19 rules; live rule evaluation health is `ok`. The existing `AdminAuthDisabled` expression depends on `process_start_time_seconds`, which is not emitted by platform-node metrics and therefore cannot prove auth mode; add an explicit auth-enabled gauge before production acceptance |
+| Alert delivery and recovery | PASS (TELEMETRY FAILURE) | Stopping only the recorded Collector container caused `TelemetryCollectorDown` to progress through pending to firing and arrive in Alertmanager with stable cluster/environment/instance labels. Restarting the same container restored `up=1`; Alertmanager returned no active alerts and the OIDC database readiness remained ready |
+| OpenTelemetry pipeline | RECEIVER ONLY / NOT APPLICATION-INTEGRATED | The Collector accepts OTLP on loopback and exposes self-metrics, but effective node configuration has `otlp_endpoint=null`. No platform/app logs or traces reached it, so trace continuity, buffering, retry, sampling, and shutdown flushing remain unvalidated |
+| PostgreSQL interruption/recovery | PASS | The exact recorded PostgreSQL Firecracker PID `289481` was paused with `SIGSTOP`. Within the bounded health window, HAProxy returned 503 for backend readiness, the independent frontend remained HTTP 200, the PostgreSQL exporter target went down, and `PostgreSQLExporterDown` fired in Alertmanager. The paused VMM stayed near 1% memory without CPU/log escalation. `SIGCONT` restored the same VM; readiness returned `database=ok`, `pg_up=1`, and the alert resolved without redeployment |
+| NATS interruption/recovery | PASS AFTER REMEDIATION | Pausing only recorded NATS Firecracker PID `223906` made the exporter target go down and fired `NatsExporterDown`; frontend and backend data-plane routes remained HTTP 200. The original nodes incorrectly reported NATS as healthy for more than 65 seconds because `NatsHealthWatcher` refreshed its timestamp without probing the server. A first canary using `Client::flush()` also failed because flush only confirms writes to the local TCP buffer. The final implementation performs a two-second request/reply to `$JS.API.INFO` every five seconds, proving both NATS and required JetStream responsiveness. After rolling the rebuilt image to all three nodes, a whole-cluster freeze made every node health endpoint return HTTP 503 within 12 seconds while both application routes stayed available. `SIGCONT` restored all node health endpoints to HTTP 200 and resolved the alert within 12 seconds without redeployment |
+| Platform-node rolling replacement | PASS | The corrected base image (`sha256:40e1e1c58430fc82e1ec775ed392e2b063e28a93aada85c0aa00e60902ebe7dc`) passed read-only `e2fsck`. Nodes 2, 1, and 0 were restarted sequentially from exact recorded state. Each node became healthy, reconstructed both OIDC deployments from desired state, and served traffic; the HAProxy backend route remained HTTP 200 throughout the observed post-restart gates and no alert remained active |
+| Single platform-node pause/recovery | PASS | Recorded node 0 PID `325604` was paused with `SIGSTOP`. Its admin endpoint timed out, `PlatformNodeDown` fired with `node=local-test-node-0`, and HAProxy metrics marked node 0 `DOWN` with `L4TOUT` in both OIDC frontend and backend pools while nodes 1 and 2 remained `UP`. Public frontend and backend readiness remained HTTP 200. `SIGCONT` restored node 0 health to HTTP 200 and Alertmanager cleared without deployment changes |
+| Abrupt platform-node termination/rebuild | PASS | After command-line verification, recorded node 1 Firecracker PID `325535` received `SIGKILL` and exited. `PlatformNodeDown` fired for only node 1 while frontend and backend stayed HTTP 200. State-driven `restart-node` replaced it as PID `327249`; within 20 seconds it was accepting requests with both OIDC deployments reconstructed, the alert cleared, and public backend readiness remained HTTP 200 |
+| eBPF build and packaging gate | BLOCKED / PRODUCTION P0 | All live nodes log `eBPF feature not compiled` and run the 10-second userspace fallback; `wasm_ebpf_active=0` is therefore accurate. `cargo check -p node --features ebpf` fails with 15 errors in the Aya 0.14 consumer, namespace-map, loader, and libc interfaces. Building the BPF crate for `bpfel-unknown-none` also fails because the pinned stable toolchain has no target `core` and the repository provides no nightly `-Z build-std` workflow. Finally, the BPF crate produces seven separate programs while the guest loader/package contract expects one `/opt/wasm-node/ebpf/ebpf-monitor.o` plus a namespace object; the rootfs builder neither enables the feature nor installs objects. Kernel BTF alone is insufficient. Production eBPF acceptance requires a reproducible pinned BPF toolchain, successful warnings-denied feature build, an explicit multi-object loader/package contract, signed/checksummed objects, least-privilege guest capabilities, and the Phase 6 event/fallback/overhead tests |
+| PostgreSQL logical backup/restore | PASS WITH APPLICATION-REPOINT GAP | `scripts/vm/validate-postgres-backup.sh` read the recorded service address, created a private custom-format dump, restored it with `--exit-on-error` into an isolated PostgreSQL 17 container, and compared source/restored metadata. Both contained 25 public tables and 11 migration rows; backup SHA-256 was `7cbcd23d036553d7dde28d3140bfa8e2ee37be355d9c01307672f6b31a0afb35`. The exact labeled container and private runtime directory were removed. This proves logical restorability, not application readiness against the restored endpoint, backup encryption/retention, or production RPO/RTO |
+| Post-remediation repository checks | PASS WITH eBPF EXCEPTION | In WSL with `CARGO_TARGET_DIR=/tmp/wasm-cloud-platform-target`: `cargo fmt --all -- --check`, shell syntax for all changed VM scripts, workspace Clippy with warnings denied, the required native workspace check, and complete messaging/proxy test suites passed (138 Rust tests total across those two packages and gateway integration). Global `git diff --check` is not usable on this checkout because unrelated pre-existing CRLF worktree conversions are reported as trailing whitespace; scoped changed-file hygiene is clean except the already-CRLF Prometheus rule file. The separate `--features ebpf` failure remains the explicit P0 above |
+| Final live-state snapshot | PASS / ENVIRONMENT LEFT RUNNING | NATS PID `223906`, PostgreSQL PID `289481`, and platform node PIDs `325604`, `327249`, and `325384` are alive; every node health probe is HTTP 200. Public frontend and backend readiness are HTTP 200, all 10 Prometheus targets are up, and Alertmanager has no active alert. The environment remains available for operator testing and must not be destroyed until explicitly requested |
+| Manual Prometheus UI validation | PASS (USER-VALIDATED) | The operator completed manual testing through `http://localhost:9095` after automated validation confirmed 10 targets up, zero targets down, and no active Alertmanager alerts |
+| Authorized teardown | PASS | After explicit operator authorization, `scripts/vm/destroy-testbed.sh` validated the selected state and removed its six exact state-labeled observability containers, recorded HAProxy PID/config/log, three platform-node VMs, NATS VM, PostgreSQL VM, exact TAP devices and bridge, state-derived OIDC credentials, and lifecycle state files. A post-teardown audit confirmed every recorded PID/device/container absent and ports 8088, 9095, and 9093 closed. No broad process or network matching was used |
 
 ### Execution notes
 
@@ -190,8 +211,8 @@ redacted artifact with the result.
 ## Phase 0: safety and prerequisites
 
 - [x] Run all commands inside Linux or WSL2 from the repository root.
-- [ ] Confirm the target is a disposable local test environment.
-- [ ] Confirm no production credentials, certificates, customer data, or DNS
+- [x] Confirm the target is a disposable local test environment.
+- [x] Confirm no production credentials, certificates, customer data, or DNS
       zones are present.
 - [x] Confirm KVM is accessible:
 
@@ -199,7 +220,7 @@ redacted artifact with the result.
   test -r /dev/kvm && test -w /dev/kvm
   ```
 
-- [ ] Confirm sufficient free CPU, memory, and disk for three 2 GiB platform
+- [x] Confirm sufficient free CPU, memory, and disk for three 2 GiB platform
       nodes plus NATS, PostgreSQL, builds, and observability.
 - [x] Select one state file and use it for provisioning, deployment, inspection,
       and destruction:
@@ -212,7 +233,7 @@ redacted artifact with the result.
       an existing environment. Inspect or explicitly destroy an old testbed
       before reusing its path.
 - [ ] Record firewall, bridge, TAP, listening-port, and route state before the run.
-- [ ] Define the SLOs and concrete pass thresholds before generating traffic.
+- [x] Define the SLOs and concrete pass thresholds before generating traffic.
 
 Suggested initial rehearsal thresholds, which must be replaced by product SLOs:
 
@@ -227,9 +248,9 @@ Suggested initial rehearsal thresholds, which must be replaced by product SLOs:
 
 ## Phase 1: release and configuration gates
 
-- [ ] Preserve unrelated worktree changes and record `git status --short`.
-- [ ] Confirm `rust-toolchain.toml` and `Cargo.lock` are committed.
-- [ ] Set build output on the Linux filesystem when the checkout is under `/mnt`:
+- [x] Preserve unrelated worktree changes and record `git status --short`.
+- [x] Confirm `rust-toolchain.toml` and `Cargo.lock` are committed.
+- [x] Set build output on the Linux filesystem when the checkout is under `/mnt`:
 
   ```bash
   export CARGO_TARGET_DIR=/tmp/wasm-cloud-platform-target
@@ -250,7 +271,7 @@ Suggested initial rehearsal thresholds, which must be replaced by product SLOs:
 - [ ] Build the same locked release artifacts intended for promotion.
 - [ ] Record SHA-256 checksums, provenance, dependency audit results, and SBOM
       location.
-- [ ] Review effective production-like configuration for unique node IDs,
+- [x] Review effective production-like configuration for unique node IDs,
       routable advertised addresses, memory/fuel limits, TLS expectations,
       secrets, log level, metrics, and eBPF mode.
 - [ ] Confirm no placeholder or local-development credential can be promoted.
@@ -276,7 +297,7 @@ bash scripts/vm/provision-testbed.sh \
 - [x] Verify the recorded Firecracker PIDs belong to this state file.
 - [x] Verify every platform node has a unique identity and writable filesystem.
 - [x] Verify NATS connectivity and platform membership convergence.
-- [ ] Verify HAProxy exposes no node administration endpoint publicly.
+- [x] Verify HAProxy exposes no node administration endpoint publicly.
 - [x] Keep the state file and companion service state for the complete run.
 
 ## Phase 3: PostgreSQL and OpenID Connect application
@@ -312,7 +333,7 @@ command succeeded.
 - [x] Frontend assets and SPA fallback routes load through HAProxy.
 - [x] OIDC discovery returns the expected issuer.
 - [x] Login reaches the identity flow without a 502 response.
-- [ ] Callback, token/session handling, authenticated API access, refresh where
+- [x] Callback, token/session handling, authenticated API access, refresh where
       supported, and logout all work through the public origin.
 - [ ] Invalid credentials, invalid redirect URIs, expired state/nonce, and expired
       sessions fail safely.
@@ -328,12 +349,12 @@ The code currently exposes platform metrics at `/metrics`. Reconcile any
 configuration or documentation that still refers to `/status/metrics` before
 accepting this phase.
 
-- [ ] Deploy or connect a disposable Prometheus and Alertmanager.
-- [ ] Scrape every platform node separately over the intended private path.
-- [ ] Configure the actual authentication and TLS behavior of `/metrics`.
-- [ ] Add host, HAProxy, NATS, PostgreSQL, and OpenTelemetry Collector metrics.
-- [ ] Assign stable `environment`, `cluster`, `node`, `job`, and `instance` labels.
-- [ ] Run:
+- [x] Deploy or connect a disposable Prometheus and Alertmanager.
+- [x] Scrape every platform node separately over the intended private path.
+- [x] Configure the actual authentication and TLS behavior of `/metrics`.
+- [x] Add host, HAProxy, NATS, PostgreSQL, and OpenTelemetry Collector metrics.
+- [x] Assign stable `environment`, `cluster`, `node`, `job`, and `instance` labels.
+- [x] Run:
 
   ```bash
   promtool check config /path/to/prometheus.yml
@@ -412,11 +433,11 @@ pattern matching.
 ### Platform node
 
 - [ ] Gracefully stop one platform node.
-- [ ] Abruptly terminate one platform-node Firecracker process.
-- [ ] Pause or isolate one node long enough to trigger health removal.
-- [ ] Verify HAProxy stops routing to the unhealthy application pool.
+- [x] Abruptly terminate one platform-node Firecracker process.
+- [x] Pause or isolate one node long enough to trigger health removal.
+- [x] Verify HAProxy stops routing to the unhealthy application pool.
 - [ ] Verify remaining capacity stays within the declared SLO.
-- [ ] Restore or rebuild the node and verify membership and deployment convergence.
+- [x] Restore or rebuild the node and verify membership and deployment convergence.
 
 ### Network
 
@@ -428,20 +449,22 @@ pattern matching.
 
 ### NATS
 
-- [ ] Interrupt the single local NATS service and observe safe platform degradation.
-- [ ] Restore it and verify subscriptions, consumers, desired state, and routes
+- [x] Interrupt the single local NATS service and observe safe platform degradation.
+      The initial node-local check failed, was remediated, and the rebuilt-image
+      retest passed on all three nodes within 12 seconds.
+- [x] Restore it and verify subscriptions, consumers, desired state, and routes
       converge without duplication.
-- [ ] Record this as dependency interruption only; the single-host test cannot pass
+- [x] Record this as dependency interruption only; the single-host test cannot pass
       an HA NATS quorum requirement.
 
 ### PostgreSQL
 
-- [ ] Stop PostgreSQL and verify readiness becomes not-ready without exhausting
+- [x] Stop PostgreSQL and verify readiness becomes not-ready without exhausting
       connections, CPU, or logs.
-- [ ] Restore PostgreSQL and verify connection-pool recovery.
+- [x] Restore PostgreSQL and verify connection-pool recovery.
 - [ ] Test invalid credentials, maximum connections, slow queries, and migration
       locking behavior.
-- [ ] Confirm frontend/static routes do not conceal backend database failure.
+- [x] Confirm frontend/static routes do not conceal backend database failure.
 
 ### Storage and resources
 
@@ -472,15 +495,23 @@ they are not production capacity figures.
 
 ## Phase 9: backup and restore
 
-- [ ] Back up PostgreSQL using the intended logical or physical procedure.
+Reusable isolated restore check:
+
+```bash
+PGPASSWORD='set-without-shell-history' \
+  bash scripts/vm/validate-postgres-backup.sh \
+  --state-file .prod-validation-single-host-state.json
+```
+
+- [x] Back up PostgreSQL using the intended logical or physical procedure.
 - [ ] Record artifact/control state required to rebuild platform nodes.
-- [ ] Restore the database into a separate disposable PostgreSQL instance.
+- [x] Restore the database into a separate disposable PostgreSQL instance.
 - [ ] Run schema/version checks, record counts or checksums, readiness, and a full
       OIDC journey against the restored instance.
 - [ ] Measure recovery point and recovery time.
 - [ ] Verify backup encryption, access controls, retention metadata, and restore
       documentation without using production keys.
-- [ ] Confirm a platform node can be destroyed and rebuilt from immutable artifacts
+- [x] Confirm a platform node can be destroyed and rebuilt from immutable artifacts
       and declared configuration without copying another live node filesystem.
 
 ## Phase 10: result and teardown
@@ -501,9 +532,9 @@ If interactive testing is complete and the user explicitly authorizes teardown:
 bash scripts/vm/destroy-testbed.sh --state-file "$STATE_FILE"
 ```
 
-- [ ] Verify only PIDs, TAP devices, bridges, HAProxy configuration, and service
+- [x] Verify only PIDs, TAP devices, bridges, HAProxy configuration, and service
       state recorded for this testbed were removed.
-- [ ] Verify the state file and companion state were removed.
+- [x] Verify the state file and companion state were removed.
 - [ ] Preserve reports, metrics snapshots, relevant redacted logs/traces, checksums,
       and the final decision record.
 

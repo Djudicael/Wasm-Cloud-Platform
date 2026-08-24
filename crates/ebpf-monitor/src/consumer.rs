@@ -289,7 +289,9 @@ fn read_cstr(bytes: &[u8]) -> String {
 #[cfg(feature = "ebpf")]
 mod ebpf_consumer {
     use super::*;
-    use aya::maps::RingBuf as AyaRingBuf;
+    use crate::metrics::EbpfMetrics;
+    use aya::maps::{MapData, RingBuf as AyaRingBuf};
+    use tracing::{debug, error, warn};
 
     /// Read events from the eBPF ring buffer and send them to the action dispatcher.
     ///
@@ -300,7 +302,7 @@ mod ebpf_consumer {
     /// The function returns when the `action_tx` channel is closed (i.e., the receiver
     /// was dropped), which signals a clean shutdown.
     pub async fn consume_ring_buffer(
-        mut ring_buf: AyaRingBuf<AyaRingBuf>,
+        mut ring_buf: AyaRingBuf<MapData>,
         action_tx: tokio::sync::mpsc::Sender<MonitorEvent>,
         metrics: Arc<EbpfMetrics>,
         poll_interval: Duration,

@@ -12,8 +12,8 @@
 //! Request -> rate limit check -> auth check -> permission check -> handler
 //! ```
 //!
-//! Public endpoints (`/health`, `/status/metrics`) bypass authentication entirely
-//! so that load balancers and Prometheus can probe the node without credentials.
+//! Health endpoints bypass authentication so load balancers can probe the node.
+//! Metrics remain protected and should be scraped with a read-only bearer token.
 
 mod admin_utils;
 mod client_ip;

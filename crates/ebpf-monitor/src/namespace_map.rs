@@ -7,6 +7,8 @@
 
 use crate::common::{TidFlags, TidIdentity};
 use std::collections::HashMap;
+#[cfg(feature = "ebpf")]
+use std::sync::Mutex;
 use std::sync::RwLock;
 use std::time::{Duration, Instant};
 use tracing::{info, warn};
@@ -38,7 +40,7 @@ struct PortBinding {
 /// fallback maps. The gateway reads from the same maps for identity resolution.
 pub struct NamespaceMap {
     #[cfg(feature = "ebpf")]
-    inner: Option<aya::maps::HashMap<aya::maps::MapData, u32, TidIdentity>>,
+    inner: Mutex<Option<aya::maps::HashMap<aya::maps::MapData, u32, TidIdentity>>>,
     /// TID → TidIdentity. Always maintained. Primary identity store.
     tid_to_identity: RwLock<HashMap<u32, TidIdentity>>,
     /// Source port → PortBinding. Populated by the consumer when eBPF events arrive.
@@ -58,10 +60,10 @@ impl NamespaceMap {
     // the identity table. This is defense-in-depth — the eBPF programs
     // should never need to write to this map.
     #[cfg(feature = "ebpf")]
-    pub fn from_ebpf(ebpf: &mut aya::Bpf, ns_ebpf: Option<&mut aya::Bpf>) -> Self {
+    pub fn from_ebpf(ebpf: &mut aya::Ebpf, ns_ebpf: Option<&mut aya::Ebpf>) -> Self {
         // Try the namespace enforcer object first (where MONITORED_TIDS lives)
         let inner = if let Some(ns) = ns_ebpf {
-            match ns.map_mut("MONITORED_TIDS") {
+            match ns.take_map("MONITORED_TIDS") {
                 Some(map) => {
                     match aya::maps::HashMap::<aya::maps::MapData, u32, TidIdentity>::try_from(map)
                     {
@@ -85,7 +87,7 @@ impl NamespaceMap {
         };
 
         // Fall back to the main eBPF object
-        let inner = inner.or_else(|| match ebpf.map_mut("MONITORED_TIDS") {
+        let inner = inner.or_else(|| match ebpf.take_map("MONITORED_TIDS") {
             Some(map) => {
                 match aya::maps::HashMap::<aya::maps::MapData, u32, TidIdentity>::try_from(map) {
                     Ok(hash_map) => {
@@ -105,7 +107,7 @@ impl NamespaceMap {
         });
 
         NamespaceMap {
-            inner,
+            inner: Mutex::new(inner),
             tid_to_identity: RwLock::new(HashMap::new()),
             port_to_tid: RwLock::new(HashMap::new()),
             port_ttl: Duration::from_secs(300),
@@ -116,7 +118,7 @@ impl NamespaceMap {
     pub fn new_fallback() -> Self {
         NamespaceMap {
             #[cfg(feature = "ebpf")]
-            inner: None,
+            inner: Mutex::new(None),
             tid_to_identity: RwLock::new(HashMap::new()),
             port_to_tid: RwLock::new(HashMap::new()),
             port_ttl: Duration::from_secs(300),
@@ -132,7 +134,7 @@ impl NamespaceMap {
         identity.registered_at_ns = Self::now_ns();
 
         #[cfg(feature = "ebpf")]
-        if let Some(ref map) = self.inner {
+        if let Some(ref mut map) = *self.inner.lock().unwrap() {
             match map.insert(tid, identity, 0) {
                 Ok(()) => {
                     info!(
@@ -166,7 +168,7 @@ impl NamespaceMap {
     /// Also removes any port_to_tid entries for this TID.
     pub fn deregister_tid(&self, tid: u32) -> Result<(), String> {
         #[cfg(feature = "ebpf")]
-        if let Some(ref map) = self.inner {
+        if let Some(ref mut map) = *self.inner.lock().unwrap() {
             let _ = map.remove(&tid);
         }
 

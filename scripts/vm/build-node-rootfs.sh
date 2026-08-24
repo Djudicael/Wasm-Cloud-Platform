@@ -38,7 +38,14 @@ fi
 
 # Create working directory
 WORK_DIR="$(mktemp -d)"
-trap "rm -rf $WORK_DIR" EXIT
+TEMP_IMAGE=""
+cleanup() {
+    rm -rf -- "$WORK_DIR"
+    if [[ -n "$TEMP_IMAGE" ]]; then
+        rm -f -- "$TEMP_IMAGE"
+    fi
+}
+trap cleanup EXIT
 
 ROOTFS_DIR="$WORK_DIR/rootfs"
 mkdir -p "$ROOTFS_DIR"
@@ -204,16 +211,19 @@ chmod +x "$ROOTFS_DIR/sbin/init"
 echo "Creating ext4 image..."
 mkdir -p "$OUTPUT_DIR"
 IMAGE="$OUTPUT_DIR/wasm-node-rootfs.ext4"
+TEMP_IMAGE="$(mktemp --tmpdir="$OUTPUT_DIR" .wasm-node-rootfs.ext4.XXXXXX)"
 
-dd if=/dev/zero of="$IMAGE" bs=1M count="$ROOTFS_SIZE_MB"
-mkfs.ext4 -F "$IMAGE"
+dd if=/dev/zero of="$TEMP_IMAGE" bs=1M count="$ROOTFS_SIZE_MB"
+mkfs.ext4 -F "$TEMP_IMAGE"
 
 # Mount and copy rootfs
 MOUNT="$WORK_DIR/mount"
 mkdir -p "$MOUNT"
-sudo mount -o loop "$IMAGE" "$MOUNT"
+sudo mount -o loop "$TEMP_IMAGE" "$MOUNT"
 sudo cp -a "$ROOTFS_DIR"/* "$MOUNT/"
 sudo umount "$MOUNT"
+mv -f -- "$TEMP_IMAGE" "$IMAGE"
+TEMP_IMAGE=""
 
 echo ""
 echo "=== wasm-node rootfs build complete ==="

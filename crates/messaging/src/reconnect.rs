@@ -1,7 +1,11 @@
+use async_nats::Client;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::watch;
+
+const NATS_HEALTH_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+const NATS_HEALTH_PROBE_SUBJECT: &str = "$JS.API.INFO";
 
 #[derive(Debug, Clone)]
 pub struct NatsHealth {
@@ -78,6 +82,14 @@ impl NatsHealth {
         self.last_connected_at.store(now, Ordering::Relaxed);
     }
 
+    fn record_probe_result(&self, succeeded: bool) {
+        if succeeded {
+            self.mark_connected();
+        } else {
+            self.mark_disconnected();
+        }
+    }
+
     /// Perform a health check on the NATS connection.
     pub fn check_health(&self) -> common::health::DependencyHealth {
         let connected = self.is_connected();
@@ -122,13 +134,15 @@ impl Default for NatsHealth {
 
 pub struct NatsHealthWatcher {
     health: NatsHealth,
+    client: Client,
     poll_interval: Duration,
 }
 
 impl NatsHealthWatcher {
-    pub fn new(health: NatsHealth, poll_interval: Duration) -> Self {
+    pub fn new(health: NatsHealth, client: Client, poll_interval: Duration) -> Self {
         Self {
             health,
+            client,
             poll_interval,
         }
     }
@@ -138,7 +152,15 @@ impl NatsHealthWatcher {
             let mut interval = tokio::time::interval(self.poll_interval);
             loop {
                 interval.tick().await;
-                self.health.update_last_message_time();
+                // A socket flush only proves that the client wrote to the local
+                // TCP buffer. Requesting JetStream account information requires
+                // a server response and therefore detects a stalled NATS guest.
+                let probe = tokio::time::timeout(
+                    NATS_HEALTH_PROBE_TIMEOUT,
+                    self.client.request(NATS_HEALTH_PROBE_SUBJECT, "".into()),
+                )
+                .await;
+                self.health.record_probe_result(matches!(probe, Ok(Ok(_))));
             }
         })
     }
@@ -169,5 +191,22 @@ mod tests {
         assert!(!health.is_connected());
         health.mark_connected();
         assert!(health.is_connected());
+    }
+
+    #[test]
+    fn test_probe_result_drives_disconnect_and_recovery() {
+        let health = NatsHealth::new();
+
+        health.record_probe_result(true);
+        assert!(health.is_connected());
+        assert!(!health.is_degraded());
+
+        health.record_probe_result(false);
+        assert!(!health.is_connected());
+        assert!(health.is_degraded());
+
+        health.record_probe_result(true);
+        assert!(health.is_connected());
+        assert!(!health.is_degraded());
     }
 }
