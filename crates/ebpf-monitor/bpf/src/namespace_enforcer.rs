@@ -128,6 +128,7 @@ fn try_ns_inet_sock_set_state(ctx: TracePointContext) -> Result<(), u32> {
 
             let header = EventHeader {
                 event_type: EventType::TidConnection as u32,
+                _padding: 0,
                 timestamp_ns: unsafe { aya_ebpf::helpers::gen::bpf_ktime_get_ns() },
                 pid: (aya_ebpf::helpers::bpf_get_current_pid_tgid() >> 32) as u32,
                 tid,
@@ -144,6 +145,7 @@ fn try_ns_inet_sock_set_state(ctx: TracePointContext) -> Result<(), u32> {
 
             let header = EventHeader {
                 event_type: EventType::NamespaceAudit as u32,
+                _padding: 0,
                 timestamp_ns: unsafe { aya_ebpf::helpers::gen::bpf_ktime_get_ns() },
                 pid: (aya_ebpf::helpers::bpf_get_current_pid_tgid() >> 32) as u32,
                 tid,
@@ -157,6 +159,7 @@ fn try_ns_inet_sock_set_state(ctx: TracePointContext) -> Result<(), u32> {
                 dest_port: gateway_port,
                 source_port: sport,
                 _padding: 0,
+                _tail_padding: 0,
             };
 
             event.write(audit);
@@ -174,6 +177,7 @@ fn try_ns_inet_sock_set_state(ctx: TracePointContext) -> Result<(), u32> {
 
             let header = EventHeader {
                 event_type: EventType::TidDisconnection as u32,
+                _padding: 0,
                 timestamp_ns: unsafe { aya_ebpf::helpers::gen::bpf_ktime_get_ns() },
                 pid: (aya_ebpf::helpers::bpf_get_current_pid_tgid() >> 32) as u32,
                 tid,
@@ -252,7 +256,7 @@ fn try_ns_audit_sendto(ctx: TracePointContext) -> Result<(), u32> {
     // Read buffer and scan for forged headers
     // We only scan the first 256 bytes (typical HTTP header size)
     let scan_len = len.min(256);
-    let mut buf = [0u8; 32];
+    let mut buf = [0u8; 16];
 
     // Patterns to detect (case-insensitive would be better but expensive in eBPF)
     let x_namespace: [u8; 12] = *b"X-Namespace:";
@@ -262,16 +266,11 @@ fn try_ns_audit_sendto(ctx: TracePointContext) -> Result<(), u32> {
     let mut found = false;
     let mut chunk_start = 0usize;
 
-    while chunk_start + 13 < scan_len && chunk_start < 256 {
-        let to_read = (scan_len - chunk_start).min(32);
-        if to_read < 12 {
-            break;
-        }
-
+    while chunk_start + 16 <= scan_len && chunk_start <= 240 {
         if unsafe {
             aya_ebpf::helpers::gen::bpf_probe_read_user(
                 buf.as_mut_ptr() as *mut _,
-                to_read as u32,
+                16,
                 (buf_ptr + chunk_start as u64) as *const _,
             )
         } < 0
@@ -279,11 +278,13 @@ fn try_ns_audit_sendto(ctx: TracePointContext) -> Result<(), u32> {
             break;
         }
 
-        // Check for X-Namespace:
-        if to_read >= 12 {
+        // Check four possible starting offsets, then advance by four bytes.
+        // The fixed-size read gives Linux 6.1's verifier a non-negative,
+        // statically bounded helper length while still covering every byte.
+        for start in 0..4 {
             let mut match_ns = true;
             for i in 0..12 {
-                if buf[i] != x_namespace[i] {
+                if buf[start + i] != x_namespace[i] {
                     match_ns = false;
                     break;
                 }
@@ -292,13 +293,10 @@ fn try_ns_audit_sendto(ctx: TracePointContext) -> Result<(), u32> {
                 found = true;
                 break;
             }
-        }
 
-        // Check for X-Source-App:
-        if to_read >= 13 {
             let mut match_app = true;
             for i in 0..13 {
-                if buf[i] != x_source_app[i] {
+                if buf[start + i] != x_source_app[i] {
                     match_app = false;
                     break;
                 }
@@ -309,7 +307,10 @@ fn try_ns_audit_sendto(ctx: TracePointContext) -> Result<(), u32> {
             }
         }
 
-        chunk_start += 16; // Overlap by checking every 16 bytes
+        if found {
+            break;
+        }
+        chunk_start += 4;
     }
 
     if found {
@@ -321,6 +322,7 @@ fn try_ns_audit_sendto(ctx: TracePointContext) -> Result<(), u32> {
 
         let header = EventHeader {
             event_type: EventType::NamespaceForgedHeader as u32,
+            _padding: 0,
             timestamp_ns: unsafe { aya_ebpf::helpers::gen::bpf_ktime_get_ns() },
             pid: (aya_ebpf::helpers::bpf_get_current_pid_tgid() >> 32) as u32,
             tid,
@@ -334,6 +336,7 @@ fn try_ns_audit_sendto(ctx: TracePointContext) -> Result<(), u32> {
             dest_port: 0,
             source_port: 0,
             _padding: 0,
+            _tail_padding: 0,
         };
 
         event.write(audit);

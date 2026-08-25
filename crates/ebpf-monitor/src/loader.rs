@@ -117,16 +117,19 @@ pub async fn load_and_attach(config: &MonitorConfig, node_pid: u32) -> Result<Op
         let mut ebpf = match load_monitor_object(name) {
             Ok(ebpf) => ebpf,
             Err(error) => {
-                warn!(%error, monitor = name, "Failed to load eBPF monitor object — skipping");
+                let error_chain = format!("{error:#}");
+                warn!(error = %error_chain, monitor = name, "Failed to load eBPF monitor object — skipping");
                 continue;
             }
         };
         if let Err(error) = write_config_map(&mut ebpf, config, node_pid) {
-            warn!(%error, monitor = name, "Failed to configure eBPF monitor — skipping");
+            let error_chain = format!("{error:#}");
+            warn!(error = %error_chain, monitor = name, "Failed to configure eBPF monitor — skipping");
             continue;
         }
         if let Err(error) = attach(&mut ebpf) {
-            warn!(%error, monitor = name, "Failed to attach eBPF monitor — skipping");
+            let error_chain = format!("{error:#}");
+            warn!(error = %error_chain, monitor = name, "Failed to attach eBPF monitor — skipping");
             continue;
         }
         info!(monitor = name, "eBPF monitor attached");
@@ -147,11 +150,13 @@ pub async fn load_and_attach(config: &MonitorConfig, node_pid: u32) -> Result<Op
                     ns_ebpf = Some(ns_bpf);
                 }
                 Err(e) => {
-                    warn!(error = %e, "Failed to attach namespace enforcer — skipping");
+                    let error_chain = format!("{e:#}");
+                    warn!(error = %error_chain, "Failed to attach namespace enforcer — skipping");
                 }
             },
             Err(e) => {
-                warn!(error = %e, "Failed to load namespace enforcer eBPF object — skipping");
+                let error_chain = format!("{e:#}");
+                warn!(error = %error_chain, "Failed to load namespace enforcer eBPF object — skipping");
             }
         }
     }
@@ -310,10 +315,11 @@ fn attach_tcp_monitor(ebpf: &mut Ebpf) -> Result<()> {
     attach_tracepoint(ebpf, "inet_sock_set_state", "sock", "inet_sock_set_state")
 }
 
-/// Attach the FD watcher (fd_install + do_filp_close kprobes).
+/// Attach the FD watcher. Linux kernels expose the close hook as either
+/// `do_filp_close` or `filp_close`, so try both without reloading the program.
 fn attach_fd_watcher(ebpf: &mut Ebpf) -> Result<()> {
     attach_kprobe(ebpf, "fd_install", "fd_install")?;
-    attach_kprobe(ebpf, "do_filp_close", "do_filp_close")?;
+    attach_kprobe_with_fallback(ebpf, "do_filp_close", "do_filp_close", "filp_close")?;
     Ok(())
 }
 
@@ -432,6 +438,38 @@ fn attach_kprobe(ebpf: &mut Ebpf, program_name: &str, symbol: &str) -> Result<()
         .with_context(|| format!("failed to attach KProbe '{}' to '{}'", program_name, symbol))?;
 
     Ok(())
+}
+
+/// Attach one loaded kprobe program to the first symbol available on the
+/// running kernel.
+fn attach_kprobe_with_fallback(
+    ebpf: &mut Ebpf,
+    program_name: &str,
+    primary_symbol: &str,
+    fallback_symbol: &str,
+) -> Result<()> {
+    let program: &mut KProbe = ebpf
+        .program_mut(program_name)
+        .ok_or_else(|| anyhow!("eBPF program '{}' not found in object", program_name))?
+        .try_into()
+        .with_context(|| format!("program '{}' is not a KProbe", program_name))?;
+
+    program
+        .load()
+        .with_context(|| format!("failed to load KProbe program '{}'", program_name))?;
+
+    match program.attach(primary_symbol, 0) {
+        Ok(_) => Ok(()),
+        Err(primary_error) => program
+            .attach(fallback_symbol, 0)
+            .map(|_| ())
+            .with_context(|| {
+                format!(
+                    "failed to attach KProbe '{}' to '{}' or '{}'; primary error: {}",
+                    program_name, primary_symbol, fallback_symbol, primary_error
+                )
+            }),
+    }
 }
 
 // ── Kernel Support Check ──────────────────────────────────────────────────────

@@ -303,7 +303,10 @@ pub async fn init(
                         .await;
                     });
 
-                    let namespace_map = Arc::new(NamespaceMap::from_ebpf(loaded.ns_ebpf.as_mut()));
+                    let namespace_map = Arc::new(NamespaceMap::from_ebpf(
+                        loaded.ns_ebpf.as_mut(),
+                        &mut loaded.monitors,
+                    ));
 
                     // Wire the namespace map into the dispatcher so that
                     // TidConnection / TidDisconnection events update port→TID bindings.

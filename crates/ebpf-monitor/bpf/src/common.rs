@@ -48,6 +48,7 @@ pub enum EventType {
 #[derive(Copy, Clone)]
 pub struct EventHeader {
     pub event_type: u32,
+    pub _padding: u32,
     pub timestamp_ns: u64, // ktime (CLOCK_MONOTONIC)
     pub pid: u32,
     pub tid: u32,
@@ -62,6 +63,7 @@ pub struct ProcessEvent {
     pub exit_code: u32, // 0 for exec events
     pub signal: u32,    // 0 for exec events; signal number for exit
     pub ppid: u32,      // Parent PID (to identify wasm-node children)
+    pub _padding: u32,
     pub cgroup_id: u64, // cgroup v2 ID for tenant attribution
 }
 
@@ -99,6 +101,7 @@ pub struct MemPressureEvent {
     pub free_pages: u64,
     pub reclaim_pages: u64,
     pub pressure_level: u32, // 0=low, 1=medium, 2=critical
+    pub _padding: u32,
     pub anon_pages: u64,     // Anonymous (Wasm linear memory) pages
 }
 
@@ -111,8 +114,10 @@ pub struct DiskIoEvent {
     pub dev_minor: u32,
     pub sector: u64,
     pub nr_sector: u32,
+    pub _padding1: u32,
     pub latency_ns: u64, // Time from submit to complete
     pub io_type: u32,    // 0=read, 1=write, 2=sync
+    pub _padding2: u32,
 }
 
 /// Syscall anomaly event.
@@ -122,6 +127,7 @@ pub struct SyscallEvent {
     pub header: EventHeader,
     pub syscall_nr: u64,
     pub syscall_category: u32, // Enum: SyscallCategory
+    pub _padding: u32,
     pub count_in_window: u64,  // Count in the last sampling window
 }
 
@@ -237,6 +243,8 @@ pub struct NamespaceAuditEvent {
     pub source_port: u16,
     /// Padding.
     pub _padding: u32,
+    /// Tail padding required by the header's 8-byte alignment.
+    pub _tail_padding: u32,
 }
 
 /// Types of namespace audit events.

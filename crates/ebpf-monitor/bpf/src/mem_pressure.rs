@@ -108,7 +108,8 @@ fn try_try_to_free_pages(ctx: ProbeContext) -> Result<c_long, c_long> {
 
     let cgroup_id = unsafe { aya_ebpf::helpers::bpf_get_current_cgroup_id() };
     let pid_tgid = aya_ebpf::helpers::bpf_get_current_pid_tgid();
-    let pid = pid_tgid as u32;
+    let pid = (pid_tgid >> 32) as u32;
+    let tid = pid_tgid as u32;
 
     // Determine pressure level based on allocation order.
     // High-order allocations failing (order >= 3) indicate severe
@@ -141,13 +142,15 @@ fn try_try_to_free_pages(ctx: ProbeContext) -> Result<c_long, c_long> {
     let event = MemPressureEvent {
         header: EventHeader {
             event_type: EventType::MemPressure as u32,
+            _padding: 0,
             timestamp_ns: unsafe { aya_ebpf::helpers::bpf_ktime_get_ns() },
             pid,
-            tid: (pid_tgid >> 32) as u32,
+            tid,
         },
         free_pages: 0,    // Userspace reads from /proc/meminfo
         reclaim_pages: 0, // Userspace reads from /proc/meminfo
         pressure_level,
+        _padding: 0,
         anon_pages: 0, // Userspace reads from cgroup memory.stat
     };
     let _ = EVENTS.output(&event, 0);
@@ -195,7 +198,8 @@ fn try_vmpressure(ctx: TracePointContext) -> Result<c_long, c_long> {
 
     let cgroup_id = unsafe { aya_ebpf::helpers::bpf_get_current_cgroup_id() };
     let pid_tgid = aya_ebpf::helpers::bpf_get_current_pid_tgid();
-    let pid = pid_tgid as u32;
+    let pid = (pid_tgid >> 32) as u32;
+    let tid = pid_tgid as u32;
 
     // Read the pressure level from the tracepoint.
     // The vmpressure_level_change tracepoint has:
@@ -222,13 +226,15 @@ fn try_vmpressure(ctx: TracePointContext) -> Result<c_long, c_long> {
     let event = MemPressureEvent {
         header: EventHeader {
             event_type: EventType::MemPressure as u32,
+            _padding: 0,
             timestamp_ns: unsafe { aya_ebpf::helpers::bpf_ktime_get_ns() },
             pid,
-            tid: (pid_tgid >> 32) as u32,
+            tid,
         },
         free_pages: 0,    // Userspace reads from /proc/meminfo
         reclaim_pages: 0, // Userspace reads from /proc/meminfo
         pressure_level: level,
+        _padding: 0,
         anon_pages: 0, // Userspace reads from cgroup memory.stat
     };
     let _ = EVENTS.output(&event, 0);

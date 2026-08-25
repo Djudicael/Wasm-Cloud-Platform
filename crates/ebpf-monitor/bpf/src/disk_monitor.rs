@@ -253,6 +253,7 @@ fn try_block_rq_complete(ctx: TracePointContext) -> Result<c_long, c_long> {
             let event = DiskIoEvent {
                 header: EventHeader {
                     event_type: EventType::DiskSlowIo as u32,
+                    _padding: 0,
                     timestamp_ns: now,
                     pid: 0, // Disk events are not per-PID
                     tid: 0,
@@ -261,8 +262,10 @@ fn try_block_rq_complete(ctx: TracePointContext) -> Result<c_long, c_long> {
                 dev_minor,
                 sector,
                 nr_sector,
+                _padding1: 0,
                 latency_ns,
                 io_type,
+                _padding2: 0,
             };
             let _ = EVENTS.output(&event, 0);
 

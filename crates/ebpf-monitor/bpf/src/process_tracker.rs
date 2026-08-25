@@ -3,7 +3,7 @@
 
 use aya_ebpf::{
     macros::{map, tracepoint},
-    maps::{Array, RingBuf},
+    maps::{Array, HashMap, RingBuf},
     programs::TracePointContext,
     EbpfContext,
 };
@@ -16,6 +16,11 @@ static CONFIG: Array<MonitorConfigMap> = Array::with_max_entries(1, 0);
 
 #[map]
 static EVENTS: RingBuf = RingBuf::with_byte_size(1024 * 1024, 0);
+
+/// Wasm execution threads registered by Supervisor. Wasm instances are
+/// in-process, so the node TGID alone cannot identify instance activity.
+#[map]
+static MONITORED_TIDS: HashMap<u32, TidIdentity> = HashMap::with_max_entries(4096, 0);
 
 #[tracepoint]
 pub fn sched_process_exec(ctx: TracePointContext) -> u32 {
@@ -47,11 +52,11 @@ fn try_sched_process_exec(ctx: TracePointContext) -> Result<u32, u32> {
     // We'll use bpf_get_current_pid_tgid to get the current PID (the one being executed).
     // Then we can get the parent PID from the current task's parent.
 
-    let pid = ctx.pid();
-    let process_id = ctx.tgid();
+    let pid = ctx.tgid();
+    let tid = ctx.pid();
 
     // Only monitor children of the wasm-node process.
-    if process_id != node_pid {
+    if pid != node_pid || unsafe { MONITORED_TIDS.get(&tid) }.is_none() {
         return Ok(0);
     }
 
@@ -59,14 +64,16 @@ fn try_sched_process_exec(ctx: TracePointContext) -> Result<u32, u32> {
     let mut event = ProcessEvent {
         header: EventHeader {
             event_type: EventType::ProcessExec as u32,
+            _padding: 0,
             timestamp_ns: unsafe { aya_ebpf::helpers::bpf_ktime_get_ns() },
             pid,
-            tid: pid,
+            tid,
         },
         comm: [0; TASK_COMM_LEN],
         exit_code: 0,
         signal: 0,
         ppid: 0,
+        _padding: 0,
         cgroup_id: 0, // TODO: get cgroup_id if available
     };
 
@@ -100,11 +107,11 @@ fn try_sched_process_exit(ctx: TracePointContext) -> Result<u32, u32> {
     // Alternatively, we can track the parent in a map when we see the exec.
     // For simplicity, we'll check if the current task's parent is the node_pid.
 
-    let pid = ctx.pid();
-    let process_id = ctx.tgid();
+    let pid = ctx.tgid();
+    let tid = ctx.pid();
 
     // Only monitor children of the wasm-node process.
-    if process_id != node_pid {
+    if pid != node_pid || unsafe { MONITORED_TIDS.get(&tid) }.is_none() {
         return Ok(0);
     }
 
@@ -136,14 +143,16 @@ fn try_sched_process_exit(ctx: TracePointContext) -> Result<u32, u32> {
     let mut event = ProcessEvent {
         header: EventHeader {
             event_type: EventType::ProcessExit as u32,
+            _padding: 0,
             timestamp_ns: unsafe { aya_ebpf::helpers::bpf_ktime_get_ns() },
             pid,
-            tid: pid,
+            tid,
         },
         comm: [0; TASK_COMM_LEN],
         exit_code: exit_code as u32,
         signal: signal as u32,
         ppid: 0,
+        _padding: 0,
         cgroup_id: 0, // TODO: get cgroup_id if available
     };
 

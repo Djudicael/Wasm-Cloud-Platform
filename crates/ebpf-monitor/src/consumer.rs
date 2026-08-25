@@ -56,7 +56,7 @@ pub enum ParseError {
 pub fn parse_event(bytes: &[u8]) -> Result<MonitorEvent, ParseError> {
     let header_size = std::mem::size_of::<EventHeader>();
     if bytes.len() < header_size {
-        retun Err(ParseError::BufferTooSmall {
+        return Err(ParseError::BufferTooSmall {
             got: bytes.len(),
             need: header_size,
         });
@@ -70,7 +70,7 @@ pub fn parse_event(bytes: &[u8]) -> Result<MonitorEvent, ParseError> {
         EventType::ProcessExec | EventType::ProcessExit => {
             let expected = std::mem::size_of::<ProcessEvent>();
             if bytes.len() < expected {
-                retun Err(ParseError::SizeMismatch {
+                return Err(ParseError::SizeMismatch {
                     event_type: header.event_type,
                     expected,
                     actual: bytes.len(),
@@ -99,7 +99,7 @@ pub fn parse_event(bytes: &[u8]) -> Result<MonitorEvent, ParseError> {
         EventType::TcpConnect | EventType::TcpClose | EventType::TcpRetransmit => {
             let expected = std::mem::size_of::<TcpEvent>();
             if bytes.len() < expected {
-                retun Err(ParseError::SizeMismatch {
+                return Err(ParseError::SizeMismatch {
                     event_type: header.event_type,
                     expected,
                     actual: bytes.len(),
@@ -133,7 +133,7 @@ pub fn parse_event(bytes: &[u8]) -> Result<MonitorEvent, ParseError> {
         EventType::FdOpen | EventType::FdLimitApproaching => {
             let expected = std::mem::size_of::<FdEvent>();
             if bytes.len() < expected {
-                retun Err(ParseError::SizeMismatch {
+                return Err(ParseError::SizeMismatch {
                     event_type: header.event_type,
                     expected,
                     actual: bytes.len(),
@@ -160,7 +160,7 @@ pub fn parse_event(bytes: &[u8]) -> Result<MonitorEvent, ParseError> {
         EventType::MemPressure => {
             let expected = std::mem::size_of::<MemPressureEvent>();
             if bytes.len() < expected {
-                retun Err(ParseError::SizeMismatch {
+                return Err(ParseError::SizeMismatch {
                     event_type: header.event_type,
                     expected,
                     actual: bytes.len(),
@@ -180,7 +180,7 @@ pub fn parse_event(bytes: &[u8]) -> Result<MonitorEvent, ParseError> {
         EventType::DiskSlowIo => {
             let expected = std::mem::size_of::<DiskIoEvent>();
             if bytes.len() < expected {
-                retun Err(ParseError::SizeMismatch {
+                return Err(ParseError::SizeMismatch {
                     event_type: header.event_type,
                     expected,
                     actual: bytes.len(),
@@ -198,7 +198,7 @@ pub fn parse_event(bytes: &[u8]) -> Result<MonitorEvent, ParseError> {
         EventType::SyscallAnomaly => {
             let expected = std::mem::size_of::<SyscallEvent>();
             if bytes.len() < expected {
-                retun Err(ParseError::SizeMismatch {
+                return Err(ParseError::SizeMismatch {
                     event_type: header.event_type,
                     expected,
                     actual: bytes.len(),
@@ -216,7 +216,7 @@ pub fn parse_event(bytes: &[u8]) -> Result<MonitorEvent, ParseError> {
         EventType::TidConnection | EventType::TidDisconnection => {
             let expected = std::mem::size_of::<TcpEvent>();
             if bytes.len() < expected {
-                retun Err(ParseError::SizeMismatch {
+                return Err(ParseError::SizeMismatch {
                     event_type: header.event_type,
                     expected,
                     actual: bytes.len(),
@@ -243,7 +243,7 @@ pub fn parse_event(bytes: &[u8]) -> Result<MonitorEvent, ParseError> {
         EventType::NamespaceAudit | EventType::NamespaceForgedHeader => {
             let expected = std::mem::size_of::<NamespaceAuditEvent>();
             if bytes.len() < expected {
-                retun Err(ParseError::SizeMismatch {
+                return Err(ParseError::SizeMismatch {
                     event_type: header.event_type,
                     expected,
                     actual: bytes.len(),
@@ -291,7 +291,7 @@ mod ebpf_consumer {
     use super::*;
     use crate::metrics::EbpfMetrics;
     use aya::maps::{MapData, RingBuf as AyaRingBuf};
-    use tracing::{debug, error, wan};
+    use tracing::{debug, error, warn};
 
     /// Read events from the eBPF ring buffer and send them to the action dispatcher.
     ///
@@ -299,7 +299,7 @@ mod ebpf_consumer {
     /// Parsed events are sent through the `action_tx` channel. Malformed events are
     /// logged and skipped (no panic).
     ///
-    /// The function retuns when the `action_tx` channel is closed (i.e., the receiver
+    /// The function returns when the `action_tx` channel is closed (i.e., the receiver
     /// was dropped), which signals a clean shutdown.
     pub async fn consume_ring_buffers(
         mut ring_buffers: Vec<(&'static str, AyaRingBuf<MapData>)>,
@@ -330,7 +330,7 @@ mod ebpf_consumer {
                             events_this_tick += 1;
                             if action_tx.send(event).await.is_err() {
                                 info!("action channel closed — eBPF consumer shutting down");
-                                retun;
+                                return;
                             }
                         }
                         Err(ParseError::UnknownEventType(t)) => {
@@ -338,7 +338,7 @@ mod ebpf_consumer {
                             metrics.events_parse_errors.inc();
                         }
                         Err(e) => {
-                            wan!(monitor, error = %e, "failed to parse eBPF event");
+                            warn!(monitor, error = %e, "failed to parse eBPF event");
                             metrics.events_parse_errors.inc();
                             consecutive_errors += 1;
 
@@ -410,7 +410,7 @@ impl Default for ConsumerConfig {
 
 /// Start the action dispatcher as a background task.
 ///
-/// Retuns the sender half of the mpsc channel. The caller should send
+/// Returns the sender half of the mpsc channel. The caller should send
 /// `MonitorEvent`s through this sender. When the sender is dropped, the
 /// dispatcher loop will exit cleanly.
 pub fn start_action_dispatcher(
@@ -448,6 +448,7 @@ mod tests {
         let event = ProcessEvent {
             header: EventHeader {
                 event_type: EventType::ProcessExec as u32,
+                _padding: 0,
                 timestamp_ns: 1000000,
                 pid: 42,
                 tid: 43,
@@ -456,6 +457,7 @@ mod tests {
             exit_code: 0,
             signal: 0,
             ppid: 1,
+            _padding: 0,
             cgroup_id: 12345,
         };
 
@@ -483,6 +485,7 @@ mod tests {
         let event = ProcessEvent {
             header: EventHeader {
                 event_type: EventType::ProcessExit as u32,
+                _padding: 0,
                 timestamp_ns: 2000000,
                 pid: 99,
                 tid: 99,
@@ -491,6 +494,7 @@ mod tests {
             exit_code: 1,
             signal: 9, // OOM kill
             ppid: 1,
+            _padding: 0,
             cgroup_id: 0,
         };
 
@@ -517,6 +521,7 @@ mod tests {
         let event = TcpEvent {
             header: EventHeader {
                 event_type: EventType::TcpConnect as u32,
+                _padding: 0,
                 timestamp_ns: 3000000,
                 pid: 100,
                 tid: 100,
@@ -554,6 +559,7 @@ mod tests {
         let event = TcpEvent {
             header: EventHeader {
                 event_type: EventType::TcpRetransmit as u32,
+                _padding: 0,
                 timestamp_ns: 4000000,
                 pid: 200,
                 tid: 200,
@@ -593,6 +599,7 @@ mod tests {
         let event = FdEvent {
             header: EventHeader {
                 event_type: EventType::FdLimitApproaching as u32,
+                _padding: 0,
                 timestamp_ns: 5000000,
                 pid: 300,
                 tid: 300,
@@ -626,13 +633,15 @@ mod tests {
         let event = MemPressureEvent {
             header: EventHeader {
                 event_type: EventType::MemPressure as u32,
+                _padding: 0,
                 timestamp_ns: 6000000,
                 pid: 400,
                 tid: 400,
             },
             free_pages: 50000,
             reclaim_pages: 1000,
-            pressure_level: 2, // critical
+            pressure_level: 2,
+            _padding: 0,
             anon_pages: 30000,
         };
 
@@ -657,6 +666,7 @@ mod tests {
         let event = DiskIoEvent {
             header: EventHeader {
                 event_type: EventType::DiskSlowIo as u32,
+                _padding: 0,
                 timestamp_ns: 7000000,
                 pid: 0,
                 tid: 0,
@@ -665,8 +675,10 @@ mod tests {
             dev_minor: 0,
             sector: 123456,
             nr_sector: 8,
+            _padding1: 0,
             latency_ns: 100_000_000, // 100ms
             io_type: 1,              // write
+            _padding2: 0,
         };
 
         let bytes = struct_to_bytes(&event);
@@ -693,12 +705,14 @@ mod tests {
         let event = SyscallEvent {
             header: EventHeader {
                 event_type: EventType::SyscallAnomaly as u32,
+                _padding: 0,
                 timestamp_ns: 8000000,
                 pid: 500,
                 tid: 500,
             },
             syscall_nr: 101, // SYS_PTRACE
             syscall_category: SyscallCategory::PrivilegeEscalation as u32,
+            _padding: 0,
             count_in_window: 1,
         };
 
@@ -732,7 +746,8 @@ mod tests {
     fn test_parse_unknown_event_type() {
         // Create a valid header with an unknown event type
         let header = EventHeader {
-            event_type: 255, // Unknown
+            event_type: 255,
+            _padding: 0,
             timestamp_ns: 0,
             pid: 0,
             tid: 0,
@@ -747,6 +762,7 @@ mod tests {
         // Create a header for ProcessExec but with insufficient bytes for the full struct
         let header = EventHeader {
             event_type: EventType::ProcessExec as u32,
+            _padding: 0,
             timestamp_ns: 0,
             pid: 0,
             tid: 0,
@@ -835,7 +851,7 @@ mod tests {
             dev_major: 8,
             dev_minor: 0,
             latency_ns: 50_000_000,
-            io_type: 0,
+            io_type: 1,
         })
         .await
         .unwrap();
@@ -863,6 +879,7 @@ mod tests {
                 struct_to_bytes(&ProcessEvent {
                     header: EventHeader {
                         event_type: EventType::ProcessExec as u32,
+                        _padding: 0,
                         timestamp_ns: 1,
                         pid: 1,
                         tid: 1,
@@ -871,6 +888,7 @@ mod tests {
                     exit_code: 0,
                     signal: 0,
                     ppid: 0,
+                    _padding: 0,
                     cgroup_id: 0,
                 }),
             ),
@@ -879,6 +897,7 @@ mod tests {
                 struct_to_bytes(&ProcessEvent {
                     header: EventHeader {
                         event_type: EventType::ProcessExit as u32,
+                        _padding: 0,
                         timestamp_ns: 2,
                         pid: 2,
                         tid: 2,
@@ -886,7 +905,8 @@ mod tests {
                     comm: [0; TASK_COMM_LEN],
                     exit_code: 0,
                     signal: 9,
-                    ppid: 1,
+                    ppid: 0,
+                    _padding: 0,
                     cgroup_id: 0,
                 }),
             ),
@@ -895,6 +915,7 @@ mod tests {
                 struct_to_bytes(&TcpEvent {
                     header: EventHeader {
                         event_type: EventType::TcpConnect as u32,
+                        _padding: 0,
                         timestamp_ns: 3,
                         pid: 3,
                         tid: 3,
@@ -914,6 +935,7 @@ mod tests {
                 struct_to_bytes(&TcpEvent {
                     header: EventHeader {
                         event_type: EventType::TcpClose as u32,
+                        _padding: 0,
                         timestamp_ns: 4,
                         pid: 4,
                         tid: 4,
@@ -933,6 +955,7 @@ mod tests {
                 struct_to_bytes(&TcpEvent {
                     header: EventHeader {
                         event_type: EventType::TcpRetransmit as u32,
+                        _padding: 0,
                         timestamp_ns: 5,
                         pid: 5,
                         tid: 5,
@@ -952,6 +975,7 @@ mod tests {
                 struct_to_bytes(&FdEvent {
                     header: EventHeader {
                         event_type: EventType::FdOpen as u32,
+                        _padding: 0,
                         timestamp_ns: 6,
                         pid: 6,
                         tid: 6,
@@ -967,6 +991,7 @@ mod tests {
                 struct_to_bytes(&FdEvent {
                     header: EventHeader {
                         event_type: EventType::FdLimitApproaching as u32,
+                        _padding: 0,
                         timestamp_ns: 7,
                         pid: 7,
                         tid: 7,
@@ -982,6 +1007,7 @@ mod tests {
                 struct_to_bytes(&MemPressureEvent {
                     header: EventHeader {
                         event_type: EventType::MemPressure as u32,
+                        _padding: 0,
                         timestamp_ns: 8,
                         pid: 8,
                         tid: 8,
@@ -989,6 +1015,7 @@ mod tests {
                     free_pages: 50000,
                     reclaim_pages: 1000,
                     pressure_level: 2,
+                    _padding: 0,
                     anon_pages: 30000,
                 }),
             ),
@@ -997,6 +1024,7 @@ mod tests {
                 struct_to_bytes(&DiskIoEvent {
                     header: EventHeader {
                         event_type: EventType::DiskSlowIo as u32,
+                        _padding: 0,
                         timestamp_ns: 9,
                         pid: 0,
                         tid: 0,
@@ -1005,8 +1033,10 @@ mod tests {
                     dev_minor: 0,
                     sector: 1234,
                     nr_sector: 8,
+                    _padding1: 0,
                     latency_ns: 50_000_000,
                     io_type: 1,
+                    _padding2: 0,
                 }),
             ),
             (
@@ -1014,12 +1044,14 @@ mod tests {
                 struct_to_bytes(&SyscallEvent {
                     header: EventHeader {
                         event_type: EventType::SyscallAnomaly as u32,
+                        _padding: 0,
                         timestamp_ns: 10,
                         pid: 10,
                         tid: 10,
                     },
                     syscall_nr: 101,
                     syscall_category: SyscallCategory::PrivilegeEscalation as u32,
+                    _padding: 0,
                     count_in_window: 1,
                 }),
             ),

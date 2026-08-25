@@ -98,7 +98,8 @@ fn try_inet_sock_set_state(ctx: TracePointContext) -> Result<c_long, c_long> {
     let dst_port: u16 = unsafe { ctx.read_at(18)? };
 
     let pid_tgid = aya_ebpf::helpers::bpf_get_current_pid_tgid();
-    let pid = pid_tgid as u32;
+    let pid = (pid_tgid >> 32) as u32;
+    let tid = pid_tgid as u32;
 
     // Only monitor the wasm-node process and its children.
     // We check if the PID matches the node PID or is a known child.
@@ -127,9 +128,10 @@ fn try_inet_sock_set_state(ctx: TracePointContext) -> Result<c_long, c_long> {
             let event = TcpEvent {
                 header: EventHeader {
                     event_type: EventType::TcpConnect as u32,
+                    _padding: 0,
                     timestamp_ns: unsafe { aya_ebpf::helpers::bpf_ktime_get_ns() },
                     pid,
-                    tid: (pid_tgid >> 32) as u32,
+                    tid,
                 },
                 src_addr: [0u8; IP_ADDR_LEN],
                 src_port,
@@ -204,9 +206,10 @@ fn try_inet_sock_set_state(ctx: TracePointContext) -> Result<c_long, c_long> {
             let event = TcpEvent {
                 header: EventHeader {
                     event_type: EventType::TcpRetransmit as u32,
+                    _padding: 0,
                     timestamp_ns: unsafe { aya_ebpf::helpers::bpf_ktime_get_ns() },
                     pid,
-                    tid: (pid_tgid >> 32) as u32,
+                    tid,
                 },
                 src_addr: [0u8; IP_ADDR_LEN],
                 src_port,
@@ -242,9 +245,10 @@ fn try_inet_sock_set_state(ctx: TracePointContext) -> Result<c_long, c_long> {
             let event = TcpEvent {
                 header: EventHeader {
                     event_type: EventType::TcpRetransmit as u32,
+                    _padding: 0,
                     timestamp_ns: unsafe { aya_ebpf::helpers::bpf_ktime_get_ns() },
                     pid,
-                    tid: (pid_tgid >> 32) as u32,
+                    tid,
                 },
                 src_addr: [0u8; IP_ADDR_LEN],
                 src_port,
@@ -265,9 +269,10 @@ fn try_inet_sock_set_state(ctx: TracePointContext) -> Result<c_long, c_long> {
             let event = TcpEvent {
                 header: EventHeader {
                     event_type: EventType::TcpConnect as u32,
+                    _padding: 0,
                     timestamp_ns: unsafe { aya_ebpf::helpers::bpf_ktime_get_ns() },
                     pid,
-                    tid: (pid_tgid >> 32) as u32,
+                    tid,
                 },
                 src_addr: [0u8; IP_ADDR_LEN],
                 src_port,
@@ -283,9 +288,10 @@ fn try_inet_sock_set_state(ctx: TracePointContext) -> Result<c_long, c_long> {
             let event = TcpEvent {
                 header: EventHeader {
                     event_type: EventType::TcpClose as u32,
+                    _padding: 0,
                     timestamp_ns: unsafe { aya_ebpf::helpers::bpf_ktime_get_ns() },
                     pid,
-                    tid: (pid_tgid >> 32) as u32,
+                    tid,
                 },
                 src_addr: [0u8; IP_ADDR_LEN],
                 src_port,

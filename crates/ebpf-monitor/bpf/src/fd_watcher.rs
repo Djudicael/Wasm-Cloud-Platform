@@ -77,7 +77,8 @@ fn try_fd_install(ctx: ProbeContext) -> Result<c_long, c_long> {
     let config = CONFIG.get(0).ok_or(0)?;
 
     let pid_tgid = aya_ebpf::helpers::bpf_get_current_pid_tgid();
-    let pid = pid_tgid as u32;
+    let pid = (pid_tgid >> 32) as u32;
+    let tid = pid_tgid as u32;
 
     // fd_install(struct file *file, unsigned int fd)
     // arg0 = file pointer, arg1 = fd number
@@ -107,9 +108,10 @@ fn try_fd_install(ctx: ProbeContext) -> Result<c_long, c_long> {
         let event = FdEvent {
             header: EventHeader {
                 event_type: EventType::FdLimitApproaching as u32,
+                _padding: 0,
                 timestamp_ns: unsafe { aya_ebpf::helpers::bpf_ktime_get_ns() },
                 pid,
-                tid: (pid_tgid >> 32) as u32,
+                tid,
             },
             fd,
             fd_type,
@@ -134,9 +136,10 @@ fn try_fd_install(ctx: ProbeContext) -> Result<c_long, c_long> {
         let event = FdEvent {
             header: EventHeader {
                 event_type: EventType::FdOpen as u32,
+                _padding: 0,
                 timestamp_ns: unsafe { aya_ebpf::helpers::bpf_ktime_get_ns() },
                 pid,
-                tid: (pid_tgid >> 32) as u32,
+                tid,
             },
             fd,
             fd_type,
@@ -177,7 +180,7 @@ pub fn do_filp_close(ctx: ProbeContext) -> c_long {
 
 fn try_do_filp_close(_ctx: ProbeContext) -> Result<c_long, c_long> {
     let pid_tgid = aya_ebpf::helpers::bpf_get_current_pid_tgid();
-    let pid = pid_tgid as u32;
+    let pid = (pid_tgid >> 32) as u32;
 
     // Decrement FD count for this PID
     unsafe {

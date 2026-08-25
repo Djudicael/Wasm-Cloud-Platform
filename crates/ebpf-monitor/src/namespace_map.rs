@@ -40,7 +40,7 @@ struct PortBinding {
 /// fallback maps. The gateway reads from the same maps for identity resolution.
 pub struct NamespaceMap {
     #[cfg(feature = "ebpf")]
-    inner: Mutex<Option<aya::maps::HashMap<aya::maps::MapData, u32, TidIdentity>>>,
+    inner: Mutex<Vec<aya::maps::HashMap<aya::maps::MapData, u32, TidIdentity>>>,
     /// TID → TidIdentity. Always maintained. Primary identity store.
     tid_to_identity: RwLock<HashMap<u32, TidIdentity>>,
     /// Source port → PortBinding. Populated by the consumer when eBPF events arrive.
@@ -59,30 +59,34 @@ impl NamespaceMap {
     // the identity table. This is defense-in-depth — the eBPF programs
     // should never need to write to this map.
     #[cfg(feature = "ebpf")]
-    pub fn from_ebpf(ns_ebpf: Option<&mut aya::Ebpf>) -> Self {
-        let inner = if let Some(ns) = ns_ebpf {
-            match ns.take_map("MONITORED_TIDS") {
-                Some(map) => {
-                    match aya::maps::HashMap::<aya::maps::MapData, u32, TidIdentity>::try_from(map)
-                    {
-                        Ok(hash_map) => {
-                            info!("MONITORED_TIDS eBPF map opened from namespace enforcer");
-                            Some(hash_map)
-                        }
-                        Err(e) => {
-                            warn!(error = %e, "MONITORED_TIDS map wrong type — using fallback");
-                            None
-                        }
-                    }
+    pub fn from_ebpf(
+        ns_ebpf: Option<&mut aya::Ebpf>,
+        monitors: &mut [crate::loader::LoadedMonitor],
+    ) -> Self {
+        let mut inner = Vec::new();
+
+        for (owner, ebpf) in monitors
+            .iter_mut()
+            .filter(|monitor| matches!(monitor.name, "process_tracker" | "syscall_counter"))
+            .map(|monitor| (monitor.name, &mut monitor.ebpf))
+            .chain(ns_ebpf.into_iter().map(|ebpf| ("namespace_enforcer", ebpf)))
+        {
+            let Some(map) = ebpf.take_map("MONITORED_TIDS") else {
+                warn!(owner, "MONITORED_TIDS map not found");
+                continue;
+            };
+            match aya::maps::HashMap::<aya::maps::MapData, u32, TidIdentity>::try_from(map) {
+                Ok(hash_map) => {
+                    info!(owner, "MONITORED_TIDS eBPF map opened");
+                    inner.push(hash_map);
                 }
-                None => {
-                    warn!("MONITORED_TIDS map not found in namespace enforcer — using fallback");
-                    None
-                }
+                Err(e) => warn!(owner, error = %e, "MONITORED_TIDS map has the wrong type"),
             }
-        } else {
-            None
-        };
+        }
+
+        if inner.is_empty() {
+            warn!("No MONITORED_TIDS eBPF maps opened — using in-process identity only");
+        }
 
         NamespaceMap {
             inner: Mutex::new(inner),
@@ -96,7 +100,7 @@ impl NamespaceMap {
     pub fn new_fallback() -> Self {
         NamespaceMap {
             #[cfg(feature = "ebpf")]
-            inner: Mutex::new(None),
+            inner: Mutex::new(Vec::new()),
             tid_to_identity: RwLock::new(HashMap::new()),
             port_to_tid: RwLock::new(HashMap::new()),
             port_ttl: Duration::from_secs(300),
@@ -112,21 +116,27 @@ impl NamespaceMap {
         identity.registered_at_ns = Self::now_ns();
 
         #[cfg(feature = "ebpf")]
-        if let Some(ref mut map) = *self.inner.lock().unwrap() {
-            match map.insert(tid, identity, 0) {
-                Ok(()) => {
-                    info!(
-                        tid,
-                        ns = identity.namespace_str(),
-                        app = identity.app_id_str(),
-                        "TID registered in eBPF map"
-                    );
-                    self.tid_to_identity.write().unwrap().insert(tid, identity);
-                    return Ok(());
+        {
+            let mut maps = self.inner.lock().unwrap();
+            for map in maps.iter_mut() {
+                if let Err(e) = map.insert(tid, identity, 0) {
+                    for inserted in maps.iter_mut() {
+                        let _ = inserted.remove(&tid);
+                    }
+                    return Err(format!(
+                        "failed to register TID {tid} in every eBPF map: {e}"
+                    ));
                 }
-                Err(e) => {
-                    warn!(tid, error = %e, "eBPF map insert failed — using fallback");
-                }
+            }
+
+            if !maps.is_empty() {
+                info!(
+                    tid,
+                    map_count = maps.len(),
+                    ns = identity.namespace_str(),
+                    app = identity.app_id_str(),
+                    "TID registered in eBPF maps"
+                );
             }
         }
 
@@ -146,7 +156,7 @@ impl NamespaceMap {
     /// Also removes any port_to_tid entries for this TID.
     pub fn deregister_tid(&self, tid: u32) -> Result<(), String> {
         #[cfg(feature = "ebpf")]
-        if let Some(ref mut map) = *self.inner.lock().unwrap() {
+        for map in self.inner.lock().unwrap().iter_mut() {
             let _ = map.remove(&tid);
         }
 

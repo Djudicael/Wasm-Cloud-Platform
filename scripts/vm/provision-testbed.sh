@@ -184,7 +184,13 @@ if [[ "$node_image_schema" != 2 ]]; then
   exit 1
 fi
 command -v firecracker >/dev/null || { echo "firecracker is missing; re-run with --prepare-assets." >&2; exit 1; }
-sudo -v
+
+if [[ -n ${WSL_DISTRO_NAME:-} ]] && command -v wsl.exe >/dev/null; then
+  run_privileged() { wsl.exe -u root -- "$@"; }
+else
+  sudo -v
+  run_privileged() { sudo -E "$@"; }
+fi
 
 target_dir=${CARGO_TARGET_DIR:-/tmp/wasm-cloud-platform-target}
 CARGO_TARGET_DIR="$target_dir" cargo build -p vm-testbed --bin vm-testbed-cli
@@ -192,14 +198,14 @@ cli="$target_dir/debug/vm-testbed-cli"
 
 args=(up --profile "$profile" --name "$name" --state-file "$state_file" --node-memory "$node_memory" --node-vcpus "$node_vcpus")
 [[ -n "$nodes" ]] && args+=(--nodes "$nodes")
-sudo -E "$cli" "${args[@]}"
-sudo -E "$cli" status --state-file "$state_file"
+run_privileged "$cli" "${args[@]}"
+run_privileged "$cli" status --state-file "$state_file"
 
 if [[ "$front_door" == haproxy ]]; then
   haproxy_config=$(python3 -c 'import os, sys; print(os.path.abspath(sys.argv[1]))' "$haproxy_config")
   haproxy_log=$(python3 -c 'import os, sys; print(os.path.abspath(sys.argv[1]))' "$haproxy_log")
 
-  mapfile -t proxy_addrs < <(sudo python3 - "$state_file" <<'PY'
+  mapfile -t proxy_addrs < <(run_privileged python3 - "$state_file" <<'PY'
 import json, sys
 with open(sys.argv[1], encoding="utf-8") as stream:
     state = json.load(stream)

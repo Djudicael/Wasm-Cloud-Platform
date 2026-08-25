@@ -4,6 +4,10 @@ version = "0.1.0"
 license.workspace = true
 edition = "2021"
 
+[[example]]
+name = "load_probe"
+required-features = ["ebpf"]
+
 [features]
 default = []
 ebpf = ["dep:aya", "dep:aya-log"]
@@ -24,3 +28,4 @@ libc = "0.2.189"
 
 [dev-dependencies]
 tokio = { version = "1.53.1", features = ["full", "test-util"] }
+tracing-subscriber.workspace = true

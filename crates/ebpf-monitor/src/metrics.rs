@@ -11,9 +11,13 @@ use prometheus::{histogram_opts, Gauge, Histogram, IntCounter, IntGauge, Opts, R
 /// If a metric is already registered, returns a new instance that shares
 /// the same underlying metric via the registry's internal deduplication.
 macro_rules! register_metric {
-    ($metric:expr, $registry:expr) => {
-        match $registry.register(Box::new($metric.clone())) {
-            Ok(_) => $metric,
+    ($metric:expr, $registry:expr) => {{
+        // Evaluate the constructor exactly once. Evaluating `$metric` again in
+        // the match arm creates a disconnected collector: the handle changes,
+        // while the registry keeps exporting its initial value.
+        let metric = $metric;
+        match $registry.register(Box::new(metric.clone())) {
+            Ok(_) => metric,
             Err(e) => {
                 // Metric already registered — retrieve the existing one.
                 // This happens in tests or if `EbpfMetrics::new` is called twice.
@@ -21,10 +25,10 @@ macro_rules! register_metric {
                     error = %e,
                     "metric already registered, creating new instance (registry will deduplicate)"
                 );
-                $metric
+                metric
             }
         }
-    };
+    }};
 }
 
 /// Prometheus metrics exported by the eBPF monitor.
@@ -304,6 +308,12 @@ mod tests {
         assert_eq!(metrics.ebpf_active.get(), 0);
         metrics.mark_ebpf_active();
         assert_eq!(metrics.ebpf_active.get(), 1);
+        let exported = registry
+            .gather()
+            .into_iter()
+            .find(|family| family.name() == "wasm_ebpf_active")
+            .expect("active gauge must be registered");
+        assert_eq!(exported.get_metric()[0].get_gauge().value(), 1.0);
         metrics.mark_ebpf_fallback();
         assert_eq!(metrics.ebpf_active.get(), 0);
     }

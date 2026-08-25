@@ -79,6 +79,7 @@ cat >> .config << 'EOF'
 CONFIG_64BIT=y
 CONFIG_SMP=y
 CONFIG_NR_CPUS=64
+CONFIG_MODULES=y
 CONFIG_MULTIUSER=y
 CONFIG_BINFMT_ELF=y
 CONFIG_BINFMT_SCRIPT=y
@@ -159,9 +160,19 @@ CONFIG_BPF=y
 CONFIG_BPF_SYSCALL=y
 CONFIG_BPF_JIT=y
 CONFIG_BPF_JIT_ALWAYS_ON=y
-CONFIG_HAVE_EBPF_JIT=y
 CONFIG_CGROUP_BPF=y
 CONFIG_BPF_EVENTS=y
+
+# Tracing hooks used by the platform's tracepoint and kprobe programs.
+# KALLSYMS is required for resolving kprobe targets by function name.
+CONFIG_KALLSYMS=y
+CONFIG_KPROBES=y
+CONFIG_KPROBE_EVENTS=y
+CONFIG_UPROBES=y
+CONFIG_UPROBE_EVENTS=y
+CONFIG_FTRACE=y
+CONFIG_TRACING=y
+CONFIG_FTRACE_SYSCALLS=y
 
 # BTF support (required for modern eBPF)
 CONFIG_DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT=y
@@ -240,7 +251,6 @@ CONFIG_MEMORY_HOTREMOVE=y
 
 # Disable unnecessary debug options to reduce size
 CONFIG_DEBUG_FS=n
-CONFIG_KALLSYMS=n
 CONFIG_KALLSYMS_ALL=n
 CONFIG_MAGIC_SYSRQ=n
 
@@ -263,6 +273,7 @@ make olddefconfig
 # root disk or network adapter.
 for required_config in \
     CONFIG_SMP=y \
+    CONFIG_MODULES=y \
     CONFIG_MULTIUSER=y \
     CONFIG_BINFMT_ELF=y \
     CONFIG_BINFMT_SCRIPT=y \
@@ -292,7 +303,18 @@ for required_config in \
     CONFIG_PRINTK=y \
     CONFIG_SERIAL_8250_CONSOLE=y \
     CONFIG_DEBUG_INFO=y \
-    CONFIG_DEBUG_INFO_BTF=y; do
+    CONFIG_DEBUG_INFO_BTF=y \
+    CONFIG_BPF=y \
+    CONFIG_BPF_SYSCALL=y \
+    CONFIG_BPF_JIT=y \
+    CONFIG_BPF_JIT_ALWAYS_ON=y \
+    CONFIG_BPF_EVENTS=y \
+    CONFIG_KALLSYMS=y \
+    CONFIG_KPROBES=y \
+    CONFIG_KPROBE_EVENTS=y \
+    CONFIG_FTRACE=y \
+    CONFIG_TRACING=y \
+    CONFIG_FTRACE_SYSCALLS=y; do
     grep -qx "$required_config" .config || {
         echo "Required Firecracker kernel setting is missing after olddefconfig: $required_config" >&2
         exit 1

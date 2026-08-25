@@ -91,7 +91,7 @@ The run fails when any required check fails. An infrastructure limitation is
 `NOT VALIDATED`; it must not be converted into a pass or an undocumented
 exception.
 
-## Execution record: 2026-08-23 / single-host run in progress
+## Execution record: 2026-08-23 through 2026-08-25 / single-host run in progress
 
 This section is the live record for the current rehearsal. Do not mark a gate
 complete solely because a command was started; retain the command output or its
@@ -182,6 +182,20 @@ redacted artifact with the result.
 | Final live-state snapshot | PASS / HISTORICAL PRE-TEARDOWN | Before authorized teardown, NATS PID `223906`, PostgreSQL PID `289481`, and platform node PIDs `325604`, `327249`, and `325384` were alive; every node health probe, both public routes, all 10 Prometheus targets, and Alertmanager were healthy. The later authorized-teardown row records removal of this environment |
 | Manual Prometheus UI validation | PASS (USER-VALIDATED) | The operator completed manual testing through `http://localhost:9095` after automated validation confirmed 10 targets up, zero targets down, and no active Alertmanager alerts |
 | Authorized teardown | PASS | After explicit operator authorization, `scripts/vm/destroy-testbed.sh` validated the selected state and removed its six exact state-labeled observability containers, recorded HAProxy PID/config/log, three platform-node VMs, NATS VM, PostgreSQL VM, exact TAP devices and bridge, state-derived OIDC credentials, and lifecycle state files. A post-teardown audit confirmed every recorded PID/device/container absent and ports 8088, 9095, and 9093 closed. No broad process or network matching was used |
+| 2026-08-25 production-like reprovision | PASS / LIVE | The exact state `.prod-validation-single-host-state.json` records NATS PID `170213`, PostgreSQL PID `170523`, and three healthy platform nodes at `172.20.0.12-14`. After the final rolling image update, node PIDs are `191773`, `191817`, and `191861`. HAProxy remains available at `http://127.0.0.1:8088`. This environment must remain running for operator browser testing. |
+| eBPF guest kernel and verifier gate | PASS | Linux `6.1.80` was rebuilt with BTF, tracing, syscall tracepoints, kprobes, modules, and the complete Firecracker boot contract. All seven objects (`process_tracker`, `tcp_monitor`, `fd_watcher`, `mem_pressure`, `disk_monitor`, `syscall_counter`, and `namespace_enforcer`) loaded and attached on all three guests with no verifier error. The FD watcher used the supported `filp_close` fallback where `do_filp_close` was unavailable. |
+| eBPF verifier compatibility defects | FIXED / PASS | Linux 6.1 rejected implicit struct padding passed to ring-buffer helpers and a variable-size namespace header read. Event wire padding is now explicit and zeroed on both sides, the forged-header scan uses verifier-provable fixed reads, and all seven BPF ELFs rebuild with pinned `nightly-2026-08-20` and `bpf-linker` 0.11.0. The reusable verifier-log summary is `scripts/ebpf/summarize-verifier-log.jq`. |
+| eBPF identity boundary | CRITICAL DEFECT FIXED / RESIDUAL GAP | Initial runtime evidence showed the node's own `bpf(2)`, socket, and worker-thread activity classified as Wasm-instance activity, producing false privilege-escalation incidents and kill requests. Root cause: filtering the in-process runtime by TGID/PID 1. The syscall and lifecycle probes now accept only supervisor-registered TIDs, and registration is mirrored atomically into the process, syscall, and namespace maps. After the fix, every node opened all three maps and startup/application traffic produced zero false security incidents. **Residual gap:** `wasi:http` components execute on shared asynchronous runtime workers and currently register no stable execution TID; per-instance syscall/lifecycle attribution is therefore not proven for those components. Do not describe this part as production-complete until HTTP execution has a dedicated attributable boundary (dedicated thread/cgroup/process or equivalent). |
+| eBPF Prometheus mode gauge | DEFECT FIXED / PASS | Runtime/admin status reported eBPF active while Prometheus exported `wasm_ebpf_active 0`. The registration macro evaluated each constructor twice, registering one collector and returning a disconnected handle. It now evaluates once, and a regression test gathers the registry value. Following rolling replacement of all nodes, Prometheus reports `wasm_ebpf_active=1` for `local-test-node-0`, `-1`, and `-2`. |
+| eBPF event path | PARTIAL PASS | Prometheus recorded two processed events, zero parse errors, and zero security violations. Guest logs correlate the two events to slow block-I/O observations, proving ring-buffer parsing, dispatch, action logging, and metric updates. File, TCP-limit, FD-limit, memory-pressure, suspicious-syscall, loss/backpressure, fallback, and overhead scenarios remain open. Block events are system-wide and reported an `unknown` I/O type, so scope/tracepoint-field accuracy still requires remediation. |
+| PostgreSQL unattended provisioning | DEFECT FIXED / PASS | The service wrapper initially blocked on an expired terminal-bound `sudo` ticket and created no VM. Under WSL it now invokes the exact CLI through `wsl.exe -u root`, matching platform provisioning. Service `oidc-postgres` then became reachable at `172.20.0.20:5432`. |
+| OIDC application deployment (2026-08-25) | PASS | The locked frontend audited 101 npm packages with zero reported vulnerabilities; both WASI components built; migrations through V37 and repeatable seed data completed against PostgreSQL 17.11 using `wasi-pg-client 0.2.0`; frontend, SPA route, discovery issuer, seeded login, and backend readiness all passed through the same-origin HAProxy gateway. Readiness returned `{"checks":{"database":"ok"},"status":"ready"}`. |
+| Focused Playwright production journey | PASS | Playwright 1.62.1 Chromium was installed in WSL. Six focused login/dashboard tests passed against `http://localhost:8088`, both before and after the rolling node update: form rendering, invalid credentials, successful login/redirect, empty-field validation, authenticated navigation, and API-backed dashboard statistics. The final serial run completed 6/6 in 4.9 seconds. |
+| Full application Playwright suite | FAIL / APPLICATION TEST DEBT | The 44-test Chromium run at its default 12 workers completed with 16 passes, 3 flaky passes, and 25 failures. Evidence shows both concurrency timeouts and deterministic test defects: stale seeded identity expectations (`admin@localhost` versus `admin@example.com`), ambiguous text locators resolving multiple elements, and cross-test prerequisites such as expecting an API key whose creation failed. The platform and database remained ready after the run. Do not use this suite as a production gate until tests use isolated data, stable role/test-id selectors, bounded worker count, and no order-dependent fixtures. |
+| Disposable observability targets | PASS | Prometheus, Alertmanager, HAProxy, NATS, PostgreSQL, host, OpenTelemetry Collector, and all three platform-node targets are up: `sum(up)=10` and `count(up == 1)=10`. HAProxy request-rate data was observed during the browser run. |
+| Logs and distributed traces | FAIL / NOT IMPLEMENTED END TO END | Nodes emit structured JSON serial logs, but no bounded log agent forwards them. The OTLP Collector is healthy on 4317/4318, yet `otelcol_receiver_accepted_spans` and `otelcol_receiver_accepted_log_records` have no series after the Playwright journey. Source inspection confirms `logging.otlp_endpoint` is loaded but not wired into the node subscriber; `metrics::tracing_setup::init_tracing` is unused and currently panics on exporter initialization. No correlated HAProxy-to-WASI-to-PostgreSQL trace exists. Phase 5 remains open. |
+| Rolling node image update | PASS | The eBPF metric fix was promoted by restarting `local-test-node-0`, `-1`, and `-2` one at a time from the corrected rootfs. Public OIDC readiness remained `database: ok` after every replacement, all nodes reconverged healthy, PostgreSQL/NATS/observability were preserved, and the focused Playwright gate passed afterward. |
+| 2026-08-25 final source gates | PASS WITH DEPENDENCY NOTICE | In WSL, `cargo fmt --all -- --check`, the required native workspace all-target check, workspace all-target Clippy with warnings denied, eBPF-feature all-target Clippy with warnings denied, all 117 eBPF monitor tests, BPF ELF rebuild, shell syntax checks, and scoped `git diff --check` pass. The diagnostic example is correctly gated behind the `ebpf` feature. Rust still emits the separately tracked future-incompatibility notice for `proc-macro-error2 2.0.1`. |
 
 ### Execution notes
 
@@ -207,6 +221,13 @@ redacted artifact with the result.
   topology provisioning is the next gate.
 - The environment must remain up after deployment for the user's interactive
   browser testing. Teardown requires a later explicit request.
+- The default application Playwright suite is not currently a safe load or
+  release gate. Keep a small serial production-journey gate separate from
+  parallel CRUD coverage until test data and selectors are isolated.
+- A healthy OTLP receiver is only a prerequisite. The 2026-08-25 journey sent
+  no spans or log records, so Phase 5 must remain failed until node subscriber
+  wiring, bounded buffering, backend storage/query, trace propagation, and
+  interruption/recovery behavior are proven.
 
 ## Phase 0: safety and prerequisites
 
@@ -335,7 +356,8 @@ command succeeded.
 - [x] Login reaches the identity flow without a 502 response.
 - [x] Callback, token/session handling, authenticated API access, refresh where
       supported, and logout all work through the public origin.
-- [ ] Invalid credentials, invalid redirect URIs, expired state/nonce, and expired
+- [x] Invalid credentials fail safely in the focused Playwright journey.
+- [ ] Invalid redirect URIs, expired state/nonce, and expired
       sessions fail safely.
 - [ ] No password, JWT, cookie, authorization header, database URL, or client
       secret appears in logs or traces.
@@ -415,19 +437,21 @@ CARGO_TARGET_DIR=/tmp/wasm-cloud-platform-target \
 
 The next microVM run must still prove the kernel-runtime portion below.
 
-- [ ] Record guest kernel version, configuration, BTF availability, capabilities,
+- [x] Record guest kernel version, configuration, BTF availability, capabilities,
       eBPF object checksum, and release feature set.
-- [ ] Confirm every eBPF object is packaged from a production-safe path.
+- [x] Confirm every eBPF object is packaged from a production-safe path.
 - [ ] Start in userspace fallback mode and record baseline metrics and overhead.
 - [ ] Enable one probe group at a time.
-- [ ] Confirm `wasm_ebpf_active` reflects the actual mode.
+- [x] Confirm `wasm_ebpf_active` reflects the actual mode.
 - [ ] Confirm events are scoped to the intended platform cgroup/PID namespace and
       do not expose unrelated processes.
 - [ ] Generate file, TCP, memory-pressure, syscall, and block-I/O events and verify
       the corresponding metrics.
 - [ ] Measure ring-buffer/event loss and dispatcher backpressure.
 - [ ] Deny eBPF loading and confirm the node continues safely in fallback mode.
-- [ ] Restart the node and unload/reload probes without leaving pinned maps or
+- [x] Restart every node and reload probes while preserving public application
+      readiness. Explicit pinned-map residue inspection remains open.
+- [ ] Unload/reload probes without leaving pinned maps or
       programs.
 - [ ] Compare request latency, CPU, and memory against the fallback baseline.
 

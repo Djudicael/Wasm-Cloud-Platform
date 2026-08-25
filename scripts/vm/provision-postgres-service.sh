@@ -46,7 +46,14 @@ postgres_image_schema=$(debugfs -R 'cat /etc/postgresql-image-schema-version' "$
 target_dir=${CARGO_TARGET_DIR:-/tmp/wasm-cloud-platform-target}
 CARGO_TARGET_DIR="$target_dir" cargo build -p vm-testbed --bin vm-testbed-cli
 cli="$target_dir/debug/vm-testbed-cli"
-sudo -E "$cli" add-service \
+if [[ -n ${WSL_DISTRO_NAME:-} ]] && command -v wsl.exe >/dev/null; then
+  run_privileged() { wsl.exe -u root -- "$@"; }
+else
+  sudo -v
+  run_privileged() { sudo -E "$@"; }
+fi
+
+run_privileged "$cli" add-service \
   --state-file "$state_file" \
   --id oidc-postgres \
   --kind postgresql \

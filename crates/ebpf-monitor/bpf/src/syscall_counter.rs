@@ -49,7 +49,7 @@
 //!
 //! - Normal syscalls only increment a per-CPU counter (no ring buffer write)
 //! - Suspicious syscalls generate a ring buffer event
-//! - The `MONITORED_PIDS` map filters out non-Wasm threads
+//! - The `MONITORED_TIDS` map filters out non-Wasm threads
 //! - Per-CPU maps avoid lock contention
 
 #![no_std]
@@ -63,7 +63,9 @@ use aya_ebpf::{
 };
 use aya_log_ebpf::{info, warn};
 
-use ebpf_monitor_bpf::{EventHeader, EventType, MonitorConfigMap, SyscallCategory, SyscallEvent};
+use ebpf_monitor_bpf::{
+    EventHeader, EventType, MonitorConfigMap, SyscallCategory, SyscallEvent, TidIdentity,
+};
 
 /// Configuration map (shared with all eBPF programs).
 #[map]
@@ -86,16 +88,13 @@ static SYSCALL_COUNTS: PerCpuHashMap<u32, u64> = PerCpuHashMap::with_max_entries
 #[map]
 static SUSPICIOUS_COUNTS: PerCpuHashMap<u32, u64> = PerCpuHashMap::with_max_entries(10240, 0);
 
-/// Set of PIDs that are wasm-node children (populated by process_tracker).
-/// Key: PID, Value: marker byte (always 1).
-/// Only PIDs in this map (or the node PID itself) are monitored for
-/// syscalls. This prevents false positives from Tokio worker threads,
-/// NATS subscriber threads, and other non-Wasm threads in the same process.
+/// Wasm execution threads registered by the supervisor.
+///
+/// Wasm instances run in-process, so filtering on the node TGID would also
+/// inspect the eBPF loader, Tokio, NATS, and proxy threads. Userspace mirrors
+/// registrations into this object as well as the namespace-enforcer object.
 #[map]
-static MONITORED_PIDS: HashMap<u32, u8> = HashMap::with_max_entries(10240, 0);
-
-/// Marker value for MONITORED_PIDS entries.
-const MONITORED_PID_MARKER: u8 = 1;
+static MONITORED_TIDS: HashMap<u32, TidIdentity> = HashMap::with_max_entries(4096, 0);
 
 // ── Privileged Syscall Numbers (x86_64) ────────────────────────────────────────
 //
@@ -180,15 +179,14 @@ fn try_sys_enter(ctx: TracePointContext) -> Result<c_long, c_long> {
     let config = CONFIG.get(0).ok_or(0)?;
 
     let pid_tgid = aya_ebpf::helpers::bpf_get_current_pid_tgid();
-    let pid = pid_tgid as u32;
+    let pid = (pid_tgid >> 32) as u32;
+    let tid = pid_tgid as u32;
 
     // ── Filter: only monitor wasm-node children ─────────────────────────
-    // The MONITORED_PIDS map is populated by the process_tracker eBPF
-    // program when it sees a new child process of the wasm-node process.
-    // We also monitor the node PID itself for defense in depth.
-    let is_monitored = pid == config.node_pid || unsafe { MONITORED_PIDS.get(&pid).is_some() };
-
-    if !is_monitored {
+    // Only inspect an execution thread explicitly registered by Supervisor.
+    // Filtering by TGID is unsafe here because all control-plane and Wasm
+    // threads share the wasm-node process.
+    if unsafe { MONITORED_TIDS.get(&tid) }.is_none() {
         return Ok(0);
     }
 
@@ -203,10 +201,10 @@ fn try_sys_enter(ctx: TracePointContext) -> Result<c_long, c_long> {
     // increments the counter. No ring buffer event is generated
     // for normal syscalls to minimize overhead.
     unsafe {
-        if let Some(count) = SYSCALL_COUNTS.get_ptr_mut(&pid) {
+        if let Some(count) = SYSCALL_COUNTS.get_ptr_mut(&tid) {
             *count += 1;
         } else {
-            let _ = SYSCALL_COUNTS.insert(&pid, &1, 0);
+            let _ = SYSCALL_COUNTS.insert(&tid, &1, 0);
         }
     }
 
@@ -217,11 +215,11 @@ fn try_sys_enter(ctx: TracePointContext) -> Result<c_long, c_long> {
     if category != SyscallCategory::Normal as u32 {
         // Increment suspicious syscall counter
         let suspicious_count = unsafe {
-            if let Some(count) = SUSPICIOUS_COUNTS.get_ptr_mut(&pid) {
+            if let Some(count) = SUSPICIOUS_COUNTS.get_ptr_mut(&tid) {
                 *count += 1;
                 *count
             } else {
-                let _ = SUSPICIOUS_COUNTS.insert(&pid, &1, 0);
+                let _ = SUSPICIOUS_COUNTS.insert(&tid, &1, 0);
                 1
             }
         };
@@ -234,12 +232,14 @@ fn try_sys_enter(ctx: TracePointContext) -> Result<c_long, c_long> {
         let event = SyscallEvent {
             header: EventHeader {
                 event_type: EventType::SyscallAnomaly as u32,
+                _padding: 0,
                 timestamp_ns: unsafe { aya_ebpf::helpers::bpf_ktime_get_ns() },
                 pid,
-                tid: (pid_tgid >> 32) as u32,
+                tid,
             },
             syscall_nr,
             syscall_category: category,
+            _padding: 0,
             count_in_window: suspicious_count,
         };
         let _ = EVENTS.output(&event, 0);
@@ -285,12 +285,14 @@ fn try_sys_enter(ctx: TracePointContext) -> Result<c_long, c_long> {
         let event = SyscallEvent {
             header: EventHeader {
                 event_type: EventType::SyscallAnomaly as u32,
+                _padding: 0,
                 timestamp_ns: unsafe { aya_ebpf::helpers::bpf_ktime_get_ns() },
                 pid,
-                tid: (pid_tgid >> 32) as u32,
+                tid,
             },
             syscall_nr: 0, // No specific syscall — rate limit exceeded
             syscall_category: SyscallCategory::Normal as u32,
+            _padding: 0,
             count_in_window: total_count,
         };
         let _ = EVENTS.output(&event, 0);
@@ -354,45 +356,6 @@ fn classify_syscall(syscall_nr: u64) -> u32 {
         // exit_group(231), rt_sigreturn(15), etc.
         _ => SyscallCategory::Normal as u32,
     }
-}
-
-/// Register a PID as a monitored (wasm-node child) process.
-///
-/// This function is called by the process_tracker eBPF program when
-/// it detects a new child process of the wasm-node process. The
-/// syscall_counter then monitors this PID for suspicious syscalls.
-///
-/// Note: This function is intended to be called from another eBPF
-/// program (process_tracker) via a BPF-to-BPF call. However, aya-ebpf
-/// does not currently support BPF-to-BPF calls in all cases.
-///
-/// As a workaround, userspace can also populate the MONITORED_PIDS
-/// map by writing to it from the ring buffer consumer when it
-/// receives a ProcessExec event.
-///
-/// This function is exported as a noinline function so it can be
-/// called from other eBPF programs if BPF-to-BPF calls are supported.
-#[inline(never)]
-pub fn register_monitored_pid(pid: u32) {
-    let _ = MONITORED_PIDS.insert(&pid, &MONITORED_PID_MARKER, 0);
-}
-
-/// Unregister a PID from the monitored set.
-///
-/// Called when a child process exits (detected by process_tracker).
-/// After unregistration, the syscall counter stops monitoring this PID,
-/// which reduces overhead and prevents false positives from recycled PIDs.
-#[inline(never)]
-pub fn unregister_monitored_pid(pid: u32) {
-    let _ = MONITORED_PIDS.remove(&pid);
-
-    // Also clean up the per-PID counters to free map entries.
-    // Note: PerCpuHashMap::remove is not available in all aya-ebpf
-    // versions. If it's not available, the counters will be cleaned
-    // up lazily when the PID is reused (the old count will be
-    // overwritten by the new process's syscalls).
-    let _ = SYSCALL_COUNTS.remove(&pid);
-    let _ = SUSPICIOUS_COUNTS.remove(&pid);
 }
 
 /// Get the total syscall count for a PID in the current window.

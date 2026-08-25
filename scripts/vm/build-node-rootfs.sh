@@ -36,8 +36,19 @@ else
     cargo build --release --bin wasm-ctl
 fi
 
-echo "Building eBPF programs..."
-"$(dirname "$0")/../ebpf/build-ebpf.sh"
+if [[ "${SKIP_EBPF_BUILD:-false}" == true ]]; then
+    EBPF_BUILD_DIR="./crates/ebpf-monitor/bpf/target/bpfel-unknown-none/release"
+    for object in process_tracker tcp_monitor fd_watcher mem_pressure disk_monitor syscall_counter namespace_enforcer; do
+        [[ -x "$EBPF_BUILD_DIR/$object" ]] || {
+            echo "SKIP_EBPF_BUILD=true but eBPF object is missing: $EBPF_BUILD_DIR/$object" >&2
+            exit 1
+        }
+    done
+    echo "Reusing existing eBPF objects from $EBPF_BUILD_DIR."
+else
+    echo "Building eBPF programs..."
+    "$(dirname "$0")/../ebpf/build-ebpf.sh"
+fi
 
 # Create working directory
 WORK_DIR="$(mktemp -d)"
@@ -87,7 +98,7 @@ echo "Installing wasm-node binaries..."
 cp "$BUILD_TARGET_DIR/release/wasm-node" "$ROOTFS_DIR/usr/local/bin/"
 cp "$BUILD_TARGET_DIR/release/wasm-ctl" "$ROOTFS_DIR/usr/local/bin/"
 chmod +x "$ROOTFS_DIR/usr/local/bin/"{wasm-node,wasm-ctl}
-EBPF_BUILD_DIR="./crates/ebpf-monitor/bpf/target/bpfel-unknown-none/release"
+EBPF_BUILD_DIR="${EBPF_BUILD_DIR:-./crates/ebpf-monitor/bpf/target/bpfel-unknown-none/release}"
 for object in process_tracker tcp_monitor fd_watcher mem_pressure disk_monitor syscall_counter namespace_enforcer; do
     cp "$EBPF_BUILD_DIR/$object" "$ROOTFS_DIR/opt/wasm-node/ebpf/$object.o"
 done
@@ -177,6 +188,7 @@ cat > "$ROOTFS_DIR/sbin/init" << 'EOF'
 mount -t proc proc /proc
 mount -t sysfs sysfs /sys
 mount -t devtmpfs devtmpfs /dev 2>/dev/null || true
+mount -t tracefs tracefs /sys/kernel/tracing 2>/dev/null || true
 ip link set lo up
 ip link set eth0 up
 NODE_ID=vm-node
