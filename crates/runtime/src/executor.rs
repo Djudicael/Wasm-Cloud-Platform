@@ -13,6 +13,7 @@ use hyper::service::service_fn;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 pub(crate) use socket_policy::{compose_socket_addr_check, SocketPolicyCheck};
 pub use socket_policy::{SocketAddrCheckFn, SocketAddrUse};
+use std::future::Future;
 use std::net::SocketAddr;
 use std::path::Path;
 use std::pin::Pin;
@@ -382,6 +383,7 @@ impl PreparedModule {
         env_vars: Vec<(String, String)>,
         addr: SocketAddr,
         socket_addr_check: Option<SocketAddrCheckFn>,
+        thread_start_hook: Option<HttpServerThreadStartHook>,
     ) -> Result<HttpServerInstance, PlatformError> {
         if self.execution_model != ComponentExecutionModel::WasiHttpIncomingHandler {
             return Err(PlatformError::runtime(
@@ -400,264 +402,285 @@ impl PreparedModule {
         let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel::<()>();
         let task_policy_counters = policy_counters.clone();
 
-        let task = tokio::spawn(async move {
-            let started_at = Instant::now();
-            let listener = match tokio::net::TcpListener::bind(addr).await {
-                Ok(listener) => listener,
-                Err(err) => {
-                    return ExecutionStats {
-                        instance_id: InstanceId::new(),
-                        fuel_limit: config.fuel_quota.0,
-                        fuel_consumed: 0,
-                        ram_bytes: 0,
-                        wall_clock_ms: 0,
-                        trap: Some(format!("failed to bind wasi:http adapter listener: {err}")),
-                        io_stats: IoStats {
-                            open_fds_peak: 0,
-                            fs_bytes_written: 0,
-                            net_egress_bytes: 0,
-                            outbound_connections: 0,
-                        },
-                    };
-                }
-            };
-
-            let linker = match build_async_http_linker(&engine) {
-                Ok(linker) => linker,
-                Err(err) => {
-                    return ExecutionStats {
-                        instance_id: InstanceId::new(),
-                        fuel_limit: config.fuel_quota.0,
-                        fuel_consumed: 0,
-                        ram_bytes: 0,
-                        wall_clock_ms: started_at.elapsed().as_millis() as u64,
-                        trap: Some(err.to_string()),
-                        io_stats: IoStats {
-                            open_fds_peak: 0,
-                            fs_bytes_written: 0,
-                            net_egress_bytes: 0,
-                            outbound_connections: 0,
-                        },
-                    };
-                }
-            };
-
-            let instance_pre = match linker.instantiate_pre(&module) {
-                Ok(pre) => pre,
-                Err(err) => {
-                    return ExecutionStats {
-                        instance_id: InstanceId::new(),
-                        fuel_limit: config.fuel_quota.0,
-                        fuel_consumed: 0,
-                        ram_bytes: 0,
-                        wall_clock_ms: started_at.elapsed().as_millis() as u64,
-                        trap: Some(format!(
-                            "failed to pre-instantiate wasi:http component: {err}"
-                        )),
-                        io_stats: IoStats {
-                            open_fds_peak: 0,
-                            fs_bytes_written: 0,
-                            net_egress_bytes: 0,
-                            outbound_connections: 0,
-                        },
-                    };
-                }
-            };
-            let pre = match ProxyPre::new(instance_pre) {
-                Ok(pre) => pre,
-                Err(err) => {
-                    return ExecutionStats {
-                        instance_id: InstanceId::new(),
-                        fuel_limit: config.fuel_quota.0,
-                        fuel_consumed: 0,
-                        ram_bytes: 0,
-                        wall_clock_ms: started_at.elapsed().as_millis() as u64,
-                        trap: Some(format!(
-                            "component does not implement wasi:http/proxy world: {err}"
-                        )),
-                        io_stats: IoStats {
-                            open_fds_peak: 0,
-                            fs_bytes_written: 0,
-                            net_egress_bytes: 0,
-                            outbound_connections: 0,
-                        },
-                    };
-                }
-            };
-            let pre = Arc::new(pre);
-            let mut trap: Option<String> = None;
-
-            loop {
-                tokio::select! {
-                    _ = &mut shutdown_rx => {
-                        break;
+        let runtime_error_config = config.clone();
+        let task = spawn_dedicated_current_thread(
+            thread_start_hook,
+            move || async move {
+                let started_at = Instant::now();
+                let listener = match tokio::net::TcpListener::bind(addr).await {
+                    Ok(listener) => listener,
+                    Err(err) => {
+                        return ExecutionStats {
+                            instance_id: InstanceId::new(),
+                            fuel_limit: config.fuel_quota.0,
+                            fuel_consumed: 0,
+                            ram_bytes: 0,
+                            wall_clock_ms: 0,
+                            trap: Some(format!("failed to bind wasi:http adapter listener: {err}")),
+                            io_stats: IoStats {
+                                open_fds_peak: 0,
+                                fs_bytes_written: 0,
+                                net_egress_bytes: 0,
+                                outbound_connections: 0,
+                            },
+                        };
                     }
-                    accept = listener.accept() => {
-                        match accept {
-                            Ok((client, _peer_addr)) => {
-                                let pre = pre.clone();
-                                let engine = engine.clone();
-                                let config = config.clone();
-                                let env_vars = env_vars.clone();
-                                let socket_addr_check = socket_addr_check.clone();
-                                let request_policy_counters = task_policy_counters.clone();
-                                let app_id = app_id.clone();
-                                tokio::spawn(async move {
-                                    let app_id_for_service = app_id.clone();
-                                    let service = service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
-                                        let pre = pre.clone();
-                                        let engine = engine.clone();
-                                        let config = config.clone();
-                                        let env_vars = env_vars.clone();
-                                        let socket_addr_check = socket_addr_check.clone();
-                                        let request_policy_counters = request_policy_counters.clone();
-                                        let app_id_for_request = app_id.clone();
-                                        async move {
-                                            let (sender, receiver) = tokio::sync::oneshot::channel();
-                                            let (response_started_tx, response_started_rx) =
-                                                tokio::sync::oneshot::channel::<bool>();
-                                            let (body_complete_tx, body_complete_rx) =
-                                                tokio::sync::oneshot::channel::<()>();
+                };
 
-                                            let app_id_for_handle = app_id_for_request.clone();
-                                            let handle = tokio::spawn(async move {
-                                                let result = async {
-                                                    let state = build_store_state(
-                                                        &config,
-                                                        env_vars.as_ref().clone(),
-                                                        addr.port(),
-                                                        socket_addr_check.clone(),
-                                                        Some(request_policy_counters),
-                                                    )
-                                                    .map_err(|e| std::io::Error::other(e.to_string()))?;
-                                                    let mut store = Store::new(&engine, state);
-                                                    store.limiter(|s| &mut s.limiter);
-                                                    configure_store(&mut store, config.fuel_quota)
+                let linker = match build_async_http_linker(&engine) {
+                    Ok(linker) => linker,
+                    Err(err) => {
+                        return ExecutionStats {
+                            instance_id: InstanceId::new(),
+                            fuel_limit: config.fuel_quota.0,
+                            fuel_consumed: 0,
+                            ram_bytes: 0,
+                            wall_clock_ms: started_at.elapsed().as_millis() as u64,
+                            trap: Some(err.to_string()),
+                            io_stats: IoStats {
+                                open_fds_peak: 0,
+                                fs_bytes_written: 0,
+                                net_egress_bytes: 0,
+                                outbound_connections: 0,
+                            },
+                        };
+                    }
+                };
+
+                let instance_pre = match linker.instantiate_pre(&module) {
+                    Ok(pre) => pre,
+                    Err(err) => {
+                        return ExecutionStats {
+                            instance_id: InstanceId::new(),
+                            fuel_limit: config.fuel_quota.0,
+                            fuel_consumed: 0,
+                            ram_bytes: 0,
+                            wall_clock_ms: started_at.elapsed().as_millis() as u64,
+                            trap: Some(format!(
+                                "failed to pre-instantiate wasi:http component: {err}"
+                            )),
+                            io_stats: IoStats {
+                                open_fds_peak: 0,
+                                fs_bytes_written: 0,
+                                net_egress_bytes: 0,
+                                outbound_connections: 0,
+                            },
+                        };
+                    }
+                };
+                let pre = match ProxyPre::new(instance_pre) {
+                    Ok(pre) => pre,
+                    Err(err) => {
+                        return ExecutionStats {
+                            instance_id: InstanceId::new(),
+                            fuel_limit: config.fuel_quota.0,
+                            fuel_consumed: 0,
+                            ram_bytes: 0,
+                            wall_clock_ms: started_at.elapsed().as_millis() as u64,
+                            trap: Some(format!(
+                                "component does not implement wasi:http/proxy world: {err}"
+                            )),
+                            io_stats: IoStats {
+                                open_fds_peak: 0,
+                                fs_bytes_written: 0,
+                                net_egress_bytes: 0,
+                                outbound_connections: 0,
+                            },
+                        };
+                    }
+                };
+                let pre = Arc::new(pre);
+                let mut trap: Option<String> = None;
+
+                loop {
+                    tokio::select! {
+                        _ = &mut shutdown_rx => {
+                            break;
+                        }
+                        accept = listener.accept() => {
+                            match accept {
+                                Ok((client, _peer_addr)) => {
+                                    let pre = pre.clone();
+                                    let engine = engine.clone();
+                                    let config = config.clone();
+                                    let env_vars = env_vars.clone();
+                                    let socket_addr_check = socket_addr_check.clone();
+                                    let request_policy_counters = task_policy_counters.clone();
+                                    let app_id = app_id.clone();
+                                    tokio::spawn(async move {
+                                        let app_id_for_service = app_id.clone();
+                                        let service = service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
+                                            let pre = pre.clone();
+                                            let engine = engine.clone();
+                                            let config = config.clone();
+                                            let env_vars = env_vars.clone();
+                                            let socket_addr_check = socket_addr_check.clone();
+                                            let request_policy_counters = request_policy_counters.clone();
+                                            let app_id_for_request = app_id.clone();
+                                            async move {
+                                                let (sender, receiver) = tokio::sync::oneshot::channel();
+                                                let (response_started_tx, response_started_rx) =
+                                                    tokio::sync::oneshot::channel::<bool>();
+                                                let (body_complete_tx, body_complete_rx) =
+                                                    tokio::sync::oneshot::channel::<()>();
+
+                                                let app_id_for_handle = app_id_for_request.clone();
+                                                let handle = tokio::spawn(async move {
+                                                    let result = async {
+                                                        let state = build_store_state(
+                                                            &config,
+                                                            env_vars.as_ref().clone(),
+                                                            addr.port(),
+                                                            socket_addr_check.clone(),
+                                                            Some(request_policy_counters),
+                                                        )
                                                         .map_err(|e| std::io::Error::other(e.to_string()))?;
+                                                        let mut store = Store::new(&engine, state);
+                                                        store.limiter(|s| &mut s.limiter);
+                                                        configure_store(&mut store, config.fuel_quota)
+                                                            .map_err(|e| std::io::Error::other(e.to_string()))?;
 
-                                                    let req = req;
-                                                    let req = store
-                                                        .data_mut()
-                                                        .http()
-                                                        .new_incoming_request(Scheme::Http, req)
-                                                        .map_err(|e| std::io::Error::other(e.to_string()))?;
-                                                    let out = store
-                                                        .data_mut()
-                                                        .http()
-                                                        .new_response_outparam(sender)
-                                                        .map_err(|e| std::io::Error::other(e.to_string()))?;
+                                                        let req = req;
+                                                        let req = store
+                                                            .data_mut()
+                                                            .http()
+                                                            .new_incoming_request(Scheme::Http, req)
+                                                            .map_err(|e| std::io::Error::other(e.to_string()))?;
+                                                        let out = store
+                                                            .data_mut()
+                                                            .http()
+                                                            .new_response_outparam(sender)
+                                                            .map_err(|e| std::io::Error::other(e.to_string()))?;
 
-                                                    let proxy = pre
-                                                        .instantiate_async(&mut store)
-                                                        .await
-                                                        .map_err(|e| std::io::Error::other(e.to_string()))?;
-                                                    proxy
-                                                        .wasi_http_incoming_handler()
-                                                        .call_handle(&mut store, req, out)
-                                                        .await
-                                                        .map_err(|e| std::io::Error::other(e.to_string()))?;
+                                                        let proxy = pre
+                                                            .instantiate_async(&mut store)
+                                                            .await
+                                                            .map_err(|e| std::io::Error::other(e.to_string()))?;
+                                                        proxy
+                                                            .wasi_http_incoming_handler()
+                                                            .call_handle(&mut store, req, out)
+                                                            .await
+                                                            .map_err(|e| std::io::Error::other(e.to_string()))?;
 
-                                                    Ok::<(), std::io::Error>(())
-                                                }
-                                                .await;
-
-                                                if let Ok(true) = response_started_rx.await {
-                                                    let _ = body_complete_rx.await;
-                                                }
-
-                                                if let Err(err) = &result {
-                                                    tracing::warn!(
-                                                        app = %app_id_for_handle.0,
-                                                        error = %err,
-                                                        "wasi:http request bridge failed"
-                                                    );
-                                                }
-                                                result
-                                            });
-
-                                            let response =
-                                                match receiver.await {
-                                                    Ok(Ok(resp)) => {
-                                                        let _ = response_started_tx.send(true);
-                                                        let (parts, body) = resp.into_parts();
-                                                        Ok(hyper::Response::from_parts(
-                                                            parts,
-                                                            ManagedOutgoingBody::new(body, body_complete_tx),
-                                                        ))
+                                                        Ok::<(), std::io::Error>(())
                                                     }
-                                                    Ok(Err(err)) => {
-                                                        let _ = response_started_tx.send(false);
-                                                        Err(std::io::Error::other(err.to_string()))
+                                                    .await;
+
+                                                    if let Ok(true) = response_started_rx.await {
+                                                        let _ = body_complete_rx.await;
                                                     }
-                                                    Err(_) => {
-                                                        let _ = response_started_tx.send(false);
-                                                        match handle.await {
-                                                            Ok(Ok(())) => Err(std::io::Error::other(
-                                                                "guest never invoked response-outparam::set",
-                                                            )),
-                                                            Ok(Err(err)) => Err(err),
-                                                            Err(err) => Err(std::io::Error::other(err.to_string())),
+
+                                                    if let Err(err) = &result {
+                                                        tracing::warn!(
+                                                            app = %app_id_for_handle.0,
+                                                            error = %err,
+                                                            "wasi:http request bridge failed"
+                                                        );
+                                                    }
+                                                    result
+                                                });
+
+                                                let response =
+                                                    match receiver.await {
+                                                        Ok(Ok(resp)) => {
+                                                            let _ = response_started_tx.send(true);
+                                                            let (parts, body) = resp.into_parts();
+                                                            Ok(hyper::Response::from_parts(
+                                                                parts,
+                                                                ManagedOutgoingBody::new(body, body_complete_tx),
+                                                            ))
                                                         }
-                                                    }
-                                                };
+                                                        Ok(Err(err)) => {
+                                                            let _ = response_started_tx.send(false);
+                                                            Err(std::io::Error::other(err.to_string()))
+                                                        }
+                                                        Err(_) => {
+                                                            let _ = response_started_tx.send(false);
+                                                            match handle.await {
+                                                                Ok(Ok(())) => Err(std::io::Error::other(
+                                                                    "guest never invoked response-outparam::set",
+                                                                )),
+                                                                Ok(Err(err)) => Err(err),
+                                                                Err(err) => Err(std::io::Error::other(err.to_string())),
+                                                            }
+                                                        }
+                                                    };
 
-                                            if let Err(err) = &response {
-                                                tracing::warn!(app = %app_id_for_request.0, error = %err, "wasi:http response bridge failed");
+                                                if let Err(err) = &response {
+                                                    tracing::warn!(app = %app_id_for_request.0, error = %err, "wasi:http response bridge failed");
+                                                }
+
+                                                response
                                             }
+                                        });
 
-                                            response
+                                        let io = TokioIo::new(client);
+                                        let result = http2::Builder::new(TokioExecutor::new())
+                                            .serve_connection(io, service)
+                                            .await;
+
+                                        if let Err(err) = result {
+                                            tracing::warn!(
+                                                app = %app_id_for_service.0,
+                                                error = %err,
+                                                "wasi:http adapter connection failed"
+                                            );
                                         }
                                     });
-
-                                    let io = TokioIo::new(client);
-                                    let result = http2::Builder::new(TokioExecutor::new())
-                                        .serve_connection(io, service)
-                                        .await;
-
-                                    if let Err(err) = result {
-                                        tracing::warn!(
-                                            app = %app_id_for_service.0,
-                                            error = %err,
-                                            "wasi:http adapter connection failed"
-                                        );
-                                    }
-                                });
-                            }
-                            Err(err) => {
-                                trap = Some(format!("wasi:http adapter accept failed: {err}"));
-                                break;
+                                }
+                                Err(err) => {
+                                    trap = Some(format!("wasi:http adapter accept failed: {err}"));
+                                    break;
+                                }
                             }
                         }
                     }
                 }
-            }
 
-            ExecutionStats {
-                instance_id: InstanceId::new(),
-                fuel_limit: config.fuel_quota.0,
-                fuel_consumed: 0,
-                ram_bytes: task_policy_counters
-                    .current_memory_bytes
-                    .load(std::sync::atomic::Ordering::Relaxed) as usize,
-                wall_clock_ms: started_at.elapsed().as_millis() as u64,
-                trap,
-                io_stats: IoStats {
-                    open_fds_peak: task_policy_counters
-                        .open_fds_peak
-                        .load(std::sync::atomic::Ordering::Relaxed),
-                    fs_bytes_written: task_policy_counters
-                        .fs_write_bytes
-                        .load(std::sync::atomic::Ordering::Relaxed),
-                    net_egress_bytes: task_policy_counters
-                        .egress_bytes
-                        .load(std::sync::atomic::Ordering::Relaxed),
-                    outbound_connections: task_policy_counters
-                        .outbound_connections_total
+                ExecutionStats {
+                    instance_id: InstanceId::new(),
+                    fuel_limit: config.fuel_quota.0,
+                    fuel_consumed: 0,
+                    ram_bytes: task_policy_counters
+                        .current_memory_bytes
                         .load(std::sync::atomic::Ordering::Relaxed)
-                        as u32,
+                        as usize,
+                    wall_clock_ms: started_at.elapsed().as_millis() as u64,
+                    trap,
+                    io_stats: IoStats {
+                        open_fds_peak: task_policy_counters
+                            .open_fds_peak
+                            .load(std::sync::atomic::Ordering::Relaxed),
+                        fs_bytes_written: task_policy_counters
+                            .fs_write_bytes
+                            .load(std::sync::atomic::Ordering::Relaxed),
+                        net_egress_bytes: task_policy_counters
+                            .egress_bytes
+                            .load(std::sync::atomic::Ordering::Relaxed),
+                        outbound_connections: task_policy_counters
+                            .outbound_connections_total
+                            .load(std::sync::atomic::Ordering::Relaxed)
+                            as u32,
+                    },
+                }
+            },
+            move |err| ExecutionStats {
+                instance_id: InstanceId::new(),
+                fuel_limit: runtime_error_config.fuel_quota.0,
+                fuel_consumed: 0,
+                ram_bytes: 0,
+                wall_clock_ms: 0,
+                trap: Some(format!(
+                    "failed to create dedicated wasi:http executor: {err}"
+                )),
+                io_stats: IoStats {
+                    open_fds_peak: 0,
+                    fs_bytes_written: 0,
+                    net_egress_bytes: 0,
+                    outbound_connections: 0,
                 },
-            }
-        });
+            },
+        );
 
         Ok(HttpServerInstance {
             task,
@@ -666,6 +689,38 @@ impl PreparedModule {
             policy,
         })
     }
+}
+
+/// Callback invoked once from the dedicated OS thread before its Tokio runtime starts.
+///
+/// The supervisor uses this point to register the thread's Linux TID in the eBPF
+/// identity maps before any application code or network I/O can execute.
+pub type HttpServerThreadStartHook = Box<dyn FnOnce() + Send + 'static>;
+
+pub(crate) fn spawn_dedicated_current_thread<T, Factory, Task, OnRuntimeError>(
+    thread_start_hook: Option<HttpServerThreadStartHook>,
+    task_factory: Factory,
+    on_runtime_error: OnRuntimeError,
+) -> tokio::task::JoinHandle<T>
+where
+    T: Send + 'static,
+    Factory: FnOnce() -> Task + Send + 'static,
+    Task: Future<Output = T> + 'static,
+    OnRuntimeError: FnOnce(std::io::Error) -> T + Send + 'static,
+{
+    tokio::task::spawn_blocking(move || {
+        if let Some(hook) = thread_start_hook {
+            hook();
+        }
+
+        match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(runtime) => runtime.block_on(task_factory()),
+            Err(err) => on_runtime_error(err),
+        }
+    })
 }
 
 pub struct HttpServerInstance {

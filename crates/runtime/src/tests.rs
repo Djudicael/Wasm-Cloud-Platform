@@ -347,6 +347,30 @@ fn test_prepare_detects_wasi_http_incoming_handler_components() {
     );
 }
 
+#[tokio::test]
+async fn test_dedicated_http_executor_stays_on_registered_thread() {
+    let (registered_thread_tx, registered_thread_rx) = tokio::sync::oneshot::channel();
+
+    let task = super::executor::spawn_dedicated_current_thread(
+        Some(Box::new(move || {
+            let _ = registered_thread_tx.send(thread::current().id());
+        })),
+        || async {
+            let before_yield = thread::current().id();
+            tokio::task::yield_now().await;
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            (before_yield, thread::current().id())
+        },
+        |err| panic!("failed to create dedicated runtime: {err}"),
+    );
+
+    let registered_thread = registered_thread_rx.await.unwrap();
+    let (before_yield, after_yield) = task.await.unwrap();
+    assert_eq!(registered_thread, before_yield);
+    assert_eq!(before_yield, after_yield);
+    assert_ne!(registered_thread, thread::current().id());
+}
+
 #[test]
 fn test_top_level_entry_point_candidates_include_start_fallback() {
     assert_eq!(top_level_entry_point_candidates(), &["run", "_start"]);

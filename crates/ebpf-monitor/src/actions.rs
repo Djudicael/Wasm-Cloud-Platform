@@ -345,60 +345,78 @@ impl ActionDispatcher {
             }
             MonitorEvent::SyscallAnomaly {
                 pid,
+                tid,
                 syscall_nr,
                 syscall_category,
                 count_in_window,
-            } => match syscall_category {
-                crate::common::SyscallCategory::PrivilegeEscalation => {
-                    error!(
-                        pid,
-                        syscall_nr,
-                        count_in_window,
-                        "SECURITY: Privilege escalation syscall from Wasm instance!"
-                    );
-                    self.metrics.security_violations.inc();
-                    self.callbacks
-                        .kill_instance(pid, "Privilege escalation syscall detected");
-                    self.callbacks.publish_security_incident(
-                        &self.node_id,
-                        pid,
-                        syscall_nr,
-                        "PrivilegeEscalation",
-                    );
+            } => {
+                let (namespace, app_id) = self.identity_for_tid(tid);
+                match syscall_category {
+                    crate::common::SyscallCategory::PrivilegeEscalation => {
+                        error!(
+                            pid,
+                            tid,
+                            namespace = %namespace,
+                            app_id = %app_id,
+                            syscall_nr,
+                            count_in_window,
+                            "SECURITY: Privilege escalation syscall from Wasm instance!"
+                        );
+                        self.metrics.security_violations.inc();
+                        self.callbacks
+                            .kill_instance_by_tid(tid, "Privilege escalation syscall detected");
+                        self.callbacks.publish_security_incident(
+                            &self.node_id,
+                            pid,
+                            syscall_nr,
+                            "PrivilegeEscalation",
+                        );
+                    }
+                    crate::common::SyscallCategory::ProcessControl => {
+                        error!(
+                            pid,
+                            tid,
+                            namespace = %namespace,
+                            app_id = %app_id,
+                            syscall_nr,
+                            count_in_window,
+                            "SECURITY: Process control syscall from Wasm instance!"
+                        );
+                        self.metrics.security_violations.inc();
+                        self.callbacks
+                            .kill_instance_by_tid(tid, "Process control syscall detected");
+                        self.callbacks.publish_security_incident(
+                            &self.node_id,
+                            pid,
+                            syscall_nr,
+                            "ProcessControl",
+                        );
+                    }
+                    crate::common::SyscallCategory::NetworkControl => {
+                        warn!(
+                            pid,
+                            tid,
+                            namespace = %namespace,
+                            app_id = %app_id,
+                            syscall_nr,
+                            count_in_window,
+                            "Unexpected network control syscall from Wasm instance"
+                        );
+                        self.metrics.security_violations.inc();
+                    }
+                    crate::common::SyscallCategory::Normal => {
+                        warn!(
+                            pid,
+                            tid,
+                            namespace = %namespace,
+                            app_id = %app_id,
+                            syscall_nr,
+                            count_in_window,
+                            "High syscall rate from Wasm instance"
+                        );
+                    }
                 }
-                crate::common::SyscallCategory::ProcessControl => {
-                    error!(
-                        pid,
-                        syscall_nr,
-                        count_in_window,
-                        "SECURITY: Process control syscall from Wasm instance!"
-                    );
-                    self.metrics.security_violations.inc();
-                    self.callbacks
-                        .kill_instance(pid, "Process control syscall detected");
-                    self.callbacks.publish_security_incident(
-                        &self.node_id,
-                        pid,
-                        syscall_nr,
-                        "ProcessControl",
-                    );
-                }
-                crate::common::SyscallCategory::NetworkControl => {
-                    warn!(
-                        pid,
-                        syscall_nr,
-                        count_in_window,
-                        "Unexpected network control syscall from Wasm instance"
-                    );
-                    self.metrics.security_violations.inc();
-                }
-                crate::common::SyscallCategory::Normal => {
-                    warn!(
-                        pid,
-                        syscall_nr, count_in_window, "High syscall rate from Wasm instance"
-                    );
-                }
-            },
+            }
             MonitorEvent::TidConnection {
                 tid,
                 namespace: _,
@@ -454,6 +472,19 @@ impl ActionDispatcher {
                 self.metrics.security_violations.inc();
             }
         }
+    }
+
+    fn identity_for_tid(&self, tid: u32) -> (String, String) {
+        let map = self.namespace_map.read().unwrap();
+        map.as_ref()
+            .and_then(|map| map.lookup_tid(tid))
+            .map(|identity| {
+                (
+                    identity.namespace_str().to_string(),
+                    identity.app_id_str().to_string(),
+                )
+            })
+            .unwrap_or_else(|| ("<unregistered>".to_string(), "<unregistered>".to_string()))
     }
 
     fn activate_backpressure_if_needed(&self, reason: &str) {

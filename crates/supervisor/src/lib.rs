@@ -89,6 +89,9 @@ pub enum SupervisorCommand {
         instance_id: InstanceId,
         reason: String,
     },
+
+    /// Kill the application instance assigned to an eBPF-monitored OS thread.
+    KillInstanceByTid { tid: u32, reason: String },
 }
 
 #[allow(clippy::type_complexity, clippy::too_many_arguments)]
@@ -135,7 +138,7 @@ pub struct Supervisor {
 
     /// eBPF namespace map for TID registration and identity resolution.
     /// Shared with the internal gateway.
-    namespace_map: Option<Arc<ebpf_monitor::NamespaceMap>>,
+    namespace_map: std::sync::RwLock<Option<Arc<ebpf_monitor::NamespaceMap>>>,
 }
 
 impl Supervisor {
@@ -172,14 +175,23 @@ impl Supervisor {
             command_rx: std::sync::Mutex::new(Some(command_rx)),
             command_tx,
             health_interval_rx: None,
-            namespace_map: None,
+            namespace_map: std::sync::RwLock::new(None),
         })
     }
 
     /// Set the eBPF namespace map for TID registration and identity resolution.
     /// Called by the node after initializing the eBPF monitor.
-    pub fn set_namespace_map(&mut self, namespace_map: Arc<ebpf_monitor::NamespaceMap>) {
-        self.namespace_map = Some(namespace_map);
+    pub fn set_namespace_map(&self, namespace_map: Arc<ebpf_monitor::NamespaceMap>) {
+        if let Ok(mut slot) = self.namespace_map.write() {
+            *slot = Some(namespace_map);
+        }
+    }
+
+    pub(crate) fn namespace_map(&self) -> Option<Arc<ebpf_monitor::NamespaceMap>> {
+        self.namespace_map
+            .read()
+            .ok()
+            .and_then(|slot| slot.as_ref().cloned())
     }
 
     /// Set the watch receiver for the health-check interval.

@@ -91,7 +91,7 @@ The run fails when any required check fails. An infrastructure limitation is
 `NOT VALIDATED`; it must not be converted into a pass or an undocumented
 exception.
 
-## Execution record: 2026-08-23 through 2026-08-25 / single-host run in progress
+## Execution record: 2026-08-23 through 2026-08-26 / single-host run in progress
 
 This section is the live record for the current rehearsal. Do not mark a gate
 complete solely because a command was started; retain the command output or its
@@ -182,10 +182,11 @@ redacted artifact with the result.
 | Final live-state snapshot | PASS / HISTORICAL PRE-TEARDOWN | Before authorized teardown, NATS PID `223906`, PostgreSQL PID `289481`, and platform node PIDs `325604`, `327249`, and `325384` were alive; every node health probe, both public routes, all 10 Prometheus targets, and Alertmanager were healthy. The later authorized-teardown row records removal of this environment |
 | Manual Prometheus UI validation | PASS (USER-VALIDATED) | The operator completed manual testing through `http://localhost:9095` after automated validation confirmed 10 targets up, zero targets down, and no active Alertmanager alerts |
 | Authorized teardown | PASS | After explicit operator authorization, `scripts/vm/destroy-testbed.sh` validated the selected state and removed its six exact state-labeled observability containers, recorded HAProxy PID/config/log, three platform-node VMs, NATS VM, PostgreSQL VM, exact TAP devices and bridge, state-derived OIDC credentials, and lifecycle state files. A post-teardown audit confirmed every recorded PID/device/container absent and ports 8088, 9095, and 9093 closed. No broad process or network matching was used |
-| 2026-08-25 production-like reprovision | PASS / LIVE | The exact state `.prod-validation-single-host-state.json` records NATS PID `170213`, PostgreSQL PID `170523`, and three healthy platform nodes at `172.20.0.12-14`. After the final rolling image update, node PIDs are `191773`, `191817`, and `191861`. HAProxy remains available at `http://127.0.0.1:8088`. This environment must remain running for operator browser testing. |
+| 2026-08-25 production-like reprovision | PASS / LIVE | The exact state `.prod-validation-single-host-state.json` records NATS PID `170213`, PostgreSQL PID `170523`, and three healthy platform nodes at `172.20.0.12-14`. After the 2026-08-26 WASI HTTP attribution rollout, node PIDs are `245833`, `275987`, and `276062`. HAProxy remains available at `http://127.0.0.1:8088`. This environment must remain running for operator browser testing. |
 | eBPF guest kernel and verifier gate | PASS | Linux `6.1.80` was rebuilt with BTF, tracing, syscall tracepoints, kprobes, modules, and the complete Firecracker boot contract. All seven objects (`process_tracker`, `tcp_monitor`, `fd_watcher`, `mem_pressure`, `disk_monitor`, `syscall_counter`, and `namespace_enforcer`) loaded and attached on all three guests with no verifier error. The FD watcher used the supported `filp_close` fallback where `do_filp_close` was unavailable. |
 | eBPF verifier compatibility defects | FIXED / PASS | Linux 6.1 rejected implicit struct padding passed to ring-buffer helpers and a variable-size namespace header read. Event wire padding is now explicit and zeroed on both sides, the forged-header scan uses verifier-provable fixed reads, and all seven BPF ELFs rebuild with pinned `nightly-2026-08-20` and `bpf-linker` 0.11.0. The reusable verifier-log summary is `scripts/ebpf/summarize-verifier-log.jq`. |
-| eBPF identity boundary | CRITICAL DEFECT FIXED / RESIDUAL GAP | Initial runtime evidence showed the node's own `bpf(2)`, socket, and worker-thread activity classified as Wasm-instance activity, producing false privilege-escalation incidents and kill requests. Root cause: filtering the in-process runtime by TGID/PID 1. The syscall and lifecycle probes now accept only supervisor-registered TIDs, and registration is mirrored atomically into the process, syscall, and namespace maps. After the fix, every node opened all three maps and startup/application traffic produced zero false security incidents. **Residual gap:** `wasi:http` components execute on shared asynchronous runtime workers and currently register no stable execution TID; per-instance syscall/lifecycle attribution is therefore not proven for those components. Do not describe this part as production-complete until HTTP execution has a dedicated attributable boundary (dedicated thread/cgroup/process or equivalent). |
+| eBPF identity boundary | PASS FOR IN-PROCESS WASI HTTP / STRONGER ISOLATION OPTIONAL | Initial runtime evidence showed the node's own `bpf(2)`, socket, and worker-thread activity classified as Wasm-instance activity, producing false privilege-escalation incidents and kill requests. Root causes were PID/TGID filtering, late namespace-map wiring through a failed `Arc::get_mut`, registering maps from the thread being monitored, discarding the event TID in userspace, and falling back to killing the largest instance. Each WASI HTTP instance now owns a dedicated single-thread Tokio runtime. The supervisor learns that Linux TID, registers its namespace/application identity from an unmonitored control thread before releasing application execution, mirrors it into all three maps, preserves the TID through parsing and dispatch, and can kill the exact matching instance. A dedicated process or cgroup remains the stronger production boundary when tenant-grade isolation is required. |
+| WASI HTTP attribution validation (Phase 6, Part 1) | PASS | The corrected rootfs (`sha256:30fe108dabda354d68e755a03cc0a299c8372f91d6a667d6bd239c5fa6975275`) was rolled one node at a time. Live kernel-map registration recorded distinct frontend/backend TIDs on every node: node 0 frontend `70`, backend `71`; node 1 frontend `68`, backend `69`; node 2 backend `68`, frontend `69`; every registration reported `map_count=3`, namespace `oidc`, and the exact deployment ID. The parser/dispatcher regression test proves that a syscall event retains its TID and resolves it to the registered namespace/application, while the supervisor regression test proves exact-TID termination. Twenty thousand direct backend readiness requests produced no false security event, no parse error, and no instance churn; all three nodes continued serving both deployments and PostgreSQL readiness remained `database=ok`. The high default per-CPU threshold did not emit a rate anomaly during this attribution-only run; deterministic event generation and counter assertions are explicitly Part 2 rather than evidence for ring-pressure testing. |
 | eBPF Prometheus mode gauge | DEFECT FIXED / PASS | Runtime/admin status reported eBPF active while Prometheus exported `wasm_ebpf_active 0`. The registration macro evaluated each constructor twice, registering one collector and returning a disconnected handle. It now evaluates once, and a regression test gathers the registry value. Following rolling replacement of all nodes, Prometheus reports `wasm_ebpf_active=1` for `local-test-node-0`, `-1`, and `-2`. |
 | eBPF event path | PARTIAL PASS | Prometheus recorded two processed events, zero parse errors, and zero security violations. Guest logs correlate the two events to slow block-I/O observations, proving ring-buffer parsing, dispatch, action logging, and metric updates. File, TCP-limit, FD-limit, memory-pressure, suspicious-syscall, loss/backpressure, fallback, and overhead scenarios remain open. Block events are system-wide and reported an `unknown` I/O type, so scope/tracepoint-field accuracy still requires remediation. |
 | PostgreSQL unattended provisioning | DEFECT FIXED / PASS | The service wrapper initially blocked on an expired terminal-bound `sudo` ticket and created no VM. Under WSL it now invokes the exact CLI through `wsl.exe -u root`, matching platform provisioning. Service `oidc-postgres` then became reachable at `172.20.0.20:5432`. |
@@ -445,6 +446,13 @@ The next microVM run must still prove the kernel-runtime portion below.
 - [x] Confirm `wasm_ebpf_active` reflects the actual mode.
 - [ ] Confirm events are scoped to the intended platform cgroup/PID namespace and
       do not expose unrelated processes.
+  - [x] **Part 1 — WASI HTTP application attribution:** each HTTP deployment runs
+        on a dedicated single-thread executor whose Linux TID is registered in
+        all three identity maps before application execution. Live OIDC frontend
+        and backend registrations are distinct on every node, parsed syscall
+        events preserve the TID, dispatch resolves the exact deployment, and
+        security actions target that instance instead of an arbitrary process.
+        Broader probe scoping remains open because block-I/O is still system-wide.
 - [ ] Generate file, TCP, memory-pressure, syscall, and block-I/O events and verify
       the corresponding metrics.
 - [ ] Measure ring-buffer/event loss and dispatcher backpressure.
@@ -454,6 +462,86 @@ The next microVM run must still prove the kernel-runtime portion below.
 - [ ] Unload/reload probes without leaving pinned maps or
       programs.
 - [ ] Compare request latency, CPU, and memory against the fallback baseline.
+
+### Part 1 record — per-application attribution for WASI HTTP
+
+Status: **PASS on 2026-08-26 for the current in-process WASI HTTP execution
+path.** This closes the shared-Tokio-worker attribution defect; it does not close
+the remaining Phase 6 probe, pressure, failure-mode, cleanup, or overhead gates.
+
+Implementation and safety properties:
+
+- each HTTP instance owns one dedicated OS thread and a current-thread Tokio
+  executor; listener, connection, request, Wasmtime, and WASI host work remain
+  on that executor;
+- the new thread reports its TID and blocks before constructing the executor;
+  the supervisor registers the identity from its control thread, avoiding a
+  self-observed `bpf(2)` syscall, and only then releases application execution;
+- late eBPF map wiring uses interior mutability. The former `Arc::get_mut`
+  silently skipped wiring after startup had cloned the supervisor;
+- syscall counting, parsing, identity lookup, lifecycle storage, deregistration,
+  and kill decisions all use the same TID key. The former PID/TID key mismatch
+  made rate lookup unreliable;
+- ordinary `socket`, `bind`, `listen`, and `connect` host syscalls are not treated
+  as sandbox escapes. Wasmtime's `socket_addr_check` remains the authoritative
+  allow/deny gate for WASI networking; and
+- a security event targets `KillInstanceByTid`. Falling back to
+  `KillLargestInstance` could terminate an unrelated deployment.
+
+Validation evidence:
+
+```text
+node 0: oidc-admin TID 70; openid-connect backend TID 71
+node 1: oidc-admin TID 68; openid-connect backend TID 69
+node 2: openid-connect backend TID 68; oidc-admin TID 69
+all registrations: namespace=oidc, map_count=3, exact versioned app ID
+rootfs: sha256:30fe108dabda354d68e755a03cc0a299c8372f91d6a667d6bd239c5fa6975275
+```
+
+The image was canaried on node 0 and then rolled through nodes 1 and 2. After
+each restart, direct node readiness and HAProxy readiness returned
+`database=ok`. A controlled 20,000-request backend run left eBPF parse errors and
+security violations at zero, produced no false network-control incident, and did
+not churn either application instance. The focused Playwright login/dashboard
+journey then passed 6/6 with one Chromium worker in 5.2 seconds.
+
+Repository verification in WSL used the Linux target directory and passed:
+
+```bash
+cargo fmt --all -- --check
+cargo check --workspace --all-targets \
+  --exclude http-hello-component --exclude wasi-grpc-echo
+cargo clippy --workspace --all-targets -- -D warnings
+cargo clippy -p node --features ebpf --all-targets -- -D warnings
+cargo test -p runtime
+cargo test -p supervisor
+cargo test -p ebpf-monitor --features ebpf
+cargo test -p node --features ebpf
+cargo build -p http-hello-component --target wasm32-wasip2
+cargo build -p wasi-grpc-echo --target wasm32-wasip2
+bash scripts/ebpf/build-ebpf.sh
+```
+
+Operational observations:
+
+- `SKIP_EBPF_BUILD=true` means “copy the existing objects”; it does not verify
+  that they are newer than their sources. One canary accidentally packaged the
+  pre-fix `syscall_counter` object. Re-run `scripts/ebpf/build-ebpf.sh` before
+  using that optimization and compare source/object timestamps or checksums.
+- The anomaly threshold is intentionally 100,000 per CPU. Normal readiness
+  traffic did not emit a rate event, even after the attribution load run. Part 2
+  must provide a deterministic test configuration/workload and assert both the
+  emitted event identity and Prometheus counter; do not lower the production
+  threshold merely to make a test pass.
+- A dedicated thread is an observable attribution boundary, not a security or
+  resource-isolation boundary. Use one runtime process per tenant/workload, or a
+  process-level cgroup whose cgroup ID is carried in eBPF events, when stronger
+  blast-radius control is required. Standard process cgroups cannot distinguish
+  two components inside the same `wasm-node` process.
+- Libraries that create their own OS threads require explicit identity
+  propagation or process isolation. The live result covers the current Wasmtime
+  WASI HTTP path and the OIDC workload, whose async tasks stayed on the dedicated
+  executor.
 
 Do not pass this phase while probes remain system-wide, object paths are tied to
 a development checkout, unsafe event parsing is unvalidated, or the primary node

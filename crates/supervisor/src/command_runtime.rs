@@ -63,10 +63,44 @@ pub(crate) fn start_command_loop(supervisor: Arc<Supervisor>) {
                         );
                     }
                 }
+                SupervisorCommand::KillInstanceByTid { tid, reason } => {
+                    kill_instance_by_tid(&supervisor, tid, &reason).await;
+                }
             }
         }
         warn!("supervisor command loop exited - no more senders");
     });
+}
+
+pub(crate) async fn kill_instance_by_tid(supervisor: &Supervisor, tid: u32, reason: &str) {
+    let target = {
+        let pools = supervisor.pools.read().await;
+        pools.iter().find_map(|(app_id, pool)| {
+            pool.instances
+                .iter()
+                .find(|instance| instance.tid == Some(tid))
+                .map(|instance| (AppId(app_id.clone()), instance.id.clone()))
+        })
+    };
+
+    match target {
+        Some((app_id, instance_id)) => {
+            warn!(
+                tid,
+                app = %app_id.0,
+                instance = %instance_id.0,
+                reason,
+                "killing eBPF-attributed instance"
+            );
+            if let Err(error) = supervisor.kill_instance(&app_id, &instance_id).await {
+                warn!(tid, error = %error, "failed to kill eBPF-attributed instance");
+            }
+        }
+        None => warn!(
+            tid,
+            reason, "no application instance registered for eBPF TID"
+        ),
+    }
 }
 
 pub(crate) async fn kill_largest_instance(supervisor: &Supervisor, reason: &str) {

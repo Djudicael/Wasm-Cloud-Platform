@@ -10,7 +10,7 @@
 //!
 //! # What It Detects
 //!
-//! - **Syscall rate per PID**: Count syscalls per second for each Wasm
+//! - **Syscall rate per TID**: Count syscalls per second for each Wasm
 //!   instance thread. An infinite loop that makes syscalls (e.g.,
 //!   `clock_gettime` in a tight loop) will show an anomalously high rate.
 //! - **Privileged syscalls**: If a Wasm instance thread makes `ptrace`,
@@ -75,15 +75,15 @@ static CONFIG: Array<MonitorConfigMap> = Array::with_max_entries(1, 0);
 #[map]
 static EVENTS: RingBuf = RingBuf::with_byte_size(512 * 1024, 0); // 512 KB
 
-/// Per-PID syscall count in current sampling window.
-/// Key: PID, Value: total syscall count.
+/// Per-TID syscall count in current sampling window.
+/// Key: TID, Value: total syscall count.
 /// Per-CPU to avoid lock contention on the fast path.
 /// Userspace reads and resets these counters every sampling period.
 #[map]
 static SYSCALL_COUNTS: PerCpuHashMap<u32, u64> = PerCpuHashMap::with_max_entries(10240, 0);
 
-/// Per-PID suspicious syscall count in current sampling window.
-/// Key: PID, Value: suspicious syscall count.
+/// Per-TID suspicious syscall count in current sampling window.
+/// Key: TID, Value: suspicious syscall count.
 /// Per-CPU for low-contention counting.
 #[map]
 static SUSPICIOUS_COUNTS: PerCpuHashMap<u32, u64> = PerCpuHashMap::with_max_entries(10240, 0);
@@ -141,18 +141,6 @@ const SYS_KILL: u64 = 62;
 
 /// `tgkill` — send a signal to a specific thread.
 const SYS_TGKILL: u64 = 234;
-
-/// `socket` — create a network socket. Unexpected from Wasm instances.
-const SYS_SOCKET: u64 = 41;
-
-/// `bind` — bind a socket to an address. Unexpected from Wasm instances.
-const SYS_BIND: u64 = 49;
-
-/// `listen` — listen for connections. Unexpected from Wasm instances.
-const SYS_LISTEN: u64 = 50;
-
-/// `connect` — initiate a connection. May be expected via WASI socket API.
-const SYS_CONNECT: u64 = 42;
 
 /// Tracepoint: raw_syscalls/sys_enter
 ///
@@ -277,7 +265,7 @@ fn try_sys_enter(ctx: TracePointContext) -> Result<c_long, c_long> {
     // across all CPUs may exceed the limit before we detect it.
     // This is acceptable — we're looking for order-of-magnitude
     // violations (e.g., 10x the limit), not exact enforcement.
-    let total_count = unsafe { SYSCALL_COUNTS.get(&pid).copied().unwrap_or(0) };
+    let total_count = unsafe { SYSCALL_COUNTS.get(&tid).copied().unwrap_or(0) };
     if total_count > config.syscall_rate_limit {
         // Emit a high-rate event. We use the SyscallAnomaly event type
         // with the Normal category to distinguish it from actual
@@ -299,7 +287,7 @@ fn try_sys_enter(ctx: TracePointContext) -> Result<c_long, c_long> {
 
         // Reset the counter after alerting to avoid flooding the
         // ring buffer with duplicate rate-limit events.
-        let _ = SYSCALL_COUNTS.insert(&pid, &0, 0);
+        let _ = SYSCALL_COUNTS.insert(&tid, &0, 0);
     }
 
     Ok(0)
@@ -315,10 +303,6 @@ fn try_sys_enter(ctx: TracePointContext) -> Result<c_long, c_long> {
 /// - **PrivilegeEscalation**: Syscalls that should never be called from
 ///   a Wasm instance: ptrace, bpf, mount, umount, setuid, setgid.
 ///   These indicate a potential sandbox escape.
-///
-/// - **NetworkControl**: Syscalls related to network socket management:
-///   socket, bind, listen. These may be expected in some cases
-///   (WASI socket API), but unexpected bind/listen calls are suspicious.
 ///
 /// - **ProcessControl**: Syscalls related to process management:
 ///   execve, clone, fork, vfork, kill, tgkill. A Wasm instance should
@@ -340,25 +324,19 @@ fn classify_syscall(syscall_nr: u64) -> u32 {
             SyscallCategory::ProcessControl as u32
         }
 
-        // ── Network Control ──────────────────────────────────────────
-        // These may be expected via the WASI socket API (connect is
-        // used for TCP client connections). However, bind and listen
-        // are suspicious — a Wasm instance should not be a server.
-        // We classify all of them as NetworkControl and let userspace
-        // decide based on the app's configuration.
-        SYS_SOCKET | SYS_BIND | SYS_LISTEN | SYS_CONNECT => SyscallCategory::NetworkControl as u32,
-
         // ── Normal ──────────────────────────────────────────────────
         // All other syscalls are classified as Normal. This includes:
         // read(0), write(1), openat(257), close(3), fstat(5),
         // mmap(9), mprotect(10), munmap(11), ioctl(16), access(21),
         // pipe(22), select(23), poll(7), nanosleep(35), clock_gettime(228),
-        // exit_group(231), rt_sigreturn(15), etc.
+        // exit_group(231), rt_sigreturn(15), and socket operations. WASI
+        // socket permissions are enforced authoritatively by Wasmtime's
+        // socket_addr_check before the host performs these syscalls.
         _ => SyscallCategory::Normal as u32,
     }
 }
 
-/// Get the total syscall count for a PID in the current window.
+/// Get the total syscall count for a TID in the current window.
 ///
 /// This is a helper for userspace to read the per-PID syscall counts
 /// during the sampling period. Userspace calls this via a BPF
@@ -368,8 +346,8 @@ fn classify_syscall(syscall_nr: u64) -> u32 {
 /// Userspace should read the SYSCALL_COUNTS map directly using
 /// aya's map iteration API.
 #[inline(never)]
-pub fn get_syscall_count(pid: u32) -> u64 {
-    unsafe { SYSCALL_COUNTS.get(&pid).copied().unwrap_or(0) }
+pub fn get_syscall_count(tid: u32) -> u64 {
+    unsafe { SYSCALL_COUNTS.get(&tid).copied().unwrap_or(0) }
 }
 
 /// Reset the per-PID syscall counters for a new sampling window.

@@ -272,6 +272,24 @@ async fn test_supervisor_command_channel_kill_instance() {
 }
 
 #[tokio::test]
+async fn test_supervisor_command_channel_kill_instance_by_tid() {
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<SupervisorCommand>(1);
+    tx.try_send(SupervisorCommand::KillInstanceByTid {
+        tid: 4242,
+        reason: "attributed security violation".to_string(),
+    })
+    .unwrap();
+
+    match rx.recv().await.unwrap() {
+        SupervisorCommand::KillInstanceByTid { tid, reason } => {
+            assert_eq!(tid, 4242);
+            assert_eq!(reason, "attributed security violation");
+        }
+        command => panic!("expected KillInstanceByTid, got {command:?}"),
+    }
+}
+
+#[tokio::test]
 async fn test_supervisor_command_channel_multiple_commands() {
     let (tx, mut rx) = tokio::sync::mpsc::channel::<SupervisorCommand>(256);
 
@@ -449,6 +467,21 @@ async fn make_test_supervisor(
     );
 
     (supervisor, port_alloc, upstream_registry, service_registry)
+}
+
+#[tokio::test]
+async fn test_namespace_map_can_be_wired_after_supervisor_is_shared() {
+    let (supervisor, _, _, _) =
+        make_test_supervisor(IpAddr::V4(Ipv4Addr::LOCALHOST), 18080, 18090).await;
+    let shared_supervisor = supervisor.clone();
+    let namespace_map = Arc::new(ebpf_monitor::NamespaceMap::new_fallback());
+
+    supervisor.set_namespace_map(namespace_map.clone());
+
+    let installed = shared_supervisor
+        .namespace_map()
+        .expect("shared supervisor should observe the installed namespace map");
+    assert!(Arc::ptr_eq(&installed, &namespace_map));
 }
 
 #[test]

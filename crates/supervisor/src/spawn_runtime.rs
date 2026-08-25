@@ -290,7 +290,7 @@ impl Supervisor {
                 let prepared_clone = prepared.clone();
                 let (spawn_result_tx, spawn_result_rx) =
                     tokio::sync::oneshot::channel::<Result<(), PlatformError>>();
-                let namespace_map_for_spawn = self.namespace_map.clone();
+                let namespace_map_for_spawn = self.namespace_map();
                 let qualified_app_id_for_spawn = qualified_app_id.clone();
                 let (tid_tx, tid_rx) = tokio::sync::oneshot::channel::<u32>();
                 let (policy_counters_tx, policy_counters_rx) = tokio::sync::oneshot::channel();
@@ -393,19 +393,50 @@ impl Supervisor {
                 )
             }
             ComponentExecutionModel::WasiHttpIncomingHandler => {
-                let http_server =
-                    match prepared.spawn_http_server(env_vars, addr, Some(socket_addr_check)) {
-                        Ok(server) => server,
-                        Err(e) => {
-                            self.port_alloc.release(host_port);
-                            return Err(e);
+                let namespace_map_for_registration = self.namespace_map();
+                let (tid_tx, tid_rx) = tokio::sync::oneshot::channel::<u32>();
+                let (registration_tx, registration_rx) = std::sync::mpsc::sync_channel::<()>(0);
+                let thread_start_hook = Box::new(move || {
+                    let tid = crate::gettid();
+                    let _ = tid_tx.send(tid);
+                    let _ = registration_rx.recv();
+                });
+
+                let http_server = match prepared.spawn_http_server(
+                    env_vars,
+                    addr,
+                    Some(socket_addr_check),
+                    Some(thread_start_hook),
+                ) {
+                    Ok(server) => server,
+                    Err(e) => {
+                        self.port_alloc.release(host_port);
+                        return Err(e);
+                    }
+                };
+
+                let instance_tid = tid_rx.await.ok();
+                if let Some(tid) = instance_tid {
+                    if let Some(ref ns_map) = namespace_map_for_registration {
+                        let identity = ebpf_monitor::common::TidIdentity::new(
+                            qualified_app_id.namespace(),
+                            &qualified_app_id.0,
+                        );
+                        if let Err(e) = ns_map.register_tid(tid, identity) {
+                            tracing::warn!(
+                                tid,
+                                error = %e,
+                                "Failed to register dedicated wasi:http TID"
+                            );
                         }
-                    };
+                    }
+                }
+                let _ = registration_tx.send(());
 
                 (
                     http_server.task,
                     http_server.shutdown_tx,
-                    None,
+                    instance_tid,
                     Some(http_server.policy_counters),
                 )
             }

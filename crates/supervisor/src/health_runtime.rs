@@ -59,7 +59,7 @@ impl Supervisor {
             Self::export_policy_metrics_from_pools(&policy_metrics, &mut pools);
         }
 
-        if let Some(ref ns_map) = self.namespace_map {
+        if let Some(ns_map) = self.namespace_map() {
             let removed = ns_map.cleanup_stale_tids();
             if removed > 0 {
                 tracing::info!(removed, "Cleaned up stale TIDs from namespace map");

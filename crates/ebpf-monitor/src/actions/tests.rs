@@ -76,6 +76,25 @@ fn make_dispatcher(callbacks: Arc<TestCallbacks>) -> ActionDispatcher {
 }
 
 #[test]
+fn test_dispatcher_resolves_registered_application_identity_by_tid() {
+    let callbacks = Arc::new(TestCallbacks::default());
+    let dispatcher = make_dispatcher(callbacks);
+    let namespace_map = Arc::new(NamespaceMap::new_fallback());
+    namespace_map
+        .register_tid(
+            420,
+            crate::common::TidIdentity::new("oidc", "oidc-backend:v1"),
+        )
+        .unwrap();
+    dispatcher.set_namespace_map(namespace_map);
+
+    assert_eq!(
+        dispatcher.identity_for_tid(420),
+        ("oidc".to_string(), "oidc-backend:v1".to_string())
+    );
+}
+
+#[test]
 fn test_oom_kill_triggers_backpressure_and_removal() {
     let callbacks = Arc::new(TestCallbacks::default());
     let dispatcher = make_dispatcher(callbacks.clone());
@@ -308,6 +327,7 @@ fn test_syscall_privilege_escalation() {
 
     dispatcher.dispatch(MonitorEvent::SyscallAnomaly {
         pid: 42,
+        tid: 420,
         syscall_nr: 101,
         syscall_category: SyscallCategory::PrivilegeEscalation,
         count_in_window: 1,
@@ -316,7 +336,7 @@ fn test_syscall_privilege_escalation() {
     assert_eq!(dispatcher.metrics.security_violations.get(), 1);
     let killed = callbacks.killed_instances.lock().unwrap();
     assert_eq!(killed.len(), 1);
-    assert_eq!(killed[0].0, 42);
+    assert_eq!(killed[0].0, 420);
 
     let incidents = callbacks.security_incidents.lock().unwrap();
     assert_eq!(incidents.len(), 1);
@@ -332,6 +352,7 @@ fn test_syscall_process_control() {
 
     dispatcher.dispatch(MonitorEvent::SyscallAnomaly {
         pid: 99,
+        tid: 990,
         syscall_nr: 59,
         syscall_category: SyscallCategory::ProcessControl,
         count_in_window: 1,
@@ -340,7 +361,7 @@ fn test_syscall_process_control() {
     assert_eq!(dispatcher.metrics.security_violations.get(), 1);
     let killed = callbacks.killed_instances.lock().unwrap();
     assert_eq!(killed.len(), 1);
-    assert_eq!(killed[0].0, 99);
+    assert_eq!(killed[0].0, 990);
 }
 
 #[test]
@@ -529,6 +550,7 @@ fn test_monitor_event_type_mapping() {
     assert_eq!(
         MonitorEvent::SyscallAnomaly {
             pid: 0,
+            tid: 0,
             syscall_nr: 0,
             syscall_category: SyscallCategory::Normal,
             count_in_window: 0

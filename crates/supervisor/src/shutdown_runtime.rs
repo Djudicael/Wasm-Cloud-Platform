@@ -96,7 +96,7 @@ impl Supervisor {
         self.port_alloc.release(instance.addr.port());
 
         if let Some(tid) = instance.tid {
-            if let Some(ref ns_map) = self.namespace_map {
+            if let Some(ns_map) = self.namespace_map() {
                 let _ = ns_map.deregister_tid(tid);
             }
         }

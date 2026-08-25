@@ -104,6 +104,7 @@ pub enum MonitorEvent {
     },
     SyscallAnomaly {
         pid: u32,
+        tid: u32,
         syscall_nr: u64,
         syscall_category: SyscallCategory,
         count_in_window: u64,

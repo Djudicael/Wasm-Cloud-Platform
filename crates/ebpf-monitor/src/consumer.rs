@@ -207,6 +207,7 @@ pub fn parse_event(bytes: &[u8]) -> Result<MonitorEvent, ParseError> {
             let event = unsafe { std::ptr::read_unaligned(bytes.as_ptr() as *const SyscallEvent) };
             Ok(MonitorEvent::SyscallAnomaly {
                 pid: event.header.pid,
+                tid: event.header.tid,
                 syscall_nr: event.syscall_nr,
                 syscall_category: SyscallCategory::from_u32(event.syscall_category),
                 count_in_window: event.count_in_window,
@@ -722,11 +723,13 @@ mod tests {
         match parsed {
             MonitorEvent::SyscallAnomaly {
                 pid,
+                tid,
                 syscall_nr,
                 syscall_category,
                 count_in_window,
             } => {
                 assert_eq!(pid, 500);
+                assert_eq!(tid, 500);
                 assert_eq!(syscall_nr, 101);
                 assert_eq!(syscall_category, SyscallCategory::PrivilegeEscalation);
                 assert_eq!(count_in_window, 1);
