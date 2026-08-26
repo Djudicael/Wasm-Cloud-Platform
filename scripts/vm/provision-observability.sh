@@ -159,6 +159,18 @@ groups:
         for: 10s
         labels: {severity: warning}
         annotations: {summary: "OpenTelemetry Collector is unavailable"}
+      - alert: EbpfRingBufferEventsDropped
+        expr: increase(wasm_ebpf_ring_buffer_dropped_events_total[5m]) > 0
+        labels: {severity: warning}
+        annotations: {summary: "The kernel eBPF ring buffer dropped monitoring events"}
+      - alert: EbpfDispatchQueueSaturated
+        expr: increase(wasm_ebpf_dispatch_queue_saturations_total[5m]) > 0
+        labels: {severity: warning}
+        annotations: {summary: "The eBPF action-dispatch queue reached capacity"}
+      - alert: EbpfDropCounterUnavailable
+        expr: increase(wasm_ebpf_ring_buffer_drop_counter_read_errors_total[5m]) > 0
+        labels: {severity: warning}
+        annotations: {summary: "The node cannot read an eBPF ring-buffer drop counter"}
 EOF
 
 cat > "$runtime_dir/alertmanager.yml" <<'EOF'

@@ -3,7 +3,7 @@
 
 use aya_ebpf::{
     macros::{map, tracepoint},
-    maps::{Array, HashMap, RingBuf},
+    maps::{Array, HashMap, PerCpuArray, RingBuf},
     programs::TracePointContext,
     EbpfContext,
 };
@@ -16,6 +16,16 @@ static CONFIG: Array<MonitorConfigMap> = Array::with_max_entries(1, 0);
 
 #[map]
 static EVENTS: RingBuf = RingBuf::with_byte_size(1024 * 1024, 0);
+
+#[map]
+static DROPPED_EVENTS: PerCpuArray<u64> = PerCpuArray::with_max_entries(1, 0);
+
+#[inline(always)]
+fn record_drop() {
+    if let Some(value) = DROPPED_EVENTS.get_ptr_mut(0) {
+        unsafe { *value = (*value).saturating_add(1) };
+    }
+}
 
 /// Wasm execution threads registered by Supervisor. Wasm instances are
 /// in-process, so the node TGID alone cannot identify instance activity.
@@ -70,6 +80,8 @@ fn try_monitored_tid_start(ctx: TracePointContext) -> Result<u32, u32> {
     if let Some(mut entry) = EVENTS.reserve::<ProcessEvent>(0) {
         entry.write(event);
         entry.submit(0);
+    } else {
+        record_drop();
     }
     Ok(0)
 }
@@ -137,6 +149,8 @@ fn try_sched_process_exec(ctx: TracePointContext) -> Result<u32, u32> {
     if let Some(mut entry) = EVENTS.reserve::<ProcessEvent>(0) {
         entry.write(event);
         entry.submit(0);
+    } else {
+        record_drop();
     }
 
     info!(&ctx, "Process exec: pid={}", pid);
@@ -216,6 +230,8 @@ fn try_sched_process_exit(ctx: TracePointContext) -> Result<u32, u32> {
     if let Some(mut entry) = EVENTS.reserve::<ProcessEvent>(0) {
         entry.write(event);
         entry.submit(0);
+    } else {
+        record_drop();
     }
 
     let _ = STARTED_TIDS.remove(&tid);

@@ -414,20 +414,35 @@ async fn try_init_ebpf(
     // Step 2: Open every independently compiled object's event ring buffer.
     let mut ring_buffers = Vec::new();
     for monitor in &mut loaded.monitors {
+        let dropped_events = monitor
+            .ebpf
+            .take_map("DROPPED_EVENTS")
+            .and_then(|map| aya::maps::PerCpuArray::try_from(map).ok());
         if let Some(ring_buf) = monitor
             .ebpf
             .take_map("EVENTS")
             .and_then(|map| aya::maps::RingBuf::try_from(map).ok())
         {
-            ring_buffers.push((monitor.name, ring_buf));
+            ring_buffers.push(consumer::RingBufferSource::new(
+                monitor.name,
+                ring_buf,
+                dropped_events,
+            ));
         }
     }
     if let Some(ns_ebpf) = loaded.ns_ebpf.as_mut() {
+        let dropped_events = ns_ebpf
+            .take_map("DROPPED_EVENTS")
+            .and_then(|map| aya::maps::PerCpuArray::try_from(map).ok());
         if let Some(ring_buf) = ns_ebpf
             .take_map("EVENTS")
             .and_then(|map| aya::maps::RingBuf::try_from(map).ok())
         {
-            ring_buffers.push(("namespace_enforcer", ring_buf));
+            ring_buffers.push(consumer::RingBufferSource::new(
+                "namespace_enforcer",
+                ring_buf,
+                dropped_events,
+            ));
         }
     }
     if ring_buffers.is_empty() {

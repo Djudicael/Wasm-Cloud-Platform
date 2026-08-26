@@ -83,6 +83,21 @@ pub struct EbpfMetrics {
     /// Total events that failed to parse (malformed or unknown type).
     pub events_parse_errors: IntCounter,
 
+    /// Events rejected by a kernel ring buffer because it was full.
+    pub ring_buffer_dropped_events: IntCounterVec,
+
+    /// Failures while reading the kernel-side drop counters.
+    pub ring_buffer_drop_counter_read_errors: IntCounterVec,
+
+    /// Current number of events waiting in the bounded dispatcher queue.
+    pub dispatch_queue_depth: IntGauge,
+
+    /// Configured capacity of the bounded dispatcher queue.
+    pub dispatch_queue_capacity: IntGauge,
+
+    /// Number of transitions into a full dispatcher queue.
+    pub dispatch_queue_saturations: IntCounter,
+
     /// Current TCP connection count for the monitored node PID.
     pub tcp_connection_count: IntGauge,
 
@@ -229,6 +244,57 @@ impl EbpfMetrics {
             registry
         );
 
+        let ring_buffer_dropped_events = register_metric!(
+            IntCounterVec::new(
+                Opts::new(
+                    "wasm_ebpf_ring_buffer_dropped_events_total",
+                    "Events rejected by a full kernel eBPF ring buffer"
+                ),
+                &["monitor"]
+            )
+            .unwrap(),
+            registry
+        );
+
+        let ring_buffer_drop_counter_read_errors = register_metric!(
+            IntCounterVec::new(
+                Opts::new(
+                    "wasm_ebpf_ring_buffer_drop_counter_read_errors_total",
+                    "Failures reading kernel eBPF ring-buffer drop counters"
+                ),
+                &["monitor"]
+            )
+            .unwrap(),
+            registry
+        );
+
+        let dispatch_queue_depth = register_metric!(
+            IntGauge::with_opts(Opts::new(
+                "wasm_ebpf_dispatch_queue_depth",
+                "Events waiting in the bounded eBPF action-dispatch queue"
+            ))
+            .unwrap(),
+            registry
+        );
+
+        let dispatch_queue_capacity = register_metric!(
+            IntGauge::with_opts(Opts::new(
+                "wasm_ebpf_dispatch_queue_capacity",
+                "Configured capacity of the bounded eBPF action-dispatch queue"
+            ))
+            .unwrap(),
+            registry
+        );
+
+        let dispatch_queue_saturations = register_metric!(
+            IntCounter::with_opts(Opts::new(
+                "wasm_ebpf_dispatch_queue_saturations_total",
+                "Transitions into a full eBPF action-dispatch queue"
+            ))
+            .unwrap(),
+            registry
+        );
+
         let tcp_connection_count = register_metric!(
             IntGauge::with_opts(Opts::new(
                 "wasm_ebpf_tcp_connection_count",
@@ -265,6 +331,11 @@ impl EbpfMetrics {
             events_processed,
             events_by_type,
             events_parse_errors,
+            ring_buffer_dropped_events,
+            ring_buffer_drop_counter_read_errors,
+            dispatch_queue_depth,
+            dispatch_queue_capacity,
+            dispatch_queue_saturations,
             tcp_connection_count,
             fd_count,
         }
@@ -334,12 +405,51 @@ mod tests {
         assert_eq!(metrics.security_violations.get(), 0);
         assert_eq!(metrics.events_processed.get(), 0);
         assert_eq!(metrics.events_parse_errors.get(), 0);
+        assert_eq!(metrics.dispatch_queue_saturations.get(), 0);
 
         // Gauges should start at 0
         assert_eq!(metrics.fd_usage_ratio.get(), 0.0);
         assert_eq!(metrics.memory_pressure_level.get(), 0);
         assert_eq!(metrics.tcp_connection_count.get(), 0);
         assert_eq!(metrics.fd_count.get(), 0);
+        assert_eq!(metrics.dispatch_queue_depth.get(), 0);
+        assert_eq!(metrics.dispatch_queue_capacity.get(), 0);
+    }
+
+    #[test]
+    fn test_ring_buffer_pressure_metrics() {
+        let registry = Registry::new();
+        let metrics = EbpfMetrics::new(&registry);
+
+        metrics
+            .ring_buffer_dropped_events
+            .with_label_values(&["fd_watcher"])
+            .inc_by(42);
+        metrics
+            .ring_buffer_drop_counter_read_errors
+            .with_label_values(&["fd_watcher"])
+            .inc();
+        metrics.dispatch_queue_capacity.set(4096);
+        metrics.dispatch_queue_depth.set(4096);
+        metrics.dispatch_queue_saturations.inc();
+
+        assert_eq!(
+            metrics
+                .ring_buffer_dropped_events
+                .with_label_values(&["fd_watcher"])
+                .get(),
+            42
+        );
+        assert_eq!(
+            metrics
+                .ring_buffer_drop_counter_read_errors
+                .with_label_values(&["fd_watcher"])
+                .get(),
+            1
+        );
+        assert_eq!(metrics.dispatch_queue_capacity.get(), 4096);
+        assert_eq!(metrics.dispatch_queue_depth.get(), 4096);
+        assert_eq!(metrics.dispatch_queue_saturations.get(), 1);
     }
 
     #[test]

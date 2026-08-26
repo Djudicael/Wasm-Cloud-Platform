@@ -287,6 +287,20 @@ fn route(path: &str) -> (u16, &'static str, String, bool) {
                 false,
             )
         }
+        "/probe/event-burst" => {
+            let iterations = query_u32(path, "iterations", 10_000).clamp(1, 1_000_000);
+            match probe_fd_event_burst(iterations) {
+                Ok(completed) => (
+                    200,
+                    "application/json",
+                    format!(
+                        r#"{{"operation":"event-burst","iterations":{iterations},"completed":{completed}}}"#
+                    ),
+                    false,
+                ),
+                Err(error) => (500, "text/plain", error, false),
+            }
+        }
         _ => (404, "text/plain", "Not Found".to_string(), false),
     }
 }
@@ -334,6 +348,27 @@ fn probe_file_io(mib: u32) -> Result<u64, String> {
     drop(file);
     std::fs::remove_file(path).map_err(|error| error.to_string())?;
     Ok(read)
+}
+
+#[cfg(target_family = "wasm")]
+fn probe_fd_event_burst(iterations: u32) -> Result<u32, String> {
+    use std::io::Write;
+
+    let path = "/tmp/ebpf-event-burst.bin";
+    let mut seed = std::fs::File::create(path).map_err(|error| error.to_string())?;
+    seed.write_all(b"ring-pressure")
+        .map_err(|error| error.to_string())?;
+    drop(seed);
+
+    let mut completed = 0_u32;
+    for _ in 0..iterations {
+        let file = std::fs::File::open(path).map_err(|error| error.to_string())?;
+        drop(file);
+        completed += 1;
+    }
+
+    std::fs::remove_file(path).map_err(|error| error.to_string())?;
+    Ok(completed)
 }
 
 #[cfg(target_family = "wasm")]

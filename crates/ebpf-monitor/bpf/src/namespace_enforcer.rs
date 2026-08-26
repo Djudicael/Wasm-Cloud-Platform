@@ -15,7 +15,7 @@
 
 use aya_ebpf::{
     macros::{map, tracepoint},
-    maps::{Array, HashMap, RingBuf},
+    maps::{Array, HashMap, PerCpuArray, RingBuf},
     programs::TracePointContext,
     EbpfContext,
 };
@@ -37,6 +37,16 @@ static NS_ENFORCE_CONFIG: Array<NsEnforceConfig> = Array::with_max_entries(1, 0)
 /// EVENTS: ring buffer for sending events to userspace
 #[map]
 static EVENTS: RingBuf = RingBuf::with_byte_size(256 * 1024, 0);
+
+#[map]
+static DROPPED_EVENTS: PerCpuArray<u64> = PerCpuArray::with_max_entries(1, 0);
+
+#[inline(always)]
+fn record_drop() {
+    if let Some(value) = DROPPED_EVENTS.get_ptr_mut(0) {
+        unsafe { *value = (*value).saturating_add(1) };
+    }
+}
 
 // ── TCP State Constants ───────────────────────────────────────────────────────
 
@@ -124,7 +134,10 @@ fn try_ns_inet_sock_set_state(ctx: TracePointContext) -> Result<(), u32> {
             // Emit TidConnection event
             let mut event = match EVENTS.reserve::<TcpEvent>(0) {
                 Some(e) => e,
-                None => return Ok(()), // Ring buffer full
+                None => {
+                    record_drop();
+                    return Ok(());
+                }
             };
 
             let connection = TcpEvent {
@@ -151,7 +164,10 @@ fn try_ns_inet_sock_set_state(ctx: TracePointContext) -> Result<(), u32> {
             // Unregistered TID connected to gateway — audit event
             let mut event = match EVENTS.reserve::<NamespaceAuditEvent>(0) {
                 Some(e) => e,
-                None => return Ok(()),
+                None => {
+                    record_drop();
+                    return Ok(());
+                }
             };
 
             let header = EventHeader {
@@ -183,7 +199,10 @@ fn try_ns_inet_sock_set_state(ctx: TracePointContext) -> Result<(), u32> {
         if is_monitored {
             let mut event = match EVENTS.reserve::<TcpEvent>(0) {
                 Some(e) => e,
-                None => return Ok(()),
+                None => {
+                    record_drop();
+                    return Ok(());
+                }
             };
 
             let connection = TcpEvent {
@@ -338,7 +357,10 @@ fn try_ns_audit_sendto(ctx: TracePointContext) -> Result<(), u32> {
         // Emit forged header detection event
         let mut event = match EVENTS.reserve::<NamespaceAuditEvent>(0) {
             Some(e) => e,
-            None => return Ok(()),
+            None => {
+                record_drop();
+                return Ok(());
+            }
         };
 
         let header = EventHeader {

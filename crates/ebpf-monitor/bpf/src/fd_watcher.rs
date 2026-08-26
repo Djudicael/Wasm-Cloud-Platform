@@ -35,7 +35,7 @@
 use aya_ebpf::{
     cty::c_long,
     macros::{kprobe, map, tracepoint},
-    maps::{Array, HashMap, RingBuf},
+    maps::{Array, HashMap, PerCpuArray, RingBuf},
     programs::{ProbeContext, TracePointContext},
 };
 use aya_log_ebpf::warn;
@@ -49,6 +49,18 @@ static CONFIG: Array<MonitorConfigMap> = Array::with_max_entries(1, 0);
 /// Ring buffer for sending events to userspace.
 #[map]
 static EVENTS: RingBuf = RingBuf::with_byte_size(512 * 1024, 0); // 512 KB
+
+#[map]
+static DROPPED_EVENTS: PerCpuArray<u64> = PerCpuArray::with_max_entries(1, 0);
+
+#[inline(always)]
+fn emit<T>(event: &T) {
+    if EVENTS.output(event, 0).is_err() {
+        if let Some(value) = DROPPED_EVENTS.get_ptr_mut(0) {
+            unsafe { *value = (*value).saturating_add(1) };
+        }
+    }
+}
 
 #[map]
 static MONITORED_TIDS: HashMap<u32, TidIdentity> = HashMap::with_max_entries(4096, 0);
@@ -122,7 +134,7 @@ fn try_fd_install(ctx: ProbeContext) -> Result<c_long, c_long> {
         current_fd_count: new_count,
         fd_soft_limit: config.fd_soft_limit,
     };
-    let _ = EVENTS.output(&opened, 0);
+    emit(&opened);
 
     // ── Check against soft limit (80% warning) ──────────────────────────
     if new_count >= config.fd_soft_limit {
@@ -139,7 +151,7 @@ fn try_fd_install(ctx: ProbeContext) -> Result<c_long, c_long> {
             current_fd_count: new_count,
             fd_soft_limit: config.fd_soft_limit,
         };
-        let _ = EVENTS.output(&event, 0);
+        emit(&event);
 
         warn!(
             &ctx,
@@ -167,7 +179,7 @@ fn try_fd_install(ctx: ProbeContext) -> Result<c_long, c_long> {
             current_fd_count: new_count,
             fd_soft_limit: config.fd_hard_limit,
         };
-        let _ = EVENTS.output(&event, 0);
+        emit(&event);
 
         warn!(
             &ctx,
@@ -248,7 +260,7 @@ fn try_sys_enter_close(ctx: TracePointContext) -> Result<c_long, c_long> {
         current_fd_count,
         fd_soft_limit: config.fd_soft_limit,
     };
-    let _ = EVENTS.output(&event, 0);
+    emit(&event);
     Ok(0)
 }
 

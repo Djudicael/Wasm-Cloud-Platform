@@ -343,8 +343,30 @@ fn read_cstr(bytes: &[u8]) -> String {
 mod ebpf_consumer {
     use super::*;
     use crate::metrics::EbpfMetrics;
-    use aya::maps::{MapData, RingBuf as AyaRingBuf};
+    use aya::maps::{MapData, PerCpuArray, RingBuf as AyaRingBuf};
     use tracing::{debug, error, warn};
+
+    pub struct RingBufferSource {
+        pub monitor: &'static str,
+        pub ring_buf: AyaRingBuf<MapData>,
+        pub dropped_events: Option<PerCpuArray<MapData, u64>>,
+        observed_drops: u64,
+    }
+
+    impl RingBufferSource {
+        pub fn new(
+            monitor: &'static str,
+            ring_buf: AyaRingBuf<MapData>,
+            dropped_events: Option<PerCpuArray<MapData, u64>>,
+        ) -> Self {
+            Self {
+                monitor,
+                ring_buf,
+                dropped_events,
+                observed_drops: 0,
+            }
+        }
+    }
 
     /// Read events from the eBPF ring buffer and send them to the action dispatcher.
     ///
@@ -355,7 +377,7 @@ mod ebpf_consumer {
     /// The function returns when the `action_tx` channel is closed (i.e., the receiver
     /// was dropped), which signals a clean shutdown.
     pub async fn consume_ring_buffers(
-        mut ring_buffers: Vec<(&'static str, AyaRingBuf<MapData>)>,
+        mut ring_buffers: Vec<RingBufferSource>,
         action_tx: tokio::sync::mpsc::Sender<MonitorEvent>,
         metrics: Arc<EbpfMetrics>,
         poll_interval: Duration,
@@ -367,6 +389,9 @@ mod ebpf_consumer {
 
         let mut interval = tokio::time::interval(poll_interval);
         let mut consecutive_errors = 0u32;
+        let queue_capacity = action_tx.max_capacity();
+        let mut queue_was_full = false;
+        metrics.dispatch_queue_capacity.set(queue_capacity as i64);
 
         loop {
             interval.tick().await;
@@ -374,24 +399,79 @@ mod ebpf_consumer {
             let mut events_this_tick = 0u32;
 
             // Drain all available events from every independently loaded object.
-            for (monitor, ring_buf) in &mut ring_buffers {
-                while let Some(item) = ring_buf.next() {
+            for source in &mut ring_buffers {
+                if let Some(dropped_events) = &source.dropped_events {
+                    match dropped_events.get(&0, 0) {
+                        Ok(values) => {
+                            let total = values.iter().copied().fold(0u64, u64::saturating_add);
+                            let delta = total.saturating_sub(source.observed_drops);
+                            if delta > 0 {
+                                metrics
+                                    .ring_buffer_dropped_events
+                                    .with_label_values(&[source.monitor])
+                                    .inc_by(delta);
+                                warn!(
+                                    monitor = source.monitor,
+                                    dropped_events = delta,
+                                    total_dropped_events = total,
+                                    "kernel eBPF ring buffer dropped events"
+                                );
+                            }
+                            source.observed_drops = total;
+                        }
+                        Err(error) => {
+                            metrics
+                                .ring_buffer_drop_counter_read_errors
+                                .with_label_values(&[source.monitor])
+                                .inc();
+                            warn!(
+                                monitor = source.monitor,
+                                error = %error,
+                                "failed to read eBPF ring-buffer drop counter"
+                            );
+                        }
+                    }
+                }
+
+                while let Some(item) = source.ring_buf.next() {
                     let raw_bytes = item.as_ref();
 
                     match parse_event(raw_bytes) {
                         Ok(event) => {
                             events_this_tick += 1;
+                            let queue_depth = queue_capacity.saturating_sub(action_tx.capacity());
+                            metrics.dispatch_queue_depth.set(queue_depth as i64);
+                            if action_tx.capacity() == 0 {
+                                if !queue_was_full {
+                                    metrics.dispatch_queue_saturations.inc();
+                                    warn!(queue_capacity, "eBPF action-dispatch queue saturated");
+                                    queue_was_full = true;
+                                }
+                            } else {
+                                queue_was_full = false;
+                            }
                             if action_tx.send(event).await.is_err() {
                                 info!("action channel closed — eBPF consumer shutting down");
                                 return;
                             }
+                            metrics
+                                .dispatch_queue_depth
+                                .set(queue_capacity.saturating_sub(action_tx.capacity()) as i64);
                         }
                         Err(ParseError::UnknownEventType(t)) => {
-                            debug!(monitor, event_type = t, "skipping unknown eBPF event type");
+                            debug!(
+                                monitor = source.monitor,
+                                event_type = t,
+                                "skipping unknown eBPF event type"
+                            );
                             metrics.events_parse_errors.inc();
                         }
                         Err(e) => {
-                            warn!(monitor, error = %e, "failed to parse eBPF event");
+                            warn!(
+                                monitor = source.monitor,
+                                error = %e,
+                                "failed to parse eBPF event"
+                            );
                             metrics.events_parse_errors.inc();
                             consecutive_errors += 1;
 
@@ -421,7 +501,7 @@ mod ebpf_consumer {
 }
 
 #[cfg(feature = "ebpf")]
-pub use ebpf_consumer::consume_ring_buffers;
+pub use ebpf_consumer::{consume_ring_buffers, RingBufferSource};
 
 // ── Action Dispatcher Loop ────────────────────────────────────────────────────
 

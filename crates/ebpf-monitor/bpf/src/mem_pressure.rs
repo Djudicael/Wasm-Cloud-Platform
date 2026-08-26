@@ -47,7 +47,7 @@
 use aya_ebpf::{
     cty::c_long,
     macros::{kprobe, map, tracepoint},
-    maps::{Array, HashMap, PerCpuHashMap, RingBuf},
+    maps::{Array, HashMap, PerCpuArray, PerCpuHashMap, RingBuf},
     programs::{ProbeContext, TracePointContext},
 };
 use aya_log_ebpf::info;
@@ -61,6 +61,18 @@ static CONFIG: Array<MonitorConfigMap> = Array::with_max_entries(1, 0);
 /// Ring buffer for sending events to userspace.
 #[map]
 static EVENTS: RingBuf = RingBuf::with_byte_size(512 * 1024, 0); // 512 KB
+
+#[map]
+static DROPPED_EVENTS: PerCpuArray<u64> = PerCpuArray::with_max_entries(1, 0);
+
+#[inline(always)]
+fn emit<T>(event: &T) {
+    if EVENTS.output(event, 0).is_err() {
+        if let Some(value) = DROPPED_EVENTS.get_ptr_mut(0) {
+            unsafe { *value = (*value).saturating_add(1) };
+        }
+    }
+}
 
 /// Last reported pressure level per cgroup (to avoid duplicate events).
 /// Key: cgroup ID, Value: last pressure level reported.
@@ -202,7 +214,7 @@ fn emit_direct_reclaim(cgroup_id: u64, pid: u32, tid: u32, now: u64) -> bool {
         _padding: 0,
         anon_pages: 0, // Userspace reads from cgroup memory.stat
     };
-    let _ = EVENTS.output(&event, 0);
+    emit(&event);
 
     true
 }
@@ -274,7 +286,7 @@ fn try_vmpressure(ctx: TracePointContext) -> Result<c_long, c_long> {
         _padding: 0,
         anon_pages: 0, // Userspace reads from cgroup memory.stat
     };
-    let _ = EVENTS.output(&event, 0);
+    emit(&event);
 
     info!(
         &ctx,

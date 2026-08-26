@@ -58,7 +58,7 @@
 use aya_ebpf::{
     cty::c_long,
     macros::{map, tracepoint},
-    maps::{Array, HashMap, PerCpuHashMap, RingBuf},
+    maps::{Array, HashMap, PerCpuArray, PerCpuHashMap, RingBuf},
     programs::TracePointContext,
 };
 use aya_log_ebpf::{info, warn};
@@ -74,6 +74,18 @@ static CONFIG: Array<MonitorConfigMap> = Array::with_max_entries(1, 0);
 /// Ring buffer for sending events to userspace.
 #[map]
 static EVENTS: RingBuf = RingBuf::with_byte_size(512 * 1024, 0); // 512 KB
+
+#[map]
+static DROPPED_EVENTS: PerCpuArray<u64> = PerCpuArray::with_max_entries(1, 0);
+
+#[inline(always)]
+fn emit<T>(event: &T) {
+    if EVENTS.output(event, 0).is_err() {
+        if let Some(value) = DROPPED_EVENTS.get_ptr_mut(0) {
+            unsafe { *value = (*value).saturating_add(1) };
+        }
+    }
+}
 
 /// Per-TID syscall count in current sampling window.
 /// Key: TID, Value: total syscall count.
@@ -208,7 +220,7 @@ fn try_sys_enter(ctx: TracePointContext) -> Result<c_long, c_long> {
             _padding: 0,
             count_in_window: 1,
         };
-        let _ = EVENTS.output(&event, 0);
+        emit(&event);
     }
 
     // ── Increment total syscall count ──────────────────────────────────
@@ -257,7 +269,7 @@ fn try_sys_enter(ctx: TracePointContext) -> Result<c_long, c_long> {
             _padding: 0,
             count_in_window: suspicious_count,
         };
-        let _ = EVENTS.output(&event, 0);
+        emit(&event);
 
         // Log at appropriate severity based on category
         match category {
@@ -310,7 +322,7 @@ fn try_sys_enter(ctx: TracePointContext) -> Result<c_long, c_long> {
             _padding: 0,
             count_in_window: total_count,
         };
-        let _ = EVENTS.output(&event, 0);
+        emit(&event);
 
         // Reset the counter after alerting to avoid flooding the
         // ring buffer with duplicate rate-limit events.

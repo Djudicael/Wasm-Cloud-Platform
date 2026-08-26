@@ -15,7 +15,15 @@ rustup run "$NIGHTLY" rustc --version >/dev/null 2>&1 || {
     exit 1
 }
 
-cargo "+$NIGHTLY" build \
+# eBPF objects are small, while reusing a stale kernel object is a correctness
+# and observability failure. In particular, host-mounted WSL checkouts can
+# preserve mtimes that make Cargo accept an object older than its source. Build
+# this isolated target from a clean state every time.
+env -u CARGO_TARGET_DIR cargo "+$NIGHTLY" clean \
+    --manifest-path "$MANIFEST" \
+    --target bpfel-unknown-none
+
+env -u CARGO_TARGET_DIR cargo "+$NIGHTLY" build \
     -Z build-std=core \
     --manifest-path "$MANIFEST" \
     --target bpfel-unknown-none \

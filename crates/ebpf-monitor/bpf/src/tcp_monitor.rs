@@ -25,7 +25,7 @@
 use aya_ebpf::{
     cty::c_long,
     macros::{kprobe, kretprobe, map, tracepoint},
-    maps::{Array, HashMap, RingBuf},
+    maps::{Array, HashMap, PerCpuArray, RingBuf},
     programs::{ProbeContext, RetProbeContext, TracePointContext},
 };
 use ebpf_monitor_bpf::{
@@ -39,6 +39,18 @@ static CONFIG: Array<MonitorConfigMap> = Array::with_max_entries(1, 0);
 /// Ring buffer for sending events to userspace.
 #[map]
 static EVENTS: RingBuf = RingBuf::with_byte_size(1024 * 1024, 0); // 1 MB
+
+#[map]
+static DROPPED_EVENTS: PerCpuArray<u64> = PerCpuArray::with_max_entries(1, 0);
+
+#[inline(always)]
+fn emit<T>(event: &T) {
+    if EVENTS.output(event, 0).is_err() {
+        if let Some(value) = DROPPED_EVENTS.get_ptr_mut(0) {
+            unsafe { *value = (*value).saturating_add(1) };
+        }
+    }
+}
 
 #[map]
 static MONITORED_TIDS: HashMap<u32, TidIdentity> = HashMap::with_max_entries(4096, 0);
@@ -138,7 +150,7 @@ fn try_inet_sock_set_state(ctx: TracePointContext) -> Result<c_long, c_long> {
                 rtt_us: 0,
                 bytes: 0,
             };
-            let _ = EVENTS.output(&event, 0);
+            emit(&event);
         }
 
         if is_monitored {
@@ -160,7 +172,7 @@ fn try_inet_sock_set_state(ctx: TracePointContext) -> Result<c_long, c_long> {
                 rtt_us: 0,
                 bytes: 0,
             };
-            let _ = EVENTS.output(&event, 0);
+            emit(&event);
         }
     } else if new_state == TCP_CLOSE {
         // Connection closed — decrement counter
@@ -190,7 +202,7 @@ fn try_inet_sock_set_state(ctx: TracePointContext) -> Result<c_long, c_long> {
                 rtt_us: 0,
                 bytes: 0,
             };
-            let _ = EVENTS.output(&event, 0);
+            emit(&event);
         }
     }
 
@@ -231,7 +243,7 @@ fn try_inet_sock_set_state(ctx: TracePointContext) -> Result<c_long, c_long> {
                 rtt_us: 0,
                 bytes: 0,
             };
-            let _ = EVENTS.output(&event, 0);
+            emit(&event);
         } else if new_state == TCP_CLOSE {
             let event = TcpEvent {
                 header: EventHeader {
@@ -251,7 +263,7 @@ fn try_inet_sock_set_state(ctx: TracePointContext) -> Result<c_long, c_long> {
                 rtt_us: 0,
                 bytes: 0,
             };
-            let _ = EVENTS.output(&event, 0);
+            emit(&event);
         }
     }
 
@@ -295,7 +307,7 @@ fn try_sys_exit_accept4(ctx: TracePointContext) -> Result<c_long, c_long> {
         rtt_us: 0,
         bytes: 0,
     };
-    let _ = EVENTS.output(&event, 0);
+    emit(&event);
     Ok(0)
 }
 
@@ -352,7 +364,7 @@ fn try_sys_enter_sendto(ctx: TracePointContext) -> Result<c_long, c_long> {
         rtt_us: 0,
         bytes: len,
     };
-    let _ = EVENTS.output(&event, 0);
+    emit(&event);
     Ok(0)
 }
 
@@ -413,7 +425,7 @@ fn try_sys_exit_recvfrom(ctx: TracePointContext) -> Result<c_long, c_long> {
         rtt_us: 0,
         bytes: ret as u64,
     };
-    let _ = EVENTS.output(&event, 0);
+    emit(&event);
     Ok(0)
 }
 
@@ -474,7 +486,7 @@ fn emit_tcp_activity(event_type: EventType, bytes: u64) -> Result<c_long, c_long
         rtt_us: 0,
         bytes,
     };
-    let _ = EVENTS.output(&event, 0);
+    emit(&event);
     Ok(0)
 }
 

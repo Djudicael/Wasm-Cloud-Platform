@@ -15,7 +15,7 @@ use crate::namespace_map::NamespaceMap;
 use crate::MonitorConfig;
 use std::sync::Arc;
 use std::time::Duration;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 pub use callbacks::{EventCallbacks, NoopCallbacks};
 pub use model::{MonitorEvent, NamespaceIncidentType, RecoveryAction};
@@ -218,7 +218,7 @@ impl ActionDispatcher {
                 new_state: _,
             } => {
                 let (namespace, app_id) = self.identity_for_tid(tid);
-                tracing::info!(pid, tid, namespace = %namespace, app_id = %app_id, src_port, dst_port, "TCP connection opened");
+                debug!(pid, tid, namespace = %namespace, app_id = %app_id, src_port, dst_port, "TCP connection opened");
                 self.metrics.tcp_connection_count.inc();
             }
             MonitorEvent::TcpClose {
@@ -228,7 +228,7 @@ impl ActionDispatcher {
                 dst_port,
             } => {
                 let (namespace, app_id) = self.identity_for_tid(tid);
-                tracing::info!(pid, tid, namespace = %namespace, app_id = %app_id, src_port, dst_port, "TCP connection closed");
+                debug!(pid, tid, namespace = %namespace, app_id = %app_id, src_port, dst_port, "TCP connection closed");
                 if self.metrics.tcp_connection_count.get() > 0 {
                     self.metrics.tcp_connection_count.dec();
                 }
@@ -263,7 +263,7 @@ impl ActionDispatcher {
             }
             MonitorEvent::TcpAccept { pid, tid, fd } => {
                 let (namespace, app_id) = self.identity_for_tid(tid);
-                tracing::info!(pid, tid, namespace = %namespace, app_id = %app_id, fd, "TCP connection accepted");
+                debug!(pid, tid, namespace = %namespace, app_id = %app_id, fd, "TCP connection accepted");
             }
             MonitorEvent::TcpSend {
                 pid,
@@ -272,7 +272,7 @@ impl ActionDispatcher {
                 bytes,
             } => {
                 let (namespace, app_id) = self.identity_for_tid(tid);
-                tracing::info!(pid, tid, namespace = %namespace, app_id = %app_id, fd, bytes, "TCP payload sent");
+                debug!(pid, tid, namespace = %namespace, app_id = %app_id, fd, bytes, "TCP payload sent");
             }
             MonitorEvent::TcpReceive {
                 pid,
@@ -281,7 +281,7 @@ impl ActionDispatcher {
                 bytes,
             } => {
                 let (namespace, app_id) = self.identity_for_tid(tid);
-                tracing::info!(pid, tid, namespace = %namespace, app_id = %app_id, fd, bytes, "TCP payload received");
+                debug!(pid, tid, namespace = %namespace, app_id = %app_id, fd, bytes, "TCP payload received");
             }
             MonitorEvent::FdOpen {
                 pid,
@@ -292,7 +292,7 @@ impl ActionDispatcher {
             } => {
                 self.metrics.set_fd_usage(current_fd_count, fd_soft_limit);
                 let (namespace, app_id) = self.identity_for_tid(tid);
-                tracing::info!(pid, tid, namespace = %namespace, app_id = %app_id, fd, current_fd_count, fd_soft_limit, "FD opened");
+                debug!(pid, tid, namespace = %namespace, app_id = %app_id, fd, current_fd_count, fd_soft_limit, "FD opened");
             }
             MonitorEvent::FdLimitApproaching {
                 pid,
@@ -334,7 +334,7 @@ impl ActionDispatcher {
             } => {
                 let (namespace, app_id) = self.identity_for_tid(tid);
                 self.metrics.fd_count.set(current_fd_count as i64);
-                tracing::info!(pid, tid, namespace = %namespace, app_id = %app_id, fd, current_fd_count, "FD closed");
+                debug!(pid, tid, namespace = %namespace, app_id = %app_id, fd, current_fd_count, "FD closed");
             }
             MonitorEvent::MemPressure {
                 pid,
