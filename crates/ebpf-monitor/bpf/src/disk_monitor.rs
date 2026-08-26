@@ -52,20 +52,34 @@ static CONFIG: Array<MonitorConfigMap> = Array::with_max_entries(1, 0);
 #[map]
 static EVENTS: RingBuf = RingBuf::with_byte_size(512 * 1024, 0); // 512 KB
 
-/// Track I/O start time per request.
-/// Key: sector number (u64), Value: start timestamp in nanoseconds.
-///
-/// We use the sector number as the key because it uniquely identifies
-/// an I/O request in the block layer. The sector is set when the
-/// request is issued and the same sector is available when the
-/// request completes.
+#[repr(C)]
+#[derive(Copy, Clone)]
+struct IoKey {
+    sector: u64,
+    dev: u32,
+    io_type: u32,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+struct IoStart {
+    timestamp_ns: u64,
+    cgroup_id: u64,
+    pid: u32,
+    tid: u32,
+    bytes: u32,
+    _padding: u32,
+}
+
+/// Track I/O start metadata by device, sector, and operation. A sector alone
+/// is not unique across devices and caused unrelated requests to correlate.
 ///
 /// Maximum entries: 65536. This should be sufficient for most workloads.
 /// If the map fills up, old entries will fail to insert but the system
 /// will continue to function (we just miss latency measurements for
 /// those requests).
 #[map]
-static IO_START_TIME: HashMap<u64, u64> = HashMap::with_max_entries(65536, 0);
+static IO_IN_FLIGHT: HashMap<IoKey, IoStart> = HashMap::with_max_entries(65536, 0);
 
 /// I/O type constants (matching userspace enum).
 const IO_TYPE_READ: u32 = 0;
@@ -90,16 +104,15 @@ static PENDING_IO_COUNT: HashMap<u32, u64> = HashMap::with_max_entries(256, 0);
 /// We record the start time so we can calculate latency when the
 /// request completes.
 ///
-/// The tracepoint format (from /sys/kernel/debug/tracing/events/block/block_rq_issue/format):
+/// Linux 6.1 tracepoint format (absolute offsets, including the common header):
 ///   field:dev_t dev;          offset:8;  size:4;  signed:0;
 ///   field:sector_t sector;   offset:16; size:8;  signed:0;
 ///   field:unsigned int nr_sector; offset:24; size:4; signed:0;
 ///   field:unsigned int bytes; offset:28; size:4; signed:0;
 ///   field:char rwbs[8];      offset:32; size:8;  signed:1;
 ///
-/// Note: The exact format may vary by kernel version. The offsets below
-/// are based on the most common layout. If the tracepoint format changes,
-/// the offsets need to be updated.
+/// Aya exposes the raw tracepoint record; it does not remove the eight-byte
+/// common header. These offsets must match the validated guest kernel schema.
 #[tracepoint]
 pub fn block_rq_issue(ctx: TracePointContext) -> c_long {
     match try_block_rq_issue(ctx) {
@@ -109,51 +122,37 @@ pub fn block_rq_issue(ctx: TracePointContext) -> c_long {
 }
 
 fn try_block_rq_issue(ctx: TracePointContext) -> Result<c_long, c_long> {
-    // Read tracepoint arguments.
-    // After the common tracepoint header (8 bytes), the fields are:
-    //   offset 0: dev_t dev (4 bytes, but aligned to 8)
-    //   offset 8: sector_t sector (8 bytes)
-    //   offset 16: unsigned int nr_sector (4 bytes)
-    //   offset 20: unsigned int bytes (4 bytes)
-    //   offset 24: char rwbs[8] (8 bytes)
-    //
-    // Note: aya-ebpf's TracePointContext already skips the common header,
-    // so offset 0 here is the first tracepoint-specific field.
+    let dev: u32 = unsafe { ctx.read_at(8)? };
+    let sector: u64 = unsafe { ctx.read_at(16)? };
+    let bytes: u32 = unsafe { ctx.read_at(28)? };
+    let io_type = read_io_type(&ctx, 32)?;
 
-    let dev: u32 = unsafe { ctx.read_at(0)? };
-    let sector: u64 = unsafe { ctx.read_at(8)? };
-    let _nr_sector: u32 = unsafe { ctx.read_at(16)? };
-
-    // Determine I/O type from the rwbs field.
-    // The rwbs field is a string like "R", "W", "WS", "WSF", etc.
-    // For simplicity, we read the first byte:
-    //   'R' (0x52) = read
-    //   'W' (0x57) = write
-    //   'S' (0x53) = sync
-    //   'F' (0x46) = flush
-    //   'D' (0x44) = discard
-    let rwbs_first_byte: u8 = unsafe { ctx.read_at(24)? };
-    let _io_type = match rwbs_first_byte {
-        0x52 => IO_TYPE_READ,  // 'R'
-        0x57 => IO_TYPE_WRITE, // 'W'
-        0x53 => IO_TYPE_SYNC,  // 'S'
-        0x46 => IO_TYPE_FLUSH, // 'F'
-        0x44 => IO_TYPE_READ,  // 'D' (discard, treat as read for metrics)
-        _ => IO_TYPE_UNKNOWN,
-    };
-
-    // Record the start time for this I/O request.
-    // We use the sector as the key because it uniquely identifies
-    // the request in the block layer.
+    // Record the start metadata for this I/O request. Device, sector, and
+    // operation together avoid collisions that a sector-only key allowed.
     let now = unsafe { aya_ebpf::helpers::bpf_ktime_get_ns() };
+    let pid_tgid = aya_ebpf::helpers::bpf_get_current_pid_tgid();
+    let start = IoStart {
+        timestamp_ns: now,
+        cgroup_id: unsafe { aya_ebpf::helpers::bpf_get_current_cgroup_id() },
+        pid: (pid_tgid >> 32) as u32,
+        tid: pid_tgid as u32,
+        bytes,
+        _padding: 0,
+    };
+    let key = IoKey {
+        sector,
+        dev,
+        io_type,
+    };
 
     // Check if we have room to track this request.
     // We use a per-device counter to limit the number of pending
     // requests we track. This prevents the map from growing too large.
     let dev_key = dev;
     let pending = unsafe { PENDING_IO_COUNT.get(&dev_key).copied().unwrap_or(0) };
-    if pending < MAX_PENDING_IO {
-        let _ = IO_START_TIME.insert(&sector, &now, 0);
+    let already_tracked = unsafe { IO_IN_FLIGHT.get(&key).is_some() };
+    if pending < MAX_PENDING_IO && !already_tracked {
+        let _ = IO_IN_FLIGHT.insert(&key, &start, 0);
 
         // Increment pending count
         let new_count = pending + 1;
@@ -173,17 +172,12 @@ fn try_block_rq_issue(ctx: TracePointContext) -> Result<c_long, c_long> {
 /// the current time. If the latency exceeds the configured threshold,
 /// we emit a `DiskSlowIo` event.
 ///
-/// The tracepoint format (from /sys/kernel/debug/tracing/events/block/block_rq_complete/format):
+/// Linux 6.1 tracepoint format (absolute offsets, including common header):
 ///   field:dev_t dev;          offset:8;  size:4;  signed:0;
 ///   field:sector_t sector;    offset:16; size:8;  signed:0;
 ///   field:unsigned int nr_sector; offset:24; size:4; signed:0;
-///   field:unsigned int bytes; offset:28; size:4; signed:0;
+///   field:int error;          offset:28; size:4; signed:1;
 ///   field:char rwbs[8];       offset:32; size:8; signed:1;
-///   field:u64 latency_ns;     offset:40; size:8; signed:0;  (some kernels)
-///
-/// Note: Some kernel versions include a `latency_ns` field directly in
-/// the tracepoint. If available, we use it. Otherwise, we calculate it
-/// from our IO_START_TIME map.
 #[tracepoint]
 pub fn block_rq_complete(ctx: TracePointContext) -> c_long {
     match try_block_rq_complete(ctx) {
@@ -195,34 +189,28 @@ pub fn block_rq_complete(ctx: TracePointContext) -> c_long {
 fn try_block_rq_complete(ctx: TracePointContext) -> Result<c_long, c_long> {
     let config = CONFIG.get(0).ok_or(0)?;
 
-    // Read tracepoint arguments (same layout as block_rq_issue)
-    let dev: u32 = unsafe { ctx.read_at(0)? };
-    let sector: u64 = unsafe { ctx.read_at(8)? };
-    let nr_sector: u32 = unsafe { ctx.read_at(16)? };
-
-    // Determine I/O type from rwbs field
-    let rwbs_first_byte: u8 = unsafe { ctx.read_at(24)? };
-    let io_type = match rwbs_first_byte {
-        0x52 => IO_TYPE_READ,  // 'R'
-        0x57 => IO_TYPE_WRITE, // 'W'
-        0x53 => IO_TYPE_SYNC,  // 'S'
-        0x46 => IO_TYPE_FLUSH, // 'F'
-        0x44 => IO_TYPE_READ,  // 'D' (discard)
-        _ => IO_TYPE_UNKNOWN,
+    let dev: u32 = unsafe { ctx.read_at(8)? };
+    let sector: u64 = unsafe { ctx.read_at(16)? };
+    let nr_sector: u32 = unsafe { ctx.read_at(24)? };
+    let io_type = read_io_type(&ctx, 32)?;
+    let key = IoKey {
+        sector,
+        dev,
+        io_type,
     };
 
     let now = unsafe { aya_ebpf::helpers::bpf_ktime_get_ns() };
 
     // Look up the start time for this request
-    let start_ns = unsafe { IO_START_TIME.get(&sector).copied() };
+    let start = unsafe { IO_IN_FLIGHT.get(&key).copied() };
 
-    if let Some(start_ns) = start_ns {
+    if let Some(start) = start {
         // Calculate latency
-        let latency_ns = now.saturating_sub(start_ns);
+        let latency_ns = now.saturating_sub(start.timestamp_ns);
 
         // Clean up the map entry
         unsafe {
-            let _ = IO_START_TIME.remove(&sector);
+            let _ = IO_IN_FLIGHT.remove(&key);
 
             // Decrement pending count
             let dev_key = dev;
@@ -235,19 +223,16 @@ fn try_block_rq_complete(ctx: TracePointContext) -> Result<c_long, c_long> {
 
         // Check against the configured threshold
         if latency_ns > config.disk_slow_threshold_ns {
-            // Extract device major:minor from dev_t
-            // dev_t format: bits 0-11 = minor, bits 12-31 = major
-            // (on modern kernels, this is extended but the low bits
-            // still follow this convention)
-            let dev_major = (dev >> 8) & 0xfff;
-            let dev_minor = dev & 0xff;
-
-            // If the minor number has more than 8 bits, use the extended format
-            let dev_minor = if dev_minor == 0 {
-                // Extended minor: bits 0-7 + bits 8-19
-                (dev >> 8) & 0xff00ff
+            // Tracepoint fields contain the kernel's native dev_t, not the
+            // userspace new_encode_dev representation: 20 minor bits followed
+            // by the major number (Linux kdev_t.h MAJOR/MINOR).
+            let dev_major = dev >> 20;
+            let dev_minor = dev & 0x000f_ffff;
+            let completed_bytes = nr_sector.saturating_mul(512);
+            let bytes = if completed_bytes == 0 {
+                start.bytes
             } else {
-                dev_minor
+                completed_bytes
             };
 
             let event = DiskIoEvent {
@@ -255,15 +240,16 @@ fn try_block_rq_complete(ctx: TracePointContext) -> Result<c_long, c_long> {
                     event_type: EventType::DiskSlowIo as u32,
                     _padding: 0,
                     timestamp_ns: now,
-                    pid: 0, // Disk events are not per-PID
-                    tid: 0,
+                    pid: start.pid,
+                    tid: start.tid,
                 },
                 dev_major,
                 dev_minor,
                 sector,
                 nr_sector,
-                _padding1: 0,
+                bytes,
                 latency_ns,
+                cgroup_id: start.cgroup_id,
                 io_type,
                 _padding2: 0,
             };
@@ -271,9 +257,10 @@ fn try_block_rq_complete(ctx: TracePointContext) -> Result<c_long, c_long> {
 
             warn!(
                 &ctx,
-                "Slow disk I/O: dev={}:{} latency={}ns type={}",
+                "Slow disk I/O: dev={}:{} bytes={} latency={}ns type={}",
                 dev_major,
                 dev_minor,
+                bytes,
                 latency_ns,
                 io_type
             );
@@ -301,6 +288,27 @@ fn try_block_rq_complete(ctx: TracePointContext) -> Result<c_long, c_long> {
     Ok(0)
 }
 
+#[inline(always)]
+fn read_io_type(ctx: &TracePointContext, rwbs_offset: usize) -> Result<u32, c_long> {
+    // `blk_fill_rwbs` may prefix an operation with `F` for preflush, so the
+    // operation is not necessarily the first character. The primary operation
+    // is always within the first two bytes on Linux 6.1.
+    let first: u8 = unsafe { ctx.read_at(rwbs_offset)? };
+    let second: u8 = unsafe { ctx.read_at(rwbs_offset + 1)? };
+
+    if first == b'W' || second == b'W' {
+        Ok(IO_TYPE_WRITE)
+    } else if first == b'R' || second == b'R' {
+        Ok(IO_TYPE_READ)
+    } else if first == b'F' || second == b'F' {
+        Ok(IO_TYPE_FLUSH)
+    } else if first == b'S' || second == b'S' {
+        Ok(IO_TYPE_SYNC)
+    } else {
+        Ok(IO_TYPE_UNKNOWN)
+    }
+}
+
 /// Tracepoint: block/block_rq_requeue (optional)
 ///
 /// Fires when a block I/O request is requeued (e.g., due to a device
@@ -309,7 +317,8 @@ fn try_block_rq_complete(ctx: TracePointContext) -> Result<c_long, c_long> {
 ///
 /// Currently disabled because requeue events are rare and the map
 /// cleanup on completion is sufficient for most cases. Enable if
-/// you notice the IO_START_TIME map growing over time.
+/// you notice the IO_IN_FLIGHT map growing over time. Requeue cleanup must use
+/// the same device/sector/operation key as issue and completion.
 ///
 /// #[tracepoint]
 /// pub fn block_rq_requeue(ctx: TracePointContext) -> c_long {
@@ -320,12 +329,14 @@ fn try_block_rq_complete(ctx: TracePointContext) -> Result<c_long, c_long> {
 /// }
 ///
 /// fn try_block_rq_requeue(ctx: TracePointContext) -> Result<c_long, c_long> {
-///     let sector: u64 = unsafe { ctx.read_at(8)? }.ok_or(0)?;
-///     let dev: u32 = unsafe { ctx.read_at(0)? }.ok_or(0)?;
+///     let dev: u32 = unsafe { ctx.read_at(8)? };
+///     let sector: u64 = unsafe { ctx.read_at(16)? };
+///     let io_type = read_io_type(&ctx, 32)?;
+///     let key = IoKey { sector, dev, io_type };
 ///
 ///     // Clean up the start time entry
 ///     unsafe {
-///         let _ = IO_START_TIME.remove(&sector);
+///         let _ = IO_IN_FLIGHT.remove(&key);
 ///
 ///         // Decrement pending count
 ///         let dev_key = dev;
@@ -339,11 +350,11 @@ fn try_block_rq_complete(ctx: TracePointContext) -> Result<c_long, c_long> {
 ///     Ok(0)
 /// }
 
-/// Periodic cleanup of stale IO_START_TIME entries.
+/// Periodic cleanup of stale IO_IN_FLIGHT entries.
 ///
 /// In some cases (e.g., device errors, driver bugs), a `block_rq_complete`
 /// event may not fire for a request. This leaves stale entries in the
-/// IO_START_TIME map, which can cause it to fill up over time.
+/// IO_IN_FLIGHT map, which can cause it to fill up over time.
 ///
 /// This function is called periodically (every sampling period) by
 /// userspace via a BPF timer or by the userspace fallback monitor.

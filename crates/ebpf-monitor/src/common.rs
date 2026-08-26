@@ -181,9 +181,10 @@ pub struct DiskIoEvent {
     pub dev_minor: u32,
     pub sector: u64,
     pub nr_sector: u32,
-    pub _padding1: u32,
+    pub bytes: u32,
     pub latency_ns: u64, // Time from submit to complete
-    pub io_type: u32,    // 0=read, 1=write, 2=sync
+    pub cgroup_id: u64,
+    pub io_type: u32, // 0=read, 1=write, 2=sync
     pub _padding2: u32,
 }
 

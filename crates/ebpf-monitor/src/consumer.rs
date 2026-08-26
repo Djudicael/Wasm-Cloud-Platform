@@ -231,7 +231,9 @@ pub fn parse_event(bytes: &[u8]) -> Result<MonitorEvent, ParseError> {
                 dev_minor: event.dev_minor,
                 sector: event.sector,
                 nr_sector: event.nr_sector,
+                bytes: event.bytes,
                 latency_ns: event.latency_ns,
+                cgroup_id: event.cgroup_id,
                 io_type: event.io_type,
             })
         }
@@ -729,9 +731,10 @@ mod tests {
             dev_minor: 0,
             sector: 123456,
             nr_sector: 8,
-            _padding1: 0,
+            bytes: 4096,
             latency_ns: 100_000_000, // 100ms
-            io_type: 1,              // write
+            cgroup_id: 42,
+            io_type: 1, // write
             _padding2: 0,
         };
 
@@ -742,13 +745,17 @@ mod tests {
             MonitorEvent::DiskSlowIo {
                 dev_major,
                 dev_minor,
+                bytes,
                 latency_ns,
+                cgroup_id,
                 io_type,
                 ..
             } => {
                 assert_eq!(dev_major, 8);
                 assert_eq!(dev_minor, 0);
+                assert_eq!(bytes, 4096);
                 assert_eq!(latency_ns, 100_000_000);
+                assert_eq!(cgroup_id, 42);
                 assert_eq!(io_type, 1);
             }
             _ => panic!("expected DiskSlowIo, got {:?}", parsed),
@@ -913,7 +920,9 @@ mod tests {
             dev_minor: 0,
             sector: 0,
             nr_sector: 0,
+            bytes: 4096,
             latency_ns: 50_000_000,
+            cgroup_id: 42,
             io_type: 1,
         })
         .await
@@ -1099,8 +1108,9 @@ mod tests {
                     dev_minor: 0,
                     sector: 1234,
                     nr_sector: 8,
-                    _padding1: 0,
+                    bytes: 4096,
                     latency_ns: 50_000_000,
+                    cgroup_id: 42,
                     io_type: 1,
                     _padding2: 0,
                 }),

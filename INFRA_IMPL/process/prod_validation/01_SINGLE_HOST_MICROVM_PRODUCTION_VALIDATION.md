@@ -182,13 +182,14 @@ redacted artifact with the result.
 | Final live-state snapshot | PASS / HISTORICAL PRE-TEARDOWN | Before authorized teardown, NATS PID `223906`, PostgreSQL PID `289481`, and platform node PIDs `325604`, `327249`, and `325384` were alive; every node health probe, both public routes, all 10 Prometheus targets, and Alertmanager were healthy. The later authorized-teardown row records removal of this environment |
 | Manual Prometheus UI validation | PASS (USER-VALIDATED) | The operator completed manual testing through `http://localhost:9095` after automated validation confirmed 10 targets up, zero targets down, and no active Alertmanager alerts |
 | Authorized teardown | PASS | After explicit operator authorization, `scripts/vm/destroy-testbed.sh` validated the selected state and removed its six exact state-labeled observability containers, recorded HAProxy PID/config/log, three platform-node VMs, NATS VM, PostgreSQL VM, exact TAP devices and bridge, state-derived OIDC credentials, and lifecycle state files. A post-teardown audit confirmed every recorded PID/device/container absent and ports 8088, 9095, and 9093 closed. No broad process or network matching was used |
-| 2026-08-25 production-like reprovision | PASS / LIVE | The exact state `.prod-validation-single-host-state.json` records NATS PID `170213`, PostgreSQL PID `170523`, and three 2-GiB platform nodes at `172.20.0.12-14`. After the Part 2B schema-3 rolling restart, node PIDs are `325548`, `325606`, and `325677`. Every node health probe returns HTTP 200, HAProxy remains available at `http://127.0.0.1:8088`, and OIDC readiness returns `database=ok`. This environment must remain running until the operator requests teardown. |
+| 2026-08-25 production-like reprovision | PASS / LIVE | The exact state `.prod-validation-single-host-state.json` records NATS PID `170213`, PostgreSQL PID `170523`, and three 2-GiB platform nodes at `172.20.0.12-14`. After the Part 3 schema-4 rolling restart, node PIDs are `341140`, `341198`, and `341254`. Every node health probe returns HTTP 200, HAProxy remains available at `http://127.0.0.1:8088`, and OIDC readiness returns `database=ok`. This environment must remain running until the operator requests teardown. |
 | eBPF guest kernel and verifier gate | PASS | Linux `6.1.80` was rebuilt with BTF, tracing, syscall tracepoints, kprobes, modules, and the complete Firecracker boot contract. All seven objects (`process_tracker`, `tcp_monitor`, `fd_watcher`, `mem_pressure`, `disk_monitor`, `syscall_counter`, and `namespace_enforcer`) loaded and attached on all three guests with no verifier error. The FD watcher used the supported `filp_close` fallback where `do_filp_close` was unavailable. |
 | eBPF verifier compatibility defects | FIXED / PASS | Linux 6.1 rejected implicit struct padding passed to ring-buffer helpers and a variable-size namespace header read. Event wire padding is now explicit and zeroed on both sides, the forged-header scan uses verifier-provable fixed reads, and all seven BPF ELFs rebuild with pinned `nightly-2026-08-20` and `bpf-linker` 0.11.0. The reusable verifier-log summary is `scripts/ebpf/summarize-verifier-log.jq`. |
 | eBPF identity boundary | PASS FOR IN-PROCESS WASI HTTP / STRONGER ISOLATION OPTIONAL | Initial runtime evidence showed the node's own `bpf(2)`, socket, and worker-thread activity classified as Wasm-instance activity, producing false privilege-escalation incidents and kill requests. Root causes were PID/TGID filtering, late namespace-map wiring through a failed `Arc::get_mut`, registering maps from the thread being monitored, discarding the event TID in userspace, and falling back to killing the largest instance. Each WASI HTTP instance now owns a dedicated single-thread Tokio runtime. The supervisor learns that Linux TID, registers its namespace/application identity from an unmonitored control thread before releasing application execution, mirrors it into all three maps, preserves the TID through parsing and dispatch, and can kill the exact matching instance. A dedicated process or cgroup remains the stronger production boundary when tenant-grade isolation is required. |
 | WASI HTTP attribution validation (Phase 6, Part 1) | PASS | The corrected rootfs (`sha256:30fe108dabda354d68e755a03cc0a299c8372f91d6a667d6bd239c5fa6975275`) was rolled one node at a time. Live kernel-map registration recorded distinct frontend/backend TIDs on every node: node 0 frontend `70`, backend `71`; node 1 frontend `68`, backend `69`; node 2 backend `68`, frontend `69`; every registration reported `map_count=3`, namespace `oidc`, and the exact deployment ID. The parser/dispatcher regression test proves that a syscall event retains its TID and resolves it to the registered namespace/application, while the supervisor regression test proves exact-TID termination. Twenty thousand direct backend readiness requests produced no false security event, no parse error, and no instance churn; all three nodes continued serving both deployments and PostgreSQL readiness remained `database=ok`. The high default per-CPU threshold did not emit a rate anomaly during this attribution-only run; deterministic event generation and counter assertions are explicitly Part 2 rather than evidence for ring-pressure testing. |
 | eBPF Prometheus mode gauge | DEFECT FIXED / PASS | Runtime/admin status reported eBPF active while Prometheus exported `wasm_ebpf_active 0`. The registration macro evaluated each constructor twice, registering one collector and returning a disconnected handle. It now evaluates once, and a regression test gathers the registry value. Following rolling replacement of all nodes, Prometheus reports `wasm_ebpf_active=1` for `local-test-node-0`, `-1`, and `-2`. |
 | eBPF deterministic probes (Phase 6, Part 2) | PARTIAL PASS | Exact-identity process start/exit, known-syscall, FD open/close, TCP connect/accept/send/receive/close, PostgreSQL allow, and NATS policy-deny assertions passed with per-type Prometheus evidence and zero parse errors. A false retransmit heuristic was removed and the corrected node reports zero retransmits. Direct reclaim emitted `MEDIUM` and activated backpressure, but the deliberately undersized guest reached OOM before its counter could be scraped; application `sync_all` writes did not move the block counter. Memory-counter and application block-I/O assertions remain open, and PID-1 OOM behavior plus the 4-GiB configured ceiling inside a 2-GiB VM are recorded production blockers. |
+| eBPF block-I/O accuracy (Phase 6, Part 3) | PASS WITH ATTRIBUTION LIMITATION | Linux 6.1 issue/complete records now use the real raw-tracepoint offsets, correlate by device/sector/operation, retain issue identity and cgroup, decode native `dev_t`, classify read/write/flush, and export completed bytes. A 256-MiB synchronous canary write produced 750 slow events and 238,960,640 slow-write bytes at the validation-only 1-ms threshold with zero parser errors; records reported `254:0`, nonzero sectors, `bytes == nr_sector * 512`, and measured latency. Cold artifact reads retained the exact application identity. Buffered ext4 writes correctly reported the kernel writeback thread as unregistered instead of falsely claiming the WASI deployment; per-application buffered-write attribution requires a process/cgroup boundary and cgroup-aware writeback accounting. The 50-ms default was restored before rolling schema 4 through all nodes. |
 | PostgreSQL unattended provisioning | DEFECT FIXED / PASS | The service wrapper initially blocked on an expired terminal-bound `sudo` ticket and created no VM. Under WSL it now invokes the exact CLI through `wsl.exe -u root`, matching platform provisioning. Service `oidc-postgres` then became reachable at `172.20.0.20:5432`. |
 | OIDC application deployment (2026-08-25) | PASS | The locked frontend audited 101 npm packages with zero reported vulnerabilities; both WASI components built; migrations through V37 and repeatable seed data completed against PostgreSQL 17.11 using `wasi-pg-client 0.2.0`; frontend, SPA route, discovery issuer, seeded login, and backend readiness all passed through the same-origin HAProxy gateway. Readiness returned `{"checks":{"database":"ok"},"status":"ready"}`. |
 | Focused Playwright production journey | PASS | Playwright 1.62.1 Chromium was installed in WSL. Six focused login/dashboard tests passed against `http://localhost:8088`, both before and after the rolling node update: form rendering, invalid credentials, successful login/redirect, empty-field validation, authenticated navigation, and API-backed dashboard statistics. The final serial run completed 6/6 in 4.9 seconds. |
@@ -196,7 +197,7 @@ redacted artifact with the result.
 | Disposable observability targets | PASS | Prometheus, Alertmanager, HAProxy, NATS, PostgreSQL, host, OpenTelemetry Collector, and all three platform-node targets are up: `sum(up)=10` and `count(up == 1)=10`. HAProxy request-rate data was observed during the browser run. |
 | Logs and distributed traces | FAIL / NOT IMPLEMENTED END TO END | Nodes emit structured JSON serial logs, but no bounded log agent forwards them. The OTLP Collector is healthy on 4317/4318, yet `otelcol_receiver_accepted_spans` and `otelcol_receiver_accepted_log_records` have no series after the Playwright journey. Source inspection confirms `logging.otlp_endpoint` is loaded but not wired into the node subscriber; `metrics::tracing_setup::init_tracing` is unused and currently panics on exporter initialization. No correlated HAProxy-to-WASI-to-PostgreSQL trace exists. Phase 5 remains open. |
 | Rolling node image update | PASS | The eBPF metric fix was promoted by restarting `local-test-node-0`, `-1`, and `-2` one at a time from the corrected rootfs. Public OIDC readiness remained `database: ok` after every replacement, all nodes reconverged healthy, PostgreSQL/NATS/observability were preserved, and the focused Playwright gate passed afterward. |
-| 2026-08-25 final source gates | PASS WITH DEPENDENCY NOTICE | In WSL, `cargo fmt --all -- --check`, the required native workspace all-target check, workspace all-target Clippy with warnings denied, eBPF-feature all-target Clippy with warnings denied, all 117 eBPF monitor tests, BPF ELF rebuild, shell syntax checks, and scoped `git diff --check` pass. The diagnostic example is correctly gated behind the `ebpf` feature. Rust still emits the separately tracked future-incompatibility notice for `proc-macro-error2 2.0.1`. |
+| 2026-08-26 Part 3 source gates | PASS WITH DEPENDENCY NOTICE | In WSL, `cargo fmt --all -- --check`, the required native workspace all-target check, workspace all-target Clippy with warnings denied, eBPF-feature node Clippy with warnings denied, all 118 eBPF monitor tests, 87 common tests, 64 runtime unit plus 7 integration tests, 38 supervisor unit plus 10 integration tests, 98 node library/binary unit plus 10 integration tests, all seven BPF object builds, changed-script shell syntax, and explicit `wasm32-wasip2` release builds for `hello-axum`, `http-hello-component`, and `wasi-grpc-echo` pass. Rust still emits the separately tracked future-incompatibility notice for `proc-macro-error2 2.0.1`. |
 
 ### Execution notes
 
@@ -453,7 +454,7 @@ The next microVM run must still prove the kernel-runtime portion below.
         events preserve the TID, dispatch resolves the exact deployment, and
         security actions target that instance instead of an arbitrary process.
         Broader probe scoping remains open because block-I/O is still system-wide.
-- [ ] Generate file, TCP, memory-pressure, syscall, and block-I/O events and verify
+- [x] Generate file, TCP, memory-pressure, syscall, and block-I/O events and verify
       the corresponding metrics.
   - [x] **Part 2 — deterministic process, syscall, FD, TCP, and policy probes:**
         the canary produced identity-rich process start/exit, known-syscall,
@@ -467,10 +468,11 @@ The next microVM run must still prove the kernel-runtime portion below.
         pressure gauge to `1`, and disabled request acceptance without killing
         the node. After 30 quiet seconds the gauge returned to `0`, backpressure
         cleared, and OIDC remained ready through the other nodes.
-  - [ ] **Part 3 remaining — block I/O counters:** block-I/O parsing/counters work
-        for boot I/O, but four deliberate 256-MiB synchronous application writes
-        left the counter at `2 -> 2`; the records also contain inaccurate fields.
-        Do not claim this assertion as passed before completing Part 3.
+  - [x] **Part 3 — block-I/O accuracy:** deterministic reads and writes now emit
+        correctly classified records with device, sector, completed bytes,
+        latency, issue PID/TID, cgroup ID, workload identity, and matching
+        Prometheus counters. Buffered writeback is explicitly unregistered when
+        the kernel worker—not the WASI executor—issues the block request.
 - [ ] Measure ring-buffer/event loss and dispatcher backpressure.
 - [ ] Deny eBPF loading and confirm the node continues safely in fallback mode.
 - [x] Restart every node and reload probes while preserving public application
@@ -640,7 +642,7 @@ Part 2B memory-pressure evidence and production observations:
   ceiling below actual VM/cgroup capacity rather than relying on the effective
   minimum;
 
-Open Part 3 evidence:
+Part 3 predecessor failure (retained to show why remediation was required):
 
 - with a validation-only 1-ms slow-I/O threshold, boot activity produced two
   `block_io` events and the matching counter. The records had
@@ -654,6 +656,77 @@ Open Part 3 evidence:
   and the kernel checksum is
   `7d6222139391f70bef3becb514916550c7b824e63a4e72ffa22485e6dab3e3d5`.
   HAProxy OIDC readiness again returned `database=ok`; the testbed remains live.
+
+### Part 3 record — block-I/O accuracy
+
+Status: **PASS WITH AN EXPLICIT ATTRIBUTION LIMITATION on 2026-08-26.** Event
+layout, issue/completion correlation, read/write classification, byte accounting,
+latency, device decoding, and Prometheus counters passed on the pinned Linux
+6.1.80 guest kernel. The platform must not claim per-application ownership of
+buffered writes that the filesystem later submits from a kernel writeback thread.
+
+Root causes and corrections:
+
+- Aya exposes the complete raw tracepoint record, including the eight-byte common
+  header. The old parser incorrectly subtracted that header. It now reads the
+  validated Linux 6.1 offsets: device at 8, sector at 16, issue bytes/completion
+  error at 28, and `rwbs` at 32;
+- sector alone is not a unique request key across devices or operations. The
+  in-flight key is now device, sector, and operation, and an existing entry is
+  not overwritten or double-counted;
+- issue metadata now retains timestamp, PID, TID, cgroup ID, and submitted bytes.
+  Completion exports actual bytes from `nr_sector * 512`, falling back to issued
+  bytes for zero-sector operations;
+- the tracepoint carries native kernel `dev_t`, decoded as 20 minor bits followed
+  by the major number. The earlier userspace encoding formula produced the false
+  device `0:65024`; the corrected records report the virtio root device `254:0`;
+- operation parsing checks the first two `rwbs` characters, so a preflush-prefixed
+  write such as `FW` is classified as write; and
+- the event ABI change bumped the node-rootfs schema from 3 to 4 so provisioning
+  rejects an image containing an incompatible userspace/BPF object pair.
+
+Deterministic live evidence used a disposable `ebpf-validation/ebpf-io-probe:p3`
+canary on node 0 with a validation-only one-millisecond slow-I/O threshold:
+
+```text
+before: block_io=204, read_bytes=8192, write_bytes=62427136, parse_errors=0
+workload: POST-like GET /probe/disk?mib=256; returned bytes=268435456
+after:  block_io=954, read_bytes=8192, write_bytes=301387776, parse_errors=0
+delta:  750 slow events and 238,960,640 slow-write bytes
+```
+
+The counter intentionally includes only completions slower than the configured
+threshold; it is not a whole-device byte counter, so its delta need not equal the
+requested 256 MiB. Sample records had nonzero sectors, `bytes == nr_sector * 512`,
+concrete latency, cgroup ID 1, and `dev=254:0`. Cold artifact reads retained
+`namespace=ebpf-validation`, the exact versioned canary ID, PID/TID, and
+`monitored_workload=true`. Buffered ext4 writes were submitted later by a kernel
+writeback thread and therefore logged `app_id=<unregistered>` and
+`monitored_workload=false`; this prevents false ownership.
+
+For production-grade per-application write attribution, run each workload in a
+dedicated runtime process/cgroup and carry the cgroup ID through writeback-aware
+accounting. Standard cgroups cannot distinguish components that share the same
+`wasm-node` process, and thread identity cannot follow buffered data after the
+kernel writeback handoff. Direct-I/O or synchronous read evidence is useful for
+probe correctness but is not a substitute for that isolation boundary.
+
+Tracepoint field layouts can differ by kernel. Every promoted kernel must compare
+`/sys/kernel/tracing/events/block/block_rq_issue/format` and
+`block_rq_complete/format` with the parser contract, then repeat this test. A
+mismatch must put monitoring into a visible degraded mode rather than silently
+exporting plausible but incorrect fields; degraded-mode behavior remains Part 5.
+
+After validation, the canary deployment and `ebpf-io.internal` route were removed.
+The rootfs was restored to the normal 50-ms threshold and schema 4 was rolled one
+node at a time. OIDC readiness returned `database=ok` after every replacement.
+Final live PIDs are node 0 `341140`, node 1 `341198`, and node 2 `341254`; NATS
+remains PID `170213` and PostgreSQL PID `170523`. Final artifact checksums are:
+
+```text
+wasm-node-rootfs.ext4 deab03a267d30934d884935748f1d2a9f7c1eeab8255de335cab73999f3684d0
+vmlinux-6.1             7d6222139391f70bef3becb514916550c7b824e63a4e72ffa22485e6dab3e3d5
+```
 
 Post-change repository verification passed in WSL with
 `CARGO_TARGET_DIR=/tmp/wasm-cloud-platform-target`: formatting, the required

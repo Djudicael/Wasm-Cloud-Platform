@@ -64,6 +64,9 @@ pub struct EbpfMetrics {
     /// Disk I/O latency histogram (seconds).
     pub disk_io_latency_seconds: Histogram,
 
+    /// Bytes completed by slow block-I/O events, labeled by fixed operation.
+    pub disk_io_bytes: IntCounterVec,
+
     /// Security violations (privileged syscalls from Wasm instances).
     pub security_violations: IntCounter,
 
@@ -166,6 +169,18 @@ impl EbpfMetrics {
             registry
         );
 
+        let disk_io_bytes = register_metric!(
+            IntCounterVec::new(
+                Opts::new(
+                    "wasm_ebpf_disk_io_bytes_total",
+                    "Bytes completed by eBPF slow block-I/O events"
+                ),
+                &["io_type"]
+            )
+            .unwrap(),
+            registry
+        );
+
         let security_violations = register_metric!(
             IntCounter::with_opts(Opts::new(
                 "wasm_ebpf_security_violations_total",
@@ -244,6 +259,7 @@ impl EbpfMetrics {
             fd_usage_ratio,
             memory_pressure_level,
             disk_io_latency_seconds,
+            disk_io_bytes,
             security_violations,
             ebpf_active,
             events_processed,
@@ -268,6 +284,13 @@ impl EbpfMetrics {
     pub fn observe_disk_latency_ns(&self, latency_ns: u64) {
         let latency_secs = latency_ns as f64 / 1_000_000_000.0;
         self.disk_io_latency_seconds.observe(latency_secs);
+    }
+
+    /// Record bytes from a block-I/O event using a bounded operation label.
+    pub fn add_disk_io_bytes(&self, io_type: &str, bytes: u32) {
+        self.disk_io_bytes
+            .with_label_values(&[io_type])
+            .inc_by(u64::from(bytes));
     }
 
     /// Record FD usage as a ratio (0.0–1.0).

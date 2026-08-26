@@ -321,7 +321,9 @@ fn test_disk_slow_io_enters_degraded_mode() {
         dev_minor: 0,
         sector: 0,
         nr_sector: 0,
+        bytes: 4096,
         latency_ns: 100_000_000,
+        cgroup_id: 42,
         io_type: 1,
     });
 
@@ -332,6 +334,14 @@ fn test_disk_slow_io_enters_degraded_mode() {
             .disk_io_latency_seconds
             .get_sample_count(),
         1
+    );
+    assert_eq!(
+        dispatcher
+            .metrics
+            .disk_io_bytes
+            .with_label_values(&["write"])
+            .get(),
+        4096
     );
 }
 
@@ -418,7 +428,9 @@ fn test_exit_degraded_mode() {
         dev_minor: 0,
         sector: 0,
         nr_sector: 0,
+        bytes: 4096,
         latency_ns: 100_000_000,
+        cgroup_id: 42,
         io_type: 1,
     });
     assert!(dispatcher.is_degraded());
@@ -594,7 +606,9 @@ fn test_monitor_event_type_mapping() {
             dev_minor: 0,
             sector: 0,
             nr_sector: 0,
+            bytes: 0,
             latency_ns: 0,
+            cgroup_id: 0,
             io_type: 0
         }
         .event_type(),

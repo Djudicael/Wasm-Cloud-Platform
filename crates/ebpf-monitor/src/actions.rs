@@ -405,7 +405,9 @@ impl ActionDispatcher {
                 dev_minor,
                 sector,
                 nr_sector,
+                bytes,
                 latency_ns,
+                cgroup_id,
                 io_type,
             } => {
                 let latency_ms = latency_ns as f64 / 1_000_000.0;
@@ -415,17 +417,25 @@ impl ActionDispatcher {
                     2 => "sync",
                     _ => "unknown",
                 };
+                let (namespace, app_id) = self.identity_for_tid(tid);
+                let monitored_workload = app_id != "<unregistered>";
                 warn!(
                     pid,
                     tid,
+                    cgroup_id,
+                    monitored_workload,
+                    namespace = %namespace,
+                    app_id = %app_id,
                     dev = format!("{}:{}", dev_major, dev_minor),
                     sector,
                     nr_sector,
+                    bytes,
                     latency_ms,
                     io_type = io_type_str,
                     "Slow disk I/O detected"
                 );
                 self.metrics.observe_disk_latency_ns(latency_ns);
+                self.metrics.add_disk_io_bytes(io_type_str, bytes);
                 self.enter_degraded_mode_if_needed(&format!(
                     "Slow disk I/O on {}:{} ({:.1}ms)",
                     dev_major, dev_minor, latency_ms

@@ -134,7 +134,9 @@ pub enum MonitorEvent {
         dev_minor: u32,
         sector: u64,
         nr_sector: u32,
+        bytes: u32,
         latency_ns: u64,
+        cgroup_id: u64,
         io_type: u32,
     },
     SyscallAnomaly {
