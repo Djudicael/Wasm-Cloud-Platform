@@ -43,6 +43,9 @@ pub struct NamespaceMap {
     inner: Mutex<Vec<aya::maps::HashMap<aya::maps::MapData, u32, TidIdentity>>>,
     /// TID → TidIdentity. Always maintained. Primary identity store.
     tid_to_identity: RwLock<HashMap<u32, TidIdentity>>,
+    /// Recently removed identities retained only for asynchronous event labeling.
+    /// Security decisions never consult this table.
+    recent_tid_identities: RwLock<HashMap<u32, (TidIdentity, Instant)>>,
     /// Source port → PortBinding. Populated by the consumer when eBPF events arrive.
     port_to_tid: RwLock<HashMap<u16, PortBinding>>,
     /// TTL for port→TID bindings. Bindings older than this are considered stale.
@@ -67,7 +70,12 @@ impl NamespaceMap {
 
         for (owner, ebpf) in monitors
             .iter_mut()
-            .filter(|monitor| matches!(monitor.name, "process_tracker" | "syscall_counter"))
+            .filter(|monitor| {
+                matches!(
+                    monitor.name,
+                    "process_tracker" | "tcp_monitor" | "fd_watcher" | "syscall_counter"
+                )
+            })
             .map(|monitor| (monitor.name, &mut monitor.ebpf))
             .chain(ns_ebpf.into_iter().map(|ebpf| ("namespace_enforcer", ebpf)))
         {
@@ -91,6 +99,7 @@ impl NamespaceMap {
         NamespaceMap {
             inner: Mutex::new(inner),
             tid_to_identity: RwLock::new(HashMap::new()),
+            recent_tid_identities: RwLock::new(HashMap::new()),
             port_to_tid: RwLock::new(HashMap::new()),
             port_ttl: Duration::from_secs(300),
         }
@@ -102,6 +111,7 @@ impl NamespaceMap {
             #[cfg(feature = "ebpf")]
             inner: Mutex::new(Vec::new()),
             tid_to_identity: RwLock::new(HashMap::new()),
+            recent_tid_identities: RwLock::new(HashMap::new()),
             port_to_tid: RwLock::new(HashMap::new()),
             port_ttl: Duration::from_secs(300),
         }
@@ -140,6 +150,7 @@ impl NamespaceMap {
             }
         }
 
+        self.recent_tid_identities.write().unwrap().remove(&tid);
         self.tid_to_identity.write().unwrap().insert(tid, identity);
         info!(
             tid,
@@ -160,7 +171,12 @@ impl NamespaceMap {
             let _ = map.remove(&tid);
         }
 
-        self.tid_to_identity.write().unwrap().remove(&tid);
+        if let Some(identity) = self.tid_to_identity.write().unwrap().remove(&tid) {
+            self.recent_tid_identities
+                .write()
+                .unwrap()
+                .insert(tid, (identity, Instant::now()));
+        }
 
         // Remove any port→TID mappings for this TID
         let mut port_map = self.port_to_tid.write().unwrap();
@@ -232,6 +248,17 @@ impl NamespaceMap {
         self.tid_to_identity.read().unwrap().get(&tid).copied()
     }
 
+    /// Label an asynchronously consumed event, including a short-lived identity
+    /// tombstone for events emitted immediately before thread teardown.
+    pub fn lookup_event_identity(&self, tid: u32) -> Option<TidIdentity> {
+        if let Some(identity) = self.lookup_tid(tid) {
+            return Some(identity);
+        }
+        let mut recent = self.recent_tid_identities.write().unwrap();
+        recent.retain(|_, (_, removed_at)| removed_at.elapsed() <= Duration::from_secs(30));
+        recent.get(&tid).map(|(identity, _)| *identity)
+    }
+
     /// Remove port bindings that have exceeded their TTL.
     /// Returns the number of bindings removed.
     pub fn cleanup_expired_bindings(&self) -> usize {
@@ -260,6 +287,10 @@ impl NamespaceMap {
     ///
     /// Called periodically by the Supervisor's health loop.
     pub fn cleanup_stale_tids(&self) -> usize {
+        self.recent_tid_identities
+            .write()
+            .unwrap()
+            .retain(|_, (_, removed_at)| removed_at.elapsed() <= Duration::from_secs(30));
         let tids: Vec<u32> = self
             .tid_to_identity
             .read()

@@ -191,8 +191,117 @@ fn route(path: &str) -> (u16, &'static str, String, bool) {
                 ),
             }
         }
+        "/probe/file" => match probe_file_io(1) {
+            Ok(bytes) => (
+                200,
+                "application/json",
+                format!(r#"{{"operation":"file","bytes":{bytes}}}"#),
+                false,
+            ),
+            Err(error) => (500, "text/plain", error, false),
+        },
+        "/probe/disk" => {
+            let mib = query_u32(path, "mib", 32).clamp(1, 256);
+            match probe_file_io(mib) {
+                Ok(bytes) => (
+                    200,
+                    "application/json",
+                    format!(r#"{{"operation":"disk","bytes":{bytes}}}"#),
+                    false,
+                ),
+                Err(error) => (500, "text/plain", error, false),
+            }
+        }
+        "/probe/memory" => {
+            // Keep the ordinary test application bounded. A production-
+            // validation deployment may explicitly raise this ceiling while
+            // also granting a matching per-instance memory limit.
+            let max_mib = std::env::var("EBPF_PROBE_MAX_MEMORY_MIB")
+                .ok()
+                .and_then(|value| value.parse::<u32>().ok())
+                .unwrap_or(512)
+                .clamp(1, 1200);
+            let mib = query_u32(path, "mib", 64).clamp(1, max_mib);
+            let bytes = mib as usize * 1024 * 1024;
+            let mut allocation = vec![0_u8; bytes];
+            for offset in (0..bytes).step_by(4096) {
+                allocation[offset] = (offset / 4096) as u8;
+            }
+            let checksum = allocation
+                .iter()
+                .step_by(4096)
+                .fold(0_u64, |sum, byte| sum.wrapping_add(u64::from(*byte)));
+            (
+                200,
+                "application/json",
+                format!(r#"{{"operation":"memory","bytes":{bytes},"checksum":{checksum}}}"#),
+                false,
+            )
+        }
+        "/probe/syscalls" => {
+            let iterations = query_u32(path, "iterations", 128).clamp(1, 4096);
+            let mut completed = 0_u32;
+            for _ in 0..iterations {
+                if std::fs::metadata("/tmp").is_ok() {
+                    completed += 1;
+                }
+            }
+            (
+                200,
+                "application/json",
+                format!(
+                    r#"{{"operation":"syscalls","iterations":{iterations},"completed":{completed}}}"#
+                ),
+                false,
+            )
+        }
         _ => (404, "text/plain", "Not Found".to_string(), false),
     }
+}
+
+#[cfg(target_family = "wasm")]
+fn query_u32(path: &str, key: &str, default: u32) -> u32 {
+    extract_query_param(path, key)
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(default)
+}
+
+#[cfg(target_family = "wasm")]
+fn probe_file_io(mib: u32) -> Result<u64, String> {
+    use std::io::{Read, Write};
+
+    // `std::process::id()` is not available on all WASI implementations.
+    // The validation workload has one serial request loop, so a fixed scratch
+    // name is deterministic and cannot race with another request.
+    let path = "/tmp/ebpf-probe.bin";
+    let bytes = mib as usize * 1024 * 1024;
+    let chunk = vec![0xA5_u8; 64 * 1024];
+    let mut file = std::fs::File::create(path).map_err(|error| error.to_string())?;
+    let mut written = 0_usize;
+    while written < bytes {
+        let count = (bytes - written).min(chunk.len());
+        file.write_all(&chunk[..count])
+            .map_err(|error| error.to_string())?;
+        written += count;
+    }
+    file.sync_all().map_err(|error| error.to_string())?;
+    drop(file);
+
+    let mut file = std::fs::File::open(path).map_err(|error| error.to_string())?;
+    let mut read_buffer = vec![0_u8; 64 * 1024];
+    let mut read = 0_u64;
+    loop {
+        let count = file
+            .read(&mut read_buffer)
+            .map_err(|error| error.to_string())?;
+        if count == 0 {
+            break;
+        }
+        read += count as u64;
+    }
+    drop(file);
+    std::fs::remove_file(path).map_err(|error| error.to_string())?;
+    Ok(read)
 }
 
 #[cfg(target_family = "wasm")]

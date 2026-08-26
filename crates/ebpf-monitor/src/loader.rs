@@ -305,6 +305,7 @@ fn write_config_map(ebpf: &mut Ebpf, config: &MonitorConfig, node_pid: u32) -> R
 
 /// Attach the process tracker (sched_process_exec + sched_process_exit tracepoints).
 fn attach_process_tracker(ebpf: &mut Ebpf) -> Result<()> {
+    attach_tracepoint(ebpf, "monitored_tid_start", "raw_syscalls", "sys_enter")?;
     attach_tracepoint(ebpf, "sched_process_exec", "sched", "sched_process_exec")?;
     attach_tracepoint(ebpf, "sched_process_exit", "sched", "sched_process_exit")?;
     Ok(())
@@ -312,7 +313,15 @@ fn attach_process_tracker(ebpf: &mut Ebpf) -> Result<()> {
 
 /// Attach the TCP connection monitor (inet_sock_set_state tracepoint).
 fn attach_tcp_monitor(ebpf: &mut Ebpf) -> Result<()> {
-    attach_tracepoint(ebpf, "inet_sock_set_state", "sock", "inet_sock_set_state")
+    attach_tracepoint(ebpf, "inet_sock_set_state", "sock", "inet_sock_set_state")?;
+    attach_tracepoint(ebpf, "sys_exit_accept4", "syscalls", "sys_exit_accept4")?;
+    attach_kprobe(ebpf, "inet_csk_accept", "inet_csk_accept")?;
+    attach_tracepoint(ebpf, "sys_enter_sendto", "syscalls", "sys_enter_sendto")?;
+    attach_tracepoint(ebpf, "sys_enter_recvfrom", "syscalls", "sys_enter_recvfrom")?;
+    attach_tracepoint(ebpf, "sys_exit_recvfrom", "syscalls", "sys_exit_recvfrom")?;
+    attach_kprobe(ebpf, "tcp_sendmsg", "tcp_sendmsg")?;
+    attach_kprobe(ebpf, "tcp_cleanup_rbuf", "tcp_cleanup_rbuf")?;
+    Ok(())
 }
 
 /// Attach the FD watcher. Linux kernels expose the close hook as either
@@ -320,6 +329,7 @@ fn attach_tcp_monitor(ebpf: &mut Ebpf) -> Result<()> {
 fn attach_fd_watcher(ebpf: &mut Ebpf) -> Result<()> {
     attach_kprobe(ebpf, "fd_install", "fd_install")?;
     attach_kprobe_with_fallback(ebpf, "do_filp_close", "do_filp_close", "filp_close")?;
+    attach_tracepoint(ebpf, "sys_enter_close", "syscalls", "sys_enter_close")?;
     Ok(())
 }
 

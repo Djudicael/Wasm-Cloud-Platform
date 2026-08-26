@@ -41,6 +41,16 @@ pub enum EventType {
     NamespaceAudit = 13,
     /// A forged namespace header was detected in send buffer.
     NamespaceForgedHeader = 14,
+    /// File descriptor closed by a monitored workload.
+    FdClose = 15,
+    /// TCP connection accepted by a monitored workload.
+    TcpAccept = 16,
+    /// TCP payload sent by a monitored workload.
+    TcpSend = 17,
+    /// TCP payload received by a monitored workload.
+    TcpReceive = 18,
+    /// First known syscall observed after a workload TID registration.
+    SyscallActivity = 19,
 }
 
 /// Header for every event sent through the ring buffer.
@@ -80,6 +90,7 @@ pub struct TcpEvent {
     pub new_state: u32,   // TCP FSM new state
     pub retransmits: u32, // Cumulative retransmit count at event time
     pub rtt_us: u64,      // Smoothed RTT in microseconds
+    pub bytes: u64,       // Payload bytes for send/receive events
 }
 
 /// File descriptor event.

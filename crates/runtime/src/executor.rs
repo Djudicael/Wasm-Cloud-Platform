@@ -708,19 +708,35 @@ where
     Task: Future<Output = T> + 'static,
     OnRuntimeError: FnOnce(std::io::Error) -> T + Send + 'static,
 {
-    tokio::task::spawn_blocking(move || {
-        if let Some(hook) = thread_start_hook {
-            hook();
-        }
+    let spawn_result = std::thread::Builder::new()
+        .name("wasi-http-instance".to_string())
+        .spawn(move || -> Result<T, std::io::Error> {
+            if let Some(hook) = thread_start_hook {
+                hook();
+            }
 
-        match tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-        {
-            Ok(runtime) => runtime.block_on(task_factory()),
-            Err(err) => on_runtime_error(err),
-        }
-    })
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()?;
+            Ok(runtime.block_on(task_factory()))
+        });
+
+    match spawn_result {
+        Ok(thread) => tokio::spawn(async move {
+            let result = match tokio::task::spawn_blocking(move || thread.join()).await {
+                Ok(Ok(result)) => result,
+                Ok(Err(_)) => Err(std::io::Error::other("dedicated wasi:http thread panicked")),
+                Err(error) => Err(std::io::Error::other(format!(
+                    "failed to join dedicated wasi:http thread: {error}"
+                ))),
+            };
+            match result {
+                Ok(result) => result,
+                Err(error) => on_runtime_error(error),
+            }
+        }),
+        Err(err) => tokio::spawn(async move { on_runtime_error(err) }),
+    }
 }
 
 pub struct HttpServerInstance {

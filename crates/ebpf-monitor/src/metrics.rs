@@ -5,7 +5,9 @@
 //! is already registered (e.g., during hot-reload or tests), the existing
 //! instance is reused instead of panicking.
 
-use prometheus::{histogram_opts, Gauge, Histogram, IntCounter, IntGauge, Opts, Registry};
+use prometheus::{
+    histogram_opts, Gauge, Histogram, IntCounter, IntCounterVec, IntGauge, Opts, Registry,
+};
 
 /// Error-resilient metric registration helper.
 /// If a metric is already registered, returns a new instance that shares
@@ -70,6 +72,10 @@ pub struct EbpfMetrics {
 
     /// Total events processed from the ring buffer (all types).
     pub events_processed: IntCounter,
+
+    /// Events processed by stable event type. Application identity remains in
+    /// structured logs to avoid an unbounded Prometheus label cardinality.
+    pub events_by_type: IntCounterVec,
 
     /// Total events that failed to parse (malformed or unknown type).
     pub events_parse_errors: IntCounter,
@@ -187,6 +193,18 @@ impl EbpfMetrics {
             registry
         );
 
+        let events_by_type = register_metric!(
+            IntCounterVec::new(
+                Opts::new(
+                    "wasm_ebpf_events_by_type_total",
+                    "eBPF events processed by stable event type"
+                ),
+                &["event_type"]
+            )
+            .unwrap(),
+            registry
+        );
+
         let events_parse_errors = register_metric!(
             IntCounter::with_opts(Opts::new(
                 "wasm_ebpf_events_parse_errors_total",
@@ -229,6 +247,7 @@ impl EbpfMetrics {
             security_violations,
             ebpf_active,
             events_processed,
+            events_by_type,
             events_parse_errors,
             tcp_connection_count,
             fd_count,

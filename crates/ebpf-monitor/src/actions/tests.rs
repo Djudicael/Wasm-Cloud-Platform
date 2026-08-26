@@ -101,6 +101,7 @@ fn test_oom_kill_triggers_backpressure_and_removal() {
 
     dispatcher.dispatch(MonitorEvent::ProcessExit {
         pid: 1234,
+        tid: 1234,
         ppid: 1,
         exit_code: 0,
         signal: 9,
@@ -124,6 +125,7 @@ fn test_signal_death_removes_from_upstream() {
 
     dispatcher.dispatch(MonitorEvent::ProcessExit {
         pid: 5678,
+        tid: 5678,
         ppid: 1,
         exit_code: 1,
         signal: 6,
@@ -146,6 +148,7 @@ fn test_normal_exit_removes_from_upstream() {
 
     dispatcher.dispatch(MonitorEvent::ProcessExit {
         pid: 9999,
+        tid: 9999,
         ppid: 1,
         exit_code: 0,
         signal: 0,
@@ -169,6 +172,7 @@ fn test_nats_retransmit_marks_disconnected() {
 
     dispatcher.dispatch(MonitorEvent::TcpRetransmit {
         pid: 1,
+        tid: 1,
         src_port: 4222,
         dst_port: 54321,
         retransmits: 5,
@@ -187,6 +191,7 @@ fn test_non_nats_retransmit_does_not_mark_disconnected() {
 
     dispatcher.dispatch(MonitorEvent::TcpRetransmit {
         pid: 1,
+        tid: 1,
         src_port: 8080,
         dst_port: 9090,
         retransmits: 3,
@@ -205,6 +210,7 @@ fn test_fd_limit_approaching_prunes() {
 
     dispatcher.dispatch(MonitorEvent::FdLimitApproaching {
         pid: 1,
+        tid: 1,
         fd: 8000,
         current_fd_count: 8000,
         fd_soft_limit: 8192,
@@ -220,6 +226,7 @@ fn test_fd_hard_limit_approaching_activates_backpressure() {
 
     dispatcher.dispatch(MonitorEvent::FdLimitApproaching {
         pid: 1,
+        tid: 1,
         fd: 7800,
         current_fd_count: 7800,
         fd_soft_limit: 8192,
@@ -236,6 +243,7 @@ fn test_memory_pressure_medium() {
 
     dispatcher.dispatch(MonitorEvent::MemPressure {
         pid: 1,
+        tid: 1,
         free_pages: 50000,
         reclaim_pages: 1000,
         pressure_level: 1,
@@ -256,6 +264,7 @@ fn test_memory_pressure_critical() {
 
     dispatcher.dispatch(MonitorEvent::MemPressure {
         pid: 1,
+        tid: 1,
         free_pages: 10000,
         reclaim_pages: 5000,
         pressure_level: 2,
@@ -277,6 +286,7 @@ fn test_memory_pressure_recovery() {
 
     dispatcher.dispatch(MonitorEvent::MemPressure {
         pid: 1,
+        tid: 1,
         free_pages: 10000,
         reclaim_pages: 5000,
         pressure_level: 2,
@@ -286,6 +296,7 @@ fn test_memory_pressure_recovery() {
 
     dispatcher.dispatch(MonitorEvent::MemPressure {
         pid: 1,
+        tid: 1,
         free_pages: 100000,
         reclaim_pages: 0,
         pressure_level: 0,
@@ -304,8 +315,12 @@ fn test_disk_slow_io_enters_degraded_mode() {
     let dispatcher = make_dispatcher(callbacks.clone());
 
     dispatcher.dispatch(MonitorEvent::DiskSlowIo {
+        pid: 0,
+        tid: 0,
         dev_major: 8,
         dev_minor: 0,
+        sector: 0,
+        nr_sector: 0,
         latency_ns: 100_000_000,
         io_type: 1,
     });
@@ -371,6 +386,7 @@ fn test_backpressure_deduplication() {
 
     dispatcher.dispatch(MonitorEvent::ProcessExit {
         pid: 100,
+        tid: 100,
         ppid: 1,
         exit_code: 0,
         signal: 9,
@@ -379,6 +395,7 @@ fn test_backpressure_deduplication() {
     });
     dispatcher.dispatch(MonitorEvent::ProcessExit {
         pid: 101,
+        tid: 101,
         ppid: 1,
         exit_code: 0,
         signal: 9,
@@ -395,8 +412,12 @@ fn test_exit_degraded_mode() {
     let dispatcher = make_dispatcher(callbacks.clone());
 
     dispatcher.dispatch(MonitorEvent::DiskSlowIo {
+        pid: 0,
+        tid: 0,
         dev_major: 8,
         dev_minor: 0,
+        sector: 0,
+        nr_sector: 0,
         latency_ns: 100_000_000,
         io_type: 1,
     });
@@ -414,6 +435,7 @@ fn test_tcp_connect_close_updates_connection_count() {
 
     dispatcher.dispatch(MonitorEvent::TcpConnect {
         pid: 1,
+        tid: 1,
         src_port: 8080,
         dst_port: 443,
         old_state: 0,
@@ -423,6 +445,7 @@ fn test_tcp_connect_close_updates_connection_count() {
 
     dispatcher.dispatch(MonitorEvent::TcpClose {
         pid: 1,
+        tid: 1,
         src_port: 8080,
         dst_port: 443,
     });
@@ -436,12 +459,14 @@ fn test_events_processed_counter() {
 
     dispatcher.dispatch(MonitorEvent::ProcessExec {
         pid: 1,
+        tid: 1,
         ppid: 0,
         comm: [0; 16],
         cgroup_id: 0,
     });
     dispatcher.dispatch(MonitorEvent::TcpConnect {
         pid: 1,
+        tid: 1,
         src_port: 80,
         dst_port: 443,
         old_state: 0,
@@ -449,6 +474,22 @@ fn test_events_processed_counter() {
     });
 
     assert_eq!(dispatcher.metrics.events_processed.get(), 2);
+    assert_eq!(
+        dispatcher
+            .metrics
+            .events_by_type
+            .with_label_values(&["process_start"])
+            .get(),
+        1
+    );
+    assert_eq!(
+        dispatcher
+            .metrics
+            .events_by_type
+            .with_label_values(&["tcp_connect"])
+            .get(),
+        1
+    );
 }
 
 #[test]
@@ -456,6 +497,7 @@ fn test_monitor_event_type_mapping() {
     assert_eq!(
         MonitorEvent::ProcessExec {
             pid: 0,
+            tid: 0,
             ppid: 0,
             comm: [0; 16],
             cgroup_id: 0
@@ -466,6 +508,7 @@ fn test_monitor_event_type_mapping() {
     assert_eq!(
         MonitorEvent::ProcessExit {
             pid: 0,
+            tid: 0,
             ppid: 0,
             exit_code: 0,
             signal: 0,
@@ -478,6 +521,7 @@ fn test_monitor_event_type_mapping() {
     assert_eq!(
         MonitorEvent::TcpConnect {
             pid: 0,
+            tid: 0,
             src_port: 0,
             dst_port: 0,
             old_state: 0,
@@ -489,6 +533,7 @@ fn test_monitor_event_type_mapping() {
     assert_eq!(
         MonitorEvent::TcpClose {
             pid: 0,
+            tid: 0,
             src_port: 0,
             dst_port: 0
         }
@@ -498,6 +543,7 @@ fn test_monitor_event_type_mapping() {
     assert_eq!(
         MonitorEvent::TcpRetransmit {
             pid: 0,
+            tid: 0,
             src_port: 0,
             dst_port: 0,
             retransmits: 0,
@@ -509,6 +555,7 @@ fn test_monitor_event_type_mapping() {
     assert_eq!(
         MonitorEvent::FdOpen {
             pid: 0,
+            tid: 0,
             fd: 0,
             current_fd_count: 0,
             fd_soft_limit: 0
@@ -519,6 +566,7 @@ fn test_monitor_event_type_mapping() {
     assert_eq!(
         MonitorEvent::FdLimitApproaching {
             pid: 0,
+            tid: 0,
             fd: 0,
             current_fd_count: 0,
             fd_soft_limit: 0
@@ -529,6 +577,7 @@ fn test_monitor_event_type_mapping() {
     assert_eq!(
         MonitorEvent::MemPressure {
             pid: 0,
+            tid: 0,
             free_pages: 0,
             reclaim_pages: 0,
             pressure_level: 0,
@@ -539,8 +588,12 @@ fn test_monitor_event_type_mapping() {
     );
     assert_eq!(
         MonitorEvent::DiskSlowIo {
+            pid: 0,
+            tid: 0,
             dev_major: 0,
             dev_minor: 0,
+            sector: 0,
+            nr_sector: 0,
             latency_ns: 0,
             io_type: 0
         }

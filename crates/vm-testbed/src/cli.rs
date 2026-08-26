@@ -1,7 +1,7 @@
 use anyhow::{anyhow, bail, Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use common::artifact_transfer::{ArtifactManifestBatchRequest, ArtifactManifestBatchResponse};
-use common::policy::{NetworkPolicyConfig, PolicyConfig};
+use common::policy::{FilesystemPolicyConfig, NetworkPolicyConfig, PolicyConfig};
 use common::types::{AppConfig, AppId, FuelQuota, MemoryPages, Route};
 use messaging::{events::Event, NatsBus};
 use serde::{Deserialize, Serialize};
@@ -23,6 +23,9 @@ struct Cli {
 }
 
 #[derive(Subcommand)]
+// This human-facing CLI intentionally keeps deploy options explicit so clap
+// generates complete help text for policy-validation rehearsals.
+#[allow(clippy::large_enum_variant)]
 enum Commands {
     /// Bring up a named topology for manual validation.
     Up {
@@ -170,6 +173,15 @@ enum Commands {
         max_instances: u32,
         #[arg(long, default_value = "100")]
         max_outbound_connections: u32,
+        /// Restrict outbound traffic to these CIDRs; repeat as needed.
+        #[arg(long = "allowed-cidr")]
+        allowed_cidrs: Vec<String>,
+        /// Explicitly deny outbound traffic to these CIDRs; repeat as needed.
+        #[arg(long = "denied-cidr")]
+        denied_cidrs: Vec<String>,
+        /// Writable host path exposed to the component; repeat as needed.
+        #[arg(long = "allowed-filesystem-path")]
+        allowed_filesystem_paths: Vec<String>,
         #[arg(long, default_value = "300")]
         idle_timeout: u64,
         #[arg(long, default_value = "8080")]
@@ -288,6 +300,9 @@ struct DeployRequest {
     memory_mb: u32,
     max_instances: u32,
     max_outbound_connections: u32,
+    allowed_cidrs: Vec<String>,
+    denied_cidrs: Vec<String>,
+    allowed_filesystem_paths: Vec<String>,
     idle_timeout: u64,
     bind_port: u16,
     health_check_path: Option<String>,
@@ -488,6 +503,9 @@ async fn main() -> Result<()> {
             memory_mb,
             max_instances,
             max_outbound_connections,
+            allowed_cidrs,
+            denied_cidrs,
+            allowed_filesystem_paths,
             idle_timeout,
             bind_port,
             health_check_path,
@@ -509,6 +527,9 @@ async fn main() -> Result<()> {
                     memory_mb,
                     max_instances,
                     max_outbound_connections,
+                    allowed_cidrs,
+                    denied_cidrs,
+                    allowed_filesystem_paths,
                     idle_timeout,
                     bind_port,
                     health_check_path: match health_check_path.as_str() {
@@ -883,9 +904,16 @@ async fn deploy_app_to_state(state: &PersistedClusterState, req: DeployRequest) 
     let policy = PolicyConfig {
         network: Some(NetworkPolicyConfig {
             max_outbound_connections: Some(req.max_outbound_connections),
+            allowed_cidrs: (!req.allowed_cidrs.is_empty()).then_some(req.allowed_cidrs),
+            denied_cidrs: (!req.denied_cidrs.is_empty()).then_some(req.denied_cidrs),
             ..NetworkPolicyConfig::default()
         }),
-        ..PolicyConfig::default()
+        filesystem: (!req.allowed_filesystem_paths.is_empty()).then_some(FilesystemPolicyConfig {
+            allowed_paths: Some(req.allowed_filesystem_paths),
+            allow_file_create: Some(true),
+            allow_file_delete: Some(true),
+            ..FilesystemPolicyConfig::default()
+        }),
     };
     let config = AppConfig {
         id: app_id.clone(),

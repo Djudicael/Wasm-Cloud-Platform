@@ -120,10 +120,15 @@ impl ActionDispatcher {
     /// Dispatch a monitor event, update metrics, and trigger recovery actions.
     pub fn dispatch(&self, event: MonitorEvent) {
         self.metrics.events_processed.inc();
+        self.metrics
+            .events_by_type
+            .with_label_values(&[event.event_type().as_str()])
+            .inc();
 
         match event {
             MonitorEvent::ProcessExec {
                 pid,
+                tid,
                 ppid,
                 comm,
                 cgroup_id,
@@ -131,8 +136,12 @@ impl ActionDispatcher {
                 let comm_str = String::from_utf8_lossy(
                     &comm[..comm.iter().position(|&b| b == 0).unwrap_or(comm.len())],
                 );
+                let (namespace, app_id) = self.identity_for_tid(tid);
                 info!(
                     pid,
+                    tid,
+                    namespace = %namespace,
+                    app_id = %app_id,
                     ppid,
                     comm = %comm_str,
                     cgroup_id,
@@ -141,12 +150,14 @@ impl ActionDispatcher {
             }
             MonitorEvent::ProcessExit {
                 pid,
+                tid,
                 ppid,
                 exit_code,
                 signal,
                 comm,
                 cgroup_id: _,
             } => {
+                let (namespace, app_id) = self.identity_for_tid(tid);
                 let comm_str = String::from_utf8_lossy(
                     &comm[..comm.iter().position(|&b| b == 0).unwrap_or(comm.len())],
                 );
@@ -154,6 +165,9 @@ impl ActionDispatcher {
                 if signal == 9 {
                     error!(
                         pid,
+                        tid,
+                        namespace = %namespace,
+                        app_id = %app_id,
                         ppid,
                         comm = %comm_str,
                         "OOM kill detected for wasm-node child process"
@@ -164,6 +178,9 @@ impl ActionDispatcher {
                 } else if signal != 0 {
                     warn!(
                         pid,
+                        tid,
+                        namespace = %namespace,
+                        app_id = %app_id,
                         ppid,
                         signal,
                         exit_code,
@@ -175,6 +192,9 @@ impl ActionDispatcher {
                 } else {
                     info!(
                         pid,
+                        tid,
+                        namespace = %namespace,
+                        app_id = %app_id,
                         ppid,
                         exit_code,
                         comm = %comm_str,
@@ -186,24 +206,31 @@ impl ActionDispatcher {
             }
             MonitorEvent::TcpConnect {
                 pid,
+                tid,
                 src_port,
                 dst_port,
                 old_state: _,
                 new_state: _,
             } => {
-                tracing::debug!(pid, src_port, dst_port, "TCP connection opened");
+                let (namespace, app_id) = self.identity_for_tid(tid);
+                tracing::info!(pid, tid, namespace = %namespace, app_id = %app_id, src_port, dst_port, "TCP connection opened");
                 self.metrics.tcp_connection_count.inc();
             }
             MonitorEvent::TcpClose {
-                pid: _,
+                pid,
+                tid,
                 src_port,
                 dst_port,
             } => {
-                tracing::debug!(src_port, dst_port, "TCP connection closed");
-                self.metrics.tcp_connection_count.dec();
+                let (namespace, app_id) = self.identity_for_tid(tid);
+                tracing::info!(pid, tid, namespace = %namespace, app_id = %app_id, src_port, dst_port, "TCP connection closed");
+                if self.metrics.tcp_connection_count.get() > 0 {
+                    self.metrics.tcp_connection_count.dec();
+                }
             }
             MonitorEvent::TcpRetransmit {
                 pid,
+                tid,
                 src_port,
                 dst_port,
                 retransmits,
@@ -212,6 +239,7 @@ impl ActionDispatcher {
                 if dst_port == 4222 || src_port == 4222 {
                     warn!(
                         pid,
+                        tid,
                         src_port,
                         dst_port,
                         retransmits,
@@ -223,22 +251,47 @@ impl ActionDispatcher {
                 } else {
                     warn!(
                         pid,
-                        src_port, dst_port, retransmits, rtt_us, "TCP retransmits detected"
+                        tid, src_port, dst_port, retransmits, rtt_us, "TCP retransmits detected"
                     );
                 }
                 self.metrics.tcp_retransmits.inc();
             }
+            MonitorEvent::TcpAccept { pid, tid, fd } => {
+                let (namespace, app_id) = self.identity_for_tid(tid);
+                tracing::info!(pid, tid, namespace = %namespace, app_id = %app_id, fd, "TCP connection accepted");
+            }
+            MonitorEvent::TcpSend {
+                pid,
+                tid,
+                fd,
+                bytes,
+            } => {
+                let (namespace, app_id) = self.identity_for_tid(tid);
+                tracing::info!(pid, tid, namespace = %namespace, app_id = %app_id, fd, bytes, "TCP payload sent");
+            }
+            MonitorEvent::TcpReceive {
+                pid,
+                tid,
+                fd,
+                bytes,
+            } => {
+                let (namespace, app_id) = self.identity_for_tid(tid);
+                tracing::info!(pid, tid, namespace = %namespace, app_id = %app_id, fd, bytes, "TCP payload received");
+            }
             MonitorEvent::FdOpen {
                 pid,
+                tid,
                 fd,
                 current_fd_count,
                 fd_soft_limit,
             } => {
                 self.metrics.set_fd_usage(current_fd_count, fd_soft_limit);
-                tracing::debug!(pid, fd, current_fd_count, fd_soft_limit, "FD opened");
+                let (namespace, app_id) = self.identity_for_tid(tid);
+                tracing::info!(pid, tid, namespace = %namespace, app_id = %app_id, fd, current_fd_count, fd_soft_limit, "FD opened");
             }
             MonitorEvent::FdLimitApproaching {
                 pid,
+                tid,
                 fd,
                 current_fd_count,
                 fd_soft_limit,
@@ -247,6 +300,7 @@ impl ActionDispatcher {
                 if ratio > 0.95 {
                     error!(
                         pid,
+                        tid,
                         fd,
                         current_fd_count,
                         fd_soft_limit,
@@ -257,6 +311,7 @@ impl ActionDispatcher {
                 } else {
                     warn!(
                         pid,
+                        tid,
                         fd,
                         current_fd_count,
                         fd_soft_limit,
@@ -266,8 +321,19 @@ impl ActionDispatcher {
                 }
                 self.metrics.set_fd_usage(current_fd_count, fd_soft_limit);
             }
+            MonitorEvent::FdClose {
+                pid,
+                tid,
+                fd,
+                current_fd_count,
+            } => {
+                let (namespace, app_id) = self.identity_for_tid(tid);
+                self.metrics.fd_count.set(current_fd_count as i64);
+                tracing::info!(pid, tid, namespace = %namespace, app_id = %app_id, fd, current_fd_count, "FD closed");
+            }
             MonitorEvent::MemPressure {
-                pid: _,
+                pid,
+                tid,
                 free_pages,
                 reclaim_pages,
                 pressure_level,
@@ -281,8 +347,8 @@ impl ActionDispatcher {
                 match pressure_level {
                     0 => {
                         info!(
-                            free_pages,
-                            reclaim_pages, anon_pages, "Memory pressure: LOW"
+                            pid,
+                            tid, free_pages, reclaim_pages, anon_pages, "Memory pressure: LOW"
                         );
                         if prev_level >= 2 {
                             self.deactivate_backpressure_if_needed();
@@ -292,6 +358,8 @@ impl ActionDispatcher {
                     }
                     1 => {
                         warn!(
+                            pid,
+                            tid,
                             free_pages,
                             reclaim_pages,
                             anon_pages,
@@ -303,6 +371,8 @@ impl ActionDispatcher {
                     }
                     2 => {
                         error!(
+                            pid,
+                            tid,
                             free_pages,
                             reclaim_pages,
                             anon_pages,
@@ -319,8 +389,12 @@ impl ActionDispatcher {
                 }
             }
             MonitorEvent::DiskSlowIo {
+                pid,
+                tid,
                 dev_major,
                 dev_minor,
+                sector,
+                nr_sector,
                 latency_ns,
                 io_type,
             } => {
@@ -332,7 +406,11 @@ impl ActionDispatcher {
                     _ => "unknown",
                 };
                 warn!(
+                    pid,
+                    tid,
                     dev = format!("{}:{}", dev_major, dev_minor),
+                    sector,
+                    nr_sector,
                     latency_ms,
                     io_type = io_type_str,
                     "Slow disk I/O detected"
@@ -417,6 +495,23 @@ impl ActionDispatcher {
                     }
                 }
             }
+            MonitorEvent::SyscallActivity {
+                pid,
+                tid,
+                syscall_nr,
+                count_in_window,
+            } => {
+                let (namespace, app_id) = self.identity_for_tid(tid);
+                tracing::info!(
+                    pid,
+                    tid,
+                    namespace = %namespace,
+                    app_id = %app_id,
+                    syscall_nr,
+                    count_in_window,
+                    "Known syscall activity from monitored workload"
+                );
+            }
             MonitorEvent::TidConnection {
                 tid,
                 namespace: _,
@@ -477,7 +572,7 @@ impl ActionDispatcher {
     fn identity_for_tid(&self, tid: u32) -> (String, String) {
         let map = self.namespace_map.read().unwrap();
         map.as_ref()
-            .and_then(|map| map.lookup_tid(tid))
+            .and_then(|map| map.lookup_event_identity(tid))
             .map(|identity| {
                 (
                     identity.namespace_str().to_string(),

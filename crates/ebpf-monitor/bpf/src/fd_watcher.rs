@@ -34,13 +34,13 @@
 
 use aya_ebpf::{
     cty::c_long,
-    macros::{kprobe, map},
+    macros::{kprobe, map, tracepoint},
     maps::{Array, HashMap, RingBuf},
-    programs::ProbeContext,
+    programs::{ProbeContext, TracePointContext},
 };
 use aya_log_ebpf::warn;
 
-use ebpf_monitor_bpf::{EventHeader, EventType, FdEvent, MonitorConfigMap};
+use ebpf_monitor_bpf::{EventHeader, EventType, FdEvent, MonitorConfigMap, TidIdentity};
 
 /// Configuration map (shared with all eBPF programs).
 #[map]
@@ -50,8 +50,11 @@ static CONFIG: Array<MonitorConfigMap> = Array::with_max_entries(1, 0);
 #[map]
 static EVENTS: RingBuf = RingBuf::with_byte_size(512 * 1024, 0); // 512 KB
 
-/// Per-PID FD counter.
-/// Key: PID, Value: current open FD count.
+#[map]
+static MONITORED_TIDS: HashMap<u32, TidIdentity> = HashMap::with_max_entries(4096, 0);
+
+/// Per-TID FD counter.
+/// Key: TID, Value: current open FD count.
 #[map]
 static FD_COUNT: HashMap<u32, u32> = HashMap::with_max_entries(10240, 0);
 
@@ -64,7 +67,7 @@ const FD_TYPE_OTHER: u32 = 3;
 /// FD table. We increment the per-PID counter and check against
 /// configured limits.
 ///
-/// Signature: `void fd_install(struct file *file, unsigned int fd)`
+/// Signature: `void fd_install(unsigned int fd, struct file *file)`
 #[kprobe]
 pub fn fd_install(ctx: ProbeContext) -> c_long {
     match try_fd_install(ctx) {
@@ -80,9 +83,12 @@ fn try_fd_install(ctx: ProbeContext) -> Result<c_long, c_long> {
     let pid = (pid_tgid >> 32) as u32;
     let tid = pid_tgid as u32;
 
-    // fd_install(struct file *file, unsigned int fd)
-    // arg0 = file pointer, arg1 = fd number
-    let fd: u32 = ctx.arg(1).ok_or(0)?;
+    if unsafe { MONITORED_TIDS.get(&tid) }.is_none() {
+        return Ok(0);
+    }
+
+    // fd_install(unsigned int fd, struct file *file)
+    let fd: u32 = ctx.arg(0).ok_or(0)?;
 
     // Determine FD type from the file pointer's f_mode or f_op.
     // In eBPF, reading the file struct is complex and kernel-version-dependent.
@@ -94,14 +100,29 @@ fn try_fd_install(ctx: ProbeContext) -> Result<c_long, c_long> {
 
     // Increment FD count for this PID
     let new_count = unsafe {
-        if let Some(count) = FD_COUNT.get_ptr_mut(&pid) {
+        if let Some(count) = FD_COUNT.get_ptr_mut(&tid) {
             *count = (*count).saturating_add(1);
             *count
         } else {
-            let _ = FD_COUNT.insert(&pid, &1, 0);
+            let _ = FD_COUNT.insert(&tid, &1, 0);
             1
         }
     };
+
+    let opened = FdEvent {
+        header: EventHeader {
+            event_type: EventType::FdOpen as u32,
+            _padding: 0,
+            timestamp_ns: unsafe { aya_ebpf::helpers::bpf_ktime_get_ns() },
+            pid,
+            tid,
+        },
+        fd,
+        fd_type,
+        current_fd_count: new_count,
+        fd_soft_limit: config.fd_soft_limit,
+    };
+    let _ = EVENTS.output(&opened, 0);
 
     // ── Check against soft limit (80% warning) ──────────────────────────
     if new_count >= config.fd_soft_limit {
@@ -179,18 +200,55 @@ pub fn do_filp_close(ctx: ProbeContext) -> c_long {
 }
 
 fn try_do_filp_close(_ctx: ProbeContext) -> Result<c_long, c_long> {
+    // Kept as a compatibility attachment point. Exact close accounting and
+    // the descriptor number come from syscalls/sys_enter_close below.
+    Ok(0)
+}
+
+#[tracepoint]
+pub fn sys_enter_close(ctx: TracePointContext) -> c_long {
+    match try_sys_enter_close(ctx) {
+        Ok(ret) => ret,
+        Err(ret) => ret,
+    }
+}
+
+fn try_sys_enter_close(ctx: TracePointContext) -> Result<c_long, c_long> {
+    let config = CONFIG.get(0).ok_or(0)?;
     let pid_tgid = aya_ebpf::helpers::bpf_get_current_pid_tgid();
     let pid = (pid_tgid >> 32) as u32;
+    let tid = pid_tgid as u32;
+    if unsafe { MONITORED_TIDS.get(&tid) }.is_none() {
+        return Ok(0);
+    }
 
-    // Decrement FD count for this PID
-    unsafe {
-        if let Some(count) = FD_COUNT.get_ptr_mut(&pid) {
+    // Specific syscall tracepoints place __syscall_nr at offset 8 and the
+    // first 64-bit argument at offset 16.
+    let fd: u64 = unsafe { ctx.read_at(16)? };
+    let current_fd_count = unsafe {
+        if let Some(count) = FD_COUNT.get_ptr_mut(&tid) {
             if *count > 0 {
                 *count -= 1;
             }
+            *count
+        } else {
+            0
         }
-    }
-
+    };
+    let event = FdEvent {
+        header: EventHeader {
+            event_type: EventType::FdClose as u32,
+            _padding: 0,
+            timestamp_ns: unsafe { aya_ebpf::helpers::bpf_ktime_get_ns() },
+            pid,
+            tid,
+        },
+        fd: fd as u32,
+        fd_type: FD_TYPE_OTHER,
+        current_fd_count,
+        fd_soft_limit: config.fd_soft_limit,
+    };
+    let _ = EVENTS.output(&event, 0);
     Ok(0)
 }
 

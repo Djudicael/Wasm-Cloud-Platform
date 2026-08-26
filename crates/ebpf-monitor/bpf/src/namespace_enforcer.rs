@@ -20,7 +20,8 @@ use aya_ebpf::{
     EbpfContext,
 };
 use ebpf_monitor_bpf::{
-    EventHeader, EventType, NamespaceAuditEvent, NamespaceAuditType, NsEnforceConfig, TidIdentity,
+    EventHeader, EventType, NamespaceAuditEvent, NamespaceAuditType, NsEnforceConfig, TcpEvent,
+    TidIdentity, IP_ADDR_LEN,
 };
 
 /// MONITORED_TIDS: u32 (TID) → TidIdentity
@@ -91,10 +92,10 @@ fn try_ns_inet_sock_set_state(ctx: TracePointContext) -> Result<(), u32> {
     //   offset 28: newstate (4 bytes)
 
     // Read ports
-    let sport = unsafe { *(data.add(16) as *const u16) };
-    let dport = unsafe { *(data.add(18) as *const u16) };
-    let _old_state = unsafe { *(data.add(24) as *const i32) as u32 };
-    let new_state = unsafe { *(data.add(28) as *const i32) as u32 };
+    let _old_state = unsafe { *(data.add(16) as *const i32) as u32 };
+    let new_state = unsafe { *(data.add(20) as *const i32) as u32 };
+    let sport = unsafe { *(data.add(24) as *const u16) };
+    let dport = unsafe { *(data.add(26) as *const u16) };
 
     // Get current TID
     let tid = aya_ebpf::helpers::bpf_get_current_pid_tgid() as u32;
@@ -121,20 +122,30 @@ fn try_ns_inet_sock_set_state(ctx: TracePointContext) -> Result<(), u32> {
 
         if is_monitored {
             // Emit TidConnection event
-            let mut event = match EVENTS.reserve::<EventHeader>(0) {
+            let mut event = match EVENTS.reserve::<TcpEvent>(0) {
                 Some(e) => e,
                 None => return Ok(()), // Ring buffer full
             };
 
-            let header = EventHeader {
-                event_type: EventType::TidConnection as u32,
-                _padding: 0,
-                timestamp_ns: unsafe { aya_ebpf::helpers::gen::bpf_ktime_get_ns() },
-                pid: (aya_ebpf::helpers::bpf_get_current_pid_tgid() >> 32) as u32,
-                tid,
+            let connection = TcpEvent {
+                header: EventHeader {
+                    event_type: EventType::TidConnection as u32,
+                    _padding: 0,
+                    timestamp_ns: unsafe { aya_ebpf::helpers::gen::bpf_ktime_get_ns() },
+                    pid: (aya_ebpf::helpers::bpf_get_current_pid_tgid() >> 32) as u32,
+                    tid,
+                },
+                src_addr: [0; IP_ADDR_LEN],
+                src_port: sport,
+                dst_addr: [0; IP_ADDR_LEN],
+                dst_port: dport,
+                old_state: _old_state,
+                new_state,
+                retransmits: 0,
+                rtt_us: 0,
+                bytes: 0,
             };
-
-            event.write(header);
+            event.write(connection);
             event.submit(0);
         } else {
             // Unregistered TID connected to gateway — audit event
@@ -170,20 +181,30 @@ fn try_ns_inet_sock_set_state(ctx: TracePointContext) -> Result<(), u32> {
         let is_monitored = unsafe { MONITORED_TIDS.get(&tid) }.is_some();
 
         if is_monitored {
-            let mut event = match EVENTS.reserve::<EventHeader>(0) {
+            let mut event = match EVENTS.reserve::<TcpEvent>(0) {
                 Some(e) => e,
                 None => return Ok(()),
             };
 
-            let header = EventHeader {
-                event_type: EventType::TidDisconnection as u32,
-                _padding: 0,
-                timestamp_ns: unsafe { aya_ebpf::helpers::gen::bpf_ktime_get_ns() },
-                pid: (aya_ebpf::helpers::bpf_get_current_pid_tgid() >> 32) as u32,
-                tid,
+            let connection = TcpEvent {
+                header: EventHeader {
+                    event_type: EventType::TidDisconnection as u32,
+                    _padding: 0,
+                    timestamp_ns: unsafe { aya_ebpf::helpers::gen::bpf_ktime_get_ns() },
+                    pid: (aya_ebpf::helpers::bpf_get_current_pid_tgid() >> 32) as u32,
+                    tid,
+                },
+                src_addr: [0; IP_ADDR_LEN],
+                src_port: sport,
+                dst_addr: [0; IP_ADDR_LEN],
+                dst_port: dport,
+                old_state: _old_state,
+                new_state,
+                retransmits: 0,
+                rtt_us: 0,
+                bytes: 0,
             };
-
-            event.write(header);
+            event.write(connection);
             event.submit(0);
         }
     }
@@ -222,9 +243,9 @@ fn try_ns_audit_sendto(ctx: TracePointContext) -> Result<(), u32> {
 
     // Offsets for sys_enter_sendto (x86_64):
     // These are approximate and may need adjustment per kernel version.
-    let _fd = unsafe { *(data.add(8) as *const i32) };
-    let buf_ptr = unsafe { *(data.add(16) as *const u64) };
-    let len = unsafe { *(data.add(24) as *const u64) as usize };
+    let _fd = unsafe { *(data.add(16) as *const i32) };
+    let buf_ptr = unsafe { *(data.add(24) as *const u64) };
+    let len = unsafe { *(data.add(32) as *const u64) as usize };
 
     // Skip if no data
     if len == 0 || buf_ptr == 0 {

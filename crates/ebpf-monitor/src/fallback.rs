@@ -83,6 +83,7 @@ pub async fn run_fallback_monitor(
             if pressure_level != last_pressure_level {
                 let event = MonitorEvent::MemPressure {
                     pid: node_pid,
+                    tid: node_pid,
                     free_pages,
                     reclaim_pages: 0, // Not available from /proc/meminfo
                     pressure_level,
@@ -136,6 +137,7 @@ pub async fn run_fallback_monitor(
                 // Hard limit approaching — critical
                 let event = MonitorEvent::FdLimitApproaching {
                     pid: node_pid,
+                    tid: node_pid,
                     fd: 0, // No specific FD in userspace fallback
                     current_fd_count: fd_count,
                     fd_soft_limit: config.fd_soft_limit,
@@ -151,6 +153,7 @@ pub async fn run_fallback_monitor(
                 // Soft limit approaching — warning
                 let event = MonitorEvent::FdOpen {
                     pid: node_pid,
+                    tid: node_pid,
                     fd: 0,
                     current_fd_count: fd_count,
                     fd_soft_limit: config.fd_soft_limit,
@@ -176,6 +179,7 @@ pub async fn run_fallback_monitor(
                     // userspace polling, so we use defaults.
                     let event = MonitorEvent::ProcessExit {
                         pid: child_pid,
+                        tid: child_pid,
                         ppid: node_pid,
                         exit_code: 0,    // Unknown from userspace
                         signal: 0,       // Unknown from userspace

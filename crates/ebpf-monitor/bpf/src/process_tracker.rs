@@ -22,6 +22,58 @@ static EVENTS: RingBuf = RingBuf::with_byte_size(1024 * 1024, 0);
 #[map]
 static MONITORED_TIDS: HashMap<u32, TidIdentity> = HashMap::with_max_entries(4096, 0);
 
+/// Registration generation already announced for each TID. Comparing the
+/// supervisor-provided timestamp makes TID reuse generate a fresh start event.
+#[map]
+static STARTED_TIDS: HashMap<u32, u64> = HashMap::with_max_entries(4096, 0);
+
+/// The first syscall after supervisor registration is the observable workload
+/// start boundary for an in-process Wasm instance.
+#[tracepoint]
+pub fn monitored_tid_start(ctx: TracePointContext) -> u32 {
+    match try_monitored_tid_start(ctx) {
+        Ok(ret) => ret,
+        Err(ret) => ret,
+    }
+}
+
+fn try_monitored_tid_start(ctx: TracePointContext) -> Result<u32, u32> {
+    let pid_tgid = aya_ebpf::helpers::bpf_get_current_pid_tgid();
+    let pid = (pid_tgid >> 32) as u32;
+    let tid = pid_tgid as u32;
+    let identity = match unsafe { MONITORED_TIDS.get(&tid) } {
+        Some(identity) => identity,
+        None => return Ok(0),
+    };
+    let generation = identity.registered_at_ns;
+    if unsafe { STARTED_TIDS.get(&tid).copied() } == Some(generation) {
+        return Ok(0);
+    }
+    let _ = STARTED_TIDS.insert(&tid, &generation, 0);
+
+    let comm = ctx.command().unwrap_or([0; TASK_COMM_LEN]);
+    let event = ProcessEvent {
+        header: EventHeader {
+            event_type: EventType::ProcessExec as u32,
+            _padding: 0,
+            timestamp_ns: unsafe { aya_ebpf::helpers::bpf_ktime_get_ns() },
+            pid,
+            tid,
+        },
+        comm,
+        exit_code: 0,
+        signal: 0,
+        ppid: 0,
+        _padding: 0,
+        cgroup_id: unsafe { aya_ebpf::helpers::bpf_get_current_cgroup_id() },
+    };
+    if let Some(mut entry) = EVENTS.reserve::<ProcessEvent>(0) {
+        entry.write(event);
+        entry.submit(0);
+    }
+    Ok(0)
+}
+
 #[tracepoint]
 pub fn sched_process_exec(ctx: TracePointContext) -> u32 {
     match try_sched_process_exec(ctx) {
@@ -74,7 +126,7 @@ fn try_sched_process_exec(ctx: TracePointContext) -> Result<u32, u32> {
         signal: 0,
         ppid: 0,
         _padding: 0,
-        cgroup_id: 0, // TODO: get cgroup_id if available
+        cgroup_id: unsafe { aya_ebpf::helpers::bpf_get_current_cgroup_id() },
     };
 
     // Copy the comm string
@@ -153,7 +205,7 @@ fn try_sched_process_exit(ctx: TracePointContext) -> Result<u32, u32> {
         signal: signal as u32,
         ppid: 0,
         _padding: 0,
-        cgroup_id: 0, // TODO: get cgroup_id if available
+        cgroup_id: unsafe { aya_ebpf::helpers::bpf_get_current_cgroup_id() },
     };
 
     // Copy the comm string
@@ -165,6 +217,8 @@ fn try_sched_process_exit(ctx: TracePointContext) -> Result<u32, u32> {
         entry.write(event);
         entry.submit(0);
     }
+
+    let _ = STARTED_TIDS.remove(&tid);
 
     // Log OOM kills
     if signal == 9 {

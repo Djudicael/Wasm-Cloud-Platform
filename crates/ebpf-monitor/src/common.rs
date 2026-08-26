@@ -45,9 +45,43 @@ pub enum EventType {
     NamespaceAudit = 13,
     /// A forged namespace header was detected in send buffer.
     NamespaceForgedHeader = 14,
+    /// File descriptor closed by a monitored workload.
+    FdClose = 15,
+    /// TCP connection accepted by a monitored workload.
+    TcpAccept = 16,
+    /// TCP payload sent by a monitored workload.
+    TcpSend = 17,
+    /// TCP payload received by a monitored workload.
+    TcpReceive = 18,
+    /// First known syscall observed after a workload TID registration.
+    SyscallActivity = 19,
 }
 
 impl EventType {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            EventType::ProcessExec => "process_start",
+            EventType::ProcessExit => "process_exit",
+            EventType::TcpConnect => "tcp_connect",
+            EventType::TcpClose => "tcp_close",
+            EventType::TcpRetransmit => "tcp_retransmit",
+            EventType::FdOpen => "fd_open",
+            EventType::MemPressure => "memory_pressure",
+            EventType::DiskSlowIo => "block_io",
+            EventType::SyscallAnomaly => "syscall_anomaly",
+            EventType::FdLimitApproaching => "fd_limit",
+            EventType::TidConnection => "namespace_connection",
+            EventType::TidDisconnection => "namespace_disconnection",
+            EventType::NamespaceAudit => "namespace_audit",
+            EventType::NamespaceForgedHeader => "namespace_forged_header",
+            EventType::FdClose => "fd_close",
+            EventType::TcpAccept => "tcp_accept",
+            EventType::TcpSend => "tcp_send",
+            EventType::TcpReceive => "tcp_receive",
+            EventType::SyscallActivity => "syscall_activity",
+        }
+    }
+
     /// Convert from raw u32 value, returns None if unknown.
     pub fn from_u32(val: u32) -> Option<Self> {
         match val {
@@ -65,6 +99,11 @@ impl EventType {
             12 => Some(EventType::TidDisconnection),
             13 => Some(EventType::NamespaceAudit),
             14 => Some(EventType::NamespaceForgedHeader),
+            15 => Some(EventType::FdClose),
+            16 => Some(EventType::TcpAccept),
+            17 => Some(EventType::TcpSend),
+            18 => Some(EventType::TcpReceive),
+            19 => Some(EventType::SyscallActivity),
             _ => None,
         }
     }
@@ -107,6 +146,7 @@ pub struct TcpEvent {
     pub new_state: u32,   // TCP FSM new state
     pub retransmits: u32, // Cumulative retransmit count at event time
     pub rtt_us: u64,      // Smoothed RTT in microseconds
+    pub bytes: u64,       // Payload bytes for send/receive events
 }
 
 /// File descriptor event.
@@ -423,7 +463,7 @@ mod tests {
 
     #[test]
     fn test_event_type_roundtrip() {
-        for i in 1..=14u32 {
+        for i in 1..=19u32 {
             let et = EventType::from_u32(i);
             assert!(et.is_some(), "EventType {} should be valid", i);
             assert_eq!(et.unwrap() as u32, i);

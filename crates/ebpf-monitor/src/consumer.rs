@@ -80,6 +80,7 @@ pub fn parse_event(bytes: &[u8]) -> Result<MonitorEvent, ParseError> {
             if event_type == EventType::ProcessExec {
                 Ok(MonitorEvent::ProcessExec {
                     pid: event.header.pid,
+                    tid: event.header.tid,
                     ppid: event.ppid,
                     comm: event.comm,
                     cgroup_id: event.cgroup_id,
@@ -87,6 +88,7 @@ pub fn parse_event(bytes: &[u8]) -> Result<MonitorEvent, ParseError> {
             } else {
                 Ok(MonitorEvent::ProcessExit {
                     pid: event.header.pid,
+                    tid: event.header.tid,
                     ppid: event.ppid,
                     exit_code: event.exit_code,
                     signal: event.signal,
@@ -96,7 +98,12 @@ pub fn parse_event(bytes: &[u8]) -> Result<MonitorEvent, ParseError> {
             }
         }
 
-        EventType::TcpConnect | EventType::TcpClose | EventType::TcpRetransmit => {
+        EventType::TcpConnect
+        | EventType::TcpClose
+        | EventType::TcpRetransmit
+        | EventType::TcpAccept
+        | EventType::TcpSend
+        | EventType::TcpReceive => {
             let expected = std::mem::size_of::<TcpEvent>();
             if bytes.len() < expected {
                 return Err(ParseError::SizeMismatch {
@@ -109,6 +116,7 @@ pub fn parse_event(bytes: &[u8]) -> Result<MonitorEvent, ParseError> {
             match event_type {
                 EventType::TcpConnect => Ok(MonitorEvent::TcpConnect {
                     pid: event.header.pid,
+                    tid: event.header.tid,
                     src_port: event.src_port,
                     dst_port: event.dst_port,
                     old_state: event.old_state,
@@ -116,21 +124,40 @@ pub fn parse_event(bytes: &[u8]) -> Result<MonitorEvent, ParseError> {
                 }),
                 EventType::TcpClose => Ok(MonitorEvent::TcpClose {
                     pid: event.header.pid,
+                    tid: event.header.tid,
                     src_port: event.src_port,
                     dst_port: event.dst_port,
                 }),
                 EventType::TcpRetransmit => Ok(MonitorEvent::TcpRetransmit {
                     pid: event.header.pid,
+                    tid: event.header.tid,
                     src_port: event.src_port,
                     dst_port: event.dst_port,
                     retransmits: event.retransmits,
                     rtt_us: event.rtt_us,
                 }),
+                EventType::TcpAccept => Ok(MonitorEvent::TcpAccept {
+                    pid: event.header.pid,
+                    tid: event.header.tid,
+                    fd: event.src_port as u32,
+                }),
+                EventType::TcpSend => Ok(MonitorEvent::TcpSend {
+                    pid: event.header.pid,
+                    tid: event.header.tid,
+                    fd: event.src_port as u32,
+                    bytes: event.bytes,
+                }),
+                EventType::TcpReceive => Ok(MonitorEvent::TcpReceive {
+                    pid: event.header.pid,
+                    tid: event.header.tid,
+                    fd: event.src_port as u32,
+                    bytes: event.bytes,
+                }),
                 _ => unreachable!(),
             }
         }
 
-        EventType::FdOpen | EventType::FdLimitApproaching => {
+        EventType::FdOpen | EventType::FdLimitApproaching | EventType::FdClose => {
             let expected = std::mem::size_of::<FdEvent>();
             if bytes.len() < expected {
                 return Err(ParseError::SizeMismatch {
@@ -143,16 +170,25 @@ pub fn parse_event(bytes: &[u8]) -> Result<MonitorEvent, ParseError> {
             if event_type == EventType::FdOpen {
                 Ok(MonitorEvent::FdOpen {
                     pid: event.header.pid,
+                    tid: event.header.tid,
+                    fd: event.fd,
+                    current_fd_count: event.current_fd_count,
+                    fd_soft_limit: event.fd_soft_limit,
+                })
+            } else if event_type == EventType::FdLimitApproaching {
+                Ok(MonitorEvent::FdLimitApproaching {
+                    pid: event.header.pid,
+                    tid: event.header.tid,
                     fd: event.fd,
                     current_fd_count: event.current_fd_count,
                     fd_soft_limit: event.fd_soft_limit,
                 })
             } else {
-                Ok(MonitorEvent::FdLimitApproaching {
+                Ok(MonitorEvent::FdClose {
                     pid: event.header.pid,
+                    tid: event.header.tid,
                     fd: event.fd,
                     current_fd_count: event.current_fd_count,
-                    fd_soft_limit: event.fd_soft_limit,
                 })
             }
         }
@@ -170,6 +206,7 @@ pub fn parse_event(bytes: &[u8]) -> Result<MonitorEvent, ParseError> {
                 unsafe { std::ptr::read_unaligned(bytes.as_ptr() as *const MemPressureEvent) };
             Ok(MonitorEvent::MemPressure {
                 pid: event.header.pid,
+                tid: event.header.tid,
                 free_pages: event.free_pages,
                 reclaim_pages: event.reclaim_pages,
                 pressure_level: event.pressure_level,
@@ -188,14 +225,18 @@ pub fn parse_event(bytes: &[u8]) -> Result<MonitorEvent, ParseError> {
             }
             let event = unsafe { std::ptr::read_unaligned(bytes.as_ptr() as *const DiskIoEvent) };
             Ok(MonitorEvent::DiskSlowIo {
+                pid: event.header.pid,
+                tid: event.header.tid,
                 dev_major: event.dev_major,
                 dev_minor: event.dev_minor,
+                sector: event.sector,
+                nr_sector: event.nr_sector,
                 latency_ns: event.latency_ns,
                 io_type: event.io_type,
             })
         }
 
-        EventType::SyscallAnomaly => {
+        EventType::SyscallAnomaly | EventType::SyscallActivity => {
             let expected = std::mem::size_of::<SyscallEvent>();
             if bytes.len() < expected {
                 return Err(ParseError::SizeMismatch {
@@ -205,13 +246,22 @@ pub fn parse_event(bytes: &[u8]) -> Result<MonitorEvent, ParseError> {
                 });
             }
             let event = unsafe { std::ptr::read_unaligned(bytes.as_ptr() as *const SyscallEvent) };
-            Ok(MonitorEvent::SyscallAnomaly {
-                pid: event.header.pid,
-                tid: event.header.tid,
-                syscall_nr: event.syscall_nr,
-                syscall_category: SyscallCategory::from_u32(event.syscall_category),
-                count_in_window: event.count_in_window,
-            })
+            if event_type == EventType::SyscallActivity {
+                Ok(MonitorEvent::SyscallActivity {
+                    pid: event.header.pid,
+                    tid: event.header.tid,
+                    syscall_nr: event.syscall_nr,
+                    count_in_window: event.count_in_window,
+                })
+            } else {
+                Ok(MonitorEvent::SyscallAnomaly {
+                    pid: event.header.pid,
+                    tid: event.header.tid,
+                    syscall_nr: event.syscall_nr,
+                    syscall_category: SyscallCategory::from_u32(event.syscall_category),
+                    count_in_window: event.count_in_window,
+                })
+            }
         }
 
         EventType::TidConnection | EventType::TidDisconnection => {
@@ -471,6 +521,7 @@ mod tests {
                 ppid,
                 comm,
                 cgroup_id,
+                ..
             } => {
                 assert_eq!(pid, 42);
                 assert_eq!(ppid, 1);
@@ -535,6 +586,7 @@ mod tests {
             new_state: 1,
             retransmits: 0,
             rtt_us: 500,
+            bytes: 0,
         };
 
         let bytes = struct_to_bytes(&event);
@@ -573,6 +625,7 @@ mod tests {
             new_state: 5,
             retransmits: 10,
             rtt_us: 2000,
+            bytes: 0,
         };
 
         let bytes = struct_to_bytes(&event);
@@ -691,6 +744,7 @@ mod tests {
                 dev_minor,
                 latency_ns,
                 io_type,
+                ..
             } => {
                 assert_eq!(dev_major, 8);
                 assert_eq!(dev_minor, 0);
@@ -806,6 +860,7 @@ mod tests {
         // Send some events
         tx.send(MonitorEvent::ProcessExec {
             pid: 1,
+            tid: 1,
             ppid: 0,
             comm: [0; 16],
             cgroup_id: 0,
@@ -815,6 +870,7 @@ mod tests {
 
         tx.send(MonitorEvent::MemPressure {
             pid: 0,
+            tid: 0,
             free_pages: 50000,
             reclaim_pages: 0,
             pressure_level: 1,
@@ -851,8 +907,12 @@ mod tests {
 
         // Send an event through the channel
         tx.send(MonitorEvent::DiskSlowIo {
+            pid: 0,
+            tid: 0,
             dev_major: 8,
             dev_minor: 0,
+            sector: 0,
+            nr_sector: 0,
             latency_ns: 50_000_000,
             io_type: 1,
         })
@@ -931,6 +991,7 @@ mod tests {
                     new_state: 1,
                     retransmits: 0,
                     rtt_us: 0,
+                    bytes: 0,
                 }),
             ),
             (
@@ -951,6 +1012,7 @@ mod tests {
                     new_state: 7,
                     retransmits: 0,
                     rtt_us: 0,
+                    bytes: 0,
                 }),
             ),
             (
@@ -971,6 +1033,7 @@ mod tests {
                     new_state: 5,
                     retransmits: 3,
                     rtt_us: 1000,
+                    bytes: 0,
                 }),
             ),
             (

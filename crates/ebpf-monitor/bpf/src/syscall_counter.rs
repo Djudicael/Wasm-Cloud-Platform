@@ -96,6 +96,10 @@ static SUSPICIOUS_COUNTS: PerCpuHashMap<u32, u64> = PerCpuHashMap::with_max_entr
 #[map]
 static MONITORED_TIDS: HashMap<u32, TidIdentity> = HashMap::with_max_entries(4096, 0);
 
+/// Registration generation for which the bounded activity event was emitted.
+#[map]
+static ACTIVITY_REPORTED: HashMap<u32, u64> = HashMap::with_max_entries(4096, 0);
+
 // ── Privileged Syscall Numbers (x86_64) ────────────────────────────────────────
 //
 // These syscall numbers are specific to the x86_64 architecture.
@@ -174,15 +178,38 @@ fn try_sys_enter(ctx: TracePointContext) -> Result<c_long, c_long> {
     // Only inspect an execution thread explicitly registered by Supervisor.
     // Filtering by TGID is unsafe here because all control-plane and Wasm
     // threads share the wasm-node process.
-    if unsafe { MONITORED_TIDS.get(&tid) }.is_none() {
-        return Ok(0);
-    }
+    let identity = match unsafe { MONITORED_TIDS.get(&tid) } {
+        Some(identity) => identity,
+        None => return Ok(0),
+    };
 
     // ── Read syscall number ─────────────────────────────────────────────
     // The syscall number is the first field after the common header.
     // On x86_64, it's a 32-bit signed integer at offset 8 of the
     // tracepoint-specific data (after the 8-byte common header).
     let syscall_nr: u64 = unsafe { ctx.read_at(8)? };
+
+    // Emit one bounded activity marker for every registration generation. This
+    // gives production validation a deterministic known-syscall event without
+    // lowering the anomaly threshold or flooding the ring buffer.
+    let generation = identity.registered_at_ns;
+    if unsafe { ACTIVITY_REPORTED.get(&tid).copied() } != Some(generation) {
+        let _ = ACTIVITY_REPORTED.insert(&tid, &generation, 0);
+        let event = SyscallEvent {
+            header: EventHeader {
+                event_type: EventType::SyscallActivity as u32,
+                _padding: 0,
+                timestamp_ns: unsafe { aya_ebpf::helpers::bpf_ktime_get_ns() },
+                pid,
+                tid,
+            },
+            syscall_nr,
+            syscall_category: SyscallCategory::Normal as u32,
+            _padding: 0,
+            count_in_window: 1,
+        };
+        let _ = EVENTS.output(&event, 0);
+    }
 
     // ── Increment total syscall count ──────────────────────────────────
     // This is the fast path — every syscall from a monitored PID
