@@ -58,7 +58,7 @@ pub struct EbpfMetrics {
     /// Value is 0.0–1.0 (fraction) for precise alerting thresholds.
     pub fd_usage_ratio: Gauge,
 
-    /// Memory pressure level (0=none, 1=low, 2=medium, 3=critical).
+    /// Memory pressure level (0=none/low, 1=medium, 2=critical).
     pub memory_pressure_level: IntGauge,
 
     /// Disk I/O latency histogram (seconds).
@@ -150,7 +150,7 @@ impl EbpfMetrics {
         let memory_pressure_level = register_metric!(
             IntGauge::with_opts(Opts::new(
                 "wasm_ebpf_memory_pressure_level",
-                "Memory pressure level (0=none, 1=low, 2=medium, 3=critical)"
+                "Memory pressure level (0=none/low, 1=medium, 2=critical)"
             ))
             .unwrap(),
             registry

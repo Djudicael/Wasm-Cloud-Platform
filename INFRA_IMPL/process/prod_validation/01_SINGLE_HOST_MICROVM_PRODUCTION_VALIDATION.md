@@ -182,7 +182,7 @@ redacted artifact with the result.
 | Final live-state snapshot | PASS / HISTORICAL PRE-TEARDOWN | Before authorized teardown, NATS PID `223906`, PostgreSQL PID `289481`, and platform node PIDs `325604`, `327249`, and `325384` were alive; every node health probe, both public routes, all 10 Prometheus targets, and Alertmanager were healthy. The later authorized-teardown row records removal of this environment |
 | Manual Prometheus UI validation | PASS (USER-VALIDATED) | The operator completed manual testing through `http://localhost:9095` after automated validation confirmed 10 targets up, zero targets down, and no active Alertmanager alerts |
 | Authorized teardown | PASS | After explicit operator authorization, `scripts/vm/destroy-testbed.sh` validated the selected state and removed its six exact state-labeled observability containers, recorded HAProxy PID/config/log, three platform-node VMs, NATS VM, PostgreSQL VM, exact TAP devices and bridge, state-derived OIDC credentials, and lifecycle state files. A post-teardown audit confirmed every recorded PID/device/container absent and ports 8088, 9095, and 9093 closed. No broad process or network matching was used |
-| 2026-08-25 production-like reprovision | PASS / LIVE | The exact state `.prod-validation-single-host-state.json` records NATS PID `170213`, PostgreSQL PID `170523`, and three platform nodes at `172.20.0.12-14`. After Part 2 restoration, node PIDs are `302361`, `295013`, and `295086`. HAProxy remains available at `http://127.0.0.1:8088`, and OIDC readiness returns `database=ok`. This environment must remain running until the operator requests teardown. |
+| 2026-08-25 production-like reprovision | PASS / LIVE | The exact state `.prod-validation-single-host-state.json` records NATS PID `170213`, PostgreSQL PID `170523`, and three 2-GiB platform nodes at `172.20.0.12-14`. After the Part 2B schema-3 rolling restart, node PIDs are `325548`, `325606`, and `325677`. Every node health probe returns HTTP 200, HAProxy remains available at `http://127.0.0.1:8088`, and OIDC readiness returns `database=ok`. This environment must remain running until the operator requests teardown. |
 | eBPF guest kernel and verifier gate | PASS | Linux `6.1.80` was rebuilt with BTF, tracing, syscall tracepoints, kprobes, modules, and the complete Firecracker boot contract. All seven objects (`process_tracker`, `tcp_monitor`, `fd_watcher`, `mem_pressure`, `disk_monitor`, `syscall_counter`, and `namespace_enforcer`) loaded and attached on all three guests with no verifier error. The FD watcher used the supported `filp_close` fallback where `do_filp_close` was unavailable. |
 | eBPF verifier compatibility defects | FIXED / PASS | Linux 6.1 rejected implicit struct padding passed to ring-buffer helpers and a variable-size namespace header read. Event wire padding is now explicit and zeroed on both sides, the forged-header scan uses verifier-provable fixed reads, and all seven BPF ELFs rebuild with pinned `nightly-2026-08-20` and `bpf-linker` 0.11.0. The reusable verifier-log summary is `scripts/ebpf/summarize-verifier-log.jq`. |
 | eBPF identity boundary | PASS FOR IN-PROCESS WASI HTTP / STRONGER ISOLATION OPTIONAL | Initial runtime evidence showed the node's own `bpf(2)`, socket, and worker-thread activity classified as Wasm-instance activity, producing false privilege-escalation incidents and kill requests. Root causes were PID/TGID filtering, late namespace-map wiring through a failed `Arc::get_mut`, registering maps from the thread being monitored, discarding the event TID in userspace, and falling back to killing the largest instance. Each WASI HTTP instance now owns a dedicated single-thread Tokio runtime. The supervisor learns that Linux TID, registers its namespace/application identity from an unmonitored control thread before releasing application execution, mirrors it into all three maps, preserves the TID through parsing and dispatch, and can kill the exact matching instance. A dedicated process or cgroup remains the stronger production boundary when tenant-grade isolation is required. |
@@ -461,12 +461,16 @@ The next microVM run must still prove the kernel-runtime portion below.
         per-type Prometheus counters. An allowed PostgreSQL connection succeeded;
         a denied NATS connection failed before the host syscall and incremented
         `wasm_policy_connection_denied_total`.
-  - [ ] **Part 2 remaining — memory and block I/O counters:** direct reclaim
-        emitted and dispatched a `MEDIUM` memory-pressure event, but the 1-GiB
-        validation guest reached OOM before its authenticated metrics endpoint
-        could be scraped. Block-I/O parsing/counters work for boot I/O, but four
-        deliberate 256-MiB synchronous application writes left the counter at
-        `2 -> 2`. Do not claim these two assertions as passed.
+  - [x] **Part 2B — deterministic non-fatal memory pressure:** a bounded page-cache
+        plus anonymous-memory workload emitted exactly one `MEDIUM` event on the
+        finalized object, incremented the stable Prometheus counter, set the
+        pressure gauge to `1`, and disabled request acceptance without killing
+        the node. After 30 quiet seconds the gauge returned to `0`, backpressure
+        cleared, and OIDC remained ready through the other nodes.
+  - [ ] **Part 3 remaining — block I/O counters:** block-I/O parsing/counters work
+        for boot I/O, but four deliberate 256-MiB synchronous application writes
+        left the counter at `2 -> 2`; the records also contain inaccurate fields.
+        Do not claim this assertion as passed before completing Part 3.
 - [ ] Measure ring-buffer/event loss and dispatcher backpressure.
 - [ ] Deny eBPF loading and confirm the node continues safely in fallback mode.
 - [x] Restart every node and reload probes while preserving public application
@@ -558,10 +562,10 @@ Operational observations:
 ### Part 2 record — deterministic probe exercise
 
 Status: **PARTIAL PASS on 2026-08-26.** Process lifecycle, known syscall, file
-descriptor, TCP payload/lifecycle, namespace/application identity, and runtime
-network-policy assertions passed. Memory-pressure Prometheus evidence and
-application-generated block-I/O evidence remain open; therefore the parent Phase
-6 checkbox stays unchecked.
+descriptor, TCP payload/lifecycle, namespace/application identity, runtime
+network-policy, and deterministic non-fatal memory-pressure assertions passed.
+Application-generated block-I/O evidence remains open for Part 3; therefore the
+parent Phase 6 checkbox stays unchecked.
 
 The reusable canary was `apps/hello-axum`, deployed directly on
 `local-test-node-0` as an `ebpf-validation/ebpf-probe` workload with a `/tmp`
@@ -602,40 +606,66 @@ Passed evidence:
   `tcp_retransmit` per-type series was emitted. A future retransmit monitor must
   use a dedicated kernel retransmit tracepoint or compatible kprobe.
 
-Open evidence and production observations:
+Part 2B memory-pressure evidence and production observations:
 
-- lowering only node 0 to 1 GiB and committing 700 MiB caused the
-  `try_to_free_pages` probe to log a `MEDIUM` memory-pressure event for PID 1/TID
-  80 and activate backpressure. The guest then logged `Out of memory and no
-  killable processes` because `wasm-node` is PID 1 and every WASI component is
-  in that same process. The admin endpoint became unavailable before the
-  Prometheus counter could be scraped. Production must not depend on the kernel
-  OOM killer to isolate an in-process tenant; use process/cgroup isolation and a
-  small init/supervisor that can restart the node process. Add a deterministic,
-  non-fatal memory-pressure injection/test hook before closing this assertion;
-- Firecracker correctly reported the temporary 1-GiB and restored 2-GiB machine
-  sizes, while `/health` continued to display a configured `4096 MB` process
-  ceiling. That value is not guest physical RAM. Production configuration must
-  set the process ceiling below actual VM/cgroup memory and expose both values so
-  operators cannot mistake the budget for capacity;
+- the original `try_to_free_pages` kprobe was not deterministic for memory-cgroup
+  reclaim. The finalized object also attaches
+  `vmscan/mm_vmscan_direct_reclaim_begin`, retains the kprobe for compatibility,
+  and uses one global ten-second timestamp map so paired hooks do not duplicate
+  events. Direct reclaim is always classified `MEDIUM`; allocation order by
+  itself is not evidence of a critical/OOM condition;
+- the reusable WASI canary now has `/probe/cache` and `/probe/cache/clear` in
+  addition to bounded `/probe/memory`. On a disposable 896-MiB node, a 350-MiB
+  retained page-cache workload followed by a 250-MiB anonymous allocation
+  completed successfully. Authenticated metrics reported exactly
+  `wasm_ebpf_events_by_type_total{event_type="memory_pressure"}=1`,
+  `wasm_ebpf_memory_pressure_level=1`, and no parser failure. Health reported
+  `accepting_requests=false` while memory itself remained healthy at
+  `437 MB / 862 MB`;
+- after 30 seconds with no newer reclaim event, the fenced recovery task reset
+  the gauge to `0`, cleared backpressure, and health reported
+  `accepting_requests=true` at `191 MB / 862 MB`. The pressure counter remained
+  `1`, as expected for a cumulative counter. OIDC readiness stayed
+  `database=ok` through the HA front door;
+- deliberately crossing the limit at 768/896 MiB also proved the new guest PID 1
+  supervision model: the kernel could kill the `wasm-node` child, PID 1 stayed
+  alive, restarted it after two seconds, and the two OIDC deployments converged
+  without recreating the Firecracker VM. This is recovery evidence, not tenant
+  isolation: production must still use process/cgroup isolation when one
+  workload must not be able to restart the whole node runtime;
+- `/health` now computes an effective memory ceiling from the configured process
+  limit, guest `/proc/meminfo`, and cgroup-v2 `memory.max`, and exposes all three
+  inputs in its message. Firecracker correctly reported each temporary size and
+  the restored 2-GiB size. Production configuration should still set its process
+  ceiling below actual VM/cgroup capacity rather than relying on the effective
+  minimum;
+
+Open Part 3 evidence:
+
 - with a validation-only 1-ms slow-I/O threshold, boot activity produced two
   `block_io` events and the matching counter. The records had
   `io_type="unknown"`, PID/TID zero, and implausible device/sector fields. Four
   application requests each wrote and `sync_all`'d 256 MiB, yet the counter stayed
   `2 -> 2`. This is a failed deterministic attribution/correlation assertion and
   feeds directly into Part 3 tracepoint-layout and request-key remediation; and
-- the normal 50-ms threshold and 2-GiB node size were restored. The resulting
-  rootfs checksum is
-  `71447296aa88019bbad85484815208544a6ddf4dfdbb4fcb86cbaa0ca5947fc1`.
+- the normal 50-ms threshold and 2-GiB node size were restored. All three nodes
+  were rolled to schema 3 and return HTTP 200. The finalized rootfs checksum is
+  `d0545f3c547743dbe02aecac93683ab895af82fcf9684e1459c13c1f7995ae9c`
+  and the kernel checksum is
+  `7d6222139391f70bef3becb514916550c7b824e63a4e72ffa22485e6dab3e3d5`.
   HAProxy OIDC readiness again returned `database=ok`; the testbed remains live.
 
 Post-change repository verification passed in WSL with
 `CARGO_TARGET_DIR=/tmp/wasm-cloud-platform-target`: formatting, the required
 native workspace all-target check, workspace Clippy with warnings denied,
-eBPF-feature node Clippy with warnings denied, 118 eBPF-monitor tests, 64 runtime
-unit plus 7 integration tests, 38 supervisor unit plus 10 integration tests,
-explicit `wasm32-wasip2` builds for the probe and both workspace WASI examples,
-all seven BPF object builds, shell syntax, and scoped diff whitespace checks.
+eBPF-feature node Clippy with warnings denied, 87 common tests, 118 eBPF-monitor
+tests, 64 runtime unit plus 7 integration tests, 38 supervisor unit plus 10
+integration tests, and 98 node library/binary unit plus 10 integration tests.
+Explicit `wasm32-wasip2` builds passed for the probe and both workspace WASI
+examples, as did all seven BPF object builds, changed-script shell syntax, and
+scoped diff whitespace checks. The repository-wide whitespace check remains
+noisy because unrelated dirty-worktree files retain CRLF changes; those files
+were preserved.
 The separately tracked `proc-macro-error2 2.0.1` future-incompatibility notice
 still appears.
 

@@ -212,6 +212,38 @@ fn route(path: &str) -> (u16, &'static str, String, bool) {
                 Err(error) => (500, "text/plain", error, false),
             }
         }
+        "/probe/cache" => {
+            let max_mib = std::env::var("EBPF_PROBE_MAX_CACHE_MIB")
+                .ok()
+                .and_then(|value| value.parse::<u32>().ok())
+                .unwrap_or(256)
+                .clamp(1, 1024);
+            let mib = query_u32(path, "mib", 128).clamp(1, max_mib);
+            match populate_page_cache(mib) {
+                Ok(bytes) => (
+                    200,
+                    "application/json",
+                    format!(r#"{{"operation":"cache","bytes":{bytes}}}"#),
+                    false,
+                ),
+                Err(error) => (500, "text/plain", error, false),
+            }
+        }
+        "/probe/cache/clear" => match std::fs::remove_file("/tmp/ebpf-page-cache.bin") {
+            Ok(()) => (
+                200,
+                "application/json",
+                r#"{"operation":"cache_clear","removed":true}"#.to_string(),
+                false,
+            ),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => (
+                200,
+                "application/json",
+                r#"{"operation":"cache_clear","removed":false}"#.to_string(),
+                false,
+            ),
+            Err(error) => (500, "text/plain", error.to_string(), false),
+        },
         "/probe/memory" => {
             // Keep the ordinary test application bounded. A production-
             // validation deployment may explicitly raise this ceiling while
@@ -301,6 +333,39 @@ fn probe_file_io(mib: u32) -> Result<u64, String> {
     }
     drop(file);
     std::fs::remove_file(path).map_err(|error| error.to_string())?;
+    Ok(read)
+}
+
+#[cfg(target_family = "wasm")]
+fn populate_page_cache(mib: u32) -> Result<u64, String> {
+    use std::io::{Read, Write};
+
+    let path = "/tmp/ebpf-page-cache.bin";
+    let bytes = mib as usize * 1024 * 1024;
+    let chunk = vec![0x5A_u8; 64 * 1024];
+    let mut file = std::fs::File::create(path).map_err(|error| error.to_string())?;
+    let mut written = 0_usize;
+    while written < bytes {
+        let count = (bytes - written).min(chunk.len());
+        file.write_all(&chunk[..count])
+            .map_err(|error| error.to_string())?;
+        written += count;
+    }
+    file.sync_all().map_err(|error| error.to_string())?;
+    drop(file);
+
+    // Read the complete file so the pages are hot and reclaimable. Unlike the
+    // ordinary file probe, retain the file until `/probe/cache/clear`.
+    let mut file = std::fs::File::open(path).map_err(|error| error.to_string())?;
+    let mut buffer = vec![0_u8; 64 * 1024];
+    let mut read = 0_u64;
+    loop {
+        let count = file.read(&mut buffer).map_err(|error| error.to_string())?;
+        if count == 0 {
+            break;
+        }
+        read += count as u64;
+    }
     Ok(read)
 }
 

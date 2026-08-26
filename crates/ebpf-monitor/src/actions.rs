@@ -14,6 +14,7 @@ use crate::metrics::EbpfMetrics;
 use crate::namespace_map::NamespaceMap;
 use crate::MonitorConfig;
 use std::sync::Arc;
+use std::time::Duration;
 use tracing::{error, info, warn};
 
 pub use callbacks::{EventCallbacks, NoopCallbacks};
@@ -31,11 +32,13 @@ pub struct ActionDispatcher {
     /// Node ID for publishing cluster events.
     node_id: String,
     /// Whether backpressure is currently active.
-    backpressure_active: std::sync::atomic::AtomicBool,
+    backpressure_active: Arc<std::sync::atomic::AtomicBool>,
     /// Whether the node is in degraded mode.
-    degraded_mode: std::sync::atomic::AtomicBool,
+    degraded_mode: Arc<std::sync::atomic::AtomicBool>,
     /// Last memory pressure level, used to detect recovery.
-    last_pressure_level: std::sync::atomic::AtomicU32,
+    last_pressure_level: Arc<std::sync::atomic::AtomicU32>,
+    /// Monotonic pressure-event generation used to fence recovery timers.
+    pressure_generation: Arc<std::sync::atomic::AtomicU64>,
     /// Current monitor configuration, updated through hot reload.
     config: std::sync::RwLock<MonitorConfig>,
     /// Namespace identity map for updating port-to-TID bindings from eBPF events.
@@ -53,9 +56,10 @@ impl ActionDispatcher {
             metrics,
             callbacks,
             node_id,
-            backpressure_active: std::sync::atomic::AtomicBool::new(false),
-            degraded_mode: std::sync::atomic::AtomicBool::new(false),
-            last_pressure_level: std::sync::atomic::AtomicU32::new(0),
+            backpressure_active: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            degraded_mode: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            last_pressure_level: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            pressure_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             config: std::sync::RwLock::new(MonitorConfig::default()),
             namespace_map: std::sync::RwLock::new(None),
         }
@@ -82,9 +86,10 @@ impl ActionDispatcher {
             metrics,
             callbacks,
             node_id,
-            backpressure_active: std::sync::atomic::AtomicBool::new(false),
-            degraded_mode: std::sync::atomic::AtomicBool::new(false),
-            last_pressure_level: std::sync::atomic::AtomicU32::new(0),
+            backpressure_active: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            degraded_mode: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            last_pressure_level: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            pressure_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             config: std::sync::RwLock::new(config),
             namespace_map: std::sync::RwLock::new(None),
         }
@@ -339,6 +344,10 @@ impl ActionDispatcher {
                 pressure_level,
                 anon_pages,
             } => {
+                let pressure_generation = self
+                    .pressure_generation
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                    + 1;
                 let prev_level = self
                     .last_pressure_level
                     .swap(pressure_level, std::sync::atomic::Ordering::Relaxed);
@@ -350,7 +359,7 @@ impl ActionDispatcher {
                             pid,
                             tid, free_pages, reclaim_pages, anon_pages, "Memory pressure: LOW"
                         );
-                        if prev_level >= 2 {
+                        if prev_level >= 1 {
                             self.deactivate_backpressure_if_needed();
                             self.callbacks
                                 .publish_node_pressure_recovered(&self.node_id);
@@ -368,6 +377,7 @@ impl ActionDispatcher {
                         self.callbacks.prune_idle_instances();
                         self.activate_backpressure_if_needed("Memory pressure: MEDIUM");
                         self.callbacks.publish_node_under_pressure(&self.node_id, 1);
+                        self.schedule_memory_pressure_recovery(pressure_generation);
                     }
                     2 => {
                         error!(
@@ -598,6 +608,32 @@ impl ActionDispatcher {
         {
             self.callbacks.deactivate_backpressure();
         }
+    }
+
+    fn schedule_memory_pressure_recovery(&self, generation: u64) {
+        let pressure_generation = Arc::clone(&self.pressure_generation);
+        let last_pressure_level = Arc::clone(&self.last_pressure_level);
+        let backpressure_active = Arc::clone(&self.backpressure_active);
+        let metrics = Arc::clone(&self.metrics);
+        let callbacks = Arc::clone(&self.callbacks);
+        let node_id = self.node_id.clone();
+
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_secs(30));
+            if pressure_generation.load(std::sync::atomic::Ordering::Relaxed) != generation
+                || last_pressure_level.load(std::sync::atomic::Ordering::Relaxed) != 1
+            {
+                return;
+            }
+
+            last_pressure_level.store(0, std::sync::atomic::Ordering::Relaxed);
+            metrics.set_memory_pressure(0);
+            if backpressure_active.swap(false, std::sync::atomic::Ordering::Relaxed) {
+                callbacks.deactivate_backpressure();
+            }
+            callbacks.publish_node_pressure_recovered(&node_id);
+            info!("Memory pressure cooldown elapsed - accepting traffic again");
+        });
     }
 
     fn enter_degraded_mode_if_needed(&self, reason: &str) {

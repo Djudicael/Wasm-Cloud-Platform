@@ -333,8 +333,15 @@ fn attach_fd_watcher(ebpf: &mut Ebpf) -> Result<()> {
     Ok(())
 }
 
-/// Attach the memory pressure sentinel (try_to_free_pages kprobe).
+/// Attach the memory pressure sentinel to both the stable vmscan tracepoint
+/// and the legacy reclaim kprobe. The BPF-side rate limit deduplicates them.
 fn attach_mem_pressure(ebpf: &mut Ebpf) -> Result<()> {
+    attach_tracepoint(
+        ebpf,
+        "direct_reclaim_begin",
+        "vmscan",
+        "mm_vmscan_direct_reclaim_begin",
+    )?;
     attach_kprobe(ebpf, "try_to_free_pages", "try_to_free_pages")
 }
 

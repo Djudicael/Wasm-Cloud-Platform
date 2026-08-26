@@ -178,8 +178,8 @@ if [[ "$nats_image_schema" != 2 ]]; then
   exit 1
 fi
 node_image_schema=$(debugfs -R 'cat /etc/wasm-node/image-schema-version' assets/wasm-node-rootfs.ext4 2>/dev/null || true)
-if [[ "$node_image_schema" != 2 ]]; then
-  echo "assets/wasm-node-rootfs.ext4 is stale or incompatible (expected image schema 2)." >&2
+if [[ "$node_image_schema" != 3 ]]; then
+  echo "assets/wasm-node-rootfs.ext4 is stale or incompatible (expected image schema 3)." >&2
   echo "Rebuild it with: scripts/vm/build-node-rootfs.sh" >&2
   exit 1
 fi

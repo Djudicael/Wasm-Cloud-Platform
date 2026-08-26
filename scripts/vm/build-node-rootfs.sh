@@ -145,7 +145,7 @@ EOF
 # Keep a guest-readable schema marker so provisioning can reject legacy cached
 # images before starting Firecracker. Bump this value whenever the early-boot
 # contract (PID 1, kernel arguments, or network bootstrap) changes.
-echo "2" > "$ROOTFS_DIR/etc/wasm-node/image-schema-version"
+echo "3" > "$ROOTFS_DIR/etc/wasm-node/image-schema-version"
 
 # Set hostname
 echo "wasm-node-vm" > "$ROOTFS_DIR/etc/hostname"
@@ -181,7 +181,9 @@ chmod +x "$ROOTFS_DIR/usr/local/bin/setup-mmds-network"
 
 # Use a deliberately small PID 1 for the disposable test guest. It mounts the
 # kernel filesystems, establishes the bootstrap address needed to reach MMDS,
-# applies the per-node address/config, and then execs the platform node.
+# applies the per-node address/config, and supervises the platform node. Keeping
+# wasm-node out of PID 1 lets the kernel terminate it under OOM and lets the
+# guest recover instead of entering "Out of memory and no killable processes".
 rm -f "$ROOTFS_DIR/sbin/init"
 cat > "$ROOTFS_DIR/sbin/init" << 'EOF'
 #!/bin/sh
@@ -211,19 +213,41 @@ else
     /usr/local/bin/setup-mmds-network
     NODE_ID=$(sed -n 's/^node_id = "\([^"]*\)"/\1/p' /etc/wasm-node/config.toml)
 fi
-exec /usr/local/bin/wasm-node \
-    --config /etc/wasm-node/config.toml \
-    --node-id "$NODE_ID" \
-    --db-path /var/lib/wasm-node/state.redb \
-    --nats-url nats://172.20.0.10:4222 \
-    --proxy-https-port 0 \
-    --admin-bind-address 0.0.0.0 \
-    --artifact-bind-address 0.0.0.0 \
-    --deploy-ingress-bind-address 0.0.0.0 \
-    --admin-advertised-host "$IP_ADDRESS" \
-    --auth-enabled true \
-    --auth-write-token local-test-write-token-change-me \
-    --auth-require-tls false
+NODE_PID=
+SHUTDOWN_REQUESTED=0
+forward_shutdown() {
+    SHUTDOWN_REQUESTED=1
+    if [ -n "$NODE_PID" ]; then
+        kill -TERM "$NODE_PID" 2>/dev/null || true
+    fi
+}
+trap forward_shutdown TERM INT
+
+while :; do
+    /usr/local/bin/wasm-node \
+        --config /etc/wasm-node/config.toml \
+        --node-id "$NODE_ID" \
+        --db-path /var/lib/wasm-node/state.redb \
+        --nats-url nats://172.20.0.10:4222 \
+        --proxy-https-port 0 \
+        --admin-bind-address 0.0.0.0 \
+        --artifact-bind-address 0.0.0.0 \
+        --deploy-ingress-bind-address 0.0.0.0 \
+        --admin-advertised-host "$IP_ADDRESS" \
+        --auth-enabled true \
+        --auth-write-token local-test-write-token-change-me \
+        --auth-require-tls false &
+    NODE_PID=$!
+    wait "$NODE_PID"
+    NODE_STATUS=$?
+    NODE_PID=
+    if [ "$SHUTDOWN_REQUESTED" -eq 1 ]; then
+        exit "$NODE_STATUS"
+    fi
+    echo "wasm-node exited with status $NODE_STATUS; restarting in 2 seconds" >&2
+    sync
+    sleep 2
+done
 EOF
 chmod +x "$ROOTFS_DIR/sbin/init"
 

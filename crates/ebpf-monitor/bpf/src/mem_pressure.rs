@@ -25,15 +25,15 @@
 //! ```text
 //! Pressure Level │ Action
 //! ───────────────┼──────────────────────────────────────────────────────────────
-//! Low            │ Log info. Emit wasm_memory_pressure_level = 1 metric.
+//! Low            │ Log info. Emit wasm_memory_pressure_level = 0 metric.
 //!                │ No instance action.
 //! ───────────────┼──────────────────────────────────────────────────────────────
-//! Medium         │ Log warning. Emit wasm_memory_pressure_level = 2 metric.
+//! Medium         │ Log warning. Emit wasm_memory_pressure_level = 1 metric.
 //!                │ Supervisor prunes all idle instances (idle_timeout = 0).
 //!                │ Backpressure signal set to "rejecting" for 30s.
 //!                │ No new cold starts until pressure drops.
 //! ───────────────┼──────────────────────────────────────────────────────────────
-//! Critical       │ Log error. Emit wasm_memory_pressure_level = 3 metric.
+//! Critical       │ Log error. Emit wasm_memory_pressure_level = 2 metric.
 //!                │ Supervisor kills the largest Wasm instance (most memory).
 //!                │ All non-essential instances killed.
 //!                │ Backpressure signal set to "rejecting" indefinitely.
@@ -47,10 +47,10 @@
 use aya_ebpf::{
     cty::c_long,
     macros::{kprobe, map, tracepoint},
-    maps::{Array, PerCpuHashMap, RingBuf},
+    maps::{Array, HashMap, PerCpuHashMap, RingBuf},
     programs::{ProbeContext, TracePointContext},
 };
-use aya_log_ebpf::{info, warn};
+use aya_log_ebpf::info;
 
 use ebpf_monitor_bpf::{EventHeader, EventType, MemPressureEvent, MonitorConfigMap};
 
@@ -68,10 +68,17 @@ static EVENTS: RingBuf = RingBuf::with_byte_size(512 * 1024, 0); // 512 KB
 #[map]
 static LAST_PRESSURE: PerCpuHashMap<u64, u32> = PerCpuHashMap::with_max_entries(256, 0);
 
+/// Last direct-reclaim event per cgroup. Direct reclaim can execute once per
+/// page, so emit at most one event every ten seconds without suppressing every
+/// later pressure episode for the lifetime of the node.
+#[map]
+static LAST_RECLAIM_EVENT_NS: HashMap<u64, u64> = HashMap::with_max_entries(256, 0);
+
+const RECLAIM_EVENT_INTERVAL_NS: u64 = 10_000_000_000;
+
 /// Pressure level constants (matching userspace enum).
 const PRESSURE_LOW: u32 = 0;
 const PRESSURE_MEDIUM: u32 = 1;
-const PRESSURE_CRITICAL: u32 = 2;
 
 /// KProbe: try_to_free_pages
 ///
@@ -111,30 +118,72 @@ fn try_try_to_free_pages(ctx: ProbeContext) -> Result<c_long, c_long> {
     let pid = (pid_tgid >> 32) as u32;
     let tid = pid_tgid as u32;
 
-    // Determine pressure level based on allocation order.
-    // High-order allocations failing (order >= 3) indicate severe
-    // fragmentation or memory pressure. Normal-order direct reclaim
-    // (order < 3) indicates moderate pressure.
-    let pressure_level = if order >= 3 {
-        PRESSURE_CRITICAL
-    } else {
-        PRESSURE_MEDIUM
-    };
+    let now = unsafe { aya_ebpf::helpers::bpf_ktime_get_ns() };
+    if emit_direct_reclaim(cgroup_id, pid, tid, now) {
+        info!(
+            &ctx,
+            "Memory pressure MEDIUM: direct reclaim order={}, cgroup={}", order, cgroup_id
+        );
+    }
 
-    // Deduplicate: only send event if the pressure level increased
-    // since the last report for this cgroup.
-    let last = unsafe {
-        LAST_PRESSURE
+    Ok(0)
+}
+
+/// Tracepoint: vmscan/mm_vmscan_direct_reclaim_begin
+///
+/// This tracepoint covers both global and memory-cgroup direct reclaim and is
+/// more stable than relying on one internal reclaim function name. Keep the
+/// kprobe above as an additional compatibility signal; the shared rate limit
+/// prevents the two hooks from duplicating events.
+#[tracepoint]
+pub fn direct_reclaim_begin(ctx: TracePointContext) -> c_long {
+    match try_direct_reclaim_begin(ctx) {
+        Ok(ret) => ret,
+        Err(ret) => ret,
+    }
+}
+
+fn try_direct_reclaim_begin(ctx: TracePointContext) -> Result<c_long, c_long> {
+    let _config = CONFIG.get(0).ok_or(0)?;
+    let order: u32 = unsafe { ctx.read_at(8)? };
+    let cgroup_id = unsafe { aya_ebpf::helpers::bpf_get_current_cgroup_id() };
+    let pid_tgid = aya_ebpf::helpers::bpf_get_current_pid_tgid();
+    let pid = (pid_tgid >> 32) as u32;
+    let tid = pid_tgid as u32;
+    let now = unsafe { aya_ebpf::helpers::bpf_ktime_get_ns() };
+
+    if emit_direct_reclaim(cgroup_id, pid, tid, now) {
+        info!(
+            &ctx,
+            "Memory pressure MEDIUM: direct reclaim tracepoint order={}, cgroup={}",
+            order,
+            cgroup_id
+        );
+    }
+
+    Ok(0)
+}
+
+#[inline(always)]
+fn emit_direct_reclaim(cgroup_id: u64, pid: u32, tid: u32, now: u64) -> bool {
+    // Direct reclaim proves pressure, but allocation order alone does not
+    // prove system-wide critical pressure. Reserve critical classification
+    // for vmpressure/OOM evidence.
+    let pressure_level = PRESSURE_MEDIUM;
+
+    // Rate-limit direct reclaim without permanently suppressing later
+    // pressure episodes for this cgroup.
+    let last_event_ns = unsafe {
+        LAST_RECLAIM_EVENT_NS
             .get(&cgroup_id)
             .copied()
-            .unwrap_or(PRESSURE_LOW)
+            .unwrap_or(0)
     };
-    if last >= pressure_level {
-        // Pressure level hasn't increased — skip to avoid flooding
-        // the ring buffer with duplicate events.
-        return Ok(0);
+    if now.saturating_sub(last_event_ns) < RECLAIM_EVENT_INTERVAL_NS {
+        // Skip closely spaced callbacks to avoid flooding the ring buffer.
+        return false;
     }
-    let _ = LAST_PRESSURE.insert(&cgroup_id, &pressure_level, 0);
+    let _ = LAST_RECLAIM_EVENT_NS.insert(&cgroup_id, &now, 0);
 
     // Emit the event. Userspace will read detailed memory stats
     // from /proc/meminfo and cgroup memory.stat since eBPF cannot
@@ -143,7 +192,7 @@ fn try_try_to_free_pages(ctx: ProbeContext) -> Result<c_long, c_long> {
         header: EventHeader {
             event_type: EventType::MemPressure as u32,
             _padding: 0,
-            timestamp_ns: unsafe { aya_ebpf::helpers::bpf_ktime_get_ns() },
+            timestamp_ns: now,
             pid,
             tid,
         },
@@ -155,19 +204,7 @@ fn try_try_to_free_pages(ctx: ProbeContext) -> Result<c_long, c_long> {
     };
     let _ = EVENTS.output(&event, 0);
 
-    if pressure_level == PRESSURE_CRITICAL {
-        warn!(
-            &ctx,
-            "Memory pressure CRITICAL: direct reclaim order={}, cgroup={}", order, cgroup_id
-        );
-    } else {
-        info!(
-            &ctx,
-            "Memory pressure MEDIUM: direct reclaim order={}, cgroup={}", order, cgroup_id
-        );
-    }
-
-    Ok(0)
+    true
 }
 
 /// Tracepoint: vmpressure/vmpressure_level_change
