@@ -182,7 +182,7 @@ redacted artifact with the result.
 | Final live-state snapshot | PASS / HISTORICAL PRE-TEARDOWN | Before authorized teardown, NATS PID `223906`, PostgreSQL PID `289481`, and platform node PIDs `325604`, `327249`, and `325384` were alive; every node health probe, both public routes, all 10 Prometheus targets, and Alertmanager were healthy. The later authorized-teardown row records removal of this environment |
 | Manual Prometheus UI validation | PASS (USER-VALIDATED) | The operator completed manual testing through `http://localhost:9095` after automated validation confirmed 10 targets up, zero targets down, and no active Alertmanager alerts |
 | Authorized teardown | PASS | After explicit operator authorization, `scripts/vm/destroy-testbed.sh` validated the selected state and removed its six exact state-labeled observability containers, recorded HAProxy PID/config/log, three platform-node VMs, NATS VM, PostgreSQL VM, exact TAP devices and bridge, state-derived OIDC credentials, and lifecycle state files. A post-teardown audit confirmed every recorded PID/device/container absent and ports 8088, 9095, and 9093 closed. No broad process or network matching was used |
-| 2026-08-25 production-like reprovision | PASS / LIVE | The exact state `.prod-validation-single-host-state.json` records NATS PID `170213`, PostgreSQL PID `170523`, and three 2-GiB platform nodes at `172.20.0.12-14`. After Part 4 cleanup and the final rolling restart, node PIDs are `387278`, `368191`, and `368273`. Every node health probe returns HTTP 200, HAProxy remains available at `http://127.0.0.1:8088`, OIDC readiness returns `database=ok`, and no alert remains active. This environment must remain running until the operator requests teardown. |
+| 2026-08-25 production-like reprovision | PASS / HISTORICAL PRE-TEARDOWN | The exact state `.prod-validation-single-host-state.json` recorded NATS PID `170213`, PostgreSQL PID `170523`, and three 2-GiB platform nodes at `172.20.0.12-14`. After Part 4 cleanup and the final rolling restart, node PIDs were `387278`, `368191`, and `368273`. Every node health probe returned HTTP 200, HAProxy was available at `http://127.0.0.1:8088`, OIDC readiness returned `database=ok`, and no alert remained active. The later 2026-08-26 teardown row records removal of this environment. |
 | eBPF guest kernel and verifier gate | PASS | Linux `6.1.80` was rebuilt with BTF, tracing, syscall tracepoints, kprobes, modules, and the complete Firecracker boot contract. All seven objects (`process_tracker`, `tcp_monitor`, `fd_watcher`, `mem_pressure`, `disk_monitor`, `syscall_counter`, and `namespace_enforcer`) loaded and attached on all three guests with no verifier error. The FD watcher used the supported `filp_close` fallback where `do_filp_close` was unavailable. |
 | eBPF verifier compatibility defects | FIXED / PASS | Linux 6.1 rejected implicit struct padding passed to ring-buffer helpers and a variable-size namespace header read. Event wire padding is now explicit and zeroed on both sides, the forged-header scan uses verifier-provable fixed reads, and all seven BPF ELFs rebuild with pinned `nightly-2026-08-20` and `bpf-linker` 0.11.0. The reusable verifier-log summary is `scripts/ebpf/summarize-verifier-log.jq`. |
 | eBPF identity boundary | PASS FOR IN-PROCESS WASI HTTP / STRONGER ISOLATION OPTIONAL | Initial runtime evidence showed the node's own `bpf(2)`, socket, and worker-thread activity classified as Wasm-instance activity, producing false privilege-escalation incidents and kill requests. Root causes were PID/TGID filtering, late namespace-map wiring through a failed `Arc::get_mut`, registering maps from the thread being monitored, discarding the event TID in userspace, and falling back to killing the largest instance. Each WASI HTTP instance now owns a dedicated single-thread Tokio runtime. The supervisor learns that Linux TID, registers its namespace/application identity from an unmonitored control thread before releasing application execution, mirrors it into all three maps, preserves the TID through parsing and dispatch, and can kill the exact matching instance. A dedicated process or cgroup remains the stronger production boundary when tenant-grade isolation is required. |
@@ -191,6 +191,7 @@ redacted artifact with the result.
 | eBPF deterministic probes (Phase 6, Part 2) | PARTIAL PASS | Exact-identity process start/exit, known-syscall, FD open/close, TCP connect/accept/send/receive/close, PostgreSQL allow, and NATS policy-deny assertions passed with per-type Prometheus evidence and zero parse errors. A false retransmit heuristic was removed and the corrected node reports zero retransmits. Direct reclaim emitted `MEDIUM` and activated backpressure, but the deliberately undersized guest reached OOM before its counter could be scraped; application `sync_all` writes did not move the block counter. Memory-counter and application block-I/O assertions remain open, and PID-1 OOM behavior plus the 4-GiB configured ceiling inside a 2-GiB VM are recorded production blockers. |
 | eBPF block-I/O accuracy (Phase 6, Part 3) | PASS WITH ATTRIBUTION LIMITATION | Linux 6.1 issue/complete records now use the real raw-tracepoint offsets, correlate by device/sector/operation, retain issue identity and cgroup, decode native `dev_t`, classify read/write/flush, and export completed bytes. A 256-MiB synchronous canary write produced 750 slow events and 238,960,640 slow-write bytes at the validation-only 1-ms threshold with zero parser errors; records reported `254:0`, nonzero sectors, `bytes == nr_sector * 512`, and measured latency. Cold artifact reads retained the exact application identity. Buffered ext4 writes correctly reported the kernel writeback thread as unregistered instead of falsely claiming the WASI deployment; per-application buffered-write attribution requires a process/cgroup boundary and cgroup-aware writeback accounting. The 50-ms default was restored before rolling schema 4 through all nodes. |
 | eBPF ring-buffer pressure (Phase 6, Part 4) | PASS | Every BPF object now records failed ring reservations/outputs in a per-CPU counter. Userspace exports per-monitor loss, drop-counter read errors, bounded dispatcher depth/capacity, and saturation transitions. A 100,000-iteration FD burst deliberately caused 87,292 kernel drops and 19 queue-saturation transitions with zero parse errors; a second burst caused both Prometheus and Alertmanager loss/saturation alerts to fire. High-rate success logs initially caused one scrape outage, so ordinary FD/TCP records moved from info to debug. The final 100,000-iteration retest completed HTTP 200 with zero failures across 10 node/OIDC health samples, zero queue saturation, zero parse errors, and bounded memory. The canary and route were removed before the final rolling node update. |
+| 2026-08-26 Part 4 authorized teardown | PASS | After explicit operator authorization, the canonical state-scoped teardown removed the six recorded observability containers, HAProxy PID `294922` plus its generated config/log, NATS PID `170213`, PostgreSQL PID `170523`, platform-node PIDs `387278`, `368191`, and `368273`, their five TAP devices, bridge `br-local-test`, state-derived OIDC secrets, observability runtime directory, and both lifecycle state files. Post-teardown checks found every exact PID, container, device, and generated file absent. No listeners remained on `8088`, `8405`, `9095`, `9093`, `4317`, or `4318`. Rootfs/kernel assets and repository work were intentionally retained so Part 5 can begin from a freshly provisioned environment. |
 | PostgreSQL unattended provisioning | DEFECT FIXED / PASS | The service wrapper initially blocked on an expired terminal-bound `sudo` ticket and created no VM. Under WSL it now invokes the exact CLI through `wsl.exe -u root`, matching platform provisioning. Service `oidc-postgres` then became reachable at `172.20.0.20:5432`. |
 | OIDC application deployment (2026-08-25) | PASS | The locked frontend audited 101 npm packages with zero reported vulnerabilities; both WASI components built; migrations through V37 and repeatable seed data completed against PostgreSQL 17.11 using `wasi-pg-client 0.2.0`; frontend, SPA route, discovery issuer, seeded login, and backend readiness all passed through the same-origin HAProxy gateway. Readiness returned `{"checks":{"database":"ok"},"status":"ready"}`. |
 | Focused Playwright production journey | PASS | Playwright 1.62.1 Chromium was installed in WSL. Six focused login/dashboard tests passed against `http://localhost:8088`, both before and after the rolling node update: form rendering, invalid credentials, successful login/redirect, empty-field validation, authenticated navigation, and API-backed dashboard statistics. The final serial run completed 6/6 in 4.9 seconds. |
@@ -200,6 +201,8 @@ redacted artifact with the result.
 | Rolling node image update | PASS | The eBPF metric fix was promoted by restarting `local-test-node-0`, `-1`, and `-2` one at a time from the corrected rootfs. Public OIDC readiness remained `database: ok` after every replacement, all nodes reconverged healthy, PostgreSQL/NATS/observability were preserved, and the focused Playwright gate passed afterward. |
 | 2026-08-26 Part 3 source gates | PASS WITH DEPENDENCY NOTICE | In WSL, `cargo fmt --all -- --check`, the required native workspace all-target check, workspace all-target Clippy with warnings denied, eBPF-feature node Clippy with warnings denied, all 118 eBPF monitor tests, 87 common tests, 64 runtime unit plus 7 integration tests, 38 supervisor unit plus 10 integration tests, 98 node library/binary unit plus 10 integration tests, all seven BPF object builds, changed-script shell syntax, and explicit `wasm32-wasip2` release builds for `hello-axum`, `http-hello-component`, and `wasi-grpc-echo` pass. Rust still emits the separately tracked future-incompatibility notice for `proc-macro-error2 2.0.1`. |
 | 2026-08-26 Part 4 source gates | PASS WITH DEPENDENCY NOTICE | Formatting, required native workspace all-target check, workspace all-target Clippy with warnings denied, eBPF-feature node Clippy with warnings denied, all 119 eBPF monitor tests, clean builds of all seven BPF ELFs, shell syntax, scoped whitespace checks, and explicit `wasm32-wasip2` release builds for `hello-axum`, `http-hello-component`, and `wasi-grpc-echo` pass in WSL. The isolated BPF clean was also verified with the shared native target variable set. The existing `proc-macro-error2 2.0.1` future-incompatibility notice remains separately tracked. |
+| 2026-08-27 Phase 6 Part 5 failure/degraded modes | PASS WITH OBSERVABILITY GAP | A state-driven runner validated real eBPF capability removal, a physically BTF-stripped guest kernel, deterministic permission/program/probe/consumer failures, optional fallback, mandatory startup refusal, Prometheus state, alert separation, peer availability, canary continuity, and clean recovery. All three nodes finish healthy and node 0 reports `ebpf_active=true`, `monitoring_degraded=false`. The unrelated HAProxy exporter target remains down and `HAProxyExporterDown` remains active; fix it before treating the observability stack as production-complete. |
+| 2026-08-27 Part 5 source and audit gates | PASS WITH DEPENDENCY NOTICE | Required native workspace check, workspace Clippy with warnings denied, eBPF-feature node Clippy, 120 eBPF-monitor tests, vm-testbed unit/doc tests, all seven BPF ELFs, three explicit `wasm32-wasip2` release builds, formatting, and changed-script syntax pass in WSL. `cargo audit --deny warnings` initially found yanked `chacha20 0.10.1`; `Cargo.lock` now resolves non-yanked `0.10.2`, and the audit passes. Rust still reports the separately tracked `proc-macro-error2 2.0.1` future-incompatibility notice. |
 
 ### Execution notes
 
@@ -480,7 +483,12 @@ The next microVM run must still prove the kernel-runtime portion below.
         burst filled the dispatcher queue and kernel ring, all loss was exported
         by bounded-label metrics, Prometheus and Alertmanager fired, memory stayed
         bounded, and the post-remediation burst preserved node/OIDC responsiveness.
-- [ ] Deny eBPF loading and confirm the node continues safely in fallback mode.
+- [x] Deny eBPF loading and confirm the node continues safely in fallback mode.
+  - [x] **Part 5 — explicit failure and degraded modes:** optional monitoring
+        failures keep the node ready in a reported degraded state and start the
+        userspace fallback; mandatory monitoring failures refuse readiness.
+        Monitoring-specific metrics and alerts distinguish these states from
+        application/node unavailability, and clean restart restores active probes.
 - [x] Restart every node and reload probes while preserving public application
       readiness. Explicit pinned-map residue inspection remains open.
 - [ ] Unload/reload probes without leaving pinned maps or
@@ -802,6 +810,87 @@ no active alert. Final PIDs are node 0 `387278`, node 1 `368191`, node 2
 wasm-node-rootfs.ext4 a8ac95c1364f3313da92373d49050a526c38be3d99b0e68563aa2c020bce328f
 vmlinux-6.1             7d6222139391f70bef3becb514916550c7b824e63a4e72ffa22485e6dab3e3d5
 ```
+
+### Part 5 record — failure and degraded modes
+
+Status: **PASS on 2026-08-27.** The test targeted only recorded node
+`local-test-node-0` (`172.20.0.12`) in a fresh three-node production-like
+topology. Nodes 1 and 2, the separate NATS VM, HAProxy, and the disposable
+observability services remained running. The routed `default/ebpf-failure:v1`
+canary was checked through `http://127.0.0.1:8088/health` with host
+`ebpf-failure.internal` after every transition.
+
+The reusable command was:
+
+```bash
+bash scripts/vm/validate-ebpf-degraded-modes.sh \
+  --state-file .prod-validation-single-host-state.json
+```
+
+The runner resolves the exact node from state and uses state-driven
+`restart-node`; it does not kill processes, remove devices, or select VMs by a
+broad pattern. Local fault hooks are accepted only through explicit testbed boot
+arguments and must never be configured in production.
+
+| Condition | Mechanism | Optional-mode result | Recovery / alert evidence |
+|---|---|---|---|
+| Missing eBPF capability | Real guest execution with only `CAP_BPF`, `CAP_SYS_ADMIN`, `CAP_PERFMON`, and `CAP_NET_ADMIN` removed | HTTP 200 degraded readiness; `ebpf_active=0`; reason `missing_capability`; application and peers remained available | Clean restart restored active monitoring |
+| Insufficient privilege | Deterministic preflight fault | Fallback active; reason `insufficient_privileges` | Metrics, readiness, canary, peers, and clean restart passed |
+| Program rejected | Deterministic loader fault | Fallback active; reason `program_load_rejected` | Metrics, readiness, canary, peers, and clean restart passed |
+| Tracepoint/probe unavailable | Deterministically skipped disk monitor while other objects loaded | eBPF remained active but explicitly degraded with reason `partial_probe_set` | `EbpfMonitoringIncomplete` rule is distinct from total monitoring loss; clean restart restored the full probe set |
+| Missing/malformed BTF | Disposable copy of the real kernel with `.BTF` and `.BTF_ids` removed by `objcopy` | Guest booted; real relocations/verifier load failed; fallback active; reason `missing_btf` | `EbpfMonitoringUnavailable` fired; `PlatformNodeDown` did not; application and peers remained available |
+| Ring consumer termination | Deterministic consumer exit after startup | Watchdog changed active to false, reason to `consumer_exited`, and started fallback | Metrics/readiness/canary passed; clean restart restored the consumer |
+| Mandatory monitoring plus missing BTF | Same physically stripped kernel with `[ebpf].required=true` | Node deliberately did not become ready; nodes 1 and 2 continued serving the canary | A final normal-kernel restart restored node 0 and active monitoring |
+
+Two test defects produced production-relevant observations:
+
+- removing *all* Linux capabilities also removed `CAP_DAC_OVERRIDE`, preventing
+  the root process from opening its cloned redb state file. Capability tests and
+  production units must remove only the eBPF-related capabilities or grant the
+  state directory to the runtime identity. Least privilege must be validated
+  against every required filesystem and network operation, not only BPF load;
+- node readiness can return before a redeployed application has reconverged on
+  that node. During early iterations HAProxy briefly returned 502 after a clean
+  node restart. Production load balancers need application-aware backend health,
+  scheduler convergence/startup gates, and connection draining; node-level
+  `/readyz` alone is insufficient for an application pool.
+
+Implementation added a dynamic monitoring availability state, bounded failure
+reasons, `wasm_ebpf_monitoring_required`,
+`wasm_ebpf_monitoring_degraded`, and
+`wasm_ebpf_monitoring_failures_total{reason}`. Optional failures are a degraded
+dependency and mandatory failures are unhealthy. Loader failures retain their
+stage so a real malformed/missing-BTF verifier path is not collapsed into a
+generic unavailable reason. Prometheus has separate unavailable and incomplete
+eBPF alerts, explicitly distinguishing monitoring failure from application
+failure.
+
+Final live evidence after the clean restart:
+
+- NATS PID `52250`; node PIDs `90300`, `65543`, and `65596`; every platform node
+  returns HTTP 200 and all three Prometheus platform-node targets are up;
+- node 0 reports `ebpf_active=true`, `monitoring_required=false`,
+  `monitoring_degraded=false`, and no degraded reason;
+- kernel SHA-256 is
+  `7d6222139391f70bef3becb514916550c7b824e63a4e72ffa22485e6dab3e3d5`;
+  node-rootfs SHA-256 is
+  `aaaf63025213b3cedb716b52e9111334d563b695bb78976fd4aee4165dd7b89b`;
+- the HAProxy exporter target is down and `HAProxyExporterDown` is active. This
+  is not an eBPF/application failure, but it is an open observability defect that
+  must be fixed before a production gate can claim all telemetry targets healthy.
+
+The final WSL source gate passed formatting, required native workspace checking,
+workspace Clippy with warnings denied, eBPF-feature node Clippy, 120 eBPF-monitor
+tests, vm-testbed unit/doc tests, all seven BPF builds, changed-script syntax, and
+release `wasm32-wasip2` builds for `hello-axum`, `http-hello-component`, and
+`wasi-grpc-echo`. `cargo audit --deny warnings` initially rejected yanked
+`chacha20 0.10.1`; the lockfile was updated to non-yanked `0.10.2`, after which
+the audit and native workspace recheck passed. The known
+`proc-macro-error2 2.0.1` future-incompatibility notice remains.
+
+The environment remains live in `.prod-validation-single-host-state.json` for
+operator inspection and the next explicitly authorized part. Teardown has not
+been run.
 
 Post-change repository verification passed in WSL with
 `CARGO_TARGET_DIR=/tmp/wasm-cloud-platform-target`: formatting, the required

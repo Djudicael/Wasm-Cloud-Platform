@@ -96,6 +96,21 @@ enum Commands {
         id: String,
         #[arg(long, default_value = ".vm-testbed-state.json")]
         state_file: PathBuf,
+        /// Inject one deterministic eBPF failure into this local test node.
+        #[arg(long, value_enum)]
+        ebpf_test_fault: Option<EbpfTestFault>,
+        /// Configure eBPF as mandatory for this restart.
+        #[arg(long)]
+        ebpf_required: bool,
+        /// Persist a running VM that is expected not to become healthy.
+        #[arg(long, requires = "ebpf_required")]
+        expect_unhealthy: bool,
+        /// Use a one-restart kernel override without changing topology state.
+        #[arg(long)]
+        kernel: Option<PathBuf>,
+        /// Start the guest node with an empty Linux capability bounding set.
+        #[arg(long)]
+        drop_ebpf_capabilities: bool,
     },
 
     /// Scale a detached topology to the requested node count.
@@ -235,6 +250,29 @@ enum TopologyProfile {
     SingleNode,
     MultiNode,
     ChaosReady,
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
+enum EbpfTestFault {
+    MissingCapability,
+    PermissionDenied,
+    ProgramRejected,
+    ProbeUnavailable,
+    MissingBtf,
+    ConsumerExit,
+}
+
+impl EbpfTestFault {
+    fn as_kernel_value(self) -> &'static str {
+        match self {
+            Self::MissingCapability => "missing_capability",
+            Self::PermissionDenied => "permission_denied",
+            Self::ProgramRejected => "program_rejected",
+            Self::ProbeUnavailable => "probe_unavailable",
+            Self::MissingBtf => "missing_btf",
+            Self::ConsumerExit => "consumer_exit",
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -390,9 +428,26 @@ async fn main() -> Result<()> {
             println!("Removed {}", id);
         }
 
-        Commands::RestartNode { id, state_file } => {
+        Commands::RestartNode {
+            id,
+            state_file,
+            ebpf_test_fault,
+            ebpf_required,
+            expect_unhealthy,
+            kernel,
+            drop_ebpf_capabilities,
+        } => {
             let mut state = read_state(&state_file)?;
-            let vm = restart_node_from_state(&mut state, &id).await?;
+            let vm = restart_node_from_state(
+                &mut state,
+                &id,
+                ebpf_test_fault,
+                ebpf_required,
+                expect_unhealthy,
+                kernel,
+                drop_ebpf_capabilities,
+            )
+            .await?;
             write_state(&state_file, &state)?;
             println!(
                 "Restarted {} admin={} proxy={} pid={}",
@@ -575,6 +630,7 @@ async fn main() -> Result<()> {
                 gateway: "172.20.0.1".to_string(),
                 bridge_name: bridge,
                 tap_device: tap,
+                extra_kernel_args: Vec::new(),
                 mmds_data: Some(serde_json::json!({
                     "node_config": {
                         "node_id": id,
@@ -662,6 +718,7 @@ async fn spawn_service_from_state(
         gateway: state.gateway.clone(),
         bridge_name: state.bridge_name.clone(),
         tap_device: network::tap_name_for_id(&id),
+        extra_kernel_args: Vec::new(),
         mmds_data: Some(serde_json::json!({
             "service_config": {
                 "id": id,
@@ -748,6 +805,7 @@ async fn spawn_node_from_state(
         gateway: state.gateway.clone(),
         bridge_name: state.bridge_name.clone(),
         tap_device: tap,
+        extra_kernel_args: Vec::new(),
         mmds_data: Some(serde_json::json!({
             "node_config": {
                 "node_id": node_id,
@@ -789,6 +847,11 @@ async fn remove_node_from_state(state: &mut PersistedClusterState, id: &str) -> 
 async fn restart_node_from_state(
     state: &mut PersistedClusterState,
     id: &str,
+    ebpf_test_fault: Option<EbpfTestFault>,
+    ebpf_required: bool,
+    expect_unhealthy: bool,
+    kernel: Option<PathBuf>,
+    drop_ebpf_capabilities: bool,
 ) -> Result<PersistedVm> {
     let index = state
         .nodes
@@ -807,9 +870,27 @@ async fn restart_node_from_state(
     network::remove_tap(&previous.tap_device)
         .map_err(|error| anyhow!("failed to remove TAP {}: {error}", previous.tap_device))?;
 
+    let mut extra_kernel_args = Vec::new();
+    if let Some(fault) = ebpf_test_fault {
+        extra_kernel_args.push(format!("wcp.ebpf_test_fault={}", fault.as_kernel_value()));
+    }
+    if ebpf_required {
+        extra_kernel_args.push("wcp.ebpf_required=1".to_string());
+    }
+    if drop_ebpf_capabilities {
+        extra_kernel_args.push("wcp.ebpf_drop_capabilities=1".to_string());
+    }
+
+    let kernel_path = match kernel {
+        Some(path) => path
+            .canonicalize()
+            .with_context(|| format!("kernel override does not exist: {}", path.display()))?,
+        None => state.kernel_path.clone(),
+    };
+
     let config = VmConfig {
         id: previous.id.clone(),
-        kernel_path: state.kernel_path.clone(),
+        kernel_path,
         rootfs_path: state.node_rootfs_path.clone(),
         data_drive_path: state.node_data_drive_path.clone(),
         memory_mb: state.node_memory_mb,
@@ -818,6 +899,7 @@ async fn restart_node_from_state(
         gateway: state.gateway.clone(),
         bridge_name: state.bridge_name.clone(),
         tap_device: previous.tap_device.clone(),
+        extra_kernel_args,
         mmds_data: Some(serde_json::json!({
             "node_config": {
                 "node_id": previous.id,
@@ -832,7 +914,16 @@ async fn restart_node_from_state(
     };
 
     let mut vm = MicroVm::spawn(config).await?;
-    vm.wait_for_health(Duration::from_secs(120)).await?;
+    if expect_unhealthy {
+        if vm.wait_for_health(Duration::from_secs(12)).await.is_ok() {
+            bail!("node {id} became healthy but an unhealthy startup was expected");
+        }
+        if vm.vmm_process.try_wait()?.is_some() {
+            bail!("node {id} VMM exited during the expected-unhealthy test");
+        }
+    } else {
+        vm.wait_for_health(Duration::from_secs(120)).await?;
+    }
     let persisted = detach_vm_state(&mut vm);
     state.nodes[index] = persisted.clone();
     Ok(persisted)

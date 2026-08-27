@@ -774,6 +774,66 @@ use supervisor::SupervisorCommand;
 
 mod dns_stub;
 
+struct EbpfDependencyChecker {
+    runtime: ebpf_monitor::MonitorRuntimeState,
+}
+
+impl EbpfDependencyChecker {
+    fn new(runtime: ebpf_monitor::MonitorRuntimeState) -> Self {
+        Self { runtime }
+    }
+}
+
+impl proxy::health::DependencyChecker for EbpfDependencyChecker {
+    fn name(&self) -> &str {
+        "ebpf_monitoring"
+    }
+
+    fn check(&self) -> common::health::DependencyHealth {
+        let availability = self.runtime.snapshot();
+        let (status, message) = if !availability.enabled {
+            (
+                common::health::DependencyStatus::Healthy,
+                "disabled by configuration".to_string(),
+            )
+        } else if !availability.monitoring_degraded {
+            (
+                common::health::DependencyStatus::Healthy,
+                "kernel monitoring active".to_string(),
+            )
+        } else if availability.required {
+            (
+                common::health::DependencyStatus::Unhealthy,
+                format!(
+                    "required kernel monitoring unavailable: {}",
+                    availability.reason.as_deref().unwrap_or("unknown")
+                ),
+            )
+        } else {
+            let mode = if availability.ebpf_active {
+                "kernel monitoring incomplete"
+            } else {
+                "userspace fallback active"
+            };
+            (
+                common::health::DependencyStatus::Degraded,
+                format!(
+                    "kernel monitoring degraded; {mode}: {}",
+                    availability.reason.as_deref().unwrap_or("unknown")
+                ),
+            )
+        };
+
+        common::health::DependencyHealth {
+            name: self.name().to_string(),
+            status,
+            message,
+            latency_ms: None,
+            last_check: chrono::Utc::now().to_rfc3339(),
+        }
+    }
+}
+
 /// Platform callbacks for the eBPF monitor's recovery actions.
 ///
 /// This struct implements the `EventCallbacks` trait defined in the
@@ -1629,6 +1689,13 @@ async fn main() -> anyhow::Result<()> {
     let ebpf_dispatcher_sync = ebpf_dispatcher.clone();
     let _ebpf_handle =
         ebpf_monitor::init(ebpf_config, ebpf_metrics, ebpf_dispatcher, node_pid).await;
+    let ebpf_runtime_state = _ebpf_handle.runtime_state();
+    let ebpf_runtime_state_admin = ebpf_runtime_state.clone();
+    let ebpf_startup = ebpf_runtime_state.snapshot();
+    if config.ebpf.required && (!ebpf_startup.ebpf_active || ebpf_startup.monitoring_degraded) {
+        let reason = ebpf_startup.reason.unwrap_or_else(|| "unknown".to_string());
+        anyhow::bail!("required eBPF monitoring failed to initialize: {reason}");
+    }
     if _ebpf_handle.is_ebpf_active() {
         info!("eBPF monitor initialized with kernel-level monitoring");
     } else {
@@ -1841,6 +1908,7 @@ async fn main() -> anyhow::Result<()> {
             Box::new(proxy::health::MemoryDependencyChecker::new(
                 config.health.max_memory_bytes,
             )),
+            Box::new(EbpfDependencyChecker::new(ebpf_runtime_state.clone())),
         ]),
         app_health_registry: app_health_registry.clone(),
         config: proxy::health::HealthCheckConfig {
@@ -2252,9 +2320,14 @@ async fn main() -> anyhow::Result<()> {
             axum::routing::get(move || {
                 let metrics = ebpf_metrics_admin.clone();
                 let dispatcher = ebpf_dispatcher_admin.clone();
+                let runtime = ebpf_runtime_state_admin.clone();
                 async move {
+                    let availability = runtime.snapshot();
                     let status = ebpf_monitor::MonitorStatus {
-                        ebpf_active: metrics.ebpf_active.get() == 1,
+                        ebpf_active: availability.ebpf_active,
+                        monitoring_required: availability.required,
+                        monitoring_degraded: availability.monitoring_degraded,
+                        monitoring_degraded_reason: availability.reason,
                         backpressure_active: dispatcher.is_backpressure_active(),
                         degraded_mode: dispatcher.is_degraded(),
                         pressure_level: dispatcher.last_pressure_level(),
@@ -3347,6 +3420,7 @@ async fn main() -> anyhow::Result<()> {
                 let new_ebpf_config =
                     ebpf_monitor::MonitorConfig::from_ebpf_section(&common::config::EbpfSection {
                         enabled: hot.ebpf.enabled,
+                        required: hot.ebpf.required,
                         fd_soft_limit: hot.ebpf.fd_soft_limit,
                         fd_hard_limit: hot.ebpf.fd_hard_limit,
                         mem_low_threshold_pages: hot.ebpf.mem_low_threshold_pages,

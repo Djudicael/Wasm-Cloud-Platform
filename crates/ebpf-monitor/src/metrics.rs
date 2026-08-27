@@ -73,6 +73,15 @@ pub struct EbpfMetrics {
     /// Whether eBPF is loaded and active (1=active, 0=fallback).
     pub ebpf_active: IntGauge,
 
+    /// Whether eBPF monitoring is required for node readiness.
+    pub monitoring_required: IntGauge,
+
+    /// Whether monitoring is incomplete or using userspace fallback.
+    pub monitoring_degraded: IntGauge,
+
+    /// Transitions into a degraded monitoring state, labeled by bounded reason.
+    pub monitoring_failures: IntCounterVec,
+
     /// Total events processed from the ring buffer (all types).
     pub events_processed: IntCounter,
 
@@ -214,6 +223,36 @@ impl EbpfMetrics {
             registry
         );
 
+        let monitoring_required = register_metric!(
+            IntGauge::with_opts(Opts::new(
+                "wasm_ebpf_monitoring_required",
+                "Whether eBPF monitoring is required for node readiness"
+            ))
+            .unwrap(),
+            registry
+        );
+
+        let monitoring_degraded = register_metric!(
+            IntGauge::with_opts(Opts::new(
+                "wasm_ebpf_monitoring_degraded",
+                "Whether kernel monitoring is incomplete or using userspace fallback"
+            ))
+            .unwrap(),
+            registry
+        );
+
+        let monitoring_failures = register_metric!(
+            IntCounterVec::new(
+                Opts::new(
+                    "wasm_ebpf_monitoring_failures_total",
+                    "Transitions into degraded eBPF monitoring by bounded reason"
+                ),
+                &["reason"]
+            )
+            .unwrap(),
+            registry
+        );
+
         let events_processed = register_metric!(
             IntCounter::with_opts(Opts::new(
                 "wasm_ebpf_events_processed_total",
@@ -315,6 +354,8 @@ impl EbpfMetrics {
 
         // Initialize: eBPF is not active yet (will be set to 1 if programs load)
         ebpf_active.set(0);
+        monitoring_required.set(0);
+        monitoring_degraded.set(0);
 
         EbpfMetrics {
             oom_kills,
@@ -328,6 +369,9 @@ impl EbpfMetrics {
             disk_io_bytes,
             security_violations,
             ebpf_active,
+            monitoring_required,
+            monitoring_degraded,
+            monitoring_failures,
             events_processed,
             events_by_type,
             events_parse_errors,
@@ -344,11 +388,23 @@ impl EbpfMetrics {
     /// Mark eBPF as active (programs loaded and attached).
     pub fn mark_ebpf_active(&self) {
         self.ebpf_active.set(1);
+        self.monitoring_degraded.set(0);
     }
 
     /// Mark eBPF as inactive (fallback mode).
     pub fn mark_ebpf_fallback(&self) {
         self.ebpf_active.set(0);
+    }
+
+    /// Record whether eBPF is a hard readiness requirement.
+    pub fn set_monitoring_required(&self, required: bool) {
+        self.monitoring_required.set(i64::from(required));
+    }
+
+    /// Record an incomplete or unavailable kernel-monitoring state.
+    pub fn mark_monitoring_degraded(&self, reason: &'static str) {
+        self.monitoring_degraded.set(1);
+        self.monitoring_failures.with_label_values(&[reason]).inc();
     }
 
     /// Record a disk I/O latency observation (converting nanoseconds to seconds).

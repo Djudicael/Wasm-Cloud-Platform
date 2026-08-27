@@ -148,6 +148,7 @@ impl ClusterFixture {
                 gateway: self.gateway.clone(),
                 bridge_name: self.bridge_name.clone(),
                 tap_device: tap,
+                extra_kernel_args: Vec::new(),
                 mmds_data: Some(json!({
                     "nats_config": {
                         "jetstream": true,
@@ -205,6 +206,7 @@ impl ClusterFixture {
             gateway: self.gateway.clone(),
             bridge_name: self.bridge_name.clone(),
             tap_device: tap,
+            extra_kernel_args: Vec::new(),
             mmds_data: Some(json!({
                 "node_config": {
                     "node_id": node_id,

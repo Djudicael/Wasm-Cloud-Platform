@@ -227,6 +227,7 @@ pub(crate) fn merge_config(base: NodeConfig, overlay: NodeConfig) -> NodeConfig 
         },
         ebpf: EbpfSection {
             enabled: overlay.ebpf.enabled,
+            required: overlay.ebpf.required,
             fd_soft_limit: overlay.ebpf.fd_soft_limit,
             fd_hard_limit: overlay.ebpf.fd_hard_limit,
             mem_low_threshold_pages: overlay.ebpf.mem_low_threshold_pages,

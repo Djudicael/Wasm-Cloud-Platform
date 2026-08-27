@@ -844,6 +844,10 @@ impl Default for RateLimitSection {
 pub struct EbpfSection {
     #[serde(default = "default_ebpf_enabled")]
     pub enabled: bool,
+    /// Refuse node readiness when kernel eBPF monitoring cannot be activated.
+    /// Keep this false when userspace fallback is an acceptable degraded mode.
+    #[serde(default)]
+    pub required: bool,
     #[serde(default = "default_fd_soft")]
     pub fd_soft_limit: u32,
     #[serde(default = "default_fd_hard")]
@@ -920,6 +924,7 @@ impl Default for EbpfSection {
     fn default() -> Self {
         EbpfSection {
             enabled: default_ebpf_enabled(),
+            required: false,
             fd_soft_limit: default_fd_soft(),
             fd_hard_limit: default_fd_hard(),
             mem_low_threshold_pages: default_mem_low(),

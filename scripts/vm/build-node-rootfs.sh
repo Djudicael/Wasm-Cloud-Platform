@@ -22,6 +22,13 @@ UBUNTU_RELEASE="${UBUNTU_RELEASE:-noble}"
 
 echo "=== Building wasm-node rootfs ==="
 
+if [[ -n ${WSL_DISTRO_NAME:-} ]] && command -v wsl.exe >/dev/null; then
+    run_privileged() { wsl.exe -u root -- "$@"; }
+else
+    sudo -v
+    run_privileged() { sudo -E "$@"; }
+fi
+
 # Ensure wasm-node is built
 BUILD_TARGET_DIR="${CARGO_TARGET_DIR:-target}"
 if [[ "${SKIP_RUST_BUILD:-false}" == true ]]; then
@@ -53,7 +60,11 @@ fi
 # Create working directory
 WORK_DIR="$(mktemp -d)"
 TEMP_IMAGE=""
+MOUNT=""
 cleanup() {
+    if [[ -n "$MOUNT" ]] && mountpoint -q "$MOUNT"; then
+        run_privileged umount "$MOUNT" || true
+    fi
     rm -rf -- "$WORK_DIR"
     if [[ -n "$TEMP_IMAGE" ]]; then
         rm -f -- "$TEMP_IMAGE"
@@ -71,13 +82,13 @@ command -v debootstrap >/dev/null || {
     exit 1
 }
 echo "Creating minimal Ubuntu $UBUNTU_RELEASE rootfs..."
-sudo debootstrap \
+run_privileged debootstrap \
     --variant=minbase \
     --include=ca-certificates,curl,iproute2,iptables,libelf1t64 \
     "$UBUNTU_RELEASE" \
     "$ROOTFS_DIR" \
     http://archive.ubuntu.com/ubuntu
-sudo chown -R "$(id -u):$(id -g)" "$ROOTFS_DIR"
+run_privileged chown -R "$(id -u):$(id -g)" "$ROOTFS_DIR"
 
 # Create necessary directories
 mkdir -p "$ROOTFS_DIR/etc/wasm-node"
@@ -140,6 +151,9 @@ trusted_proxies = ["172.20.0.1/32"]
 
 [health]
 check_interval_secs = 2
+
+[ebpf]
+required = false
 EOF
 
 # Keep a guest-readable schema marker so provisioning can reject legacy cached
@@ -196,13 +210,32 @@ ip link set eth0 up
 NODE_ID=vm-node
 IP_ADDRESS=
 GATEWAY=172.20.0.1
+EBPF_TEST_FAULT=
+EBPF_REQUIRED=0
+EBPF_DROP_CAPABILITIES=0
 for ARGUMENT in $(cat /proc/cmdline); do
     case "$ARGUMENT" in
         wcp.node_id=*) NODE_ID=${ARGUMENT#wcp.node_id=} ;;
         wcp.ip=*) IP_ADDRESS=${ARGUMENT#wcp.ip=} ;;
         wcp.gateway=*) GATEWAY=${ARGUMENT#wcp.gateway=} ;;
+        wcp.ebpf_test_fault=*) EBPF_TEST_FAULT=${ARGUMENT#wcp.ebpf_test_fault=} ;;
+        wcp.ebpf_required=1) EBPF_REQUIRED=1 ;;
+        wcp.ebpf_drop_capabilities=1) EBPF_DROP_CAPABILITIES=1 ;;
     esac
 done
+case "$EBPF_TEST_FAULT" in
+    ""|missing_capability|permission_denied|program_rejected|probe_unavailable|missing_btf|consumer_exit) ;;
+    *)
+        echo "ignoring invalid local eBPF test fault: $EBPF_TEST_FAULT" >&2
+        EBPF_TEST_FAULT=
+        ;;
+esac
+if [ "$EBPF_REQUIRED" -eq 1 ]; then
+    sed -i 's/^required = .*/required = true/' /etc/wasm-node/config.toml
+fi
+if [ -n "$EBPF_TEST_FAULT" ]; then
+    export WASM_EBPF_TEST_FAULT="$EBPF_TEST_FAULT"
+fi
 if [ -n "$IP_ADDRESS" ]; then
     ip address flush dev eth0 scope global
     ip address add "$IP_ADDRESS/24" dev eth0
@@ -224,7 +257,11 @@ forward_shutdown() {
 trap forward_shutdown TERM INT
 
 while :; do
-    /usr/local/bin/wasm-node \
+    set -- /usr/local/bin/wasm-node
+    if [ "$EBPF_DROP_CAPABILITIES" -eq 1 ]; then
+        set -- setpriv --bounding-set=-bpf,-sys_admin,-perfmon,-net_admin -- /usr/local/bin/wasm-node
+    fi
+    "$@" \
         --config /etc/wasm-node/config.toml \
         --node-id "$NODE_ID" \
         --db-path /var/lib/wasm-node/state.redb \
@@ -263,9 +300,9 @@ mkfs.ext4 -F "$TEMP_IMAGE"
 # Mount and copy rootfs
 MOUNT="$WORK_DIR/mount"
 mkdir -p "$MOUNT"
-sudo mount -o loop "$TEMP_IMAGE" "$MOUNT"
-sudo cp -a "$ROOTFS_DIR"/* "$MOUNT/"
-sudo umount "$MOUNT"
+run_privileged mount -o loop "$TEMP_IMAGE" "$MOUNT"
+run_privileged cp -a "$ROOTFS_DIR"/. "$MOUNT/"
+run_privileged umount "$MOUNT"
 mv -f -- "$TEMP_IMAGE" "$IMAGE"
 TEMP_IMAGE=""
 

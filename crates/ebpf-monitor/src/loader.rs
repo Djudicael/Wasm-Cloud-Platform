@@ -52,6 +52,23 @@ pub struct LoadedEbpf {
     /// Attachment links for each loaded program.
     /// Links can be detached to stop a specific monitor.
     pub links: Vec<String>,
+    /// Requested monitors that could not be loaded, configured, or attached.
+    pub failures: Vec<MonitorLoadFailure>,
+}
+
+/// Bounded diagnostic for one unavailable requested monitor.
+#[derive(Debug, Clone)]
+pub struct MonitorLoadFailure {
+    pub monitor: &'static str,
+    pub stage: &'static str,
+}
+
+fn failure_stage(default_stage: &'static str, error: &str) -> &'static str {
+    if error.to_ascii_lowercase().contains("btf") {
+        "missing_btf"
+    } else {
+        default_stage
+    }
 }
 
 /// One independently compiled monitor object.
@@ -84,6 +101,7 @@ pub async fn load_and_attach(config: &MonitorConfig, node_pid: u32) -> Result<Op
 
     let mut monitors = Vec::new();
     let mut links = Vec::new();
+    let mut failures = Vec::new();
 
     let requested: [MonitorRequest; 6] = [
         (
@@ -114,21 +132,43 @@ pub async fn load_and_attach(config: &MonitorConfig, node_pid: u32) -> Result<Op
         if !enabled {
             continue;
         }
+        if std::env::var("WASM_EBPF_TEST_FAULT").as_deref() == Ok("probe_unavailable")
+            && name == "disk_monitor"
+        {
+            warn!(monitor = name, "test fault: required probe is unavailable");
+            failures.push(MonitorLoadFailure {
+                monitor: name,
+                stage: "probe_unavailable",
+            });
+            continue;
+        }
         let mut ebpf = match load_monitor_object(name) {
             Ok(ebpf) => ebpf,
             Err(error) => {
                 let error_chain = format!("{error:#}");
+                failures.push(MonitorLoadFailure {
+                    monitor: name,
+                    stage: failure_stage("load", &error_chain),
+                });
                 warn!(error = %error_chain, monitor = name, "Failed to load eBPF monitor object — skipping");
                 continue;
             }
         };
         if let Err(error) = write_config_map(&mut ebpf, config, node_pid) {
+            failures.push(MonitorLoadFailure {
+                monitor: name,
+                stage: "configure",
+            });
             let error_chain = format!("{error:#}");
             warn!(error = %error_chain, monitor = name, "Failed to configure eBPF monitor — skipping");
             continue;
         }
         if let Err(error) = attach(&mut ebpf) {
             let error_chain = format!("{error:#}");
+            failures.push(MonitorLoadFailure {
+                monitor: name,
+                stage: failure_stage("attach", &error_chain),
+            });
             warn!(error = %error_chain, monitor = name, "Failed to attach eBPF monitor — skipping");
             continue;
         }
@@ -144,6 +184,10 @@ pub async fn load_and_attach(config: &MonitorConfig, node_pid: u32) -> Result<Op
                 Ok(()) => {
                     info!("Namespace enforcer attached (tracepoints: sock/inet_sock_set_state, syscalls/sys_enter_sendto)");
                     if let Err(e) = write_ns_enforce_config(&mut ns_bpf, config, node_pid) {
+                        failures.push(MonitorLoadFailure {
+                            monitor: "namespace_enforcer",
+                            stage: "configure",
+                        });
                         warn!(error = %e, "Failed to write NS_ENFORCE_CONFIG map — namespace enforcer may not enforce");
                     }
                     links.push("namespace_enforcer".to_string());
@@ -151,11 +195,19 @@ pub async fn load_and_attach(config: &MonitorConfig, node_pid: u32) -> Result<Op
                 }
                 Err(e) => {
                     let error_chain = format!("{e:#}");
+                    failures.push(MonitorLoadFailure {
+                        monitor: "namespace_enforcer",
+                        stage: failure_stage("attach", &error_chain),
+                    });
                     warn!(error = %error_chain, "Failed to attach namespace enforcer — skipping");
                 }
             },
             Err(e) => {
                 let error_chain = format!("{e:#}");
+                failures.push(MonitorLoadFailure {
+                    monitor: "namespace_enforcer",
+                    stage: failure_stage("load", &error_chain),
+                });
                 warn!(error = %error_chain, "Failed to load namespace enforcer eBPF object — skipping");
             }
         }
@@ -176,7 +228,12 @@ pub async fn load_and_attach(config: &MonitorConfig, node_pid: u32) -> Result<Op
 
     if links.is_empty() {
         warn!("No eBPF programs attached — falling back to userspace monitoring");
-        return Ok(None);
+        return Ok(Some(LoadedEbpf {
+            monitors,
+            ns_ebpf,
+            links,
+            failures,
+        }));
     }
 
     info!(
@@ -188,6 +245,7 @@ pub async fn load_and_attach(config: &MonitorConfig, node_pid: u32) -> Result<Op
         monitors,
         ns_ebpf,
         links,
+        failures,
     }))
 }
 
@@ -500,11 +558,17 @@ fn attach_kprobe_with_fallback(
 ///
 /// Returns `true` if all requirements are met, `false` otherwise.
 fn is_kernel_supported() -> bool {
+    kernel_support_failure_reason().is_none()
+}
+
+/// Return a bounded reason when the current process cannot load the required
+/// kernel-monitoring programs.
+pub(crate) fn kernel_support_failure_reason() -> Option<&'static str> {
     // Check 1: BTF support (required for BTF-enabled eBPF programs)
     let btf_path = Path::new("/sys/kernel/btf/vmlinux");
     if !btf_path.exists() {
         warn!("BTF not available at /sys/kernel/btf/vmlinux — eBPF programs may not load");
-        return false;
+        return Some("missing_btf");
     }
 
     // Check 2: Kernel version >= 5.8
@@ -516,7 +580,7 @@ fn is_kernel_supported() -> bool {
                     minimum = "5.8.0",
                     "Kernel version too old for eBPF ring buffer support"
                 );
-                return false;
+                return Some("kernel_too_old");
             }
             info!(
                 kernel_version = format!("{}.{}.{}", major, minor, _patch),
@@ -535,10 +599,34 @@ fn is_kernel_supported() -> bool {
     #[cfg(not(target_os = "linux"))]
     {
         warn!("Not running on Linux — eBPF is not available");
-        return false;
+        return Some("unsupported_operating_system");
     }
 
-    true
+    #[cfg(target_os = "linux")]
+    if let Ok(status) = std::fs::read_to_string("/proc/self/status") {
+        if let Some(raw) = status
+            .lines()
+            .find_map(|line| line.strip_prefix("CapEff:\t"))
+        {
+            if let Ok(capabilities) = u64::from_str_radix(raw.trim(), 16) {
+                const CAP_NET_ADMIN: u32 = 12;
+                const CAP_SYS_ADMIN: u32 = 21;
+                const CAP_PERFMON: u32 = 38;
+                const CAP_BPF: u32 = 39;
+                let has = |capability: u32| capabilities & (1_u64 << capability) != 0;
+                if !has(CAP_BPF) && !has(CAP_SYS_ADMIN) {
+                    warn!("CAP_BPF or CAP_SYS_ADMIN is required for eBPF loading");
+                    return Some("missing_capability");
+                }
+                if !has(CAP_SYS_ADMIN) && (!has(CAP_PERFMON) || !has(CAP_NET_ADMIN)) {
+                    warn!("CAP_PERFMON and CAP_NET_ADMIN are required for eBPF monitoring");
+                    return Some("insufficient_privileges");
+                }
+            }
+        }
+    }
+
+    None
 }
 
 /// Parse the kernel version from `/proc/version` or `uname()`.
@@ -646,6 +734,18 @@ mod tests {
                 assert!(minor <= 100, "Kernel minor version should be reasonable");
             }
         }
+    }
+
+    #[test]
+    fn test_failure_stage_classifies_btf_errors() {
+        assert_eq!(
+            failure_stage("attach", "verifier rejected malformed in-kernel BTF"),
+            "missing_btf"
+        );
+        assert_eq!(
+            failure_stage("attach", "tracepoint is unavailable"),
+            "attach"
+        );
     }
 
     #[test]

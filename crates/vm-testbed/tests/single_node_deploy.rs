@@ -53,6 +53,7 @@ async fn test_single_node_deploy() {
         gateway: "172.20.0.1".to_string(),
         bridge_name: "br-wasm".to_string(),
         tap_device: "tap-test-node-0".to_string(),
+        extra_kernel_args: Vec::new(),
         mmds_data: Some(serde_json::json!({
             "node_config": {
                 "node_id": "test-node-0",

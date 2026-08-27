@@ -93,11 +93,60 @@ pub use loader::LoadedEbpf;
 
 // ── Monitor Handle ────────────────────────────────────────────────────────────
 
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 #[cfg(any(feature = "ebpf", test))]
 use std::time::Duration;
 
 use tracing::{info, warn};
+
+/// Current kernel-monitoring availability shared with health and admin APIs.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct MonitorAvailability {
+    pub enabled: bool,
+    pub required: bool,
+    pub ebpf_active: bool,
+    pub monitoring_degraded: bool,
+    pub reason: Option<String>,
+}
+
+/// Thread-safe monitor availability state.
+#[derive(Debug, Clone)]
+pub struct MonitorRuntimeState(Arc<RwLock<MonitorAvailability>>);
+
+impl MonitorRuntimeState {
+    fn new(enabled: bool, required: bool) -> Self {
+        Self(Arc::new(RwLock::new(MonitorAvailability {
+            enabled,
+            required,
+            ebpf_active: false,
+            monitoring_degraded: false,
+            reason: if enabled {
+                Some("initializing".to_string())
+            } else {
+                Some("disabled_by_configuration".to_string())
+            },
+        })))
+    }
+
+    pub fn snapshot(&self) -> MonitorAvailability {
+        self.0.read().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    #[cfg(feature = "ebpf")]
+    fn mark_active(&self) {
+        let mut state = self.0.write().unwrap_or_else(|e| e.into_inner());
+        state.ebpf_active = true;
+        state.monitoring_degraded = false;
+        state.reason = None;
+    }
+
+    fn mark_degraded(&self, active: bool, reason: &'static str) {
+        let mut state = self.0.write().unwrap_or_else(|e| e.into_inner());
+        state.ebpf_active = active;
+        state.monitoring_degraded = true;
+        state.reason = Some(reason.to_string());
+    }
+}
 
 /// Snapshot of the eBPF monitor's current state, suitable for
 /// serialization in admin API responses.
@@ -105,6 +154,12 @@ use tracing::{info, warn};
 pub struct MonitorStatus {
     /// Whether eBPF programs are loaded and active (vs userspace fallback).
     pub ebpf_active: bool,
+    /// Whether kernel monitoring is a hard node-readiness requirement.
+    pub monitoring_required: bool,
+    /// Whether kernel monitoring is unavailable or incomplete.
+    pub monitoring_degraded: bool,
+    /// Bounded machine-readable reason for monitoring degradation.
+    pub monitoring_degraded_reason: Option<String>,
     /// Whether backpressure is currently active (rejecting new connections).
     pub backpressure_active: bool,
     /// Whether the node is in degraded mode (slow I/O recovery).
@@ -147,8 +202,8 @@ pub struct MonitorStatus {
 pub struct MonitorHandle {
     /// Shutdown signal sender. When dropped, all monitor tasks will exit.
     shutdown_tx: tokio::sync::watch::Sender<bool>,
-    /// Whether eBPF programs are active (vs userspace fallback).
-    ebpf_active: bool,
+    /// Dynamic availability shared with health and admin APIs.
+    runtime_state: MonitorRuntimeState,
     /// Optional join handle for the consumer task (eBPF mode).
     _consumer_handle: Option<tokio::task::JoinHandle<()>>,
     /// Optional join handle for the fallback task.
@@ -172,7 +227,12 @@ impl MonitorHandle {
     /// When `false`, the monitor is running in userspace fallback mode
     /// with higher latency (5s polling vs 10ms eBPF).
     pub fn is_ebpf_active(&self) -> bool {
-        self.ebpf_active
+        self.runtime_state.snapshot().ebpf_active
+    }
+
+    /// Clone the dynamic availability state for health/admin integration.
+    pub fn runtime_state(&self) -> MonitorRuntimeState {
+        self.runtime_state.clone()
     }
 
     /// Get a snapshot of the monitor's current status.
@@ -181,8 +241,12 @@ impl MonitorHandle {
     /// operational state, suitable for serialization in admin API
     /// responses.
     pub fn status(&self) -> MonitorStatus {
+        let availability = self.runtime_state.snapshot();
         MonitorStatus {
-            ebpf_active: self.ebpf_active,
+            ebpf_active: availability.ebpf_active,
+            monitoring_required: availability.required,
+            monitoring_degraded: availability.monitoring_degraded,
+            monitoring_degraded_reason: availability.reason,
             backpressure_active: self.dispatcher.is_backpressure_active(),
             degraded_mode: self.dispatcher.is_degraded(),
             pressure_level: self.dispatcher.last_pressure_level(),
@@ -255,6 +319,8 @@ pub async fn init(
     node_pid: u32,
 ) -> MonitorHandle {
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    let runtime_state = MonitorRuntimeState::new(config.enabled, config.required);
+    metrics.set_monitoring_required(config.required);
 
     // Validate configuration
     if let Err(e) = config.validate() {
@@ -279,6 +345,19 @@ pub async fn init(
             match try_init_ebpf(&config, &metrics, &dispatcher, node_pid).await {
                 Ok((consumer_handle, action_tx, mut loaded)) => {
                     info!("eBPF monitor initialized with kernel-level monitoring");
+                    metrics.mark_ebpf_active();
+                    runtime_state.mark_active();
+                    if !loaded.failures.is_empty() {
+                        for failure in &loaded.failures {
+                            warn!(
+                                monitor = failure.monitor,
+                                stage = failure.stage,
+                                "requested eBPF monitor is unavailable"
+                            );
+                        }
+                        metrics.mark_monitoring_degraded("partial_probe_set");
+                        runtime_state.mark_degraded(true, "partial_probe_set");
+                    }
 
                     // Spawn a watchdog that monitors the consumer task.
                     // If the consumer dies, fall back to userspace monitoring.
@@ -286,13 +365,21 @@ pub async fn init(
                     let watchdog_dispatcher = dispatcher.clone();
                     let watchdog_config = config.clone();
                     let watchdog_shutdown = shutdown_rx.clone();
+                    let watchdog_state = runtime_state.clone();
                     let _watchdog_handle = tokio::spawn(async move {
-                        let _ = consumer_handle.await;
+                        let result = consumer_handle.await;
+                        let reason = if result.is_err() {
+                            "consumer_task_failed"
+                        } else {
+                            "consumer_exited"
+                        };
                         warn!(
                             "eBPF ring buffer consumer exited — \
                              starting userspace fallback monitor"
                         );
                         watchdog_metrics.mark_ebpf_fallback();
+                        watchdog_metrics.mark_monitoring_degraded(reason);
+                        watchdog_state.mark_degraded(false, reason);
                         fallback::run_fallback_monitor(
                             watchdog_config,
                             watchdog_metrics,
@@ -318,7 +405,7 @@ pub async fn init(
 
                     return MonitorHandle {
                         shutdown_tx,
-                        ebpf_active: true,
+                        runtime_state,
                         _consumer_handle: None, // watchdog manages the task
                         _fallback_handle: None,
                         _loaded_ebpf: Some(loaded),
@@ -332,6 +419,9 @@ pub async fn init(
                         reason,
                         "eBPF initialization skipped — using userspace fallback"
                     );
+                    metrics.mark_ebpf_fallback();
+                    metrics.mark_monitoring_degraded(reason);
+                    runtime_state.mark_degraded(false, reason);
                 }
             }
         } else {
@@ -342,6 +432,9 @@ pub async fn init(
     #[cfg(not(feature = "ebpf"))]
     {
         if config.enabled {
+            metrics.mark_ebpf_fallback();
+            metrics.mark_monitoring_degraded("feature_not_compiled");
+            runtime_state.mark_degraded(false, "feature_not_compiled");
             info!(
                 "eBPF feature not compiled — running in userspace fallback mode. \
                  Compile with --features ebpf for kernel-level monitoring on Linux."
@@ -371,7 +464,7 @@ pub async fn init(
 
     MonitorHandle {
         shutdown_tx,
-        ebpf_active: false,
+        runtime_state,
         _consumer_handle: None,
         _fallback_handle: Some(fallback_handle),
         #[cfg(feature = "ebpf")]
@@ -398,6 +491,24 @@ async fn try_init_ebpf(
     ),
     &'static str,
 > {
+    if let Ok(fault) = std::env::var("WASM_EBPF_TEST_FAULT") {
+        let reason = match fault.as_str() {
+            "missing_capability" => Some("missing_capability"),
+            "permission_denied" => Some("insufficient_privileges"),
+            "program_rejected" => Some("program_load_rejected"),
+            "missing_btf" => Some("missing_btf"),
+            _ => None,
+        };
+        if let Some(reason) = reason {
+            warn!(fault, reason, "injecting local eBPF initialization failure");
+            return Err(reason);
+        }
+    }
+
+    if let Some(reason) = loader::kernel_support_failure_reason() {
+        return Err(reason);
+    }
+
     // Step 1: Load and attach eBPF programs
     let mut loaded = loader::load_and_attach(config, node_pid)
         .await
@@ -408,7 +519,16 @@ async fn try_init_ebpf(
         .ok_or("ebpf_not_available")?;
 
     if loaded.links.is_empty() {
-        return Err("no_ebpf_programs_attached");
+        let reason = if loaded
+            .failures
+            .iter()
+            .any(|failure| failure.stage == "missing_btf")
+        {
+            "missing_btf"
+        } else {
+            "no_ebpf_programs_attached"
+        };
+        return Err(reason);
     }
 
     // Step 2: Open every independently compiled object's event ring buffer.
@@ -449,23 +569,31 @@ async fn try_init_ebpf(
         return Err("events_ring_buffers_not_found");
     }
 
-    // Step 3: Mark eBPF as active
-    metrics.mark_ebpf_active();
-
-    // Step 4: Start the action dispatcher channel
+    // Step 3: Start the action dispatcher channel
     let action_tx = start_action_dispatcher(dispatcher.clone(), ConsumerConfig::default());
 
-    // Step 5: Spawn the ring buffer consumer task
+    // Step 4: Spawn the ring buffer consumer task
     let consumer_metrics = metrics.clone();
     let consumer_action_tx = action_tx.clone();
+    let inject_consumer_exit =
+        std::env::var("WASM_EBPF_TEST_FAULT").as_deref() == Ok("consumer_exit");
     let consumer_handle = tokio::spawn(async move {
-        consumer::consume_ring_buffers(
+        let consumer = consumer::consume_ring_buffers(
             ring_buffers,
             consumer_action_tx,
             consumer_metrics,
             Duration::from_millis(10),
-        )
-        .await;
+        );
+        if inject_consumer_exit {
+            tokio::select! {
+                () = consumer => {},
+                () = tokio::time::sleep(Duration::from_secs(3)) => {
+                    warn!("injecting local eBPF consumer termination");
+                }
+            }
+        } else {
+            consumer.await;
+        }
     });
 
     info!(
@@ -530,6 +658,12 @@ mod tests {
 
         // Disabled config should always be in fallback mode
         assert!(!handle.is_ebpf_active());
+        let availability = handle.runtime_state().snapshot();
+        assert!(!availability.monitoring_degraded);
+        assert_eq!(
+            availability.reason.as_deref(),
+            Some("disabled_by_configuration")
+        );
     }
 
     #[tokio::test]
@@ -671,6 +805,8 @@ mod tests {
         assert_eq!(metrics.security_violations.get(), 0);
         assert_eq!(metrics.events_processed.get(), 0);
         assert_eq!(metrics.events_parse_errors.get(), 0);
+        assert_eq!(metrics.monitoring_required.get(), 0);
+        assert_eq!(metrics.monitoring_degraded.get(), 0);
     }
 
     #[tokio::test]
@@ -683,5 +819,17 @@ mod tests {
 
         metrics.mark_ebpf_fallback();
         assert_eq!(metrics.ebpf_active.get(), 0);
+
+        metrics.set_monitoring_required(true);
+        metrics.mark_monitoring_degraded("missing_btf");
+        assert_eq!(metrics.monitoring_required.get(), 1);
+        assert_eq!(metrics.monitoring_degraded.get(), 1);
+        assert_eq!(
+            metrics
+                .monitoring_failures
+                .with_label_values(&["missing_btf"])
+                .get(),
+            1
+        );
     }
 }

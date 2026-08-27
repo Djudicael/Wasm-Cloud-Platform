@@ -27,6 +27,7 @@
 //!         gateway: "172.20.0.1".to_string(),
 //!         bridge_name: "br-wasm".to_string(),
 //!         tap_device: "tap-node1".to_string(),
+//!         extra_kernel_args: Vec::new(),
 //!         mmds_data: None,
 //!     };
 //!
@@ -75,6 +76,8 @@ pub struct VmConfig {
     pub tap_device: String,
     /// Optional MMDS metadata to pass to the guest.
     pub mmds_data: Option<serde_json::Value>,
+    /// Additional validated kernel command-line arguments for local fault tests.
+    pub extra_kernel_args: Vec<String>,
 }
 
 /// A running microVM instance managed by Firecracker.
@@ -211,10 +214,24 @@ impl MicroVm {
             .map_err(VmError::Firecracker)?;
 
         // 8. Configure boot source
-        let boot_args = format!(
+        let mut boot_args = format!(
             "console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda rw init=/sbin/init wcp.node_id={} wcp.ip={} wcp.gateway={}",
             config.id, config.ip, config.gateway
         );
+        for argument in &config.extra_kernel_args {
+            if argument.is_empty()
+                || argument
+                    .bytes()
+                    .any(|byte| byte.is_ascii_whitespace() || byte == 0)
+            {
+                return Err(VmError::Process(format!(
+                    "invalid extra kernel argument for {}",
+                    config.id
+                )));
+            }
+            boot_args.push(' ');
+            boot_args.push_str(argument);
+        }
         client
             .set_boot_source(&config.kernel_path, &boot_args)
             .await

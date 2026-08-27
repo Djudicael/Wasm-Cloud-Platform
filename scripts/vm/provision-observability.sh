@@ -159,6 +159,16 @@ groups:
         for: 10s
         labels: {severity: warning}
         annotations: {summary: "OpenTelemetry Collector is unavailable"}
+      - alert: EbpfMonitoringUnavailable
+        expr: wasm_ebpf_monitoring_degraded == 1 and wasm_ebpf_active == 0
+        for: 10s
+        labels: {severity: warning}
+        annotations: {summary: "Kernel eBPF monitoring is unavailable; the application node may still be serving"}
+      - alert: EbpfMonitoringIncomplete
+        expr: wasm_ebpf_monitoring_degraded == 1 and wasm_ebpf_active == 1
+        for: 10s
+        labels: {severity: warning}
+        annotations: {summary: "One or more requested eBPF probes are unavailable"}
       - alert: EbpfRingBufferEventsDropped
         expr: increase(wasm_ebpf_ring_buffer_dropped_events_total[5m]) > 0
         labels: {severity: warning}
