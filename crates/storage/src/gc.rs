@@ -270,6 +270,57 @@ impl Store {
         Ok(())
     }
 
+    /// Clear a previous undeploy marker when an application is deployed again.
+    pub fn mark_deployed(&self, app_name: &str) -> Result<(), PlatformError> {
+        let meta_key = format!("_undeploy:{app_name}");
+        let tx = self
+            .db
+            .begin_write()
+            .map_err(PlatformError::storage_source)?;
+        {
+            let mut table = tx
+                .open_table(SCHEMA_META)
+                .map_err(PlatformError::storage_source)?;
+            table.remove(meta_key.as_str()).ok();
+        }
+        tx.commit().map_err(PlatformError::storage_source)?;
+        info!(app = %app_name, "application marked as deployed");
+        Ok(())
+    }
+
+    /// Return whether an application is inside its undeploy grace period.
+    ///
+    /// Its artifacts remain recoverable until GC runs, but it must not be
+    /// restored into a supervisor pool or exposed as a deployed application.
+    pub fn is_undeployed(&self, app_name: &str) -> Result<bool, PlatformError> {
+        let meta_key = format!("_undeploy:{app_name}");
+        let tx = self
+            .db
+            .begin_read()
+            .map_err(PlatformError::storage_source)?;
+        let table = tx
+            .open_table(SCHEMA_META)
+            .map_err(PlatformError::storage_source)?;
+        let marker = table
+            .get(meta_key.as_str())
+            .map_err(PlatformError::storage_source)?;
+        Ok(marker.is_some())
+    }
+
+    /// List configurations that represent currently deployed applications.
+    /// Undeploy grace-period artifacts intentionally remain in `list_apps()`
+    /// for recovery/GC, but must not enter runtime or bootstrap state.
+    pub fn list_deployed_apps(&self) -> Result<Vec<common::types::AppId>, PlatformError> {
+        self.list_apps()?
+            .into_iter()
+            .filter_map(|app_id| match self.is_undeployed(&app_id.0) {
+                Ok(false) => Some(Ok(app_id)),
+                Ok(true) => None,
+                Err(error) => Some(Err(error)),
+            })
+            .collect()
+    }
+
     /// Purge all state for apps whose undeploy grace period has expired.
     pub fn gc_undeployed_apps(&self, grace_secs: u64) -> Result<u64, PlatformError> {
         let now = SystemTime::now()
@@ -495,7 +546,7 @@ impl Store {
         Ok(())
     }
 
-    fn list_routes_for_app(
+    pub fn list_routes_for_app(
         &self,
         app_name: &str,
     ) -> Result<Vec<common::types::Route>, PlatformError> {

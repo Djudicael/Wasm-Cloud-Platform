@@ -230,6 +230,36 @@ fn test_prune_old_versions() {
 }
 
 #[test]
+fn redeploy_clears_undeploy_marker_before_gc() {
+    let (store, _f) = make_store();
+    let id = AppId::new("redeployed", "v1");
+    store.store_artifact(&id, b"still-active").unwrap();
+    store.mark_undeployed(&id.0).unwrap();
+    store.mark_deployed(&id.0).unwrap();
+
+    assert_eq!(store.gc_undeployed_apps(0).unwrap(), 0);
+    assert_eq!(store.load_artifact(&id).unwrap().unwrap(), b"still-active");
+}
+
+#[test]
+fn undeploy_marker_is_observable_during_grace_period() {
+    let (store, _file) = make_store();
+    let id = AppId("default/lifecycle:v1".to_string());
+    store
+        .save_config(&AppConfig::default_for(id.clone()))
+        .unwrap();
+
+    assert!(!store.is_undeployed(&id.0).unwrap());
+    assert_eq!(store.list_deployed_apps().unwrap(), vec![id.clone()]);
+    store.mark_undeployed(&id.0).unwrap();
+    assert!(store.is_undeployed(&id.0).unwrap());
+    assert!(store.list_deployed_apps().unwrap().is_empty());
+    store.mark_deployed(&id.0).unwrap();
+    assert!(!store.is_undeployed(&id.0).unwrap());
+    assert_eq!(store.list_deployed_apps().unwrap(), vec![id]);
+}
+
+#[test]
 fn test_cluster_node_registry_roundtrip() {
     let (store, _f) = make_store();
     let mut node = ClusterNodeRecord::new("node-1", 1_700_000_000);

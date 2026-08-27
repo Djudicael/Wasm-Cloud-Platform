@@ -159,7 +159,7 @@ EOF
 # Keep a guest-readable schema marker so provisioning can reject legacy cached
 # images before starting Firecracker. Bump this value whenever the early-boot
 # contract (PID 1, kernel arguments, or network bootstrap) changes.
-echo "4" > "$ROOTFS_DIR/etc/wasm-node/image-schema-version"
+echo "5" > "$ROOTFS_DIR/etc/wasm-node/image-schema-version"
 
 # Set hostname
 echo "wasm-node-vm" > "$ROOTFS_DIR/etc/hostname"
@@ -205,6 +205,8 @@ mount -t proc proc /proc
 mount -t sysfs sysfs /sys
 mount -t devtmpfs devtmpfs /dev 2>/dev/null || true
 mount -t tracefs tracefs /sys/kernel/tracing 2>/dev/null || true
+mkdir -p /sys/fs/bpf
+mount -t bpf bpf /sys/fs/bpf 2>/dev/null || true
 ip link set lo up
 ip link set eth0 up
 NODE_ID=vm-node

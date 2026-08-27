@@ -178,8 +178,8 @@ if [[ "$nats_image_schema" != 2 ]]; then
   exit 1
 fi
 node_image_schema=$(debugfs -R 'cat /etc/wasm-node/image-schema-version' assets/wasm-node-rootfs.ext4 2>/dev/null || true)
-if [[ "$node_image_schema" != 4 ]]; then
-  echo "assets/wasm-node-rootfs.ext4 is stale or incompatible (expected image schema 4)." >&2
+if [[ "$node_image_schema" != 5 ]]; then
+  echo "assets/wasm-node-rootfs.ext4 is stale or incompatible (expected image schema 5)." >&2
   echo "Rebuild it with: scripts/vm/build-node-rootfs.sh" >&2
   exit 1
 fi
@@ -235,6 +235,10 @@ PY
     for index in "${!proxy_addrs[@]}"; do
       echo "  server node$((index + 1)) ${proxy_addrs[$index]} check"
     done
+    echo "listen local_prometheus"
+    echo "  bind 127.0.0.1:8405"
+    echo "  mode http"
+    echo "  http-request use-service prometheus-exporter if { path /metrics }"
   } > "$haproxy_config"
 
   "$haproxy_bin" -c -f "$haproxy_config"
@@ -261,6 +265,7 @@ payload = {
         "pid": int(pid),
         "config": os.path.abspath(config),
         "log": os.path.abspath(log),
+        "metrics": "http://127.0.0.1:8405/metrics",
     },
 }
 temporary = f"{path}.tmp"

@@ -13,6 +13,58 @@ use std::sync::RwLock;
 use std::time::{Duration, Instant};
 use tracing::{info, warn};
 
+/// One active application identity registered for eBPF filtering.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct MonitoredTidStatus {
+    pub tid: u32,
+    pub namespace: String,
+    pub app_id: String,
+    pub registered_at_ns: u64,
+}
+
+/// Bounded lifecycle snapshot for the authenticated admin API.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct NamespaceMapStatus {
+    pub active_tids: Vec<MonitoredTidStatus>,
+    pub recent_tombstones: usize,
+    pub port_bindings: usize,
+    pub kernel_map_entry_counts: Vec<usize>,
+    pub bpffs_mounted: bool,
+    pub pinned_entries: usize,
+}
+
+fn count_directory_entries(path: &std::path::Path) -> usize {
+    let Ok(entries) = std::fs::read_dir(path) else {
+        return 0;
+    };
+    entries
+        .filter_map(Result::ok)
+        .map(|entry| {
+            let nested = entry
+                .file_type()
+                .ok()
+                .filter(|kind| kind.is_dir())
+                .map(|_| count_directory_entries(&entry.path()))
+                .unwrap_or(0);
+            1 + nested
+        })
+        .sum()
+}
+
+fn bpffs_mounted() -> bool {
+    std::fs::read_to_string("/proc/mounts")
+        .ok()
+        .is_some_and(|mounts| {
+            mounts.lines().any(|line| {
+                let mut fields = line.split_whitespace();
+                matches!(
+                    (fields.next(), fields.next(), fields.next()),
+                    (Some(_), Some("/sys/fs/bpf"), Some("bpf"))
+                )
+            })
+        })
+}
+
 /// Identity of a caller, returned by `resolve_identity()`.
 #[derive(Debug, Clone)]
 pub struct CallerIdentity {
@@ -248,6 +300,49 @@ impl NamespaceMap {
         self.tid_to_identity.read().unwrap().get(&tid).copied()
     }
 
+    /// Return a consistent, read-only lifecycle snapshot for operators/tests.
+    pub fn status(&self) -> NamespaceMapStatus {
+        let mut active_tids: Vec<_> = self
+            .tid_to_identity
+            .read()
+            .unwrap()
+            .iter()
+            .map(|(tid, identity)| MonitoredTidStatus {
+                tid: *tid,
+                namespace: identity.namespace_str().to_string(),
+                app_id: identity.app_id_str().to_string(),
+                registered_at_ns: identity.registered_at_ns,
+            })
+            .collect();
+        active_tids.sort_by_key(|identity| identity.tid);
+
+        let recent_tombstones = {
+            let mut recent = self.recent_tid_identities.write().unwrap();
+            recent.retain(|_, (_, removed_at)| removed_at.elapsed() <= Duration::from_secs(30));
+            recent.len()
+        };
+
+        #[cfg(feature = "ebpf")]
+        let kernel_map_entry_counts = self
+            .inner
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|map| map.keys().filter(Result::is_ok).count())
+            .collect();
+        #[cfg(not(feature = "ebpf"))]
+        let kernel_map_entry_counts = Vec::new();
+
+        NamespaceMapStatus {
+            active_tids,
+            recent_tombstones,
+            port_bindings: self.port_to_tid.read().unwrap().len(),
+            kernel_map_entry_counts,
+            bpffs_mounted: bpffs_mounted(),
+            pinned_entries: count_directory_entries(std::path::Path::new("/sys/fs/bpf")),
+        }
+    }
+
     /// Label an asynchronously consumed event, including a short-lived identity
     /// tombstone for events emitted immediately before thread teardown.
     pub fn lookup_event_identity(&self, tid: u32) -> Option<TidIdentity> {
@@ -420,6 +515,27 @@ mod tests {
         let found = map.lookup_tid(12349).unwrap();
         assert_eq!(found.namespace_str(), "prod");
         assert_eq!(found.app_id_str(), "svc:v2");
+    }
+
+    #[test]
+    fn test_status_tracks_registration_and_cleanup() {
+        let map = NamespaceMap::new_fallback();
+        map.register_tid(12351, TidIdentity::new("prod", "lifecycle:v1"))
+            .unwrap();
+        map.bind_port(54327, 12351);
+
+        let active = map.status();
+        assert_eq!(active.active_tids.len(), 1);
+        assert_eq!(active.active_tids[0].tid, 12351);
+        assert_eq!(active.active_tids[0].namespace, "prod");
+        assert_eq!(active.active_tids[0].app_id, "lifecycle:v1");
+        assert_eq!(active.port_bindings, 1);
+
+        map.deregister_tid(12351).unwrap();
+        let removed = map.status();
+        assert!(removed.active_tids.is_empty());
+        assert_eq!(removed.recent_tombstones, 1);
+        assert_eq!(removed.port_bindings, 0);
     }
 
     #[test]

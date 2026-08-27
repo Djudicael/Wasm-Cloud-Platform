@@ -1,5 +1,6 @@
 // crates/metrics/src/health_metrics.rs
 use prometheus::{IntGauge, IntGaugeVec, Opts, Registry};
+use std::{collections::HashSet, sync::Mutex};
 
 /// Prometheus metrics for the health check subsystem.
 pub struct HealthMetrics {
@@ -29,6 +30,9 @@ pub struct HealthMetrics {
 
     /// Per-app total instance count (labeled by app_id).
     pub app_total_instances: IntGaugeVec,
+
+    /// App labels exported by the previous report, used to delete stale series.
+    previous_app_ids: Mutex<HashSet<String>>,
 }
 
 impl HealthMetrics {
@@ -121,6 +125,7 @@ impl HealthMetrics {
             memory_used_mb,
             app_healthy_instances,
             app_total_instances,
+            previous_app_ids: Mutex::new(HashSet::new()),
         }
     }
 
@@ -172,6 +177,19 @@ impl HealthMetrics {
             }
         }
 
+        // Remove labels for apps absent from the current report. Leaving a zero
+        // gauge behind would make an undeployed application alert forever.
+        let current_app_ids: HashSet<_> =
+            report.apps.iter().map(|app| app.app_id.clone()).collect();
+        let mut previous_app_ids = self
+            .previous_app_ids
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        for removed in previous_app_ids.difference(&current_app_ids) {
+            let _ = self.app_healthy_instances.remove_label_values(&[removed]);
+            let _ = self.app_total_instances.remove_label_values(&[removed]);
+        }
+
         // Per-app metrics: iterate all apps and set gauge values with the app label.
         for app in &report.apps {
             self.app_healthy_instances
@@ -181,5 +199,58 @@ impl HealthMetrics {
                 .with_label_values(&[&app.app_id])
                 .set(app.instances as i64);
         }
+        *previous_app_ids = current_app_ids;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use common::health::{AppHealthSummary, NodeHealthReport, NodeHealthStatus};
+    use prometheus::core::Collector;
+
+    fn report(apps: Vec<AppHealthSummary>) -> NodeHealthReport {
+        NodeHealthReport {
+            status: NodeHealthStatus::Healthy,
+            node_id: "node-0".to_string(),
+            timestamp: "2026-08-27T00:00:00Z".to_string(),
+            uptime_secs: 1,
+            startup_complete: true,
+            accepting_requests: true,
+            active_instances: apps.iter().map(|app| app.instances).sum(),
+            deployed_apps: apps.len() as u32,
+            dependencies: Vec::new(),
+            apps,
+        }
+    }
+
+    #[test]
+    fn removed_apps_delete_their_prometheus_series() {
+        let registry = Registry::new();
+        let metrics = HealthMetrics::new(&registry);
+        metrics.update_from_report(&report(vec![AppHealthSummary {
+            app_id: "default/lifecycle:v1".to_string(),
+            instances: 1,
+            healthy_instances: 1,
+            serving: true,
+        }]));
+        assert_eq!(
+            metrics.app_healthy_instances.collect()[0]
+                .get_metric()
+                .len(),
+            1
+        );
+
+        metrics.update_from_report(&report(Vec::new()));
+        assert!(metrics
+            .app_healthy_instances
+            .collect()
+            .iter()
+            .all(|family| family.get_metric().is_empty()));
+        assert!(metrics
+            .app_total_instances
+            .collect()
+            .iter()
+            .all(|family| family.get_metric().is_empty()));
     }
 }

@@ -149,6 +149,14 @@ impl NatsBus {
             .publish(subject.clone(), payload.into())
             .await
             .map_err(|e| PlatformError::messaging(format!("publish to {subject}: {e}")))?;
+        // A successful async-nats publish only guarantees that the message was
+        // queued in the client. Short-lived control-plane clients (for example
+        // vm-testbed-cli undeploy) can otherwise drop the connection before
+        // the server receives it while still reporting success to the user.
+        self.client
+            .flush()
+            .await
+            .map_err(|e| PlatformError::messaging(format!("flush publish to {subject}: {e}")))?;
         Ok(())
     }
 

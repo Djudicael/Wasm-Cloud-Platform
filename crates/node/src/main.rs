@@ -1691,6 +1691,7 @@ async fn main() -> anyhow::Result<()> {
         ebpf_monitor::init(ebpf_config, ebpf_metrics, ebpf_dispatcher, node_pid).await;
     let ebpf_runtime_state = _ebpf_handle.runtime_state();
     let ebpf_runtime_state_admin = ebpf_runtime_state.clone();
+    let ebpf_namespace_map_admin = _ebpf_handle.namespace_map.clone();
     let ebpf_startup = ebpf_runtime_state.snapshot();
     if config.ebpf.required && (!ebpf_startup.ebpf_active || ebpf_startup.monitoring_degraded) {
         let reason = ebpf_startup.reason.unwrap_or_else(|| "unknown".to_string());
@@ -2325,6 +2326,7 @@ async fn main() -> anyhow::Result<()> {
                     let availability = runtime.snapshot();
                     let status = ebpf_monitor::MonitorStatus {
                         ebpf_active: availability.ebpf_active,
+                        attached_programs: availability.attached_programs,
                         monitoring_required: availability.required,
                         monitoring_degraded: availability.monitoring_degraded,
                         monitoring_degraded_reason: availability.reason,
@@ -2344,6 +2346,13 @@ async fn main() -> anyhow::Result<()> {
                     };
                     axum::Json(status)
                 }
+            }),
+        )
+        .route(
+            "/admin/ebpf/identities",
+            axum::routing::get(move || {
+                let namespace_map = ebpf_namespace_map_admin.clone();
+                async move { axum::Json(namespace_map.status()) }
             }),
         )
         .route(

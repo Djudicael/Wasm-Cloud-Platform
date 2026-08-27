@@ -91,7 +91,7 @@ The run fails when any required check fails. An infrastructure limitation is
 `NOT VALIDATED`; it must not be converted into a pass or an undocumented
 exception.
 
-## Execution record: 2026-08-23 through 2026-08-26 / single-host run in progress
+## Execution record: 2026-08-23 through 2026-08-27 / single-host run in progress
 
 This section is the live record for the current rehearsal. Do not mark a gate
 complete solely because a command was started; retain the command output or its
@@ -201,8 +201,12 @@ redacted artifact with the result.
 | Rolling node image update | PASS | The eBPF metric fix was promoted by restarting `local-test-node-0`, `-1`, and `-2` one at a time from the corrected rootfs. Public OIDC readiness remained `database: ok` after every replacement, all nodes reconverged healthy, PostgreSQL/NATS/observability were preserved, and the focused Playwright gate passed afterward. |
 | 2026-08-26 Part 3 source gates | PASS WITH DEPENDENCY NOTICE | In WSL, `cargo fmt --all -- --check`, the required native workspace all-target check, workspace all-target Clippy with warnings denied, eBPF-feature node Clippy with warnings denied, all 118 eBPF monitor tests, 87 common tests, 64 runtime unit plus 7 integration tests, 38 supervisor unit plus 10 integration tests, 98 node library/binary unit plus 10 integration tests, all seven BPF object builds, changed-script shell syntax, and explicit `wasm32-wasip2` release builds for `hello-axum`, `http-hello-component`, and `wasi-grpc-echo` pass. Rust still emits the separately tracked future-incompatibility notice for `proc-macro-error2 2.0.1`. |
 | 2026-08-26 Part 4 source gates | PASS WITH DEPENDENCY NOTICE | Formatting, required native workspace all-target check, workspace all-target Clippy with warnings denied, eBPF-feature node Clippy with warnings denied, all 119 eBPF monitor tests, clean builds of all seven BPF ELFs, shell syntax, scoped whitespace checks, and explicit `wasm32-wasip2` release builds for `hello-axum`, `http-hello-component`, and `wasi-grpc-echo` pass in WSL. The isolated BPF clean was also verified with the shared native target variable set. The existing `proc-macro-error2 2.0.1` future-incompatibility notice remains separately tracked. |
-| 2026-08-27 Phase 6 Part 5 failure/degraded modes | PASS WITH OBSERVABILITY GAP | A state-driven runner validated real eBPF capability removal, a physically BTF-stripped guest kernel, deterministic permission/program/probe/consumer failures, optional fallback, mandatory startup refusal, Prometheus state, alert separation, peer availability, canary continuity, and clean recovery. All three nodes finish healthy and node 0 reports `ebpf_active=true`, `monitoring_degraded=false`. The unrelated HAProxy exporter target remains down and `HAProxyExporterDown` remains active; fix it before treating the observability stack as production-complete. |
+| 2026-08-27 Phase 6 Part 5 failure/degraded modes | PASS / OBSERVABILITY GAP SUBSEQUENTLY CLOSED | A state-driven runner validated real eBPF capability removal, a physically BTF-stripped guest kernel, deterministic permission/program/probe/consumer failures, optional fallback, mandatory startup refusal, Prometheus state, alert separation, peer availability, canary continuity, and clean recovery. All three nodes finished healthy and node 0 reported `ebpf_active=true`, `monitoring_degraded=false`. The HAProxy exporter gap observed during this part was fixed and independently retested before Part 6. |
 | 2026-08-27 Part 5 source and audit gates | PASS WITH DEPENDENCY NOTICE | Required native workspace check, workspace Clippy with warnings denied, eBPF-feature node Clippy, 120 eBPF-monitor tests, vm-testbed unit/doc tests, all seven BPF ELFs, three explicit `wasm32-wasip2` release builds, formatting, and changed-script syntax pass in WSL. `cargo audit --deny warnings` initially found yanked `chacha20 0.10.1`; `Cargo.lock` now resolves non-yanked `0.10.2`, and the audit passes. Rust still reports the separately tracked `proc-macro-error2 2.0.1` future-incompatibility notice. |
+| HAProxy Prometheus gap remediation | FIXED / PASS | Production-like HAProxy generation now exposes the native exporter only on `127.0.0.1:8405`; a state-driven reload helper validates and replaces only the recorded HAProxy process and atomically updates its lifecycle state. Live HAProxy PID `99344` serves metrics, Prometheus reports the `haproxy` target `up`, and the final alert set is empty. |
+| eBPF lifecycle cleanup (Phase 6, Part 6) | PASS | `scripts/vm/validate-ebpf-lifecycle-cleanup.sh` completed three WASI HTTP deploy/forced-stop/cold-start/remove cycles across all three nodes and one full rolling node restart. Every restart/deploy produced a fresh TID registration; all five kernel identity maps matched the active identity count. Final state on every node is zero active TIDs, tombstones, port bindings, map entries, and bpffs pins; seven node-scoped programs remain attached as designed. Removed routes no longer return 2xx, per-app Prometheus series disappear, no stale identity receives new events, HAProxy remains scrapeable, and Prometheus has no active alert. |
+| Part 6 lifecycle defects | FIXED / PASS | Undeploy now removes routes before instances, removes the empty supervisor pool, retains artifacts only for the GC grace period, and deploy clears the undeploy marker. Local restore and peer bootstrap exclude grace-period apps and routes. Health metrics delete absent application label series. `NatsBus::publish` flushes before returning so short-lived CLI commands cannot report success while dropping buffered control events. The canonical app deployer now supports both Wasm binaries and `cdylib` components. |
+| 2026-08-27 Part 6 source and audit gates | PASS WITH DEPENDENCY NOTICE | WSL gates pass: formatting; required native workspace all-target check; workspace all-target Clippy with warnings denied; eBPF-feature node Clippy; storage 51 unit plus 12 integration tests; messaging 13; metrics 11; supervisor 38 unit plus 10 integration tests; eBPF monitor 121; explicit release `wasm32-wasip2` builds for `http-hello-component` and `wasi-grpc-echo`; changed-script syntax; and `cargo audit --deny warnings` over 749 dependencies. The separately tracked `proc-macro-error2 2.0.1` future-incompatibility notice remains. |
 
 ### Execution notes
 
@@ -490,9 +494,12 @@ The next microVM run must still prove the kernel-runtime portion below.
         Monitoring-specific metrics and alerts distinguish these states from
         application/node unavailability, and clean restart restores active probes.
 - [x] Restart every node and reload probes while preserving public application
-      readiness. Explicit pinned-map residue inspection remains open.
-- [ ] Unload/reload probes without leaving pinned maps or
-      programs.
+      readiness; inspect bpffs and kernel identity-map residue explicitly.
+  - [x] **Part 6 — lifecycle cleanup:** three deploy/stop/cold-start/remove cycles
+        plus a rolling restart kept seven node-scoped programs attached, produced
+        fresh application identities, and finished with zero active identities,
+        tombstones, port bindings, kernel-map entries, or bpffs pins.
+- [x] Unload/reload probes without leaving pinned maps or programs.
 - [ ] Compare request latency, CPU, and memory against the fallback baseline.
 
 ### Part 1 record — per-application attribution for WASI HTTP
@@ -875,9 +882,10 @@ Final live evidence after the clean restart:
   `7d6222139391f70bef3becb514916550c7b824e63a4e72ffa22485e6dab3e3d5`;
   node-rootfs SHA-256 is
   `aaaf63025213b3cedb716b52e9111334d563b695bb78976fd4aee4165dd7b89b`;
-- the HAProxy exporter target is down and `HAProxyExporterDown` is active. This
-  is not an eBPF/application failure, but it is an open observability defect that
-  must be fixed before a production gate can claim all telemetry targets healthy.
+- during Part 5, the HAProxy exporter target was down and
+  `HAProxyExporterDown` was active. The pre-Part-6 remediation added the
+  loopback-only native exporter to canonical topology generation, reloaded only
+  the state-recorded HAProxy process, and proved the Prometheus target `up`.
 
 The final WSL source gate passed formatting, required native workspace checking,
 workspace Clippy with warnings denied, eBPF-feature node Clippy, 120 eBPF-monitor
@@ -891,6 +899,91 @@ the audit and native workspace recheck passed. The known
 The environment remains live in `.prod-validation-single-host-state.json` for
 operator inspection and the next explicitly authorized part. Teardown has not
 been run.
+
+### Part 6 record — application and eBPF lifecycle cleanup
+
+Status: **PASS on 2026-08-27.** The reusable validator is:
+
+```bash
+bash scripts/vm/validate-ebpf-lifecycle-cleanup.sh \
+  --state-file .prod-validation-single-host-state.json \
+  --cycles 3
+```
+
+It deploys the repository's `wasi:http/incoming-handler` fixture rather than a
+CLI component that runs its own permanent server. This distinction matters: an
+early test used `hello-axum`, whose long-lived `wasi:cli/run` call correctly hit
+the runtime's 30-second epoch ceiling. Production HTTP services should use the
+incoming-handler model, where the ceiling applies to each request; a permanent
+CLI-style server must not be deployed until the platform has a separately
+designed service-lifetime and request-deadline model.
+
+The final run completed all of the following on `local-test-node-0`, `-1`, and
+`-2`:
+
+- three complete deploy, warm, forced-stop, cold-start, and remove cycles for
+  `default/ebpf-lifecycle:v1`;
+- a rolling restart of all three nodes during cycle 1 while the application
+  remained reachable directly and through the HAProxy front door;
+- a different `tid:registered_at_ns` identity after every forced stop,
+  redeploy, and node replacement;
+- exact agreement between active identities and all five kernel identity maps;
+- route removal on every node, deletion of per-application Prometheus series,
+  and rejection of requests to the removed route;
+- no new eBPF action record attributed to the removed identity; and
+- expiry of the bounded 30-second tombstone retention window.
+
+The test exposed and closed several independent lifecycle defects:
+
+1. `RemoveApp` left its route in storage/router state, allowing a request to
+   cold-start an application after undeploy. Routes are now removed before
+   instance shutdown.
+2. The supervisor retained an empty application pool, so health and Prometheus
+   continued reporting an undeployed app. The empty live pool is now removed,
+   and absent label values are deleted from both application gauges.
+3. Grace-period artifacts were indistinguishable from deployed state during
+   restart and peer bootstrap. Storage now exposes `list_deployed_apps()`;
+   local restore and bootstrap configs/routes exclude undeploy-marked apps,
+   while the artifacts remain recoverable until GC. Redeploy clears the marker.
+4. A short-lived CLI could print `Undeploy requested` and exit before its
+   buffered NATS publish reached the server. `NatsBus::publish()` now flushes
+   before returning, so success means the control message reached NATS.
+5. The canonical application deployment helper assumed every Wasm package had
+   a binary target. It now resolves either a binary or `cdylib`, enabling direct
+   production-like validation of WASI HTTP components.
+6. The original HAProxy topology omitted the native Prometheus listener even
+   though observability always scraped it. Canonical HAProxy generation now
+   binds metrics to `127.0.0.1:8405`; the state-driven reload helper validates
+   the exact recorded config/process and updates lifecycle state atomically.
+
+Final live evidence:
+
+- NATS PID `52250`; HAProxy PID `99344`; node PIDs `171971`, `172045`, and
+  `172120`; every node process is alive and its health endpoint returns 200;
+- every node reports `ebpf_active=true`, seven attached programs, and no
+  monitoring degradation;
+- every `/admin/ebpf/identities` response reports `active_tids=[]`,
+  `recent_tombstones=0`, `port_bindings=0`, five zero-valued kernel maps,
+  `bpffs_mounted=true`, and `pinned_entries=0`;
+- Prometheus reports the HAProxy target up and `/api/v1/alerts` returns an empty
+  alert set;
+- final rootfs SHA-256 is
+  `89b06132006d44535f6c0f38c356707d7023f4e168a1beba697ad3972b97cbe5`;
+  kernel SHA-256 remains
+  `7d6222139391f70bef3becb514916550c7b824e63a4e72ffa22485e6dab3e3d5`.
+
+Repository verification passed in WSL with
+`CARGO_TARGET_DIR=/tmp/wasm-cloud-platform-target`: formatting, the required
+native workspace all-target check, workspace Clippy with warnings denied,
+eBPF-feature node Clippy, storage (51 unit and 12 integration), messaging (13),
+metrics (11), supervisor (38 unit and 10 integration), and eBPF monitor (121)
+tests. Release `wasm32-wasip2` builds passed for `http-hello-component` and
+`wasi-grpc-echo`; changed-script syntax and `cargo audit --deny warnings` also
+pass. The `proc-macro-error2 2.0.1` future-incompatibility notice remains a
+separately tracked dependency warning.
+
+The environment remains live and contains no deployed lifecycle fixture.
+Teardown has not been run.
 
 Post-change repository verification passed in WSL with
 `CARGO_TARGET_DIR=/tmp/wasm-cloud-platform-target`: formatting, the required

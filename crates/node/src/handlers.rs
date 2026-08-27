@@ -402,6 +402,7 @@ impl EventDispatcher {
         self.store.store_artifact(&app_id, &artifact_bytes)?;
         self.store.save_config(&config)?;
         self.store.save_artifact_hash(&app_id, &sha256)?;
+        self.store.mark_deployed(&app_id.0)?;
         info!(
             app = %app_id.0,
             "deploy complete, waiting for first request"
@@ -412,12 +413,25 @@ impl EventDispatcher {
     async fn handle_remove(&self, app_id: AppId) -> Result<(), PlatformError> {
         info!(app = %app_id.0, "removing app");
 
+        // Remove routes before stopping instances so new requests cannot race
+        // the undeploy and cold-start an application being removed.
+        let route_hosts: std::collections::BTreeSet<_> = self
+            .store
+            .list_routes_for_app(&app_id.0)?
+            .into_iter()
+            .map(|route| route.host)
+            .collect();
+        for host in route_hosts {
+            self.handle_route_remove(host).await?;
+        }
+
         // Kill all running instances first (this creates billing records)
         self.supervisor.kill_all_instances(&app_id).await?;
 
         // Mark app as undeployed - starts grace period
         // Actual deletion happens after grace period expires in GC loop
         self.store.mark_undeployed(&app_id.0)?;
+        self.supervisor.forget_app(&app_id).await?;
 
         // Note: We don't immediately delete artifacts/configs anymore
         // The GC loop will purge them after the grace period

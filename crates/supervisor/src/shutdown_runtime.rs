@@ -312,6 +312,23 @@ impl Supervisor {
         Ok(())
     }
 
+    /// Remove an undeployed application's now-empty pool from live state.
+    /// Persisted artifacts remain available to the storage GC grace period.
+    pub async fn forget_app(&self, app_id: &AppId) -> Result<(), PlatformError> {
+        let mut pools = self.pools.write().await;
+        if pools
+            .get(&app_id.0)
+            .is_some_and(|pool| pool.active_count() != 0)
+        {
+            return Err(PlatformError::runtime(format!(
+                "cannot forget app {} while instances are active",
+                app_id.0
+            )));
+        }
+        pools.remove(&app_id.0);
+        Ok(())
+    }
+
     /// Convert a runtime trap into the standard instance shutdown path.
     pub async fn handle_trap(&self, app_id: &AppId, instance_id: &InstanceId, reason: &str) {
         tracing::error!(

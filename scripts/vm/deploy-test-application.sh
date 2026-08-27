@@ -102,10 +102,16 @@ package = next(
     package for package in metadata["packages"]
     if package["manifest_path"] == sys.argv[1]
 )
-binary = next((target for target in package["targets"] if "bin" in target["kind"]), None)
-if binary is None:
-    raise SystemExit("manifest has no binary target")
-print(binary["name"] + ".wasm")
+target = next(
+    (
+        target for target in package["targets"]
+        if "bin" in target["kind"] or "cdylib" in target["crate_types"]
+    ),
+    None,
+)
+if target is None:
+    raise SystemExit("manifest has no Wasm binary or cdylib target")
+print(target["name"].replace("-", "_") + ".wasm")
 ' "$manifest_abs")
   wasm="$target_dir/wasm32-wasip2/release/$artifact_name"
 fi

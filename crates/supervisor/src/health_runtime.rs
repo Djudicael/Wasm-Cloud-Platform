@@ -142,7 +142,7 @@ impl Supervisor {
     /// Rehydrate app pools from persisted config and prepared artifacts so
     /// apps can cold-start again on first request after a node restart.
     pub async fn restore_from_storage(&self) -> Result<(), PlatformError> {
-        let app_ids = self.store.list_apps()?;
+        let app_ids = self.store.list_deployed_apps()?;
         let mut pools = self.pools.write().await;
 
         for app_id in app_ids {

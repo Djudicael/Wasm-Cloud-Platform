@@ -70,7 +70,7 @@ pub mod fallback;
 pub mod metrics;
 pub mod namespace_map;
 
-pub use namespace_map::{CallerIdentity, NamespaceMap};
+pub use namespace_map::{CallerIdentity, MonitoredTidStatus, NamespaceMap, NamespaceMapStatus};
 
 // Shared data structures between eBPF programs and userspace.
 // Always available — the type definitions don't depend on aya.
@@ -105,6 +105,7 @@ pub struct MonitorAvailability {
     pub enabled: bool,
     pub required: bool,
     pub ebpf_active: bool,
+    pub attached_programs: usize,
     pub monitoring_degraded: bool,
     pub reason: Option<String>,
 }
@@ -119,6 +120,7 @@ impl MonitorRuntimeState {
             enabled,
             required,
             ebpf_active: false,
+            attached_programs: 0,
             monitoring_degraded: false,
             reason: if enabled {
                 Some("initializing".to_string())
@@ -133,9 +135,10 @@ impl MonitorRuntimeState {
     }
 
     #[cfg(feature = "ebpf")]
-    fn mark_active(&self) {
+    fn mark_active(&self, attached_programs: usize) {
         let mut state = self.0.write().unwrap_or_else(|e| e.into_inner());
         state.ebpf_active = true;
+        state.attached_programs = attached_programs;
         state.monitoring_degraded = false;
         state.reason = None;
     }
@@ -154,6 +157,8 @@ impl MonitorRuntimeState {
 pub struct MonitorStatus {
     /// Whether eBPF programs are loaded and active (vs userspace fallback).
     pub ebpf_active: bool,
+    /// Number of eBPF programs currently attached to this node.
+    pub attached_programs: usize,
     /// Whether kernel monitoring is a hard node-readiness requirement.
     pub monitoring_required: bool,
     /// Whether kernel monitoring is unavailable or incomplete.
@@ -244,6 +249,7 @@ impl MonitorHandle {
         let availability = self.runtime_state.snapshot();
         MonitorStatus {
             ebpf_active: availability.ebpf_active,
+            attached_programs: availability.attached_programs,
             monitoring_required: availability.required,
             monitoring_degraded: availability.monitoring_degraded,
             monitoring_degraded_reason: availability.reason,
@@ -346,7 +352,7 @@ pub async fn init(
                 Ok((consumer_handle, action_tx, mut loaded)) => {
                     info!("eBPF monitor initialized with kernel-level monitoring");
                     metrics.mark_ebpf_active();
-                    runtime_state.mark_active();
+                    runtime_state.mark_active(loaded.links.len());
                     if !loaded.failures.is_empty() {
                         for failure in &loaded.failures {
                             warn!(
