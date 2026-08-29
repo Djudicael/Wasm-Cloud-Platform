@@ -211,6 +211,8 @@ redacted artifact with the result.
 | 2026-08-29 OIDC post-eBPF validation (Phase 6, Part 8) | PASS WITH RECORDED PRODUCTION LIMITS | PostgreSQL 17.11 was reprovisioned, OIDC migrations through V37 and repeatable seed data completed, and the versioned frontend/backend WASI components passed database readiness through the same-origin HAProxy gateway. The focused Chromium login/dashboard journey passed 6/6 before and after a one-at-a-time restart of all three platform nodes (5.2 s and 4.9 s). Every replacement reconstructed both applications and registered fresh exact-deployment TIDs in all five identity maps. Runtime evidence tied PostgreSQL connects to the backend identity; process/syscall, FD, TCP, and block-I/O counters were present. Final Prometheus state was 10/10 targets up, three active eBPF nodes, 6,081 processed events, and zero monitoring degradation, parse errors, or queue saturations. The 2-GiB guest images remained traffic-serving but reported low-disk health, and buffered writeback/per-application RSS still require a stronger process/cgroup boundary for tenant-grade attribution. |
 | 2026-08-29 controlled platform-node drain (Phase 7, Part 1) | PASS AFTER OPERATOR-DRAIN REMEDIATION | Firecracker's guest reboot action alone did not invoke the platform application-drain path. A scoped `wasm-ctl node --target NODE drain` command was added, ambiguous untargeted drains are refused, and the target now fences new traffic/readiness before instance shutdown. Node 0 became HTTP 503-ready immediately, HAProxy removed both pools, both instances reached zero, and an orderly guest stop followed. With node 0 absent, 20 paced OIDC readiness requests at 4 requests/s passed 20/20 in 33–52 ms. A deliberately unpaced 30-request burst produced 29 HTTP 200 and one node-local HTTP 429, proving admission limits—not availability—must be aligned with the Phase 8 load profile. State-driven rebuild restored fresh identities; all three nodes were rolled to rootfs `b6512b8b...`, Playwright passed 6/6, Prometheus returned to 10/10, and no alert remained. |
 
+| 2026-08-29 controlled network faults (Phase 7, Part 2) | PASS AFTER APPLICATION-TIMEOUT AND STALE-DEPLOYMENT REMEDIATION | Exact node-0 netem, NATS, and PostgreSQL faults were injected and individually removed. Latency/loss/bandwidth controls behaved as configured; NATS loss made only node 0 not-ready and recovered without a reconnect storm. The first PostgreSQL partition exposed an unbounded WASI database readiness connection behind HAProxy's 60-second server timeout. The OIDC backend now enforces a two-second database health deadline: the live retest returned bounded HTTP 503 in 2.013 seconds, subsequent circuit-open responses took 4-9 ms, HAProxy withdrew only node 0, and peer traffic stayed HTTP 200. Automatic recovery occurred after the circuit-breaker cooldown without redeployment. A superseded content-addressed backend initially left stale alert labels; the OIDC deployer now removes old same-component versions after the replacement passes health, waits for their metric series to disappear, and the node app API excludes undeployed grace-period artifacts. Rootfs `e23eeac...` was rolled through all three nodes; only the two current OIDC deployments are listed, all pools are up, Playwright passes 6/6, Prometheus reports 10/10 targets, no alert or fault rule remains, and every TAP uses `fq_codel`. |
+
 ### Execution notes
 
 - The workspace emits Rust's future-incompatibility notice for
@@ -1308,11 +1310,98 @@ separately tracked `proc-macro-error2 2.0.1` future-incompatibility notice.
 
 ### Network
 
-- [ ] Add latency, jitter, packet loss, and bandwidth restriction to one node.
-- [ ] Partition one platform node from NATS.
-- [ ] Partition one platform node from PostgreSQL.
-- [ ] Verify timeouts are bounded and recovery does not cause a retry storm.
-- [ ] Verify stale routes or application instances are not advertised indefinitely.
+- [x] Add latency, jitter, packet loss, and bandwidth restriction to one node.
+- [x] Partition one platform node from NATS.
+- [x] Partition one platform node from PostgreSQL.
+- [x] Verify timeouts are bounded and recovery does not cause a retry storm.
+- [x] Verify stale routes or application instances are not advertised indefinitely.
+
+### Part 2 record - controlled network and dependency faults
+
+Status: **PASS on 2026-08-29 after closing bounded-readiness and
+superseded-deployment gaps.** Each fault targeted the exact node-0 address and
+TAP recorded in `.prod-validation-single-host-state.json`. Only one fault was
+active at a time, every rollback used the same full selector used to create the
+fault, and the final audit found no Phase 7 firewall rule or netem qdisc left
+behind.
+
+The node-0 TAP `tap-7976f61b7d5` was configured with 100 ms latency, 20 ms
+jitter, 5% packet loss, and a 20-Mbit/s rate. A 50-packet probe observed 45
+replies, 10% sample loss, and 74.065/101.395/143.288 ms minimum/average/maximum
+round-trip time. Twelve direct readiness requests all returned HTTP 200 in
+181-258 ms. The qdisc recorded 241 packets and 14 drops before it was restored
+to `fq_codel`; all three final TAPs report `fq_codel`.
+
+An exact `FORWARD` rule then dropped node 0 (`172.20.0.12`) traffic to NATS
+(`172.20.0.10:4222`). The rule counted 17 packets and 3,563 bytes. Node 0
+returned HTTP 503-ready within 16 seconds with NATS explicitly disconnected,
+while node 1 and the public OIDC database path remained healthy. Its serial log
+contained one transition into degraded mode and no reconnect loop. Removing
+the exact rule restored NATS health within 12 seconds and produced one recovery
+transition.
+
+The first equivalent PostgreSQL partition exposed a production-significant
+application defect. A node-0 backend readiness request returned an initial 502
+in 2.043 seconds, then a later request remained blocked beyond 47 seconds; an
+independently bounded client timed out after 5.010 seconds. The platform proxy
+had established the WASI HTTP request, but the backend's PostgreSQL connection
+had no application-level readiness deadline. HAProxy's `timeout server 60s`
+therefore could not guarantee prompt pool withdrawal. The independent frontend
+on node 0 stayed HTTP 200, and HAProxy continued serving backend readiness from
+the other two nodes.
+
+The OIDC backend at
+`D:/dev/openid_connect_wasi/crates/openid-connect-wasi/src/router/health.rs`
+now races the complete database connect/query operation against a two-second
+deadline on both native Tokio and `wasm32-wasip2`. A timeout returns the
+existing not-ready response instead of trapping or hanging. Two regression
+tests cover completion and cancellation; the application passed formatting,
+17 backend tests, all-target Clippy with warnings denied, and a release
+`wasm32-wasip2` build.
+
+After deploying backend `oidc/openid-connect-wasi:vd5fc09739b3d`, the repeated
+partition behaved as intended. The first direct node-0 check returned
+`{"checks":{"database":"failed"},"status":"not_ready"}` with HTTP 503 in
+2.013 seconds. The platform circuit breaker returned the next two HTTP 503
+responses in 9.4 and 4.2 ms. Node-0 frontend traffic remained HTTP 200 in 3.7
+ms, public backend readiness remained HTTP 200 in 35 ms, and HAProxy marked
+only `oidc_backend_nodes/node0` down with `L7STS/503`, leaving two active
+servers. The rule counted 17 packets and 1,020 bytes. Timeout warnings occurred
+at the bounded four-second health cadence rather than as an uncontrolled retry
+loop; the node stayed responsive and its Firecracker RSS remained bounded.
+After exact rule removal, the circuit breaker completed its roughly 30-second
+cooldown, a direct readiness probe returned HTTP 200 in 37 ms, and HAProxy
+automatically restored node 0 with three active servers and an empty queue.
+
+The final telemetry gate found three stale `ApplicationNotReady` alerts for the
+superseded backend version even though the replacement was healthy. The alert
+correctly reflected old zero-instance metric labels: the OIDC deployment
+workflow had deployed a new content-addressed version without removing the old
+desired-state version. `scripts/vm/deploy-oidc-hub-test.sh` now removes only
+older versions of its two known OIDC components after the replacements pass
+their health checks and waits until all node metric endpoints stop exporting
+those labels. Separately, `/admin/apps` now uses `list_deployed_apps()`, so
+recoverable undeploy-grace artifacts remain available to GC without being
+presented as live deployments. A complete repeat deployment passed this cleanup
+gate.
+
+The corrected node image SHA-256 is
+`e23eeac8baaaa1b8df81174861870a373adf4663326d6f56bd84ebf07b94c246`.
+It was rolled one node at a time as PIDs `226513`, `226584`, and `226655`.
+Public OIDC readiness remained HTTP 200 during each replacement. Every node now
+lists exactly frontend `oidc/oidc-admin-wasi:vd2d032b3c42d` and backend
+`oidc/openid-connect-wasi:vd5fc09739b3d`, each with one instance. All three
+HAProxy backend members are up, PostgreSQL readiness is `database=ok`, the
+focused single-worker Playwright login/dashboard gate passes 6/6 in 5.3
+seconds, Prometheus reports `sum(up)=10`, and no alert remains.
+
+WSL source gates passed with the Linux target directory: formatting; the
+required native workspace all-target check; workspace all-target Clippy with
+warnings denied; 51 storage unit plus 12 integration tests; 30 node library
+tests; explicit `wasm32-wasip2` builds for both workspace WASI applications;
+`cargo audit --deny warnings` across 749 locked dependencies; changed-script
+syntax; and scoped whitespace checks. Cargo continues to emit
+the separately tracked `proc-macro-error2 2.0.1` future-incompatibility notice.
 
 ### NATS
 

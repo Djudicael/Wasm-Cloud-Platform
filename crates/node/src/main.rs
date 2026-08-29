@@ -2682,7 +2682,7 @@ async fn main() -> anyhow::Result<()> {
                     let supervisor = supervisor.clone();
                     async move {
                         let namespace = params.get("namespace").cloned().unwrap_or_else(|| "default".to_string());
-                        match store.list_apps() {
+                        match store.list_deployed_apps() {
                             Ok(app_ids) => {
                                 let mut apps = Vec::new();
                                 for app_id in app_ids {

@@ -90,6 +90,8 @@ backend_fuel=10000000000
 # Runtime configuration is part of deployment identity. Otherwise a same-artifact
 # redeploy can leave an already-running instance on its previous resource limits.
 backend_version="v$(printf '%s\nfuel=%s\n' "$(sha256sum "$backend_wasm" | cut -d' ' -f1)" "$backend_fuel" | sha256sum | cut -c1-12)"
+frontend_app_id="oidc/oidc-admin-wasi:$frontend_version"
+backend_app_id="oidc/openid-connect-wasi:$backend_version"
 
 scripts/vm/deploy-test-application.sh \
   --state-file "$state_file" \
@@ -120,6 +122,73 @@ scripts/vm/deploy-test-application.sh \
   --env "OIDC_RATE_LIMIT_MODE=proxy" \
   --env "OIDC_TRUST_PROXY_HEADERS=true" \
   --env "OIDC_CORS_ORIGINS="
+
+# This rehearsal uses one active version of each OIDC component. A new
+# content-addressed deployment supersedes the previous version after the new
+# artifact has passed its application health check. Explicitly remove those old
+# desired-state entries so their zero-instance Prometheus series cannot fire an
+# ApplicationNotReady alert indefinitely. Other applications and namespaces are
+# deliberately left untouched.
+node_admin_addr=$(python3 - "$state_file" <<'PY'
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as stream:
+    state = json.load(stream)
+print(state["nodes"][0]["admin_addr"])
+PY
+)
+deployed_apps=$(curl -fsS --max-time 5 \
+  -H "Authorization: Bearer $WASM_CTL_AUTH_TOKEN" \
+  "http://$node_admin_addr/admin/apps?namespace=oidc")
+mapfile -t superseded_app_ids < <(
+  python3 - "$frontend_app_id" "$backend_app_id" "$deployed_apps" <<'PY'
+import json, sys
+
+current = set(sys.argv[1:3])
+apps = json.loads(sys.argv[3])
+prefixes = ("oidc/oidc-admin-wasi:", "oidc/openid-connect-wasi:")
+for app in apps:
+    app_id = app.get("id", "")
+    if app_id.startswith(prefixes) and app_id not in current:
+        print(app_id)
+PY
+)
+platform_target_dir=${PLATFORM_CARGO_TARGET_DIR:-/tmp/wasm-cloud-platform-target}
+for superseded_app_id in "${superseded_app_ids[@]}"; do
+  CARGO_TARGET_DIR="$platform_target_dir" cargo run -q -p vm-testbed \
+    --bin vm-testbed-cli -- undeploy-app \
+    --state-file "$state_file" --app-id "$superseded_app_id"
+done
+
+if ((${#superseded_app_ids[@]})); then
+  mapfile -t node_admin_addrs < <(python3 - "$state_file" <<'PY'
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as stream:
+    state = json.load(stream)
+for node in state["nodes"]:
+    print(node["admin_addr"])
+PY
+  )
+  deadline=$((SECONDS + 45))
+  while :; do
+    stale_series=false
+    for admin_addr in "${node_admin_addrs[@]}"; do
+      metrics=$(curl -fsS --max-time 5 \
+        -H "Authorization: Bearer $WASM_CTL_AUTH_TOKEN" \
+        "http://$admin_addr/metrics")
+      for superseded_app_id in "${superseded_app_ids[@]}"; do
+        if grep -Fq "wasm_node_app_healthy_instances{app=\"$superseded_app_id\"}" <<<"$metrics"; then
+          stale_series=true
+        fi
+      done
+    done
+    [[ "$stale_series" == false ]] && break
+    ((SECONDS < deadline)) || {
+      echo "Superseded OIDC metrics were not removed within 45 seconds." >&2
+      exit 1
+    }
+    sleep 1
+  done
+fi
 
 scripts/vm/configure-oidc-test-gateway.sh --state-file "$state_file"
 
