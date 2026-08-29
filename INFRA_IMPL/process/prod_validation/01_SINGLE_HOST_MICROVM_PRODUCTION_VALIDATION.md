@@ -215,6 +215,7 @@ redacted artifact with the result.
 | 2026-08-29 PostgreSQL failure modes (Phase 7, Part 3) | PASS AFTER DEADLINE, EXPORTER, AND MIGRATION REMEDIATION | A reusable state-scoped runner proved prompt invalid-credential failure, 197 observed sessions against PostgreSQL's 200/3 maximum/reserved configuration, backend HTTP 503 with an independent HTTP 200 frontend during exhaustion, automatic pool recovery, a two-second statement deadline, a sanitized application lock-timeout response in 2.029 seconds, and serialized migrations. An advisory-lock competitor failed in 10.06 seconds with SQLSTATE `55P03`; after release the migrator passed in 0.08 seconds with 11/11 unique migration records. Runtime database deadlines are now deployment identity, exporter queries have bounded connect/statement/lock/transaction deadlines, and all three native migration entry points apply each migration plus tracking row atomically under the same session advisory lock. The final focused Playwright gate passed 6/6, OIDC readiness was `database=ok`, all Prometheus alerts were clear, and the environment remains live for Part 4. |
 | 2026-08-29 OIDC capacity and short soak (Phase 8, Part 1) | PASS FOR THE CONFIGURED LOCAL ENVELOPE | A paced 50/25/20/5 frontend/discovery/readiness/login mix established HAProxy's configured 100-requests-per-10-seconds per-client stick-table as the first saturation boundary. At 5 requests/s, 600/600 requests passed a 120-second short soak; route p99 values were 5.2/54.7/57.1/166.4 ms. At 15 requests/s the ramp admitted 74/300 and returned 226 deliberate HTTP 429 responses; 30 and 60 requests/s were completely admission-limited before host resources saturated. With node 0 drained and absent, the representative 5 requests/s mix passed 151/151, while an earlier 15 requests/s readiness run admitted 98/450 and rejected 352. The conservative envelope for this exact front-door policy is therefore 5 requests/s per client IP, including N−1 headroom; this is not the host's raw compute maximum. Node memory peaked at 27%, process RSS at 578 MiB, CPU at 0.09 core, PostgreSQL at two sessions, HAProxy queue at zero, and NATS/eBPF error-pressure signals at zero. All three nodes were restored, OIDC database readiness passed, Prometheus returned to 10/10, and no alert remained. |
 | 2026-08-29 OIDC upgrade and rollback (Phase 8, Part 2) | PASS WITH RELEASE-ARTIFACT LIMITATION | The last-known-good backend `vdc1902621308` and candidate identity `vdc1902621308-phase8-candidate` ran concurrently against a transactional additive schema probe. Candidate readiness passed on all nodes, the public route cut over and rolled back while 450/450 paced requests stayed HTTP 200 (p99 68.5 ms), and migration tracking returned from 11/11 to 11/11 after exact probe cleanup. An admitted synthetic candidate with a malformed database URL returned HTTP 500, stopped at canary, and was undeployed without deleting the current application or database state. The final route inventory contains only the original frontend/backend, no Phase 8 metric series remains, Playwright passes 6/6, Prometheus is 10/10 with no alert, and eBPF is active on three nodes. Both release identities intentionally used the same tested Wasm SHA-256 because no clean newer artifact existed; repeat this gate with the real distinct release digest before production promotion. A host-suspend clock-skew failure was also fixed by image-schema-6 boot-time and continuous Chrony synchronization. |
+| 2026-08-29 OIDC disaster recovery (Phase 9) | PASS WITH DATABASE-TIME, KMS, AND RETENTION LIMITATIONS | A state-scoped recovery runner created a PostgreSQL 17 custom-format snapshot, verified an OpenPGP AES-256 encrypt/decrypt checksum round trip, restored into a separate container, and compared all 26 snapshot tables by row count and content hash with 11/11 migrations. A unique recovery backend used the restored database on every platform node; the public route was temporarily cut over and the focused login/dashboard Playwright suite passed 6/6 before automatic rollback and cleanup. The final run measured a 2 ms on-demand snapshot boundary, 1.221 s dump, 6.338 s database restore, 43.470 s application readiness, and 52.053 s through the browser journey. The redacted manifest records only active route-referenced applications, topology, artifact digests, routes, and secret requirements. The live schema-3 PostgreSQL VM was 12,399 seconds behind after host suspend; schema 4 now requires boot-time and continuous Chrony, builds cleanly as `9249f950...`, and the builder refuses to overwrite a disk referenced by a live recorded service. The live VM was not destructively replaced, so the new image must be used for the next environment. Production KMS/HSM custody, off-host replication, immutable retention, and scheduled-backup RPO remain multi-system operator gates. |
 | 2026-08-29 storage and resource pressure (Phase 7, Part 4) | PASS WITH A WASI CLI CONNECTION-LIFECYCLE LIMITATION | Disposable low-space, inode, read-only-root, CPU, memory, FD, and connection tests all produced bounded, observable behavior while peer OIDC traffic remained available. Inode-aware readiness, disk/inode/memory/process-FD metrics and alerts, exponential PID-1 restart backoff, one-restart VM sizing/read-only controls, an enforced WASI ResourceTable ceiling, full FD-denial error chains/counters, and identity-aware deployment verification were added. A request-scoped WASI HTTP canary held exactly 32 connections, denied the 33rd, exported 32 active during the hold, and returned to zero afterward. A 64-handle FD ceiling trapped only the offending request, incremented `wasm_policy_fd_denied_total`, and the next request passed. Persistent WASI CLI servers cannot observe individual socket destruction through the current Wasmtime address-check hook, so their connection counter is a conservative instance-lifetime budget; do not claim simultaneous-connection enforcement for that execution model until socket-drop interception or a process/cgroup boundary is implemented. Final rootfs `ce9f190a...` was rolled through all nodes with eBPF active, process FD usage was 144/1024 per node, focused Playwright passed 6/6, all platform targets were up, OIDC readiness was `database=ok`, no alert fired, and resource canaries were undeployed. |
 | 2026-08-29 Phase 7 Part 4 source gates | PASS WITH DEPENDENCY NOTICE | WSL gates pass: formatting; required native workspace all-target check; workspace all-target Clippy with warnings denied; eBPF-feature node Clippy with warnings denied; 54 storage unit plus 12 integration tests; 64 runtime unit plus 7 integration tests; 11 metrics tests; 9 vm-testbed unit plus 3 doc tests; explicit release `wasm32-wasip2` builds for `hello-axum` and `http-hello-component`; and changed-script shell syntax. The focused OIDC Chromium suite passed 6/6. Rust still reports the separately tracked `proc-macro-error2 2.0.1` future-incompatibility notice. |
 
@@ -1812,16 +1813,108 @@ PGPASSWORD='set-without-shell-history' \
   --state-file .prod-validation-single-host-state.json
 ```
 
+Full application-level recovery rehearsal:
+
+```bash
+PGPASSWORD='set-without-shell-history' \
+  CARGO_TARGET_DIR=/tmp/wasm-cloud-platform-target \
+  bash scripts/vm/validate-oidc-disaster-recovery.sh \
+  --state-file .prod-validation-single-host-state.json \
+  --app-dir /mnt/d/dev/openid_connect_wasi \
+  --report-dir /tmp/phase9-oidc-recovery-$(date -u +%Y%m%dT%H%M%SZ)
+```
+
 - [x] Back up PostgreSQL using the intended logical or physical procedure.
-- [ ] Record artifact/control state required to rebuild platform nodes.
+- [x] Record artifact/control state required to rebuild platform nodes.
 - [x] Restore the database into a separate disposable PostgreSQL instance.
-- [ ] Run schema/version checks, record counts or checksums, readiness, and a full
+- [x] Run schema/version checks, record counts or checksums, readiness, and a full
       OIDC journey against the restored instance.
-- [ ] Measure recovery point and recovery time.
-- [ ] Verify backup encryption, access controls, retention metadata, and restore
+- [x] Measure recovery point and recovery time.
+- [x] Verify backup encryption, access controls, retention metadata, and restore
       documentation without using production keys.
 - [x] Confirm a platform node can be destroyed and rebuilt from immutable artifacts
       and declared configuration without copying another live node filesystem.
+
+### Phase 9 result: application-level recovery rehearsal
+
+The final reusable runner is `scripts/vm/validate-oidc-disaster-recovery.sh`.
+It refuses an existing report directory, derives all service/node addresses from
+the selected topology state, uses a unique immutable recovery identity per report,
+and installs an exit trap before changing any route. The trap restores the exact
+last-known-good backend, removes only the recovery host and application, drops
+only the source marker table created by the run, and removes only the labeled
+restore container and private plaintext workspace.
+
+The final evidence is `/tmp/phase9-oidc-recovery-20260829-final4`. The database
+backup was PostgreSQL custom format and the encrypted artifact is
+`oidc.dump.gpg`, SHA-256
+`e20b30f120e33183b3f6a6cc1670537b4133b8b77b18149f1c3a0b43bf904229`.
+The report directory is mode 700 and every retained evidence file is mode 600.
+The disposable encryption passphrase was used to decrypt and verify the exact
+plaintext SHA-256, then destroyed with the plaintext workspace. This validates
+the local encryption procedure without embedding a key in the evidence, but it
+does not validate production KMS/HSM recovery, key rotation, separation of
+duties, off-host replication, object lock, or retention enforcement.
+
+The snapshot boundary uses two deterministic recovery markers. The marker
+committed immediately before `pg_dump` exists after restore, while a transaction
+committed after the dump does not. All 26 public tables in that snapshot matched
+by row count and a deterministic hash of every logical row; PostgreSQL was 17.11
+on both sides and migration tracking was 11 total/11 distinct. The restore
+backend returned `database=ok` through every platform-node proxy. After temporary
+public cutover, the focused Chromium login/dashboard suite passed 6/6 in 4.4
+seconds, including invalid and successful login behavior. The original public
+backend was restored before the recovery deployment and container were removed.
+
+Measured local timings from the final run were:
+
+| Measurement | Result | Interpretation |
+|---|---:|---|
+| Observed snapshot boundary | 0.002 s | Host-observed marker commit to dump start; this is not the production scheduled-backup interval |
+| Logical dump | 1.221 s | Small local OIDC database only |
+| Database restore RTO | 6.338 s | Recovery start through successful `pg_restore` and database verification |
+| Application readiness RTO | 43.470 s | Recovery start through restored-backend readiness and public cutover |
+| Full journey RTO | 52.053 s | Recovery start through all six Playwright checks |
+
+These values demonstrate that the mechanism can recover on this host. Production
+RPO is instead bounded by backup frequency, replication/archive lag, and the last
+independently verified off-host recovery point. Production RTO must add incident
+detection, operator or automation reaction time, artifact/secret retrieval,
+network/DNS changes, larger data volume, cache warm-up, and approval gates.
+
+#### PostgreSQL clock defect and image remediation
+
+The first report incorrectly appeared to have an approximately 12,329-second RPO.
+The recovery markers revealed that the running PostgreSQL schema-3 microVM had
+retained time from before a laptop/WSL suspend, just as the platform-node images
+had earlier. The final run measured 12,398.867 seconds of source database clock
+skew. Database time is therefore recorded separately and is never used as the
+runner's RPO clock. This matters for audit order, retention, token/session expiry,
+scheduled jobs, point-in-time recovery, and timestamp-based conflict handling.
+
+The PostgreSQL rootfs contract is now schema 4. It installs Chrony, requires a
+bounded initial synchronization before PostgreSQL starts listening, and keeps
+continuous synchronization running. The disposable local image uses a fixed
+public Cloudflare NTP source; production requires multiple authenticated or
+operator-controlled time sources plus offset, stratum, reachability, and source-
+loss alerts. An alternate schema-4 image built successfully at
+`/tmp/phase9-postgres-schema4/postgres-rootfs.ext4`, contains `chronyd`, passes
+read-only `e2fsck`, and has SHA-256
+`9249f9507ce2abe3cc787e557e99b2e0099c0aa7ca0344382ededf1233272ad4`.
+
+The live schema-3 database disk was deliberately not overwritten. The builder
+now refuses to replace the canonical PostgreSQL image whenever a PostgreSQL PID
+from a repository state file still exists, and `provision-postgres-service.sh`
+rejects pre-schema-4 images. The next fresh environment must use schema 4; this
+running environment remains a valid data-recovery source but is explicitly not
+evidence of continuous database time synchronization.
+
+One repeat run reused the exact recovery version and timed out with HTTP 503.
+The cleanup trap restored the last-known-good route and removed the container.
+Recovery versions are now derived from the unique report path, and two subsequent
+fresh-identity rehearsals passed. Operational automation must treat recovery and
+rollback identities as immutable, single-use release records rather than rapidly
+recycling a previously undeployed identity.
 
 ## Phase 10: result and teardown
 

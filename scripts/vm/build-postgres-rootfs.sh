@@ -9,6 +9,8 @@ ALPINE_VERSION=${ALPINE_VERSION:-3.21}
 POSTGRES_DATABASE=${POSTGRES_DATABASE:-oidc}
 POSTGRES_USER=${POSTGRES_USER:-oidc}
 POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-oidc-local-test}
+repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
+image="$OUTPUT_DIR/postgres-rootfs.ext4"
 
 [[ "$POSTGRES_DATABASE" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || {
   echo "POSTGRES_DATABASE must be a simple SQL identifier." >&2
@@ -22,6 +24,32 @@ POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-oidc-local-test}
   echo "POSTGRES_PASSWORD may contain only letters, digits, dot, underscore, and dash." >&2
   exit 2
 }
+
+# The canonical service disk is writable and contains the live database. Do not
+# truncate it merely because a schema bump made the cached image look stale.
+# Firecracker's block backend is not reported reliably by fuser under every WSL
+# kernel, so recorded service PIDs are the authoritative additional guard.
+canonical_image=$(realpath -m "$image")
+canonical_repo_image=$(realpath -m "$repo_root/assets/postgres-rootfs.ext4")
+if [[ -e "$image" && "$canonical_image" == "$canonical_repo_image" ]]; then
+  command -v jq >/dev/null || {
+    echo "jq is required to prove the canonical PostgreSQL image is not live." >&2
+    exit 1
+  }
+  shopt -s nullglob
+  for candidate_state in "$repo_root"/.*state*.json "$repo_root"/*state*.json; do
+    [[ -f "$candidate_state" ]] || continue
+    while IFS= read -r service_pid; do
+      if [[ "$service_pid" =~ ^[0-9]+$ ]] && [[ -d "/proc/$service_pid" ]]; then
+        echo "Refusing to replace the canonical PostgreSQL image while recorded service PID $service_pid is alive." >&2
+        echo "State file: $candidate_state" >&2
+        echo "Stop the exact recorded service or build into a different OUTPUT_DIR." >&2
+        exit 1
+      fi
+    done < <(jq -r '.services[]? | select(.kind == "postgresql") | .pid' "$candidate_state" 2>/dev/null || true)
+  done
+  shopt -u nullglob
+fi
 
 echo "=== Building PostgreSQL rootfs ==="
 work_dir=$(mktemp -d)
@@ -52,7 +80,7 @@ printf '%s\n' \
 
 sudo cp -L /etc/resolv.conf "$rootfs_dir/etc/resolv.conf"
 sudo chroot "$rootfs_dir" /sbin/apk add --no-cache \
-  alpine-base openrc iproute2 postgresql postgresql-client postgresql17-contrib \
+  alpine-base chrony openrc iproute2 postgresql postgresql-client postgresql17-contrib \
   su-exec ca-certificates
 postgres_bin=/usr/libexec/postgresql17
 for executable in initdb postgres pg_isready psql createdb; do
@@ -73,7 +101,7 @@ mkdir -p \
   "$rootfs_dir/dev" \
   "$rootfs_dir/tmp"
 sudo chroot "$rootfs_dir" chown -R postgres:postgres /var/lib/postgresql /run/postgresql
-echo "3" > "$rootfs_dir/etc/postgresql-image-schema-version"
+echo "4" > "$rootfs_dir/etc/postgresql-image-schema-version"
 
 cat > "$rootfs_dir/etc/init.d/postgresql-testbed" <<'EOF'
 #!/sbin/openrc-run
@@ -159,6 +187,22 @@ ip link set eth0 up
 ip address add 172.20.0.20/24 dev eth0
 ip route replace default via 172.20.0.1 dev eth0
 
+# Database timestamps participate in backup recovery points, token/session
+# validity, retention, and audit ordering. Firecracker guest clocks can lag when
+# a laptop/WSL host resumes, so synchronize before PostgreSQL accepts traffic and
+# keep chronyd running. This fixed public source is only for the disposable local
+# image; production must use redundant operator-controlled time sources.
+chronyd -q -t 15 'server 162.159.200.1 iburst' || {
+  echo "initial clock synchronization failed; refusing to start PostgreSQL" >&2
+  poweroff -f
+  exit 1
+}
+chronyd 'server 162.159.200.1 iburst' || {
+  echo "failed to start continuous clock synchronization" >&2
+  poweroff -f
+  exit 1
+}
+
 if [ ! -s /var/lib/postgresql/data/PG_VERSION ]; then
   su-exec postgres /usr/libexec/postgresql17/initdb --encoding=UTF8 --locale=C -D /var/lib/postgresql/data
   cat >> /var/lib/postgresql/data/postgresql.conf <<'CONFIG'
@@ -210,7 +254,17 @@ iface eth0 inet static
 EOF
 
 mkdir -p "$OUTPUT_DIR"
-image="$OUTPUT_DIR/postgres-rootfs.ext4"
+if [[ -e "$image" ]]; then
+  command -v fuser >/dev/null || {
+    echo "fuser is required before replacing an existing PostgreSQL image." >&2
+    exit 1
+  }
+  if sudo fuser "$image" >/dev/null 2>&1; then
+    echo "Refusing to replace PostgreSQL image while a microVM has it open: $image" >&2
+    echo "Stop the recorded PostgreSQL service or build into a different OUTPUT_DIR." >&2
+    exit 1
+  fi
+fi
 dd if=/dev/zero of="$image" bs=1M count="$ROOTFS_SIZE_MB" status=progress
 mkfs.ext4 -F "$image"
 mkdir -p "$work_dir/mount"

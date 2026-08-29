@@ -37,8 +37,8 @@ command -v debugfs >/dev/null || {
   exit 1
 }
 postgres_image_schema=$(debugfs -R 'cat /etc/postgresql-image-schema-version' "$rootfs" 2>/dev/null || true)
-[[ "$postgres_image_schema" == 3 ]] || {
-  echo "$rootfs is stale or incompatible (expected PostgreSQL image schema 3)." >&2
+[[ "$postgres_image_schema" == 4 ]] || {
+  echo "$rootfs is stale or incompatible (expected PostgreSQL image schema 4)." >&2
   echo "Rebuild it with: scripts/vm/build-postgres-rootfs.sh" >&2
   exit 1
 }
