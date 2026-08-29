@@ -118,9 +118,28 @@ async fn build_test_dispatcher(
         rate_limiter: Arc::new(proxy::rate_limiter::RateLimiter::new(
             proxy::rate_limiter::RateLimitConfig::default(),
         )),
+        backpressure: proxy::backpressure::BackpressureSignal::new(),
         cluster_node_stale_after_secs: 120,
         gateway: None,
     }
+}
+
+#[tokio::test]
+async fn targeted_node_drain_fences_new_requests() {
+    let temp = NamedTempFile::new().unwrap();
+    let store = Store::open(temp.path()).unwrap();
+    let dispatcher = build_test_dispatcher(store, None, None).await;
+    assert!(dispatcher.backpressure.is_accepting());
+
+    dispatcher
+        .handle(Event::NodeDraining {
+            node_id: "node-under-test".to_string(),
+            drain_timeout_secs: 0,
+        })
+        .await
+        .unwrap();
+
+    assert!(!dispatcher.backpressure.is_accepting());
 }
 
 #[test]

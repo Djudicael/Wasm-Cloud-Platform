@@ -209,6 +209,7 @@ redacted artifact with the result.
 | 2026-08-27 Part 6 source and audit gates | PASS WITH DEPENDENCY NOTICE | WSL gates pass: formatting; required native workspace all-target check; workspace all-target Clippy with warnings denied; eBPF-feature node Clippy; storage 51 unit plus 12 integration tests; messaging 13; metrics 11; supervisor 38 unit plus 10 integration tests; eBPF monitor 121; explicit release `wasm32-wasip2` builds for `http-hello-component` and `wasi-grpc-echo`; changed-script syntax; and `cargo audit --deny warnings` over 749 dependencies. The separately tracked `proc-macro-error2 2.0.1` future-incompatibility notice remains. |
 | 2026-08-29 eBPF overhead (Phase 6, Part 7) | PASS | The final rootfs was measured with two alternating fallback/active blocks, two 20,000-request rounds per mode per block, and concurrency 32: 80,000 requests per mode and 160,000 total. Active eBPF caused 0.12% median-throughput loss, +1.11 ms median p99, +1.72% node CPU per 1,000 requests, +12.00% node context switches, and +8.62 MiB peak RSS; application-TID CPU increased 2.95% and its context switches increased 0.32%. All are inside the predefined 5% throughput/meaningful-p99, 15% CPU, 25% context-switch, and 64-MiB RSS limits. There were zero request failures, parse errors, ring drops, or queue saturations while 170,842 eBPF events were observed. Slow-I/O degraded-state recovery, bounded recovery-worker lifecycle, and kernel CONFIG-map hot reload defects found during the audit were fixed and validated in the guest before this final rerun. |
 | 2026-08-29 OIDC post-eBPF validation (Phase 6, Part 8) | PASS WITH RECORDED PRODUCTION LIMITS | PostgreSQL 17.11 was reprovisioned, OIDC migrations through V37 and repeatable seed data completed, and the versioned frontend/backend WASI components passed database readiness through the same-origin HAProxy gateway. The focused Chromium login/dashboard journey passed 6/6 before and after a one-at-a-time restart of all three platform nodes (5.2 s and 4.9 s). Every replacement reconstructed both applications and registered fresh exact-deployment TIDs in all five identity maps. Runtime evidence tied PostgreSQL connects to the backend identity; process/syscall, FD, TCP, and block-I/O counters were present. Final Prometheus state was 10/10 targets up, three active eBPF nodes, 6,081 processed events, and zero monitoring degradation, parse errors, or queue saturations. The 2-GiB guest images remained traffic-serving but reported low-disk health, and buffered writeback/per-application RSS still require a stronger process/cgroup boundary for tenant-grade attribution. |
+| 2026-08-29 controlled platform-node drain (Phase 7, Part 1) | PASS AFTER OPERATOR-DRAIN REMEDIATION | Firecracker's guest reboot action alone did not invoke the platform application-drain path. A scoped `wasm-ctl node --target NODE drain` command was added, ambiguous untargeted drains are refused, and the target now fences new traffic/readiness before instance shutdown. Node 0 became HTTP 503-ready immediately, HAProxy removed both pools, both instances reached zero, and an orderly guest stop followed. With node 0 absent, 20 paced OIDC readiness requests at 4 requests/s passed 20/20 in 33–52 ms. A deliberately unpaced 30-request burst produced 29 HTTP 200 and one node-local HTTP 429, proving admission limits—not availability—must be aligned with the Phase 8 load profile. State-driven rebuild restored fresh identities; all three nodes were rolled to rootfs `b6512b8b...`, Playwright passed 6/6, Prometheus returned to 10/10, and no alert remained. |
 
 ### Execution notes
 
@@ -1228,12 +1229,82 @@ pattern matching.
 
 ### Platform node
 
-- [ ] Gracefully stop one platform node.
+- [x] Gracefully drain and stop one platform node.
 - [x] Abruptly terminate one platform-node Firecracker process.
 - [x] Pause or isolate one node long enough to trigger health removal.
 - [x] Verify HAProxy stops routing to the unhealthy application pool.
-- [ ] Verify remaining capacity stays within the declared SLO.
+- [x] Verify remaining capacity stays within the declared Phase 7 availability
+      SLO. Higher-rate capacity remains Phase 8.
 - [x] Restore or rebuild the node and verify membership and deployment convergence.
+
+### Part 1 record — controlled platform-node drain and N−1 availability
+
+Status: **PASS on 2026-08-29 after closing the missing operator-drain path.**
+The Phase 7 availability SLO is deliberately below configured admission limits:
+20 backend-readiness requests paced at 4 requests/s, zero non-2xx responses, and
+maximum request time below one second while one of three platform nodes is
+absent. This is an availability gate, not the Phase 8 capacity envelope.
+
+The first orderly Firecracker `SendCtrlAltDel` experiment exposed a real gap.
+The guest rebooted and the VMM exited, but the serial log ended at
+`reboot: machine restart` without the platform's `NodeDraining` flow. The
+runtime already handled that event, but `wasm-ctl` offered no operator command
+to publish it and the handler did not fence new traffic before waiting for the
+application drain.
+
+Remediation:
+
+- `wasm-ctl node --target NODE drain --timeout-secs N` publishes the existing
+  targeted `NodeDraining` control event;
+- the command requires an explicit target and refuses an ambiguous drain;
+- the target node immediately sets its shared request gate to rejecting, so its
+  readiness endpoint becomes HTTP 503 and HAProxy stops assigning new work;
+- the existing supervisor drain then shuts down application instances; and
+- operators stop or replace the VM only after readiness is false and active
+  instances reach zero.
+
+The live canary targeted only `local-test-node-0`. Readiness changed to HTTP 503
+with `accepting_requests=false` while its two instances were still completing
+the drain. Both frontend and backend then reached zero instances, and direct
+application traffic on node 0 returned HTTP 503. HAProxy marked node 0 `DOWN`
+in both OIDC pools with `L7STS/503`; public backend readiness remained
+`database=ok` through nodes 1 and 2. The guest was then stopped through its exact
+Firecracker control socket, with no broad process matching.
+
+With node 0 absent, all 20 paced requests passed:
+
+```text
+request rate: 4 requests/s
+HTTP status: 20/20 HTTP 200
+minimum: 32.884 ms
+maximum: 52.384 ms
+acceptance gate: zero failures and maximum < 1,000 ms
+```
+
+An earlier unpaced 30-request, concurrency-2 burst returned 29 HTTP 200 and one
+HTTP 429 from a surviving node. HAProxy had already removed node 0 and no 5xx
+occurred. This is important production evidence: the front door allows a larger
+burst than the node-local per-IP limiter can guarantee after capacity drops from
+three nodes to two. Phase 8 must define the intended client/request mix and
+either align both limiter layers for N−1 capacity or use an explicitly designed
+distributed limiter. Availability tests must not misclassify expected 429
+admission control as backend failure, but production SLOs must decide whether
+429 counts against the user-visible error budget.
+
+The state-driven restart rebuilt node 0 as Firecracker PID `190287` with both
+OIDC deployments and two fresh eBPF identities. The corrected immutable image
+was then rolled through nodes 1 and 2 as PIDs `190354` and `190405`. Final node
+rootfs SHA-256 is
+`b6512b8bda8ad8dbe17e5b80d16d8414e535fbe0579ecdb269fb97b7b69c4619`.
+All nodes accept requests, connect to NATS, serve both deployments, and report
+active eBPF monitoring. The focused Playwright login/dashboard suite passed 6/6
+in 4.2 seconds, Prometheus reported all 10 targets up, and no alert remained.
+
+WSL source gates passed with the Linux target directory: formatting; required
+native workspace all-target checking; workspace all-target Clippy with warnings
+denied; eBPF-feature node Clippy; 23 `ctl` tests; and the focused node drain
+regression in both node library and binary targets. Cargo continues to print the
+separately tracked `proc-macro-error2 2.0.1` future-incompatibility notice.
 
 ### Network
 

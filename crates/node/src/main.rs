@@ -1529,6 +1529,7 @@ async fn main() -> anyhow::Result<()> {
     };
     drop(initial_hot);
     let rate_limiter = Arc::new(proxy::rate_limiter::RateLimiter::new(default_rate_config));
+    let backpressure = proxy::backpressure::BackpressureSignal::new();
 
     // -- Embedded DNS Stub (resolves *.internal without external DNS) --
     let _dns_stub_addr = if config.dns.stub_enabled {
@@ -1572,6 +1573,7 @@ async fn main() -> anyhow::Result<()> {
         ),
         node_table: node_load_table.clone(),
         rate_limiter: rate_limiter.clone(),
+        backpressure: backpressure.clone(),
         cluster_node_stale_after_secs: config.health.cluster_node_stale_after_secs,
         gateway: Some(gateway.clone()),
     });
@@ -1671,8 +1673,6 @@ async fn main() -> anyhow::Result<()> {
         &prom_metrics.registry,
     ));
     info!("health check metrics registered with Prometheus");
-
-    let backpressure = proxy::backpressure::BackpressureSignal::new();
 
     // -- Initialize eBPF monitor (kernel-level observability) ------------
     // The eBPF monitor provides kernel-level monitoring for memory pressure,

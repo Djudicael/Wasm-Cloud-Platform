@@ -140,6 +140,12 @@ enum NodeAction {
     Readiness,
     /// Force a full node rebuild from cluster state
     Rebuild,
+    /// Drain application instances before an operator stops or replaces the node
+    Drain {
+        /// Time allowed for in-flight requests before instances are stopped
+        #[arg(long, default_value = "30")]
+        timeout_secs: u64,
+    },
     /// Show eBPF kernel-level monitor status
     EbpfStatus,
     /// Send commands to the eBPF monitor (prune idle instances, kill largest)
@@ -202,7 +208,13 @@ enum BillingAction {
 }
 
 impl NodeAction {
-    pub async fn run(&self, node_api: &str, http: &reqwest::Client) -> anyhow::Result<()> {
+    pub async fn run(
+        &self,
+        node_api: &str,
+        http: &reqwest::Client,
+        bus: &messaging::NatsBus,
+        target: Option<&str>,
+    ) -> anyhow::Result<()> {
         match self {
             NodeAction::Health => cmds::node::health(node_api, http).await,
             NodeAction::Startup => {
@@ -254,6 +266,26 @@ impl NodeAction {
                 Ok(())
             }
             NodeAction::Rebuild => cmds::node::rebuild(node_api, http).await,
+            NodeAction::Drain { timeout_secs } => {
+                let node_id = target.ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "node drain requires --target <NODE_ID>; refusing an ambiguous drain"
+                    )
+                })?;
+                anyhow::ensure!(
+                    (1..=3600).contains(timeout_secs),
+                    "drain timeout must be between 1 and 3600 seconds"
+                );
+                bus.publish(&messaging::events::Event::NodeDraining {
+                    node_id: node_id.to_string(),
+                    drain_timeout_secs: *timeout_secs,
+                })
+                .await?;
+                println!(
+                    "Drain requested for {node_id}; allow up to {timeout_secs}s before stopping the node"
+                );
+                Ok(())
+            }
             NodeAction::EbpfStatus => {
                 let url = format!("{}/admin/ebpf/status", node_api);
                 let resp = http.get(&url).send().await?;
@@ -578,7 +610,11 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
         },
-        Commands::Node { target: _, action } => action.run(&cli.node_api, &http).await?,
+        Commands::Node { target, action } => {
+            action
+                .run(&cli.node_api, &http, &bus, target.as_deref())
+                .await?
+        }
         Commands::Cluster => cmds::node::cluster_health(&bus).await?,
         Commands::Billing { store_path, action } => match action {
             BillingAction::Report {
@@ -681,4 +717,49 @@ pub fn handle_auth_response(response: reqwest::Response) -> anyhow::Result<reqwe
         anyhow::bail!("Server error: {}", status);
     }
     Ok(response)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_scoped_node_drain() {
+        let cli = Cli::try_parse_from([
+            "wasm-ctl",
+            "node",
+            "--target",
+            "local-test-node-2",
+            "drain",
+            "--timeout-secs",
+            "45",
+        ])
+        .expect("node drain command should parse");
+
+        match cli.command {
+            Commands::Node {
+                target,
+                action: NodeAction::Drain { timeout_secs },
+            } => {
+                assert_eq!(target.as_deref(), Some("local-test-node-2"));
+                assert_eq!(timeout_secs, 45);
+            }
+            _ => panic!("expected scoped node drain command"),
+        }
+    }
+
+    #[test]
+    fn node_drain_defaults_to_thirty_seconds() {
+        let cli =
+            Cli::try_parse_from(["wasm-ctl", "node", "--target", "local-test-node-0", "drain"])
+                .expect("node drain command should parse");
+
+        match cli.command {
+            Commands::Node {
+                action: NodeAction::Drain { timeout_secs },
+                ..
+            } => assert_eq!(timeout_secs, 30),
+            _ => panic!("expected node drain command"),
+        }
+    }
 }

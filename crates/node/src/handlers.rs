@@ -100,6 +100,9 @@ pub struct EventDispatcher {
     pub node_table: Arc<NodeLoadTable>,
     /// Node-local application limiter, updated from each persisted AppConfig.
     pub rate_limiter: Arc<proxy::rate_limiter::RateLimiter>,
+    /// Shared request gate. A terminal node drain fences new traffic before
+    /// application instances begin their graceful shutdown window.
+    pub backpressure: proxy::backpressure::BackpressureSignal,
     pub cluster_node_stale_after_secs: u64,
     /// In-memory gateway cache (also updated when persistent storage changes).
     pub gateway: Option<Arc<proxy::gateway::Gateway>>,
@@ -767,6 +770,7 @@ impl EventDispatcher {
                 timeout_secs = drain_timeout_secs,
                 "beginning graceful shutdown"
             );
+            self.backpressure.set_rejecting();
             self.begin_graceful_shutdown(drain_timeout_secs).await;
         } else {
             info!(node = %node_id, "peer node draining");
