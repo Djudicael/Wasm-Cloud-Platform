@@ -91,7 +91,7 @@ The run fails when any required check fails. An infrastructure limitation is
 `NOT VALIDATED`; it must not be converted into a pass or an undocumented
 exception.
 
-## Execution record: 2026-08-23 through 2026-08-27 / single-host run in progress
+## Execution record: 2026-08-23 through 2026-08-29 / single-host run complete, environment retained
 
 This section is the live record for the current rehearsal. Do not mark a gate
 complete solely because a command was started; retain the command output or its
@@ -216,6 +216,8 @@ redacted artifact with the result.
 | 2026-08-29 OIDC capacity and short soak (Phase 8, Part 1) | PASS FOR THE CONFIGURED LOCAL ENVELOPE | A paced 50/25/20/5 frontend/discovery/readiness/login mix established HAProxy's configured 100-requests-per-10-seconds per-client stick-table as the first saturation boundary. At 5 requests/s, 600/600 requests passed a 120-second short soak; route p99 values were 5.2/54.7/57.1/166.4 ms. At 15 requests/s the ramp admitted 74/300 and returned 226 deliberate HTTP 429 responses; 30 and 60 requests/s were completely admission-limited before host resources saturated. With node 0 drained and absent, the representative 5 requests/s mix passed 151/151, while an earlier 15 requests/s readiness run admitted 98/450 and rejected 352. The conservative envelope for this exact front-door policy is therefore 5 requests/s per client IP, including N−1 headroom; this is not the host's raw compute maximum. Node memory peaked at 27%, process RSS at 578 MiB, CPU at 0.09 core, PostgreSQL at two sessions, HAProxy queue at zero, and NATS/eBPF error-pressure signals at zero. All three nodes were restored, OIDC database readiness passed, Prometheus returned to 10/10, and no alert remained. |
 | 2026-08-29 OIDC upgrade and rollback (Phase 8, Part 2) | PASS WITH RELEASE-ARTIFACT LIMITATION | The last-known-good backend `vdc1902621308` and candidate identity `vdc1902621308-phase8-candidate` ran concurrently against a transactional additive schema probe. Candidate readiness passed on all nodes, the public route cut over and rolled back while 450/450 paced requests stayed HTTP 200 (p99 68.5 ms), and migration tracking returned from 11/11 to 11/11 after exact probe cleanup. An admitted synthetic candidate with a malformed database URL returned HTTP 500, stopped at canary, and was undeployed without deleting the current application or database state. The final route inventory contains only the original frontend/backend, no Phase 8 metric series remains, Playwright passes 6/6, Prometheus is 10/10 with no alert, and eBPF is active on three nodes. Both release identities intentionally used the same tested Wasm SHA-256 because no clean newer artifact existed; repeat this gate with the real distinct release digest before production promotion. A host-suspend clock-skew failure was also fixed by image-schema-6 boot-time and continuous Chrony synchronization. |
 | 2026-08-29 OIDC disaster recovery (Phase 9) | PASS WITH DATABASE-TIME, KMS, AND RETENTION LIMITATIONS | A state-scoped recovery runner created a PostgreSQL 17 custom-format snapshot, verified an OpenPGP AES-256 encrypt/decrypt checksum round trip, restored into a separate container, and compared all 26 snapshot tables by row count and content hash with 11/11 migrations. A unique recovery backend used the restored database on every platform node; the public route was temporarily cut over and the focused login/dashboard Playwright suite passed 6/6 before automatic rollback and cleanup. The final run measured a 2 ms on-demand snapshot boundary, 1.221 s dump, 6.338 s database restore, 43.470 s application readiness, and 52.053 s through the browser journey. The redacted manifest records only active route-referenced applications, topology, artifact digests, routes, and secret requirements. The live schema-3 PostgreSQL VM was 12,399 seconds behind after host suspend; schema 4 now requires boot-time and continuous Chrony, builds cleanly as `9249f950...`, and the builder refuses to overwrite a disk referenced by a live recorded service. The live VM was not destructively replaced, so the new image must be used for the next environment. Production KMS/HSM custody, off-host replication, immutable retention, and scheduled-backup RPO remain multi-system operator gates. |
+| 2026-08-29 Phase 10 final decision | NO-GO FOR PRODUCTION PROMOTION / LOCAL CORE PASS | The durable decision and redacted evidence package are under `evidence/2026-08-29-single-host/`. Current RustSec audit passes, all three direct-node and public OIDC readiness probes return HTTP 200 with `database=ok`, Prometheus is 10/10 with zero alerts, and three eBPF nodes are active/non-degraded. Production remains blocked by clean signed release provenance/SBOM, secret lifecycle and default rejection, complete alert testing, end-to-end logs/traces/audit transport, negative OIDC expiry/redirect tests, production kernel hardening, schema-4 PostgreSQL live validation, resource-policy alignment, and multi-host/provider gates. The environment remains live; teardown was not performed. |
+| 2026-08-30 P10-01 supply-chain remediation | SOURCE PASS / RELEASE-SPECIFIC EVIDENCE PENDING | Release automation now binds an exact clean GitHub source SHA to frozen native, WASI, and all seven eBPF artifacts; rejects non-semver promotion refs; labels manual runs non-promotable; generates a deterministic bundle and SPDX 2.3 SBOM; creates and verifies SLSA provenance plus SPDX attestations through GitHub OIDC/Sigstore; and uploads the archive, manifest, SBOM, checksums, and attestation bundles only after verification. Operator admission independently enforces the artifact allowlist, hashes/sizes, safe archive shape, source SHA/ref, signer workflow, and both predicates. WSL shell syntax, frozen release builds for `wasm-node --features ebpf`, `wasm-ctl`, `wasm-deploy-ingress`, and `hello-axum` for `wasm32-wasip2`, clean frozen builds of all seven eBPF ELFs, and the positive/reproducibility/tamper-rejection tests pass. The existing `proc-macro-error2 2.0.1` future-incompatibility notice remains separately tracked. A clean approved tag workflow and independent verification of its downloaded bytes are still required before this blocker can be marked release-evidence complete. See [release artifact promotion](../RELEASE_ARTIFACT_PROMOTION.md). |
 | 2026-08-29 storage and resource pressure (Phase 7, Part 4) | PASS WITH A WASI CLI CONNECTION-LIFECYCLE LIMITATION | Disposable low-space, inode, read-only-root, CPU, memory, FD, and connection tests all produced bounded, observable behavior while peer OIDC traffic remained available. Inode-aware readiness, disk/inode/memory/process-FD metrics and alerts, exponential PID-1 restart backoff, one-restart VM sizing/read-only controls, an enforced WASI ResourceTable ceiling, full FD-denial error chains/counters, and identity-aware deployment verification were added. A request-scoped WASI HTTP canary held exactly 32 connections, denied the 33rd, exported 32 active during the hold, and returned to zero afterward. A 64-handle FD ceiling trapped only the offending request, incremented `wasm_policy_fd_denied_total`, and the next request passed. Persistent WASI CLI servers cannot observe individual socket destruction through the current Wasmtime address-check hook, so their connection counter is a conservative instance-lifetime budget; do not claim simultaneous-connection enforcement for that execution model until socket-drop interception or a process/cgroup boundary is implemented. Final rootfs `ce9f190a...` was rolled through all nodes with eBPF active, process FD usage was 144/1024 per node, focused Playwright passed 6/6, all platform targets were up, OIDC readiness was `database=ok`, no alert fired, and resource canaries were undeployed. |
 | 2026-08-29 Phase 7 Part 4 source gates | PASS WITH DEPENDENCY NOTICE | WSL gates pass: formatting; required native workspace all-target check; workspace all-target Clippy with warnings denied; eBPF-feature node Clippy with warnings denied; 54 storage unit plus 12 integration tests; 64 runtime unit plus 7 integration tests; 11 metrics tests; 9 vm-testbed unit plus 3 doc tests; explicit release `wasm32-wasip2` builds for `hello-axum` and `http-hello-component`; and changed-script shell syntax. The focused OIDC Chromium suite passed 6/6. Rust still reports the separately tracked `proc-macro-error2 2.0.1` future-incompatibility notice. |
 
@@ -278,6 +280,10 @@ redacted artifact with the result.
 - [ ] Record firewall, bridge, TAP, listening-port, and route state before the run.
 - [x] Define the SLOs and concrete pass thresholds before generating traffic.
 
+**NOT VALIDATED:** the pre-run host firewall, listening-port, bridge, TAP, and
+route snapshot cannot be reconstructed from the final state. Capture it before
+the next rehearsal.
+
 Suggested initial rehearsal thresholds, which must be replaced by product SLOs:
 
 | Signal | Rehearsal threshold |
@@ -319,6 +325,11 @@ Suggested initial rehearsal thresholds, which must be replaced by product SLOs:
       secrets, log level, metrics, and eBPF mode.
 - [ ] Confirm no placeholder or local-development credential can be promoted.
 
+**NOT VALIDATED / PRODUCTION BLOCKER:** the tested checkout was dirty and local
+development credentials were intentionally used. No clean signed promotion
+artifact, standards-based SBOM/provenance attestation, or admission control that
+rejects local defaults was demonstrated.
+
 ## Phase 2: provision the topology
 
 Prepare Firecracker, kernel, and rootfs assets only when missing:
@@ -353,7 +364,7 @@ bash scripts/vm/provision-postgres-service.sh --state-file "$STATE_FILE"
 ```
 
 - [x] Verify TCP readiness from the host.
-- [ ] Verify PostgreSQL reachability from every platform-node network namespace,
+- [x] Verify PostgreSQL reachability from every platform-node network namespace,
       not only from the host.
 - [x] Verify the database accepts only intended source networks and credentials.
 - [x] Record PostgreSQL version, database name, migration version, and connection
@@ -384,6 +395,13 @@ command succeeded.
 - [ ] No password, JWT, cookie, authorization header, database URL, or client
       secret appears in logs or traces.
 
+Direct `database=ok` probes through each node during Phase 8 and both Phase 9
+recovery rehearsals prove the scheduled backend can authenticate to PostgreSQL
+from every platform node. **NOT VALIDATED / PRODUCTION BLOCKER:** invalid redirect
+URI, expired state/nonce/session, and systematic secret absence from logs/traces
+remain open. The disposable development seeder is already known to print local
+test credentials, so it cannot be promoted.
+
 Retain the environment for interactive browser testing. Do not destroy it until
 the user explicitly finishes testing.
 
@@ -413,6 +431,11 @@ accepting this phase.
       exporter failure.
 - [ ] Confirm alerts resolve and notifications are deduplicated after recovery.
 
+**NOT VALIDATED / PRODUCTION BLOCKER:** individual fault runs proved many alert
+firing and resolution paths, but the complete rule set lacks representative
+`promtool` unit inputs, an every-expression live query audit, notification
+receipt, and deduplication evidence.
+
 ## Phase 5: logs, traces, and audit records
 
 - [ ] Emit structured JSON logs to stdout/journald.
@@ -440,6 +463,12 @@ is not evidence of export.
       panicking.
 - [ ] Test collector interruption, bounded retry, recovery, and shutdown flushing.
 - [ ] Confirm sampling retains errors and does not create uncontrolled cardinality.
+
+**FAIL / NOT VALIDATED / PRODUCTION BLOCKER:** structured serial logs exist, but
+no bounded host log shipper, separated audit stream, or backend interruption test
+was completed. The healthy OTLP Collector accepted no application spans/logs,
+the node OTLP configuration is not wired to the subscriber, and no correlated
+HAProxy-to-WASI-to-PostgreSQL trace exists.
 
 ## Phase 6: eBPF functional validation
 
@@ -474,6 +503,11 @@ The next microVM run must still prove the kernel-runtime portion below.
         events preserve the TID, dispatch resolves the exact deployment, and
         security actions target that instance instead of an arbitrary process.
         Broader probe scoping remains open because block-I/O is still system-wide.
+
+**NOT VALIDATED FOR TENANT-GRADE ISOLATION:** individual probe types were exercised
+deterministically, but probe groups were not enabled one at a time and block-I/O
+can remain system-wide. Treat the design as one trust domain until cgroup/process
+boundaries and cross-tenant non-observation tests pass.
 - [x] Generate file, TCP, memory-pressure, syscall, and block-I/O events and verify
       the corresponding metrics.
   - [x] **Part 2 — deterministic process, syscall, FD, TCP, and policy probes:**
@@ -1918,15 +1952,23 @@ recycling a previously undeployed identity.
 
 ## Phase 10: result and teardown
 
+Final decision: **NO-GO FOR PRODUCTION PROMOTION.** The local core-platform
+rehearsal passes within its boundary, but unresolved P1 production gates remain.
+See [the final decision](evidence/2026-08-29-single-host/FINAL_DECISION.md) and
+[redacted evidence manifest](evidence/2026-08-29-single-host/EVIDENCE_MANIFEST.json).
+
 The single-host plan passes only when:
 
 - [ ] All required build, application, routing, observability, failure, upgrade,
       rollback, and restore checks pass.
-- [ ] All limitations are explicitly recorded as `NOT VALIDATED` or approved
+- [x] All limitations are explicitly recorded as `NOT VALIDATED` or approved
       exceptions.
 - [ ] No unresolved P0/P1 defect applies to the tested production design.
-- [ ] The complete evidence package is reviewable by someone other than the test
+- [x] The complete redacted decision package is reviewable by someone other than the test
       operator.
+
+The first and third gates remain unchecked by design. A local functional pass
+does not override the P1 blockers enumerated in the decision record.
 
 If interactive testing is complete and the user explicitly authorizes teardown:
 
@@ -1934,11 +1976,16 @@ If interactive testing is complete and the user explicitly authorizes teardown:
 bash scripts/vm/destroy-testbed.sh --state-file "$STATE_FILE"
 ```
 
-- [x] Verify only PIDs, TAP devices, bridges, HAProxy configuration, and service
+- [ ] Verify only PIDs, TAP devices, bridges, HAProxy configuration, and service
       state recorded for this testbed were removed.
-- [x] Verify the state file and companion state were removed.
-- [ ] Preserve reports, metrics snapshots, relevant redacted logs/traces, checksums,
+- [ ] Verify the state file and companion state were removed.
+- [x] Preserve reports, metrics snapshots, relevant redacted logs/traces, checksums,
       and the final decision record.
+
+Teardown is **NOT PERFORMED** for this current run. The two removal checks are
+intentionally unchecked, and the live environment remains available until the
+user gives separate explicit authorization. No trace payload could be preserved
+because Phase 5 produced none; that absence is recorded in the result summary.
 
 ## Handoff to multi-host validation
 

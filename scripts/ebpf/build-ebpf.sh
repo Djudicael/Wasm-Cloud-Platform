@@ -25,6 +25,8 @@ env -u CARGO_TARGET_DIR cargo "+$NIGHTLY" clean \
 
 env -u CARGO_TARGET_DIR cargo "+$NIGHTLY" build \
     -Z build-std=core \
+    --locked \
+    --frozen \
     --manifest-path "$MANIFEST" \
     --target bpfel-unknown-none \
     --release

@@ -5,14 +5,12 @@ on:
     tags:
       - "v*"
   workflow_dispatch:
-    inputs:
-      release_ref:
-        description: "Git ref to build"
-        required: false
-        type: string
 
 permissions:
   contents: read
+  id-token: write
+  attestations: write
+  artifact-metadata: write
 
 concurrency:
   group: release-${{ github.workflow }}-${{ github.ref }}
@@ -22,20 +20,45 @@ env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
   CARGO_INCREMENTAL: 0
-  SOURCE_DATE_EPOCH: 0
+  CARGO_PROFILE_RELEASE_DEBUG: 0
 
 jobs:
   release-artifacts:
-    name: Build Reproducible Release Artifacts
+    name: Build, attest, and verify release artifacts
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout code
+      - name: Checkout exact source ref
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
-          ref: ${{ inputs.release_ref || github.ref }}
+          ref: ${{ github.sha }}
+          fetch-depth: 0
 
-      - name: Install Rust toolchain
+      - name: Resolve immutable release identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+          build_sha="$(git rev-parse HEAD)"
+          test "$build_sha" = "$GITHUB_SHA"
+          source_epoch="$(git show -s --format=%ct HEAD)"
+          if [[ "${GITHUB_EVENT_NAME}" == push ]]; then
+            [[ "${GITHUB_REF_TYPE}" == tag ]]
+            [[ "${GITHUB_REF_NAME}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([+-][0-9A-Za-z.-]+)?$ ]]
+            test "$(git rev-list -n 1 "refs/tags/${GITHUB_REF_NAME}")" = "$build_sha"
+            release_ref="${GITHUB_REF_NAME}"
+            promotion_mode=promotion
+          else
+            release_ref="candidate-${build_sha}"
+            promotion_mode=candidate
+          fi
+          {
+            echo "BUILD_GIT_SHA=$build_sha"
+            echo "RELEASE_REF=$release_ref"
+            echo "PROMOTION_MODE=$promotion_mode"
+            echo "SOURCE_DATE_EPOCH=$source_epoch"
+          } >> "$GITHUB_ENV"
+
+      - name: Install pinned Rust toolchain
         uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9
         with:
           toolchain: 1.97.1
@@ -47,46 +70,106 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-release-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-release-${{ hashFiles('Cargo.lock', 'crates/ebpf-monitor/bpf/Cargo.lock') }}
 
-      - name: Verify lockfile
-        run: cargo metadata --locked --format-version 1 > /dev/null
+      - name: Verify committed workspace lockfile
+        run: cargo metadata --locked --frozen --format-version 1 > /dev/null
 
-      - name: Build release artifacts with frozen lockfile
+      - name: Install pinned eBPF build toolchain
         run: |
-          cargo build --locked --frozen --release --bin wasm-node
+          sudo apt-get update
+          sudo apt-get install --yes zstd
+          bash scripts/ebpf/install-toolchain.sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Build frozen release artifact set
+        run: |
+          cargo build --locked --frozen --release --bin wasm-node --features ebpf
+          cargo build --locked --frozen --release --bin wasm-ctl
+          cargo build --locked --frozen --release --bin wasm-deploy-ingress
           cargo build --locked --frozen --release --manifest-path apps/hello-axum/Cargo.toml --target wasm32-wasip2
+          bash scripts/ebpf/build-ebpf.sh
 
-      - name: Stage deterministic artifact set
+      - name: Stage allowlisted artifacts from clean source
+        run: bash scripts/stage-release-artifacts.sh release-artifacts
+
+      - name: Record blocking dependency audit
         run: |
-          rm -rf release-artifacts
-          mkdir -p release-artifacts
-          cp target/release/wasm-node release-artifacts/wasm-node
-          cp target/wasm32-wasip2/release/hello-axum.wasm release-artifacts/hello-axum.wasm
-          chmod 0755 release-artifacts/wasm-node
+          cargo install cargo-audit --version 0.22.1 --locked
+          cargo audit --json --deny warnings --ignore RUSTSEC-2026-0173 \
+            > release-artifacts/security-audit.json
 
-      - name: Generate checksums and release manifest
+      - name: Generate SPDX 2.3 SBOM
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        with:
+          path: .
+          format: spdx-json
+          output-file: release-artifacts/sbom.spdx.json
+          upload-artifact: false
+          upload-release-assets: false
+          dependency-snapshot: false
+
+      - name: Finalize and locally verify deterministic bundle
         run: |
-          sha256sum release-artifacts/wasm-node release-artifacts/hello-axum.wasm > release-artifacts/SHA256SUMS
-          bash scripts/create_release_manifest.sh release-artifacts "${GITHUB_SHA}" release-artifacts/RELEASE-MANIFEST.json
+          bash scripts/finalize-release-bundle.sh \
+            release-artifacts "$BUILD_GIT_SHA" "$RELEASE_REF" "$PROMOTION_MODE" \
+            "$SOURCE_DATE_EPOCH" wasm-cloud-platform-release.tar.gz
+          bash scripts/verify-release-bundle.sh \
+            wasm-cloud-platform-release.tar.gz "$BUILD_GIT_SHA" "$RELEASE_REF" "$PROMOTION_MODE"
 
-      - name: Package deterministic tarball
+      - name: Attest individual artifact provenance
+        id: provenance
+        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0
+        with:
+          subject-checksums: release-artifacts/SHA256SUMS
+
+      - name: Attest individual artifact SBOM
+        id: sbom-attestation
+        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0
+        with:
+          subject-checksums: release-artifacts/SHA256SUMS
+          sbom-path: release-artifacts/sbom.spdx.json
+
+      - name: Attest promotion bundle provenance
+        id: bundle-provenance
+        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0
+        with:
+          subject-path: wasm-cloud-platform-release.tar.gz
+
+      - name: Preserve attestation bundles
         run: |
-          tar \
-            --sort=name \
-            --mtime='UTC 1970-01-01' \
-            --owner=0 \
-            --group=0 \
-            --numeric-owner \
-            -czf wasm-cloud-platform-release.tar.gz \
-            -C release-artifacts .
+          mkdir -p release-attestations
+          cp "${{ steps.provenance.outputs.bundle-path }}" release-attestations/artifacts-provenance.jsonl
+          cp "${{ steps.sbom-attestation.outputs.bundle-path }}" release-attestations/artifacts-sbom.jsonl
+          cp "${{ steps.bundle-provenance.outputs.bundle-path }}" release-attestations/release-bundle-provenance.jsonl
 
-      - name: Upload release bundle
+      - name: Verify keyless provenance before publication
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh attestation verify wasm-cloud-platform-release.tar.gz \
+            --repo "$GITHUB_REPOSITORY" \
+            --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" \
+            --source-digest "$BUILD_GIT_SHA" --source-ref "$GITHUB_REF"
+          while IFS= read -r subject; do
+            gh attestation verify "release-artifacts/$subject" \
+              --repo "$GITHUB_REPOSITORY" \
+              --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" \
+              --source-digest "$BUILD_GIT_SHA" --source-ref "$GITHUB_REF"
+            gh attestation verify "release-artifacts/$subject" \
+              --repo "$GITHUB_REPOSITORY" \
+              --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" \
+              --source-digest "$BUILD_GIT_SHA" --source-ref "$GITHUB_REF" \
+              --predicate-type https://spdx.dev/Document/v2.3
+          done < <(awk '{print $2}' release-artifacts/SHA256SUMS)
+
+      - name: Upload immutable candidate evidence
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: wasm-cloud-platform-release-${{ github.sha }}
+          name: wasm-cloud-platform-${{ env.PROMOTION_MODE }}-${{ env.BUILD_GIT_SHA }}
+          if-no-files-found: error
+          retention-days: 90
           path: |
             wasm-cloud-platform-release.tar.gz
-            release-artifacts/SHA256SUMS
-            release-artifacts/RELEASE-MANIFEST.json
+            release-artifacts/
+            release-attestations/

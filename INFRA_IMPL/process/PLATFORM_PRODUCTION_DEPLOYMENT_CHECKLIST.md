@@ -196,6 +196,16 @@ provides no evidence for production NATS high availability.
 
 ## 8. Artifact and release trust gates
 
+- [ ] Build platform artifacts only through `.github/workflows/release.yml` from
+      the approved semantic-version tag; manual candidate runs are not promotable.
+- [ ] Apply `INFRA_IMPL/process/RELEASE_ARTIFACT_PROMOTION.md` and run
+      `scripts/verify-release-attestations.sh` on the exact downloaded archive
+      before deployment.
+- [ ] Verify the expected source SHA/ref, exact signer workflow, SLSA provenance,
+      SPDX 2.3 attestation, closed artifact allowlist, manifest, and checksums.
+- [ ] Record the workflow run, archive digest, manifest, SBOM, and attestation
+      bundles in the production change record.
+
 - [ ] Rust is pinned through `rust-toolchain.toml`; `Cargo.lock` is committed.
 - [ ] Release builds use locked/frozen resolution in a controlled Linux builder.
 - [ ] Required formatting, Clippy, native target, WASI target, unit, integration,
