@@ -22,8 +22,17 @@ pub struct HealthMetrics {
     /// Available disk space in MB.
     pub disk_free_mb: IntGauge,
 
+    /// Available filesystem inodes.
+    pub disk_free_inodes: IntGauge,
+
     /// Process memory usage in MB.
     pub memory_used_mb: IntGauge,
+
+    /// Effective memory limit in MB.
+    pub memory_limit_mb: IntGauge,
+
+    /// Process memory use as an integer percentage of the effective limit.
+    pub memory_usage_percent: IntGauge,
 
     /// Per-app healthy instance count (labeled by app_id).
     pub app_healthy_instances: IntGaugeVec,
@@ -85,10 +94,34 @@ impl HealthMetrics {
             .register(Box::new(disk_free_mb.clone()))
             .unwrap_or(());
 
+        let disk_free_inodes =
+            IntGauge::new("wasm_node_disk_free_inodes", "Available filesystem inodes").unwrap();
+        registry
+            .register(Box::new(disk_free_inodes.clone()))
+            .unwrap_or(());
+
         let memory_used_mb =
             IntGauge::new("wasm_node_memory_used_mb", "Process memory usage in MB").unwrap();
         registry
             .register(Box::new(memory_used_mb.clone()))
+            .unwrap_or(());
+
+        let memory_limit_mb = IntGauge::new(
+            "wasm_node_memory_limit_mb",
+            "Effective process memory limit in MB",
+        )
+        .unwrap();
+        registry
+            .register(Box::new(memory_limit_mb.clone()))
+            .unwrap_or(());
+
+        let memory_usage_percent = IntGauge::new(
+            "wasm_node_memory_usage_percent",
+            "Process memory use as a percentage of the effective limit",
+        )
+        .unwrap();
+        registry
+            .register(Box::new(memory_usage_percent.clone()))
             .unwrap_or(());
 
         let app_healthy_instances = IntGaugeVec::new(
@@ -122,7 +155,10 @@ impl HealthMetrics {
             nats_connected,
             accepting_requests,
             disk_free_mb,
+            disk_free_inodes,
             memory_used_mb,
+            memory_limit_mb,
+            memory_usage_percent,
             app_healthy_instances,
             app_total_instances,
             previous_app_ids: Mutex::new(HashSet::new()),
@@ -160,16 +196,35 @@ impl HealthMetrics {
                     {
                         self.disk_free_mb.set(mb);
                     }
+                    let words: Vec<_> = dep.message.split_whitespace().collect();
+                    if let Some(inodes) = words.windows(2).find_map(|window| {
+                        (window[1] == "inodes")
+                            .then(|| window[0].parse::<i64>().ok())
+                            .flatten()
+                    }) {
+                        self.disk_free_inodes.set(inodes);
+                    }
                 }
                 "memory" => {
                     // Parse "XXX MB / YYY MB" from the message
-                    if let Some(part) = dep.message.split('/').next() {
-                        if let Some(val) = part
+                    let mut parts = dep.message.split('/');
+                    if let Some(part) = parts.next() {
+                        if let Some(used) = part
                             .trim()
                             .strip_suffix(" MB")
                             .and_then(|s| s.parse::<i64>().ok())
                         {
-                            self.memory_used_mb.set(val);
+                            self.memory_used_mb.set(used);
+                            if let Some(limit) = parts
+                                .next()
+                                .and_then(|value| value.split_whitespace().next())
+                                .and_then(|value| value.parse::<i64>().ok())
+                            {
+                                self.memory_limit_mb.set(limit);
+                                if limit > 0 {
+                                    self.memory_usage_percent.set(used * 100 / limit);
+                                }
+                            }
                         }
                     }
                 }

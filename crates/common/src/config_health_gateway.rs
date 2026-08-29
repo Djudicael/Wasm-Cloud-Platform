@@ -21,6 +21,8 @@ pub struct HealthSection {
     pub success_threshold: u32,
     #[serde(default = "default_min_disk_free_bytes")]
     pub min_disk_free_bytes: u64,
+    #[serde(default = "default_min_disk_free_inodes")]
+    pub min_disk_free_inodes: u64,
     #[serde(default = "default_max_memory_bytes")]
     pub max_memory_bytes: u64,
     #[serde(default = "default_snapshot_interval")]
@@ -65,6 +67,10 @@ fn default_success_threshold() -> u32 {
 
 fn default_min_disk_free_bytes() -> u64 {
     1024 * 1024 * 1024 // 1 GB
+}
+
+fn default_min_disk_free_inodes() -> u64 {
+    10_000
 }
 
 fn default_max_memory_bytes() -> u64 {
@@ -144,6 +150,7 @@ impl Default for HealthSection {
             failure_threshold: default_failure_threshold(),
             success_threshold: default_success_threshold(),
             min_disk_free_bytes: default_min_disk_free_bytes(),
+            min_disk_free_inodes: default_min_disk_free_inodes(),
             max_memory_bytes: default_max_memory_bytes(),
             snapshot_interval_secs: default_snapshot_interval(),
             cluster_node_stale_after_secs: default_cluster_node_stale_after_secs(),

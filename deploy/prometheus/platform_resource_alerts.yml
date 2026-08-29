@@ -1,0 +1,52 @@
+groups:
+  - name: platform_resources
+    rules:
+      - alert: PlatformNodeDiskSpaceExhausted
+        expr: wasm_node_disk_free_mb < 1024
+        for: 15s
+        labels:
+          severity: critical
+          component: platform_node
+        annotations:
+          summary: "Platform node filesystem is below its hard free-space reserve"
+          description: >-
+            The node has less than 1 GiB available on the filesystem containing
+            its state database. Readiness should withdraw this node before
+            writes fail. Free space or replace the node image.
+
+      - alert: PlatformNodeInodesExhausted
+        expr: wasm_node_disk_free_inodes < 10000
+        for: 15s
+        labels:
+          severity: critical
+          component: platform_node
+        annotations:
+          summary: "Platform node filesystem is below its hard inode reserve"
+          description: >-
+            The filesystem containing node state has fewer than 10,000 free
+            inodes. Byte-based disk monitoring alone cannot detect this failure.
+
+      - alert: PlatformNodeMemoryPressure
+        expr: wasm_node_memory_usage_percent > 85
+        for: 15s
+        labels:
+          severity: warning
+          component: platform_node
+        annotations:
+          summary: "Platform node memory use exceeds 85% of its effective limit"
+          description: >-
+            Memory is measured against the smallest configured, physical, or
+            cgroup limit. Verify backpressure and reduce or replace workloads
+            before the guest OOM killer becomes the recovery mechanism.
+
+      - alert: PlatformNodeFileDescriptorsHigh
+        expr: process_open_fds / process_max_fds > 0.80
+        for: 2m
+        labels:
+          severity: warning
+          component: platform_node
+        annotations:
+          summary: "Platform node process is using more than 80% of its FD limit"
+          description: >-
+            Check application FD policy counters and instance lifecycle for a
+            leak before the node-wide process limit is exhausted.

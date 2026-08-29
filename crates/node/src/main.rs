@@ -1908,6 +1908,7 @@ async fn main() -> anyhow::Result<()> {
             Box::new(proxy::health::DiskDependencyChecker::new(
                 config.storage.db_path.clone(),
                 config.health.min_disk_free_bytes,
+                config.health.min_disk_free_inodes,
             )),
             Box::new(proxy::health::MemoryDependencyChecker::new(
                 config.health.max_memory_bytes,
@@ -1917,6 +1918,7 @@ async fn main() -> anyhow::Result<()> {
         app_health_registry: app_health_registry.clone(),
         config: proxy::health::HealthCheckConfig {
             min_disk_free_bytes: config.health.min_disk_free_bytes,
+            min_disk_free_inodes: config.health.min_disk_free_inodes,
             max_memory_bytes: config.health.max_memory_bytes,
             failure_threshold: config.health.failure_threshold,
             success_threshold: config.health.success_threshold,

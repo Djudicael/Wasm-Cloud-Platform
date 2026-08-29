@@ -213,6 +213,8 @@ redacted artifact with the result.
 
 | 2026-08-29 controlled network faults (Phase 7, Part 2) | PASS AFTER APPLICATION-TIMEOUT AND STALE-DEPLOYMENT REMEDIATION | Exact node-0 netem, NATS, and PostgreSQL faults were injected and individually removed. Latency/loss/bandwidth controls behaved as configured; NATS loss made only node 0 not-ready and recovered without a reconnect storm. The first PostgreSQL partition exposed an unbounded WASI database readiness connection behind HAProxy's 60-second server timeout. The OIDC backend now enforces a two-second database health deadline: the live retest returned bounded HTTP 503 in 2.013 seconds, subsequent circuit-open responses took 4-9 ms, HAProxy withdrew only node 0, and peer traffic stayed HTTP 200. Automatic recovery occurred after the circuit-breaker cooldown without redeployment. A superseded content-addressed backend initially left stale alert labels; the OIDC deployer now removes old same-component versions after the replacement passes health, waits for their metric series to disappear, and the node app API excludes undeployed grace-period artifacts. Rootfs `e23eeac...` was rolled through all three nodes; only the two current OIDC deployments are listed, all pools are up, Playwright passes 6/6, Prometheus reports 10/10 targets, no alert or fault rule remains, and every TAP uses `fq_codel`. |
 | 2026-08-29 PostgreSQL failure modes (Phase 7, Part 3) | PASS AFTER DEADLINE, EXPORTER, AND MIGRATION REMEDIATION | A reusable state-scoped runner proved prompt invalid-credential failure, 197 observed sessions against PostgreSQL's 200/3 maximum/reserved configuration, backend HTTP 503 with an independent HTTP 200 frontend during exhaustion, automatic pool recovery, a two-second statement deadline, a sanitized application lock-timeout response in 2.029 seconds, and serialized migrations. An advisory-lock competitor failed in 10.06 seconds with SQLSTATE `55P03`; after release the migrator passed in 0.08 seconds with 11/11 unique migration records. Runtime database deadlines are now deployment identity, exporter queries have bounded connect/statement/lock/transaction deadlines, and all three native migration entry points apply each migration plus tracking row atomically under the same session advisory lock. The final focused Playwright gate passed 6/6, OIDC readiness was `database=ok`, all Prometheus alerts were clear, and the environment remains live for Part 4. |
+| 2026-08-29 storage and resource pressure (Phase 7, Part 4) | PASS WITH A WASI CLI CONNECTION-LIFECYCLE LIMITATION | Disposable low-space, inode, read-only-root, CPU, memory, FD, and connection tests all produced bounded, observable behavior while peer OIDC traffic remained available. Inode-aware readiness, disk/inode/memory/process-FD metrics and alerts, exponential PID-1 restart backoff, one-restart VM sizing/read-only controls, an enforced WASI ResourceTable ceiling, full FD-denial error chains/counters, and identity-aware deployment verification were added. A request-scoped WASI HTTP canary held exactly 32 connections, denied the 33rd, exported 32 active during the hold, and returned to zero afterward. A 64-handle FD ceiling trapped only the offending request, incremented `wasm_policy_fd_denied_total`, and the next request passed. Persistent WASI CLI servers cannot observe individual socket destruction through the current Wasmtime address-check hook, so their connection counter is a conservative instance-lifetime budget; do not claim simultaneous-connection enforcement for that execution model until socket-drop interception or a process/cgroup boundary is implemented. Final rootfs `ce9f190a...` was rolled through all nodes with eBPF active, process FD usage was 144/1024 per node, focused Playwright passed 6/6, all platform targets were up, OIDC readiness was `database=ok`, no alert fired, and resource canaries were undeployed. |
+| 2026-08-29 Phase 7 Part 4 source gates | PASS WITH DEPENDENCY NOTICE | WSL gates pass: formatting; required native workspace all-target check; workspace all-target Clippy with warnings denied; eBPF-feature node Clippy with warnings denied; 54 storage unit plus 12 integration tests; 64 runtime unit plus 7 integration tests; 11 metrics tests; 9 vm-testbed unit plus 3 doc tests; explicit release `wasm32-wasip2` builds for `hello-axum` and `http-hello-component`; and changed-script shell syntax. The focused OIDC Chromium suite passed 6/6. Rust still reports the separately tracked `proc-macro-error2 2.0.1` future-incompatibility notice. |
 
 ### Execution notes
 
@@ -1514,11 +1516,106 @@ non-transactional operation must have an explicit idempotent recovery design.
 
 ### Storage and resources
 
-- [ ] Test low disk space and inode exhaustion on disposable images.
-- [ ] Test read-only or delayed storage where supported.
-- [ ] Constrain CPU and memory and verify backpressure activates before host failure.
-- [ ] Exercise file-descriptor, connection, and ephemeral-port limits safely.
-- [ ] Confirm the monitoring pipeline itself does not amplify an exhaustion event.
+- [x] Test low disk space and inode exhaustion on disposable images.
+- [x] Test read-only storage. Deterministic block-device delay is not supported by
+      the current Firecracker testbed and remains a two-host/provider fault gate.
+- [x] Constrain CPU and memory and verify backpressure activates before host failure.
+- [x] Exercise file-descriptor, connection, and ephemeral-port limits safely.
+- [x] Confirm the monitoring pipeline itself does not amplify an exhaustion event.
+
+### Part 4 record - storage and resource pressure
+
+Status: **PASS WITH AN EXPLICIT PERSISTENT-WASI-CLI CONNECTION LIMITATION on
+2026-08-29.** The tests used only exact state-recorded node identities and
+disposable cloned root filesystems. The production OIDC application remained
+available through peer nodes, and the environment remains live for Phase 8.
+
+Storage evidence and fixes:
+
+- an 800-MiB synchronous write reduced node 0 to 739 MiB free, made readiness
+  return HTTP 503, and fired `PlatformNodeDiskSpaceExhausted`; a peer and public
+  OIDC readiness remained HTTP 200. A shorter repeat returned successfully and
+  removed its file;
+- creating 115,000 files left 9,419 free inodes while 1,538 MiB remained free.
+  The new independent inode threshold made readiness return HTTP 503 and fired
+  `PlatformNodeInodesExhausted`, proving byte-only disk monitoring is
+  insufficient;
+- storage health now reports both available bytes and inodes, with hard and
+  warning thresholds exported as `wasm_node_disk_free_mb` and
+  `wasm_node_disk_free_inodes`;
+- a read-only root kept the Firecracker VMM alive but prevented redb startup and
+  withdrew the node. PID 1 originally retried every two seconds; it now uses
+  bounded 2/4/8/16/30-second exponential restart backoff. Production immutable
+  roots therefore require a distinct writable state volume; and
+- long synchronous WASI work must not be its own in-band health check. Epoch
+  interruption can prevent guest `Drop`/finally cleanup, so destructive storage
+  faults must be cleaned by replacing the disposable VM, not by trusting guest
+  cleanup code. The testbed has no deterministic Firecracker block-latency
+  injector, so delayed-device semantics are not claimed here.
+
+CPU and memory evidence:
+
+- node 0 was restarted once at one vCPU and 1 GiB. A five-second CPU probe
+  completed; a longer probe exhausted its fuel after about 15.6 seconds while
+  node admin health stayed responsive, OIDC remained HTTP 200 through peers,
+  queue depth stayed bounded, and saturation remained zero;
+- holding 400 MiB produced 856/989 MiB effective use (87%), set
+  `accepting_requests=false`, activated memory backpressure/eBPF pressure, and
+  fired `PlatformNodeMemoryPressure`. The request completed, memory returned to
+  458 MiB, readiness recovered, and the alert cleared; and
+- memory metrics now expose the effective limit and usage percentage, based on
+  the smallest configured, physical, or cgroup ceiling.
+
+FD and connection evidence:
+
+- `max_open_fds` is now applied to Wasmtime's Preview 2 `ResourceTable`; the
+  previous core-Wasm table limiter did not cover WASI descriptors or sockets;
+- a WASI HTTP canary with a 64-handle ceiling opened until the table was full.
+  The offending request returned 502 with the complete
+  `resource table has no free keys` cause, `wasm_policy_fd_denied_total`
+  increased to 1, the server stayed alive, and the immediately following request
+  returned 200;
+- the deployment CLI previously discarded `--max-open-fds` unless an allowed
+  filesystem path was also present. Policy construction now always transmits the
+  explicit ceiling;
+- a request-scoped WASI HTTP canary configured for 32 outbound connections and
+  a larger ResourceTable opened exactly 32, returned a permission denial for the
+  33rd, exposed 32 active connections during the hold, and returned the active
+  gauge to zero when the request store ended. The policy limit is far below the
+  guest ephemeral-port range, so exhaustion was bounded by policy rather than
+  host port availability;
+- persistent WASI CLI HTTP servers expose a Wasmtime limitation: the address
+  policy hook observes connect but not socket drop, so reservations are released
+  only when the instance store is destroyed. For this model the current counter
+  is a safe but availability-reducing instance-lifetime budget, not a true
+  simultaneous count. Production workloads requiring persistent outbound
+  sockets must use request-scoped WASI HTTP, dedicated processes/cgroups, or add
+  an authoritative socket-drop host wrapper before acceptance; and
+- the node now registers Prometheus' process collector. Every final node exported
+  `process_open_fds=144` and `process_max_fds=1024` (about 14%), giving
+  `PlatformNodeFileDescriptorsHigh` real input instead of an absent series.
+
+Operational and final gates:
+
+- success logging remained bounded, restart loops use exponential backoff, and
+  the pressure tests caused no telemetry target or OIDC availability loss;
+- deployment verification now supports `--verify-contains` and the shared agent
+  skill requires application-identity evidence. This closed a false-positive
+  where HAProxy's default OIDC frontend returned 200 for an unknown canary host;
+- the final eBPF-enabled rootfs SHA-256 is
+  `ce9f190a21169a321d622aa7ea135ae8912a0a6d0b04ec0c3235564c9a4e5d51`.
+  An intermediate direct build omitted `--features ebpf`; the rolling gate caught
+  `feature_not_compiled` before the last node, and the corrected image was then
+  rolled one node at a time with `kernel monitoring active` verified on each;
+- after the rollout all three `platform-node` targets reported `up=1`, OIDC
+  readiness returned `database=ok`, no Prometheus alert was firing, and the
+  focused Chromium login/dashboard suite passed 6/6 in 4.9 seconds; and
+- all Part 4 resource canaries and routes were explicitly undeployed. The NATS,
+  PostgreSQL, platform, HAProxy, and observability environment was intentionally
+  left running for the next authorized phase. A final inventory also found and
+  removed the exact zero-instance superseded backend
+  `oidc/openid-connect-wasi:vd5fc09739b3d`; the inventory now contains only the
+  active frontend and backend, and the `validation` namespace is empty.
 
 ## Phase 8: capacity, soak, upgrade, and rollback
 

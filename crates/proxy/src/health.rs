@@ -52,6 +52,8 @@ pub struct HealthState {
 pub struct HealthCheckConfig {
     /// Minimum free disk space in bytes (default: 1 GB).
     pub min_disk_free_bytes: u64,
+    /// Minimum free filesystem inodes (default: 10,000).
+    pub min_disk_free_inodes: u64,
     /// Maximum process memory in bytes (default: 4 GB).
     pub max_memory_bytes: u64,
     /// Number of consecutive failures before marking a dependency unhealthy (default: 3).
@@ -67,7 +69,8 @@ pub struct HealthCheckConfig {
 impl Default for HealthCheckConfig {
     fn default() -> Self {
         HealthCheckConfig {
-            min_disk_free_bytes: 1024 * 1024 * 1024,  // 1 GB
+            min_disk_free_bytes: 1024 * 1024 * 1024, // 1 GB
+            min_disk_free_inodes: 10_000,
             max_memory_bytes: 4 * 1024 * 1024 * 1024, // 4 GB
             failure_threshold: 3,
             success_threshold: 2,
@@ -173,13 +176,15 @@ impl DependencyChecker for RedbDependencyChecker {
 pub struct DiskDependencyChecker {
     db_path: std::path::PathBuf,
     min_free_bytes: u64,
+    min_free_inodes: u64,
 }
 
 impl DiskDependencyChecker {
-    pub fn new(db_path: std::path::PathBuf, min_free_bytes: u64) -> Self {
+    pub fn new(db_path: std::path::PathBuf, min_free_bytes: u64, min_free_inodes: u64) -> Self {
         DiskDependencyChecker {
             db_path,
             min_free_bytes,
+            min_free_inodes,
         }
     }
 }
@@ -190,7 +195,7 @@ impl DependencyChecker for DiskDependencyChecker {
     }
 
     fn check(&self) -> DependencyHealth {
-        storage::health::check_disk_space(&self.db_path, self.min_free_bytes)
+        storage::health::check_disk_space(&self.db_path, self.min_free_bytes, self.min_free_inodes)
     }
 }
 

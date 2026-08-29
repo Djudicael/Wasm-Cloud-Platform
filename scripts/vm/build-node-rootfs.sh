@@ -250,6 +250,7 @@ else
 fi
 NODE_PID=
 SHUTDOWN_REQUESTED=0
+RESTART_DELAY=2
 forward_shutdown() {
     SHUTDOWN_REQUESTED=1
     if [ -n "$NODE_PID" ]; then
@@ -259,6 +260,7 @@ forward_shutdown() {
 trap forward_shutdown TERM INT
 
 while :; do
+    STARTED_AT=$(cut -d. -f1 /proc/uptime)
     set -- /usr/local/bin/wasm-node
     if [ "$EBPF_DROP_CAPABILITIES" -eq 1 ]; then
         set -- setpriv --bounding-set=-bpf,-sys_admin,-perfmon,-net_admin -- /usr/local/bin/wasm-node
@@ -283,9 +285,20 @@ while :; do
     if [ "$SHUTDOWN_REQUESTED" -eq 1 ]; then
         exit "$NODE_STATUS"
     fi
-    echo "wasm-node exited with status $NODE_STATUS; restarting in 2 seconds" >&2
+    ENDED_AT=$(cut -d. -f1 /proc/uptime)
+    RUNTIME_SECONDS=$((ENDED_AT - STARTED_AT))
+    if [ "$RUNTIME_SECONDS" -ge 60 ]; then
+        RESTART_DELAY=2
+    fi
+    echo "wasm-node exited with status $NODE_STATUS after ${RUNTIME_SECONDS}s; restarting in ${RESTART_DELAY}s" >&2
     sync
-    sleep 2
+    sleep "$RESTART_DELAY"
+    if [ "$RUNTIME_SECONDS" -lt 60 ] && [ "$RESTART_DELAY" -lt 30 ]; then
+        RESTART_DELAY=$((RESTART_DELAY * 2))
+        if [ "$RESTART_DELAY" -gt 30 ]; then
+            RESTART_DELAY=30
+        fi
+    fi
 done
 EOF
 chmod +x "$ROOTFS_DIR/sbin/init"

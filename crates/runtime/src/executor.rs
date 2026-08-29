@@ -48,6 +48,16 @@ const WASI_HTTP_INCOMING_HANDLER_INTERFACES: &[&str] = &[
     "wasi:http/incoming-handler@0.2.1",
     "wasi:http/incoming-handler@0.2.0",
 ];
+
+const RESOURCE_TABLE_FULL_MESSAGE: &str = "resource table has no free keys";
+
+fn record_resource_table_capacity_denial(message: &str, counters: &PolicyCounters) {
+    if message.contains(RESOURCE_TABLE_FULL_MESSAGE) {
+        counters
+            .fd_denied_total
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
 const TOP_LEVEL_ENTRY_POINT_FALLBACKS: &[&str] = &["run", "_start"];
 pub(crate) fn top_level_entry_point_candidates() -> &'static [&'static str] {
     TOP_LEVEL_ENTRY_POINT_FALLBACKS
@@ -149,10 +159,17 @@ fn build_store_state(
         .map(|cfg| cfg.to_limits())
         .unwrap_or_default();
 
+    let mut table = ResourceTable::new();
+    // WASI Preview 2 descriptors and sockets are handles in the component
+    // ResourceTable. The core Wasm `ResourceLimiter::table_growing` hook does
+    // not observe these resources, so the filesystem FD policy must also cap
+    // this table or an application can exceed its declared descriptor limit.
+    table.set_max_capacity(policy.filesystem.max_open_fds as usize);
+
     Ok(StoreState {
         ctx: builder.build(),
         http: WasiHttpCtx::new(),
-        table: ResourceTable::new(),
+        table,
         limiter: MemoryLimiter::new(
             config.memory_limit,
             extended_limits,
@@ -525,6 +542,8 @@ impl PreparedModule {
                                                     tokio::sync::oneshot::channel::<()>();
 
                                                 let app_id_for_handle = app_id_for_request.clone();
+                                                let request_error_counters =
+                                                    request_policy_counters.clone();
                                                 let handle = tokio::spawn(async move {
                                                     let result = async {
                                                         let state = build_store_state(
@@ -560,7 +579,14 @@ impl PreparedModule {
                                                             .wasi_http_incoming_handler()
                                                             .call_handle(&mut store, req, out)
                                                             .await
-                                                            .map_err(|e| std::io::Error::other(e.to_string()))?;
+                                                            .map_err(|e| {
+                                                                let message = format!("{e:#}");
+                                                                record_resource_table_capacity_denial(
+                                                                    &message,
+                                                                    &request_error_counters,
+                                                                );
+                                                                std::io::Error::other(message)
+                                                            })?;
 
                                                         Ok::<(), std::io::Error>(())
                                                     }

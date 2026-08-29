@@ -20,6 +20,7 @@
 //!         id: "node-1".to_string(),
 //!         kernel_path: "/opt/kernels/vmlinux-6.1".into(),
 //!         rootfs_path: "/opt/images/wasm-node.ext4".into(),
+//!         rootfs_read_only: false,
 //!         data_drive_path: Some("/opt/images/node-data.ext4".into()),
 //!         memory_mb: 512,
 //!         vcpus: 2,
@@ -60,6 +61,8 @@ pub struct VmConfig {
     pub kernel_path: PathBuf,
     /// Path to the root filesystem (ext4 image).
     pub rootfs_path: PathBuf,
+    /// Attach the root filesystem read-only for explicit local fault tests.
+    pub rootfs_read_only: bool,
     /// Optional path to a secondary data drive (for persistent redb storage).
     pub data_drive_path: Option<PathBuf>,
     /// Memory allocated to the VM in MiB.
@@ -214,8 +217,9 @@ impl MicroVm {
             .map_err(VmError::Firecracker)?;
 
         // 8. Configure boot source
+        let root_mount_mode = if config.rootfs_read_only { "ro" } else { "rw" };
         let mut boot_args = format!(
-            "console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda rw init=/sbin/init wcp.node_id={} wcp.ip={} wcp.gateway={}",
+            "console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda {root_mount_mode} init=/sbin/init wcp.node_id={} wcp.ip={} wcp.gateway={}",
             config.id, config.ip, config.gateway
         );
         for argument in &config.extra_kernel_args {
@@ -239,7 +243,7 @@ impl MicroVm {
 
         // 9. Attach rootfs
         client
-            .attach_drive("rootfs", &instance_rootfs, true)
+            .attach_drive("rootfs", &instance_rootfs, true, config.rootfs_read_only)
             .await
             .map_err(VmError::Firecracker)?;
 

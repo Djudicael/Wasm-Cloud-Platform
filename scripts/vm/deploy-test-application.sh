@@ -14,6 +14,7 @@ Usage: deploy-test-application.sh [options]
   --health-path PATH     runtime health path, or none (default: /health)
   --env KEY=VALUE        application environment variable; repeat as needed
   --verify-path PATH     HTTP path used for verification (default: /)
+  --verify-contains TEXT require TEXT in the verification response body
   --state-file PATH      testbed state (default: .vm-testbed-state.json)
   --auth-token TOKEN     local admin/artifact token (default: WASM_CTL_AUTH_TOKEN or testbed token)
   --timeout SECONDS      verification timeout (default: 90)
@@ -28,6 +29,7 @@ Usage: deploy-test-application.sh [options]
   --allowed-filesystem-path PATH  writable preopen; repeat as needed
   --verify-direct-node   bypass a topology-specific HAProxy configuration
   --max-outbound-connections N  simultaneous outbound TCP limit (default: 100)
+  --max-open-fds N        simultaneous WASI file-descriptor limit (default: 256)
 EOF
 }
 
@@ -47,6 +49,7 @@ rate_limit_per_ip=
 target_node=
 verify_direct_node=false
 max_outbound_connections=100
+max_open_fds=256
 auth_token=${WASM_CTL_AUTH_TOKEN:-local-test-write-token-change-me}
 route_paths=()
 allowed_cidrs=()
@@ -55,6 +58,7 @@ allowed_filesystem_paths=()
 health_path=/health
 env_vars=()
 verify_path=/
+verify_contains=
 
 while (($#)); do
   case "$1" in
@@ -68,6 +72,7 @@ while (($#)); do
     --health-path) health_path=${2:?missing health path}; shift 2 ;;
     --env) env_vars+=("${2:?missing environment variable}"); shift 2 ;;
     --verify-path) verify_path=${2:?missing verification path}; shift 2 ;;
+    --verify-contains) verify_contains=${2:?missing expected text}; shift 2 ;;
     --state-file) state_file=${2:?missing state path}; shift 2 ;;
     --auth-token) auth_token=${2:?missing auth token}; shift 2 ;;
     --timeout) timeout=${2:?missing timeout}; shift 2 ;;
@@ -82,6 +87,7 @@ while (($#)); do
     --allowed-filesystem-path) allowed_filesystem_paths+=("${2:?missing filesystem path}"); shift 2 ;;
     --verify-direct-node) verify_direct_node=true; shift ;;
     --max-outbound-connections) max_outbound_connections=${2:?missing limit}; shift 2 ;;
+    --max-open-fds) max_open_fds=${2:?missing limit}; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown argument: $1" >&2; usage >&2; exit 2 ;;
   esac
@@ -140,6 +146,7 @@ deploy_args=(deploy-app \
   --memory-mb "$memory_mb" \
   --health-check-path "$health_path")
 deploy_args+=(--max-outbound-connections "$max_outbound_connections")
+deploy_args+=(--max-open-fds "$max_open_fds")
 if [[ -n "$rate_limit_rps" ]]; then
   deploy_args+=(--rate-limit-rps "$rate_limit_rps")
   [[ -z "$rate_limit_burst" ]] || deploy_args+=(--rate-limit-burst "$rate_limit_burst")
@@ -214,7 +221,11 @@ trap 'rm -f "$response_file"' EXIT
 while ((SECONDS < deadline)); do
   status=$(curl --silent --show-error --output "$response_file" --write-out '%{http_code}' \
     --max-time 5 --header "Host: $route_host" "http://$proxy_addr$verify_path" || true)
-  if [[ "$status" =~ ^2[0-9][0-9]$ ]]; then
+  body_matches=true
+  if [[ -n "$verify_contains" ]] && ! grep -Fq -- "$verify_contains" "$response_file"; then
+    body_matches=false
+  fi
+  if [[ "$status" =~ ^2[0-9][0-9]$ && "$body_matches" == true ]]; then
     echo "Verified $namespace:$app:$version through $verification_target at http://$proxy_addr$verify_path (Host: $route_host)"
     cat "$response_file"
     printf '\n'
@@ -223,5 +234,5 @@ while ((SECONDS < deadline)); do
   sleep 2
 done
 
-echo "Deployment verification timed out after ${timeout}s (last HTTP status: ${status:-none})." >&2
+echo "Deployment verification timed out after ${timeout}s (last HTTP status: ${status:-none}, expected body text: ${verify_contains:-<not configured>})." >&2
 exit 1

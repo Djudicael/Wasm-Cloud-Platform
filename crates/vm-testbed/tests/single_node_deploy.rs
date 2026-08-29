@@ -46,6 +46,7 @@ async fn test_single_node_deploy() {
         id: "test-node-0".to_string(),
         kernel_path: find_kernel(),
         rootfs_path: find_node_rootfs(),
+        rootfs_read_only: false,
         data_drive_path: None,
         memory_mb: 512,
         vcpus: 2,

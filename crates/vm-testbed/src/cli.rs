@@ -103,7 +103,7 @@ enum Commands {
         #[arg(long)]
         ebpf_required: bool,
         /// Persist a running VM that is expected not to become healthy.
-        #[arg(long, requires = "ebpf_required")]
+        #[arg(long)]
         expect_unhealthy: bool,
         /// Use a one-restart kernel override without changing topology state.
         #[arg(long)]
@@ -111,6 +111,15 @@ enum Commands {
         /// Start the guest node with an empty Linux capability bounding set.
         #[arg(long)]
         drop_ebpf_capabilities: bool,
+        /// Use a one-restart memory size without changing the topology default.
+        #[arg(long)]
+        memory: Option<usize>,
+        /// Use a one-restart vCPU count without changing the topology default.
+        #[arg(long)]
+        vcpus: Option<usize>,
+        /// Attach the cloned root filesystem read-only for a local fault test.
+        #[arg(long)]
+        rootfs_read_only: bool,
     },
 
     /// Scale a detached topology to the requested node count.
@@ -197,6 +206,9 @@ enum Commands {
         rate_limit_per_ip: Option<u32>,
         #[arg(long, default_value = "100")]
         max_outbound_connections: u32,
+        /// Maximum concurrently open WASI file descriptors.
+        #[arg(long, default_value = "256")]
+        max_open_fds: u32,
         /// Restrict outbound traffic to these CIDRs; repeat as needed.
         #[arg(long = "allowed-cidr")]
         allowed_cidrs: Vec<String>,
@@ -350,6 +362,7 @@ struct DeployRequest {
     rate_limit_burst: Option<u32>,
     rate_limit_per_ip: Option<u32>,
     max_outbound_connections: u32,
+    max_open_fds: u32,
     allowed_cidrs: Vec<String>,
     denied_cidrs: Vec<String>,
     allowed_filesystem_paths: Vec<String>,
@@ -358,6 +371,17 @@ struct DeployRequest {
     health_check_path: Option<String>,
     env_vars: Vec<(String, String)>,
     secret_keys: Vec<String>,
+}
+
+struct RestartNodeOptions {
+    ebpf_test_fault: Option<EbpfTestFault>,
+    ebpf_required: bool,
+    expect_unhealthy: bool,
+    kernel: Option<PathBuf>,
+    drop_ebpf_capabilities: bool,
+    memory: Option<usize>,
+    vcpus: Option<usize>,
+    rootfs_read_only: bool,
 }
 
 #[tokio::main]
@@ -448,16 +472,24 @@ async fn main() -> Result<()> {
             expect_unhealthy,
             kernel,
             drop_ebpf_capabilities,
+            memory,
+            vcpus,
+            rootfs_read_only,
         } => {
             let mut state = read_state(&state_file)?;
             let vm = restart_node_from_state(
                 &mut state,
                 &id,
-                ebpf_test_fault,
-                ebpf_required,
-                expect_unhealthy,
-                kernel,
-                drop_ebpf_capabilities,
+                RestartNodeOptions {
+                    ebpf_test_fault,
+                    ebpf_required,
+                    expect_unhealthy,
+                    kernel,
+                    drop_ebpf_capabilities,
+                    memory,
+                    vcpus,
+                    rootfs_read_only,
+                },
             )
             .await?;
             write_state(&state_file, &state)?;
@@ -573,6 +605,7 @@ async fn main() -> Result<()> {
             rate_limit_burst,
             rate_limit_per_ip,
             max_outbound_connections,
+            max_open_fds,
             allowed_cidrs,
             denied_cidrs,
             allowed_filesystem_paths,
@@ -600,6 +633,7 @@ async fn main() -> Result<()> {
                     rate_limit_burst,
                     rate_limit_per_ip,
                     max_outbound_connections,
+                    max_open_fds,
                     allowed_cidrs,
                     denied_cidrs,
                     allowed_filesystem_paths,
@@ -641,6 +675,7 @@ async fn main() -> Result<()> {
                 id: id.clone(),
                 kernel_path,
                 rootfs_path,
+                rootfs_read_only: false,
                 data_drive_path: None,
                 memory_mb: memory,
                 vcpus,
@@ -729,6 +764,7 @@ async fn spawn_service_from_state(
         id: id.clone(),
         kernel_path: state.kernel_path.clone(),
         rootfs_path: rootfs,
+        rootfs_read_only: false,
         data_drive_path: None,
         memory_mb,
         vcpus,
@@ -816,6 +852,7 @@ async fn spawn_node_from_state(
         id: node_id.clone(),
         kernel_path: state.kernel_path.clone(),
         rootfs_path: state.node_rootfs_path.clone(),
+        rootfs_read_only: false,
         data_drive_path: state.node_data_drive_path.clone(),
         memory_mb,
         vcpus,
@@ -865,11 +902,7 @@ async fn remove_node_from_state(state: &mut PersistedClusterState, id: &str) -> 
 async fn restart_node_from_state(
     state: &mut PersistedClusterState,
     id: &str,
-    ebpf_test_fault: Option<EbpfTestFault>,
-    ebpf_required: bool,
-    expect_unhealthy: bool,
-    kernel: Option<PathBuf>,
-    drop_ebpf_capabilities: bool,
+    options: RestartNodeOptions,
 ) -> Result<PersistedVm> {
     let index = state
         .nodes
@@ -889,30 +922,39 @@ async fn restart_node_from_state(
         .map_err(|error| anyhow!("failed to remove TAP {}: {error}", previous.tap_device))?;
 
     let mut extra_kernel_args = Vec::new();
-    if let Some(fault) = ebpf_test_fault {
+    if let Some(fault) = options.ebpf_test_fault {
         extra_kernel_args.push(format!("wcp.ebpf_test_fault={}", fault.as_kernel_value()));
     }
-    if ebpf_required {
+    if options.ebpf_required {
         extra_kernel_args.push("wcp.ebpf_required=1".to_string());
     }
-    if drop_ebpf_capabilities {
+    if options.drop_ebpf_capabilities {
         extra_kernel_args.push("wcp.ebpf_drop_capabilities=1".to_string());
     }
 
-    let kernel_path = match kernel {
+    let kernel_path = match options.kernel {
         Some(path) => path
             .canonicalize()
             .with_context(|| format!("kernel override does not exist: {}", path.display()))?,
         None => state.kernel_path.clone(),
     };
+    let memory_mb = options.memory.unwrap_or(state.node_memory_mb);
+    let vcpu_count = options.vcpus.unwrap_or(state.node_vcpus);
+    if memory_mb < 128 {
+        bail!("restart memory must be at least 128 MiB");
+    }
+    if !(1..=32).contains(&vcpu_count) {
+        bail!("restart vCPU count must be between 1 and 32");
+    }
 
     let config = VmConfig {
         id: previous.id.clone(),
         kernel_path,
         rootfs_path: state.node_rootfs_path.clone(),
+        rootfs_read_only: options.rootfs_read_only,
         data_drive_path: state.node_data_drive_path.clone(),
-        memory_mb: state.node_memory_mb,
-        vcpus: state.node_vcpus,
+        memory_mb,
+        vcpus: vcpu_count,
         ip: previous.ip.clone(),
         gateway: state.gateway.clone(),
         bridge_name: state.bridge_name.clone(),
@@ -932,7 +974,7 @@ async fn restart_node_from_state(
     };
 
     let mut vm = MicroVm::spawn(config).await?;
-    if expect_unhealthy {
+    if options.expect_unhealthy {
         if vm.wait_for_health(Duration::from_secs(12)).await.is_ok() {
             bail!("node {id} became healthy but an unhealthy startup was expected");
         }
@@ -1022,10 +1064,11 @@ async fn deploy_app_to_state(state: &PersistedClusterState, req: DeployRequest) 
             denied_cidrs: (!req.denied_cidrs.is_empty()).then_some(req.denied_cidrs),
             ..NetworkPolicyConfig::default()
         }),
-        filesystem: (!req.allowed_filesystem_paths.is_empty()).then_some(FilesystemPolicyConfig {
+        filesystem: Some(FilesystemPolicyConfig {
             allowed_paths: Some(req.allowed_filesystem_paths),
             allow_file_create: Some(true),
             allow_file_delete: Some(true),
+            max_open_fds: Some(req.max_open_fds),
             ..FilesystemPolicyConfig::default()
         }),
     };

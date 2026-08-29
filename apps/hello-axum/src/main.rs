@@ -212,6 +212,96 @@ fn route(path: &str) -> (u16, &'static str, String, bool) {
                 Err(error) => (500, "text/plain", error, false),
             }
         }
+        "/probe/disk/hold" => {
+            let max_mib = std::env::var("RESOURCE_PROBE_MAX_DISK_MIB")
+                .ok()
+                .and_then(|value| value.parse::<u32>().ok())
+                .unwrap_or(1024)
+                .clamp(1, 1536);
+            let mib = query_u32(path, "mib", 768).clamp(1, max_mib);
+            let hold_ms = query_u32(path, "hold_ms", 30_000).clamp(100, 120_000);
+            match probe_disk_pressure(mib, hold_ms) {
+                Ok((bytes, write_error)) => (
+                    200,
+                    "application/json",
+                    format!(
+                        r#"{{"operation":"disk_hold","requested_mib":{mib},"bytes":{bytes},"write_error":{}}}"#,
+                        json_optional_string(write_error.as_deref())
+                    ),
+                    false,
+                ),
+                Err(error) => (500, "text/plain", error, false),
+            }
+        }
+        "/probe/inodes/hold" => {
+            let max_count = std::env::var("RESOURCE_PROBE_MAX_INODES")
+                .ok()
+                .and_then(|value| value.parse::<u32>().ok())
+                .unwrap_or(125_000)
+                .clamp(1, 150_000);
+            let count = query_u32(path, "count", 110_000).clamp(1, max_count);
+            let hold_ms = query_u32(path, "hold_ms", 30_000).clamp(100, 120_000);
+            match probe_inode_pressure(count, hold_ms) {
+                Ok((created, create_error)) => (
+                    200,
+                    "application/json",
+                    format!(
+                        r#"{{"operation":"inode_hold","requested":{count},"created":{created},"create_error":{}}}"#,
+                        json_optional_string(create_error.as_deref())
+                    ),
+                    false,
+                ),
+                Err(error) => (500, "text/plain", error, false),
+            }
+        }
+        "/probe/fds/hold" => {
+            let count = query_u32(path, "count", 128).clamp(1, 4096);
+            let hold_ms = query_u32(path, "hold_ms", 10_000).clamp(100, 120_000);
+            match probe_fd_pressure(count, hold_ms) {
+                Ok((opened, open_error)) => (
+                    200,
+                    "application/json",
+                    format!(
+                        r#"{{"operation":"fd_hold","requested":{count},"opened":{opened},"open_error":{}}}"#,
+                        json_optional_string(open_error.as_deref())
+                    ),
+                    false,
+                ),
+                Err(error) => (500, "text/plain", error, false),
+            }
+        }
+        "/probe/connections/hold" => {
+            let count = query_u32(path, "count", 64).clamp(1, 4096);
+            let hold_ms = query_u32(path, "hold_ms", 10_000).clamp(100, 120_000);
+            match probe_connection_pressure(count, hold_ms) {
+                Ok((opened, open_error)) => (
+                    200,
+                    "application/json",
+                    format!(
+                        r#"{{"operation":"connection_hold","requested":{count},"opened":{opened},"open_error":{}}}"#,
+                        json_optional_string(open_error.as_deref())
+                    ),
+                    false,
+                ),
+                Err(error) => (500, "text/plain", error, false),
+            }
+        }
+        "/probe/cpu" => {
+            let millis = query_u32(path, "millis", 1000).clamp(1, 30_000);
+            let deadline =
+                std::time::Instant::now() + std::time::Duration::from_millis(millis.into());
+            let mut iterations = 0_u64;
+            while std::time::Instant::now() < deadline {
+                iterations = iterations.wrapping_add(1);
+                std::hint::black_box(iterations.rotate_left(13));
+            }
+            (
+                200,
+                "application/json",
+                format!(r#"{{"operation":"cpu","millis":{millis},"iterations":{iterations}}}"#),
+                false,
+            )
+        }
         "/probe/cache" => {
             let max_mib = std::env::var("EBPF_PROBE_MAX_CACHE_MIB")
                 .ok()
@@ -255,6 +345,7 @@ fn route(path: &str) -> (u16, &'static str, String, bool) {
                 .clamp(1, 1200);
             let mib = query_u32(path, "mib", 64).clamp(1, max_mib);
             let bytes = mib as usize * 1024 * 1024;
+            let hold_ms = query_u32(path, "hold_ms", 0).clamp(0, 120_000);
             let mut allocation = vec![0_u8; bytes];
             for offset in (0..bytes).step_by(4096) {
                 allocation[offset] = (offset / 4096) as u8;
@@ -263,10 +354,15 @@ fn route(path: &str) -> (u16, &'static str, String, bool) {
                 .iter()
                 .step_by(4096)
                 .fold(0_u64, |sum, byte| sum.wrapping_add(u64::from(*byte)));
+            if hold_ms > 0 {
+                std::thread::sleep(std::time::Duration::from_millis(hold_ms.into()));
+            }
             (
                 200,
                 "application/json",
-                format!(r#"{{"operation":"memory","bytes":{bytes},"checksum":{checksum}}}"#),
+                format!(
+                    r#"{{"operation":"memory","bytes":{bytes},"checksum":{checksum},"hold_ms":{hold_ms}}}"#
+                ),
                 false,
             )
         }
@@ -369,6 +465,118 @@ fn probe_fd_event_burst(iterations: u32) -> Result<u32, String> {
 
     std::fs::remove_file(path).map_err(|error| error.to_string())?;
     Ok(completed)
+}
+
+#[cfg(target_family = "wasm")]
+fn json_optional_string(value: Option<&str>) -> String {
+    value.map_or_else(
+        || "null".to_string(),
+        |text| format!(r#""{}""#, text.replace('\\', "\\\\").replace('"', "\\\"")),
+    )
+}
+
+#[cfg(target_family = "wasm")]
+fn probe_disk_pressure(mib: u32, hold_ms: u32) -> Result<(u64, Option<String>), String> {
+    use std::io::Write;
+
+    let path = "/tmp/resource-disk-pressure.bin";
+    let requested = u64::from(mib) * 1024 * 1024;
+    let chunk = vec![0xD5_u8; 64 * 1024];
+    let mut file = std::fs::File::create(path).map_err(|error| error.to_string())?;
+    let mut written = 0_u64;
+    let mut write_error = None;
+    while written < requested {
+        let count = (requested - written).min(chunk.len() as u64) as usize;
+        match file.write_all(&chunk[..count]) {
+            Ok(()) => written += count as u64,
+            Err(error) => {
+                write_error = Some(error.to_string());
+                break;
+            }
+        }
+    }
+    let _ = file.sync_all();
+    std::thread::sleep(std::time::Duration::from_millis(hold_ms.into()));
+    drop(file);
+    std::fs::remove_file(path).map_err(|error| error.to_string())?;
+    Ok((written, write_error))
+}
+
+#[cfg(target_family = "wasm")]
+fn probe_inode_pressure(count: u32, hold_ms: u32) -> Result<(u32, Option<String>), String> {
+    let root = "/tmp/resource-inode-pressure";
+    match std::fs::remove_dir_all(root) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.to_string()),
+    }
+    std::fs::create_dir(root).map_err(|error| error.to_string())?;
+    let mut created = 0_u32;
+    let mut create_error = None;
+    for index in 0..count {
+        let path = format!("{root}/{index:06x}");
+        match std::fs::File::create(path) {
+            Ok(file) => {
+                drop(file);
+                created += 1;
+            }
+            Err(error) => {
+                create_error = Some(error.to_string());
+                break;
+            }
+        }
+    }
+    std::thread::sleep(std::time::Duration::from_millis(hold_ms.into()));
+    std::fs::remove_dir_all(root).map_err(|error| error.to_string())?;
+    Ok((created, create_error))
+}
+
+#[cfg(target_family = "wasm")]
+fn probe_fd_pressure(count: u32, hold_ms: u32) -> Result<(u32, Option<String>), String> {
+    use std::io::Write;
+
+    let path = "/tmp/resource-fd-pressure.bin";
+    let mut seed = std::fs::File::create(path).map_err(|error| error.to_string())?;
+    seed.write_all(b"fd-pressure")
+        .map_err(|error| error.to_string())?;
+    drop(seed);
+    let mut files = Vec::new();
+    let mut open_error = None;
+    for _ in 0..count {
+        match std::fs::File::open(path) {
+            Ok(file) => files.push(file),
+            Err(error) => {
+                open_error = Some(error.to_string());
+                break;
+            }
+        }
+    }
+    let opened = files.len() as u32;
+    std::thread::sleep(std::time::Duration::from_millis(hold_ms.into()));
+    drop(files);
+    std::fs::remove_file(path).map_err(|error| error.to_string())?;
+    Ok((opened, open_error))
+}
+
+#[cfg(target_family = "wasm")]
+fn probe_connection_pressure(count: u32, hold_ms: u32) -> Result<(u32, Option<String>), String> {
+    let target = std::env::var("RESOURCE_PROBE_TCP_TARGET")
+        .unwrap_or_else(|_| "172.20.0.10:4222".to_string());
+    let mut streams = Vec::new();
+    let mut open_error = None;
+    for _ in 0..count {
+        match std::net::TcpStream::connect(&target) {
+            Ok(stream) => streams.push(stream),
+            Err(error) => {
+                open_error = Some(error.to_string());
+                break;
+            }
+        }
+    }
+    let opened = streams.len() as u32;
+    std::thread::sleep(std::time::Duration::from_millis(hold_ms.into()));
+    drop(streams);
+    Ok((opened, open_error))
 }
 
 #[cfg(target_family = "wasm")]

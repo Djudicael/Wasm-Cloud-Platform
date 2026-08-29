@@ -257,6 +257,7 @@ pub(crate) fn merge_config(base: NodeConfig, overlay: NodeConfig) -> NodeConfig 
             failure_threshold: overlay.health.failure_threshold,
             success_threshold: overlay.health.success_threshold,
             min_disk_free_bytes: overlay.health.min_disk_free_bytes,
+            min_disk_free_inodes: overlay.health.min_disk_free_inodes,
             max_memory_bytes: overlay.health.max_memory_bytes,
             snapshot_interval_secs: overlay.health.snapshot_interval_secs,
             cluster_node_stale_after_secs: overlay.health.cluster_node_stale_after_secs,
