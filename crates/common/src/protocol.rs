@@ -6,7 +6,8 @@ use serde::{Deserialize, Serialize};
 ///
 /// Version History:
 /// - 1: Initial protocol (messages, events, cluster communication)
-pub const PROTOCOL_VERSION: u32 = 1;
+/// - 2: Targeted secret revocation events
+pub const PROTOCOL_VERSION: u32 = 2;
 
 /// Minimum protocol version this binary can communicate with.
 /// Nodes running a version below this are incompatible and should be upgraded first.

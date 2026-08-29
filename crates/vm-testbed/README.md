@@ -61,9 +61,12 @@ Your existing `crates/e2e` tests run `wasm-node` as a **native process** on the 
 ### Prerequisites
 
 - **Linux** with KVM support (`/dev/kvm` accessible)
-- **Rust** 1.80+ with `wasm32-wasip2` target
+- **Rust** pinned by the repository's `rust-toolchain.toml`, with the
+  `wasm32-wasip2` target
 - **sudo** or `CAP_NET_ADMIN` for network setup
 - **Firecracker** binary installed
+- **Image/service tooling**: `curl`, `debugfs`, `jq`, `mkfs.ext4`, `openssl`,
+  `python3`, `unzip`, and standard mount utilities
 
 ### 1. Install Firecracker
 
@@ -81,6 +84,17 @@ This creates:
 - `./assets/vmlinux-6.1` — Linux kernel with eBPF/BTF support
 - `./assets/wasm-node-rootfs.ext4` — Alpine Linux with wasm-node binary
 - `./assets/nats-rootfs.ext4` — Alpine Linux with NATS Server
+- `./assets/postgres-rootfs.ext4` — optional application database fixture
+- `./assets/vault-rootfs.ext4` — optional initialized Vault Transit fixture
+- `./assets/vault-test-ca.crt` — private CA for the local Vault fixture
+
+PostgreSQL and Vault are service microVMs, not platform nodes. PostgreSQL is
+only an application dependency, while Vault exercises one supported external
+seal-root integration. The aggregate builder creates a protected Vault
+bootstrap outside the repository; the initialized Vault rootfs and bootstrap
+must never be published or promoted to production. See the
+[service microVM guide](../../docs/vm-testbed/service-microvms.md) for lifecycle,
+state, credential, and teardown details.
 
 ### 3. Run Tests
 
@@ -113,6 +127,11 @@ bash scripts/vm/provision-testbed.sh --preset production-like --nodes 3
 This starts one NATS microVM plus three platform microVMs, each with its built-in reverse proxy, and a host HAProxy front door at `127.0.0.1:8088`. Override the listener with `--front-door-bind HOST:PORT`, or disable it with `--front-door none`. HAProxy must already be installed in Linux/WSL. Deployment verification automatically uses the recorded front door, and the destroy script stops that exact process.
 
 The preset is a production-like rehearsal rather than a production deployment: it does not provide production TLS, an external secrets backend, monitoring/alerting, or highly available NATS.
+
+Optional PostgreSQL, Vault Transit, and observability fixtures can be attached
+to the recorded topology for integration testing. They do not make those
+external services production-ready and are not installed by the platform in
+production. Follow the [service microVM guide](../../docs/vm-testbed/service-microvms.md).
 
 ### 5. Use the CLI directly
 

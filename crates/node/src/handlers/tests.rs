@@ -185,6 +185,66 @@ async fn test_apply_secret_update_uses_secret_provider_bundle_format() {
 }
 
 #[tokio::test]
+async fn targeted_secret_delete_revokes_local_value() {
+    let temp = NamedTempFile::new().unwrap();
+    let store = Store::open(temp.path()).unwrap();
+    let dispatcher = build_test_dispatcher(store, None, None).await;
+    let app_id = AppId("secret-app:v1".to_string());
+    dispatcher
+        .secret_provider
+        .set(&app_id, "API_KEY", "old-value")
+        .await
+        .unwrap();
+
+    dispatcher
+        .handle(Event::SecretDelete {
+            app_id: app_id.clone(),
+            key: "API_KEY".to_string(),
+            target_node_id: "node-under-test".to_string(),
+        })
+        .await
+        .unwrap();
+
+    assert!(dispatcher
+        .secret_provider
+        .list_keys(&app_id)
+        .await
+        .unwrap()
+        .is_empty());
+}
+
+#[tokio::test]
+async fn secret_delete_for_another_node_is_ignored() {
+    let temp = NamedTempFile::new().unwrap();
+    let store = Store::open(temp.path()).unwrap();
+    let dispatcher = build_test_dispatcher(store, None, None).await;
+    let app_id = AppId("secret-app:v1".to_string());
+    dispatcher
+        .secret_provider
+        .set(&app_id, "API_KEY", "old-value")
+        .await
+        .unwrap();
+
+    dispatcher
+        .handle(Event::SecretDelete {
+            app_id: app_id.clone(),
+            key: "API_KEY".to_string(),
+            target_node_id: "node-other".to_string(),
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(
+        dispatcher
+            .secret_provider
+            .get(&app_id, "API_KEY")
+            .await
+            .unwrap(),
+        "old-value"
+    );
+}
+
+#[tokio::test]
 async fn test_secret_update_event_roundtrip_persists_plaintext_via_secret_provider() {
     let _nats = start_test_nats().await.unwrap();
     let bus = NatsBus::connect(&_nats.url).await.unwrap();

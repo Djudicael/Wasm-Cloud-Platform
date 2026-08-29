@@ -23,6 +23,7 @@ pub const CONTROL_STREAM_SUBJECTS: &[&str] = &[
     "instance.ready.>",
     "instance.dead.>",
     "secrets.update.>",
+    "secrets.delete.>",
     "config.update.>",
     "gateway.config.>",
 ];
@@ -106,7 +107,7 @@ impl NatsBus {
         let client = async_nats::connect(url)
             .await
             .map_err(|e| PlatformError::messaging(format!("NATS connect: {e}")))?;
-        tracing::info!(url, "connected to NATS");
+        tracing::info!("connected to NATS");
         Ok(NatsBus {
             client,
             node_id: "unknown".to_string(),
@@ -122,7 +123,7 @@ impl NatsBus {
             .connect(url)
             .await
             .map_err(|e| PlatformError::messaging(format!("NATS secure connect: {e}")))?;
-        tracing::info!(url, "connected to NATS securely");
+        tracing::info!("connected to NATS securely");
         Ok(NatsBus {
             client,
             node_id: "unknown".to_string(),

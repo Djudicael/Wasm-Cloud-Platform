@@ -1,4 +1,4 @@
-use common::config::NodeConfig;
+use common::config::{DeploymentEnvironment, NodeConfig};
 use common::error::PlatformError;
 use std::net::IpAddr;
 use url::Url;
@@ -121,6 +121,118 @@ fn validate_admin_advertisement(config: &NodeConfig, errors: &mut Vec<String>) {
                 e
             )),
         }
+    }
+}
+
+fn validate_production_secret_policy(config: &NodeConfig, errors: &mut Vec<String>) {
+    if config.node.environment != DeploymentEnvironment::Production {
+        return;
+    }
+
+    if !config.auth.enabled {
+        errors.push("production requires auth.enabled = true".to_string());
+    }
+    if !config.auth.require_tls {
+        errors.push("production requires auth.require_tls = true".to_string());
+    }
+    if config.admin.auth_token.is_some() {
+        errors.push(
+            "production rejects legacy admin.auth_token; use separate read/write tokens"
+                .to_string(),
+        );
+    }
+    for (label, token) in [
+        ("auth.read_token", config.auth.read_token.as_deref()),
+        ("auth.write_token", config.auth.write_token.as_deref()),
+    ] {
+        if let Err(error) = common::auth::validate_production_bearer_token(label, token) {
+            errors.push(error);
+        }
+    }
+
+    if !matches!(
+        config.runtime.key_source.as_str(),
+        "vault-transit" | "aws-kms-hmac"
+    ) {
+        errors.push(
+            "production requires runtime.key_source = \"vault-transit\" or \"aws-kms-hmac\" so the root key remains non-exportable"
+                .to_string(),
+        );
+    }
+    if config.runtime.key_source == "vault-transit" {
+        if config
+            .runtime
+            .key_vault_ca_cert
+            .as_deref()
+            .is_some_and(|path| path.trim().is_empty())
+        {
+            errors.push("runtime.key_vault_ca_cert must not be empty when configured".to_string());
+        }
+        if !config
+            .runtime
+            .key_vault_transit_key_version
+            .is_some_and(|version| version > 0)
+        {
+            errors.push(
+                "production requires a pinned runtime.key_vault_transit_key_version greater than zero"
+                    .to_string(),
+            );
+        }
+        if config.runtime.key_vault_transit_previous_key_version
+            == config.runtime.key_vault_transit_key_version
+            && config
+                .runtime
+                .key_vault_transit_previous_key_version
+                .is_some()
+        {
+            errors.push(
+                "Vault Transit previous key version must differ from the active version"
+                    .to_string(),
+            );
+        }
+        if let Some(url) = config.runtime.key_vault_url.as_deref() {
+            if Url::parse(url.trim())
+                .map(|url| url.scheme() != "https")
+                .unwrap_or(true)
+            {
+                errors.push("production Vault Transit URL must use https".to_string());
+            }
+        }
+    }
+    if config.runtime.key_source == "aws-kms-hmac" {
+        if config.runtime.key_aws_kms_previous_key_id == config.runtime.key_aws_kms_key_id
+            && config.runtime.key_aws_kms_previous_key_id.is_some()
+        {
+            errors.push("AWS KMS previous key id must differ from the active key id".to_string());
+        }
+        if let Some(endpoint) = config.runtime.key_aws_kms_endpoint.as_deref() {
+            if Url::parse(endpoint.trim())
+                .map(|url| url.scheme() != "https")
+                .unwrap_or(true)
+            {
+                errors.push("production AWS KMS endpoint override must use https".to_string());
+            }
+        }
+    }
+
+    if config
+        .nats
+        .creds_file
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or_default()
+        .is_empty()
+    {
+        errors.push("production requires nats.creds_file".to_string());
+    }
+    if !config.nats.url.trim().starts_with("tls://") {
+        errors.push("production requires a tls:// NATS URL".to_string());
+    }
+    if config.dns.webhook_token.is_some() {
+        errors.push(
+            "production rejects inline dns.webhook_token; inject this credential through the external secret manager"
+                .to_string(),
+        );
     }
 }
 
@@ -408,6 +520,7 @@ pub(crate) fn validate_config(config: &NodeConfig) -> Result<(), PlatformError> 
         )),
     }
     validate_admin_advertisement(config, &mut errors);
+    validate_production_secret_policy(config, &mut errors);
 
     if config.auth.enabled && config.auth.require_tls && !admin_tls_material_configured(config) {
         errors.push(

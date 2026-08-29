@@ -164,6 +164,11 @@ impl EventDispatcher {
                 self.handle_secret_update(app_id, key, target_node_id, secret)
                     .await
             }
+            Event::SecretDelete {
+                app_id,
+                key,
+                target_node_id,
+            } => self.handle_secret_delete(app_id, key, target_node_id).await,
             Event::ConfigUpdate { app_id, config } => self.handle_config_update(app_id, config),
             Event::NodeLoad {
                 node_id,
@@ -716,7 +721,28 @@ impl EventDispatcher {
             &key,
             &secret,
         )
-        .await
+        .await?;
+        // WASI environment values are resolved at instance creation. Evict
+        // warm instances so subsequent requests cannot continue using the old
+        // value after a completed rotation.
+        self.supervisor.kill_all_instances(&app_id).await?;
+        info!(app = %app_id.0, key, "secret rotation applied; warm instances invalidated");
+        Ok(())
+    }
+
+    async fn handle_secret_delete(
+        &self,
+        app_id: AppId,
+        key: String,
+        target_node_id: String,
+    ) -> Result<(), PlatformError> {
+        if target_node_id != self.our_node_id() {
+            return Ok(());
+        }
+        self.secret_provider.delete(&app_id, &key).await?;
+        self.supervisor.kill_all_instances(&app_id).await?;
+        info!(app = %app_id.0, key, "secret revoked; warm instances invalidated");
+        Ok(())
     }
 
     fn handle_config_update(

@@ -24,6 +24,18 @@ That index points to one separate operator file per level:
 
 For current production guidance, prefer that document over older historical notes in this file.
 
+### Vault Transit seal root
+
+Production nodes may use a pinned non-exportable Vault Transit HMAC root. A
+private Vault PKI must be configured with `runtime.key_vault_ca_cert`,
+`WASM_NODE_RUNTIME_KEY_VAULT_CA_CERT`, or `--key-vault-ca-cert`; certificate
+hostname/SAN validation remains enabled. Vault's real
+`vault:vN:<base64>` HMAC response and legacy hex fixtures are accepted only
+when they decode to exactly 32 bytes. The node context is HMAC input for domain
+separation, not Vault's `derived=true` key feature. See the
+[production lifecycle](../../INFRA_IMPL/process/PRODUCTION_SECRET_LIFECYCLE.md)
+and [real Vault microVM runbook](../../INFRA_IMPL/process/VAULT_TRANSIT_MICROVM_VALIDATION.md).
+
 ## Architecture
 
 ```

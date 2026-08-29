@@ -86,6 +86,50 @@ except BaseException:
 PY
     echo "Stopped the recorded local observability services."
   fi
+  mapfile -t vault_state < <(python3 - "$services_file" <<'PY'
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as stream:
+    vault = json.load(stream).get("vault") or {}
+print(vault.get("state_key", ""))
+print(vault.get("runtime_dir", ""))
+PY
+  )
+  recorded_vault_key=${vault_state[0]:-}
+  recorded_vault_dir=${vault_state[1]:-}
+  if [[ -n "$recorded_vault_key" || -n "$recorded_vault_dir" ]]; then
+    vault_root="${XDG_RUNTIME_DIR:-/tmp}/wasm-cloud-platform-vault-$(id -u)"
+    expected_vault_dir="$vault_root/$observability_state_key"
+    [[ "$recorded_vault_key" == "$observability_state_key" \
+      && "$recorded_vault_dir" == "$expected_vault_dir" ]] || {
+      echo "Vault runtime state does not match the selected state file; refusing cleanup." >&2
+      exit 1
+    }
+    if [[ -d "$expected_vault_dir" ]]; then
+      rm -rf -- "$expected_vault_dir"
+      rmdir --ignore-fail-on-non-empty "$vault_root" 2>/dev/null || true
+    fi
+    python3 - "$services_file" <<'PY'
+import json, os, sys, tempfile
+path = sys.argv[1]
+with open(path, encoding="utf-8") as stream:
+    state = json.load(stream)
+state.pop("vault", None)
+directory = os.path.dirname(os.path.abspath(path))
+fd, temporary = tempfile.mkstemp(prefix=".services-", dir=directory, text=True)
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as stream:
+        json.dump(state, stream, indent=2)
+        stream.write("\n")
+    os.replace(temporary, path)
+except BaseException:
+    try:
+        os.unlink(temporary)
+    except FileNotFoundError:
+        pass
+    raise
+PY
+    echo "Removed the recorded local Vault credentials."
+  fi
   mapfile -t front_door_state < <(python3 - "$services_file" <<'PY'
 import json, sys
 with open(sys.argv[1], encoding="utf-8") as stream:

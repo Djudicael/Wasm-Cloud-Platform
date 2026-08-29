@@ -22,6 +22,64 @@ fn symm_key_from_exact_32(
     Ok(secrets::crypto::SymmetricKey::from_bytes(key))
 }
 
+fn build_vault_agent(runtime: &common::config::RuntimeSection) -> anyhow::Result<ureq::Agent> {
+    let mut builder =
+        ureq::Agent::config_builder().timeout_global(Some(std::time::Duration::from_secs(5)));
+    if let Some(ca_path) = runtime
+        .key_vault_ca_cert
+        .as_deref()
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+    {
+        let pem = std::fs::read(ca_path)
+            .map_err(|e| anyhow::anyhow!("failed to read Vault CA bundle {ca_path}: {e}"))?;
+        let mut certificates = Vec::new();
+        for item in ureq::tls::parse_pem(&pem) {
+            match item
+                .map_err(|e| anyhow::anyhow!("failed to parse Vault CA bundle {ca_path}: {e}"))?
+            {
+                ureq::tls::PemItem::Certificate(certificate) => certificates.push(certificate),
+                ureq::tls::PemItem::PrivateKey(_) => {}
+                _ => {}
+            }
+        }
+        if certificates.is_empty() {
+            anyhow::bail!("Vault CA bundle {ca_path} contains no certificates");
+        }
+        builder = builder.tls_config(
+            ureq::tls::TlsConfig::builder()
+                .root_certs(ureq::tls::RootCerts::new_with_certs(&certificates))
+                .build(),
+        );
+    }
+    Ok(builder.build().into())
+}
+
+fn decode_vault_transit_hmac(hmac: &str) -> anyhow::Result<Vec<u8>> {
+    use base64::Engine as _;
+
+    let encoded = hmac
+        .rsplit(':')
+        .next()
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("Vault transit hmac response is empty"))?;
+    let decoded = if encoded.len() == 64 && encoded.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        hex::decode(encoded)
+            .map_err(|e| anyhow::anyhow!("failed to decode legacy hex Vault transit hmac: {e}"))?
+    } else {
+        base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .map_err(|e| anyhow::anyhow!("failed to decode Vault transit hmac base64: {e}"))?
+    };
+    if decoded.len() != 32 {
+        anyhow::bail!(
+            "Vault transit hmac must decode to exactly 32 bytes, found {} bytes",
+            decoded.len()
+        );
+    }
+    Ok(decoded)
+}
+
 fn load_kek_from_env_spec(spec: &str) -> anyhow::Result<secrets::crypto::SymmetricKey> {
     let var_name = spec
         .strip_prefix("env:")
@@ -65,16 +123,14 @@ fn load_kek_from_command(command: &[String]) -> anyhow::Result<secrets::crypto::
         .output()
         .map_err(|e| anyhow::anyhow!("failed to run key command {}: {e}", command[0]))?;
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
         anyhow::bail!(
-            "key command {} failed with status {}: {}",
+            "key command {} failed with status {}; stderr suppressed because secret-manager helpers may emit sensitive material",
             command[0],
             output
                 .status
                 .code()
                 .map(|code| code.to_string())
-                .unwrap_or_else(|| "terminated by signal".to_string()),
-            stderr.trim()
+                .unwrap_or_else(|| "terminated by signal".to_string())
         );
     }
 
@@ -138,10 +194,7 @@ fn load_kek_from_vault_kv(
         mount,
         secret_path.trim_start_matches('/')
     );
-    let agent: ureq::Agent = ureq::Agent::config_builder()
-        .timeout_global(Some(std::time::Duration::from_secs(5)))
-        .build()
-        .into();
+    let agent = build_vault_agent(runtime)?;
     let mut response = agent
         .get(&request_url)
         .header("X-Vault-Token", token.trim())
@@ -237,14 +290,15 @@ fn load_kek_from_vault_transit(
         use base64::Engine as _;
         base64::engine::general_purpose::STANDARD.encode(context.as_bytes())
     };
-    let agent: ureq::Agent = ureq::Agent::config_builder()
-        .timeout_global(Some(std::time::Duration::from_secs(5)))
-        .build()
-        .into();
+    let agent = build_vault_agent(runtime)?;
+    let mut request = serde_json::json!({ "input": input });
+    if let Some(version) = runtime.key_vault_transit_key_version {
+        request["key_version"] = serde_json::json!(version);
+    }
     let mut response = agent
         .post(&request_url)
         .header("X-Vault-Token", token.trim())
-        .send_json(serde_json::json!({ "input": input }))
+        .send_json(request)
         .map_err(|e| anyhow::anyhow!("failed to derive seal key from Vault transit: {e}"))?;
     let body = response
         .body_mut()
@@ -257,16 +311,11 @@ fn load_kek_from_vault_transit(
         .and_then(|value| value.get("hmac"))
         .and_then(|value| value.as_str())
         .ok_or_else(|| anyhow::anyhow!("Vault transit response did not contain data.hmac"))?;
-    let hex_hmac = hmac
-        .rsplit(':')
-        .next()
-        .filter(|value| value.len() == 64)
-        .ok_or_else(|| anyhow::anyhow!("Vault transit hmac must end with a 64-char hex digest"))?;
-    let derived = hex::decode(hex_hmac)
-        .map_err(|e| anyhow::anyhow!("failed to decode Vault transit hmac hex: {e}"))?;
+    let derived = decode_vault_transit_hmac(hmac)?;
     tracing::info!(
         mount = mount,
         key = transit_key,
+        key_version = runtime.key_vault_transit_key_version,
         "derived KEK seal key from Vault transit"
     );
     symm_key_from_exact_32(&derived, "Vault transit hmac")
@@ -415,9 +464,40 @@ fn resolve_persisted_seal_key(
     }
 }
 
+fn resolve_previous_persisted_seal_key(
+    store: &storage::Store,
+    runtime: &common::config::RuntimeSection,
+) -> anyhow::Result<Option<secrets::crypto::SymmetricKey>> {
+    match runtime.key_source.as_str() {
+        "vault-transit" => {
+            let Some(previous_version) = runtime.key_vault_transit_previous_key_version else {
+                return Ok(None);
+            };
+            let mut previous = runtime.clone();
+            previous.key_vault_transit_key_version = Some(previous_version);
+            previous.key_vault_transit_previous_key_version = None;
+            Ok(Some(load_kek_from_vault_transit(&previous)?))
+        }
+        "aws-kms-hmac" => {
+            let Some(previous_key_id) = runtime.key_aws_kms_previous_key_id.as_ref() else {
+                return Ok(None);
+            };
+            let mut previous = runtime.clone();
+            previous.key_aws_kms_key_id = Some(previous_key_id.clone());
+            previous.key_aws_kms_previous_key_id = None;
+            Ok(Some(load_kek_from_aws_kms_hmac(&previous)?))
+        }
+        _ => {
+            let _ = store;
+            Ok(None)
+        }
+    }
+}
+
 fn load_or_create_persisted_kek(
     store: &storage::Store,
     seal_key: &secrets::crypto::SymmetricKey,
+    previous_seal_key: Option<&secrets::crypto::SymmetricKey>,
 ) -> anyhow::Result<secrets::crypto::SymmetricKey> {
     match store.load_kek()? {
         Some(bytes) if bytes.len() == 32 => {
@@ -430,9 +510,20 @@ fn load_or_create_persisted_kek(
             Ok(legacy)
         }
         Some(sealed_blob) => {
-            let plaintext =
-                secrets::crypto::decrypt(seal_key, &secrets::crypto::EncryptedBlob(sealed_blob))?;
-            tracing::info!("loaded sealed KEK from redb using configured key source");
+            let encrypted = secrets::crypto::EncryptedBlob(sealed_blob);
+            let (plaintext, rewrap) = match secrets::crypto::decrypt(seal_key, &encrypted) {
+                Ok(plaintext) => (plaintext, false),
+                Err(current_error) => {
+                    let previous = previous_seal_key.ok_or(current_error)?;
+                    (secrets::crypto::decrypt(previous, &encrypted)?, true)
+                }
+            };
+            if rewrap {
+                store.save_kek(&seal_kek_blob(seal_key, &plaintext)?)?;
+                tracing::warn!("rewrapped persisted KEK with the active external seal-key version");
+            } else {
+                tracing::info!("loaded sealed KEK from redb using configured key source");
+            }
             symm_key_from_exact_32(&plaintext, "persisted sealed KEK")
         }
         None => {
@@ -451,14 +542,21 @@ fn load_or_create_persisted_kek(
 fn load_or_create_persisted_secret_transport_keypair(
     store: &storage::Store,
     seal_key: &secrets::crypto::SymmetricKey,
+    previous_seal_key: Option<&secrets::crypto::SymmetricKey>,
 ) -> anyhow::Result<secrets::BootstrapKeyPair> {
     match store.load_meta(SECRET_TRANSPORT_KEY_META_KEY)? {
         Some(sealed_hex) => {
             let sealed_blob = hex::decode(sealed_hex.trim()).map_err(|e| {
                 anyhow::anyhow!("failed to decode sealed secret transport key from redb: {e}")
             })?;
-            let plaintext =
-                secrets::crypto::decrypt(seal_key, &secrets::crypto::EncryptedBlob(sealed_blob))?;
+            let encrypted = secrets::crypto::EncryptedBlob(sealed_blob);
+            let (plaintext, rewrap) = match secrets::crypto::decrypt(seal_key, &encrypted) {
+                Ok(plaintext) => (plaintext, false),
+                Err(current_error) => {
+                    let previous = previous_seal_key.ok_or(current_error)?;
+                    (secrets::crypto::decrypt(previous, &encrypted)?, true)
+                }
+            };
             if plaintext.len() != 32 {
                 anyhow::bail!(
                     "persisted sealed secret transport key must contain exactly 32 bytes, found {} bytes",
@@ -467,7 +565,15 @@ fn load_or_create_persisted_secret_transport_keypair(
             }
             let mut secret_bytes = [0u8; 32];
             secret_bytes.copy_from_slice(&plaintext);
-            tracing::info!("loaded sealed node secret transport key from redb");
+            if rewrap {
+                let resealed = secrets::crypto::encrypt(seal_key, &plaintext)?;
+                store.save_meta(SECRET_TRANSPORT_KEY_META_KEY, &hex::encode(resealed.0))?;
+                tracing::warn!(
+                    "rewrapped node secret transport key with the active external seal-key version"
+                );
+            } else {
+                tracing::info!("loaded sealed node secret transport key from redb");
+            }
             Ok(secrets::BootstrapKeyPair::from_secret_bytes(secret_bytes))
         }
         None => {
@@ -513,6 +619,7 @@ const NODE_SUBSCRIPTION_SPECS: &[(&str, &str)] = &[
     ("CONTROL", "instance.ready.>"),
     ("CONTROL", "instance.dead.>"),
     ("CONTROL", "secrets.update.>"),
+    ("CONTROL", "secrets.delete.>"),
     ("CONTROL", "config.update.>"),
     ("CONTROL", "gateway.config.>"),
     ("NODE", "node.load.>"),
@@ -732,7 +839,10 @@ fn load_kek_from_config(
     runtime: &common::config::RuntimeSection,
 ) -> anyhow::Result<secrets::crypto::SymmetricKey> {
     match resolve_persisted_seal_key(store, runtime)? {
-        Some(seal_key) => load_or_create_persisted_kek(store, &seal_key),
+        Some(seal_key) => {
+            let previous = resolve_previous_persisted_seal_key(store, runtime)?;
+            load_or_create_persisted_kek(store, &seal_key, previous.as_ref())
+        }
         None => {
             if let Ok(Some(_persisted_kek)) = store.load_kek() {
                 anyhow::bail!(
@@ -752,7 +862,10 @@ fn load_secret_transport_keypair_from_config(
     runtime: &common::config::RuntimeSection,
 ) -> anyhow::Result<secrets::BootstrapKeyPair> {
     match resolve_persisted_seal_key(store, runtime)? {
-        Some(seal_key) => load_or_create_persisted_secret_transport_keypair(store, &seal_key),
+        Some(seal_key) => {
+            let previous = resolve_previous_persisted_seal_key(store, runtime)?;
+            load_or_create_persisted_secret_transport_keypair(store, &seal_key, previous.as_ref())
+        }
         None => {
             if let Ok(Some(_persisted_transport_key)) =
                 store.load_meta(SECRET_TRANSPORT_KEY_META_KEY)
@@ -990,6 +1103,18 @@ use args::Args;
 use auth_reload::setup_sighup_handler;
 use config::{load_config, CliOverrides};
 
+fn clear_persisted_auth_override(db_path: &str) -> anyhow::Result<()> {
+    if !std::path::Path::new(db_path).is_file() {
+        anyhow::bail!(
+            "refusing auth-override cleanup because redb file does not exist: {}",
+            db_path
+        );
+    }
+    let store = storage::Store::open(std::path::Path::new(db_path))?;
+    store.delete_auth_config()?;
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
@@ -1040,11 +1165,21 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
+    if args.clear_persisted_auth_override {
+        clear_persisted_auth_override(&args.db_path)?;
+        println!("Persisted auth override removed. Rotate external admin tokens before startup.");
+        return Ok(());
+    }
+
     // Convert CLI args to overrides for the config system
+    let has_config_file = args.config.is_some();
     let cli_overrides = CliOverrides {
-        node_id: Some(args.node_id.clone()),
-        db_path: Some(args.db_path.clone()),
-        nats_url: Some(args.nats_url.clone()),
+        node_id: (!has_config_file || args.node_id != "node-0").then(|| args.node_id.clone()),
+        environment: None,
+        db_path: (!has_config_file || args.db_path != "/tmp/wasm-node/state.redb")
+            .then(|| args.db_path.clone()),
+        nats_url: (!has_config_file || args.nats_url != "nats://127.0.0.1:4222")
+            .then(|| args.nats_url.clone()),
         nats_creds: args.nats_creds.clone(),
         http_port: Some(args.proxy_port),
         https_port: Some(args.proxy_https_port),
@@ -1062,7 +1197,8 @@ async fn main() -> anyhow::Result<()> {
         admin_advertised_artifact_url: args.admin_advertised_artifact_url.clone(),
         port_start: Some(args.port_start),
         port_end: Some(args.port_end),
-        key_source: Some(args.key_source.clone()),
+        key_source: (!has_config_file || args.key_source != "generate")
+            .then(|| args.key_source.clone()),
         key_file: args.key_file.clone(),
         key_command: if args.key_command.is_empty() {
             None
@@ -1071,6 +1207,7 @@ async fn main() -> anyhow::Result<()> {
         },
         key_vault_url: args.key_vault_url.clone(),
         key_vault_token_env: args.key_vault_token_env.clone(),
+        key_vault_ca_cert: args.key_vault_ca_cert.clone(),
         key_vault_mount: args.key_vault_mount.clone(),
         key_vault_path: args.key_vault_path.clone(),
         key_vault_field: args.key_vault_field.clone(),
@@ -1310,7 +1447,7 @@ async fn main() -> anyhow::Result<()> {
         None => messaging::NatsBus::connect(&config.nats.url).await?,
     };
     bus.set_node_id(config.node.node_id.clone());
-    info!(url = %config.nats.url, "NATS connected");
+    info!("NATS connected");
 
     bus.setup_jetstream().await?;
 
@@ -2026,20 +2163,34 @@ async fn main() -> anyhow::Result<()> {
         common::auth::AuthConfig::default()
     };
 
-    // Load persisted auth config overrides from redb (survives restarts)
+    let production_environment =
+        config.node.environment == common::config::DeploymentEnvironment::Production;
+
+    // Production credentials must remain under the external secret manager's
+    // lifecycle. A legacy plaintext redb override is therefore a startup error.
     match store.load_auth_config() {
         Ok(Some(persisted)) => {
-            tracing::info!("loaded persisted auth config from database (overrides TOML values)");
-            effective_auth_config = persisted;
+            if production_environment {
+                anyhow::bail!(
+                    "production startup rejected plaintext persisted auth override; remove it with the documented migration procedure and rotate the affected tokens in the external secret manager"
+                );
+            } else {
+                tracing::info!(
+                    "loaded persisted auth config from database (overrides TOML values)"
+                );
+                effective_auth_config = persisted;
+            }
         }
         Ok(None) => {
             tracing::debug!("no persisted auth config found - using TOML/CLI values");
         }
         Err(e) => {
-            tracing::warn!(
-                error = %e,
-                "failed to load persisted auth config - falling back to TOML file values"
-            );
+            if production_environment {
+                return Err(anyhow::anyhow!(
+                    "failed to verify absence of persisted auth override in production: {e}"
+                ));
+            }
+            tracing::warn!(error = %e, "failed to load persisted auth config - falling back to TOML file values");
         }
     }
 
@@ -2119,6 +2270,7 @@ async fn main() -> anyhow::Result<()> {
     let rotate_auth_config = auth_config_shared.clone();
     let rotate_store = store.clone();
     let rotate_node_id = config.node.node_id.clone();
+    let rotate_disabled = production_environment;
 
     let admin_app = axum::Router::new()
         .merge(health_router)
@@ -3236,6 +3388,15 @@ async fn main() -> anyhow::Result<()> {
                 let store = rotate_store.clone();
                 let node_id = rotate_node_id.clone();
                 async move {
+                    if rotate_disabled {
+                        return (
+                            axum::http::StatusCode::CONFLICT,
+                            axum::Json(serde_json::json!({
+                                "error": "external_secret_lifecycle_required",
+                                "message": "production token rotation must be performed in the external secret manager and applied through a controlled node reload"
+                            })),
+                        );
+                    }
                     // Parse the request body
                     let req: proxy::auth_middleware::RotateTokenRequest = match serde_json::from_value(body.0) {
                         Ok(r) => r,
@@ -3268,22 +3429,12 @@ async fn main() -> anyhow::Result<()> {
                     let mut config = auth_config.write().await;
                     match req.token_type.as_str() {
                         "read" => {
-                            let old = config.read_token.clone();
                             config.read_token = Some(new_token.clone());
-                            tracing::warn!(
-                                old_prefix = old.map(|t| t[..8.min(t.len())].to_string()).unwrap_or_else(|| "none".to_string()),
-                                new_prefix = &new_token[..8.min(new_token.len())],
-                                "read token rotated via admin API"
-                            );
+                            tracing::warn!(token_type = "read", "admin token rotated via admin API");
                         }
                         "write" => {
-                            let old = config.write_token.clone();
                             config.write_token = Some(new_token.clone());
-                            tracing::warn!(
-                                old_prefix = old.map(|t| t[..8.min(t.len())].to_string()).unwrap_or_else(|| "none".to_string()),
-                                new_prefix = &new_token[..8.min(new_token.len())],
-                                "write token rotated via admin API"
-                            );
+                            tracing::warn!(token_type = "write", "admin token rotated via admin API");
                         }
                         _ => unreachable!("validate_rotation_request should have caught this"),
                     }

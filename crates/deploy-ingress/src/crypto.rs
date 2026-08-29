@@ -33,6 +33,16 @@ pub fn load_kek(args: &Args) -> anyhow::Result<SymmetricKey> {
                 .ok_or_else(|| anyhow::anyhow!("key_source=file requires --key-file"))?;
             let bytes = std::fs::read(key_file)
                 .with_context(|| format!("failed to read key file {key_file}"))?;
+            #[cfg(unix)]
+            if args.environment == "production" {
+                use std::os::unix::fs::PermissionsExt;
+                let mode = std::fs::metadata(key_file)?.permissions().mode();
+                if mode & 0o077 != 0 {
+                    anyhow::bail!(
+                        "production key file {key_file} must not be readable or writable by group/others (expected mode 0600 or stricter)"
+                    );
+                }
+            }
             symm_key_from_exact_32(&bytes, &format!("key file {key_file}"))
         }
         spec if spec.starts_with("env:") => load_kek_from_env_spec(spec),

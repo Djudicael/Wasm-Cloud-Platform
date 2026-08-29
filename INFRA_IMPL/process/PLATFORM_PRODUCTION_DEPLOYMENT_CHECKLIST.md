@@ -16,6 +16,15 @@ This checklist is an operator runbook, not a statement that every listed capabil
 is automated today. Items marked as requirements need deployment evidence from the
 chosen infrastructure, even when the platform code has unit or integration coverage.
 
+The boundary is the Wasm Cloud Platform. NATS is a required platform dependency,
+but PostgreSQL is only a dependency of applications such as the OIDC rehearsal.
+Vault Transit and AWS KMS HMAC are supported external seal-root integrations;
+the platform does not deploy Vault, KMS, or an HSM. Likewise, Prometheus, log,
+and trace backends consume platform telemetry but remain external services.
+Platform release gates prove client interoperability, fail-safe behavior, and
+recovery. Availability, backup, PKI, and lifecycle qualification of the chosen
+external products belong to the deployment operator's infrastructure gate.
+
 ## Release decision rules
 
 Classify every required gate as `PASS`, `FAIL`, or `EXCEPTION`. Each exception needs
@@ -164,6 +173,9 @@ provides no evidence for production NATS high availability.
 
 ## 6. Identity, authentication, and secrets gates
 
+Apply the detailed [production secret lifecycle](./PRODUCTION_SECRET_LIFECYCLE.md)
+and attach its external-manager and redaction evidence to the change record.
+
 - [ ] Replace every `CHANGE-ME` value in the production template through external
       secret delivery; fail deployment if placeholders remain.
 - [ ] Use structured read/write admin authentication. Legacy single-token mode is
@@ -172,11 +184,22 @@ provides no evidence for production NATS high availability.
 - [ ] Read and write identities are separate, least-privilege, rotated, revocable,
       audited, and not shared by humans and automation.
 - [ ] Admin and artifact access is identity-aware at the network and application layers.
-- [ ] The runtime sealing key uses a durable production source such as Vault Transit,
-      KMS, a protected command integration, or a tightly protected file provisioned
-      by the secret system. Do not use generated-ephemeral keys for persistent production state.
+- [ ] Set `node.environment = "production"`; prove admission rejects local defaults.
+- [ ] The node runtime sealing root uses pinned Vault Transit HMAC or AWS KMS HMAC
+      with a non-exportable key. Generated, file, command, KV-exported, environment,
+      and passphrase sources are not admitted for production nodes.
+- [ ] Private Vault PKI is supplied through `runtime.key_vault_ca_cert`; SAN
+      validation passes and no trust-all or plaintext fallback exists.
+- [ ] Vault Transit uses `type=hmac key_size=32` without `derived=true`; the
+      stable unique node context is HMAC input/domain separation.
+- [ ] Deploy ingress runs in its production mode and receives its derived envelope
+      key from a secret-agent read-only tmpfs projection with mode 0600 or stricter.
 - [ ] Bootstrap credentials are short-lived and cannot be reused as steady-state credentials.
 - [ ] Key/certificate/token rotation is tested without losing encrypted data or cluster availability.
+- [ ] Secret deletion reaches every authoritative registry node, including a stale
+      node after reconnect, and rotated/revoked application instances are evicted.
+- [ ] External seal-root rotation rewraps both the persisted KEK and node transport
+      key; every node restarts successfully after the previous key is removed.
 - [ ] Break-glass access is time-bounded, separately audited, and exercised before an incident.
 - [ ] Secret values never appear in CLI arguments, process listings, unit files,
       repository files, release bundles, state files, logs, metrics, or support archives.

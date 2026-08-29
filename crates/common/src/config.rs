@@ -13,7 +13,7 @@ pub use config_health_gateway::{
 use std::path::PathBuf;
 
 /// Top-level configuration for a wasm-node.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Clone, Serialize, Deserialize, Default)]
 pub struct NodeConfig {
     #[serde(default)]
     pub node: NodeSection,
@@ -57,6 +57,19 @@ fn default_true() -> bool {
 pub struct NodeSection {
     #[serde(default = "default_node_id")]
     pub node_id: String,
+    /// Controls fail-closed admission checks. Production mode rejects local
+    /// defaults and requires externally anchored secret material.
+    #[serde(default)]
+    pub environment: DeploymentEnvironment,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum DeploymentEnvironment {
+    #[default]
+    Development,
+    Test,
+    Production,
 }
 
 fn default_node_id() -> String {
@@ -67,6 +80,7 @@ impl Default for NodeSection {
     fn default() -> Self {
         NodeSection {
             node_id: default_node_id(),
+            environment: DeploymentEnvironment::default(),
         }
     }
 }
@@ -168,7 +182,7 @@ impl Default for ProxySection {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct AdminSection {
     #[serde(default = "default_admin_port")]
     pub port: u16,
@@ -265,7 +279,7 @@ impl Default for AdminSection {
 /// rate_limit_burst = 20
 /// trusted_proxies = ["10.0.0.0/8", "192.168.1.10"]
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct AuthSection {
     /// Enable authentication on admin API endpoints.
     #[serde(default)]
@@ -381,6 +395,10 @@ pub struct RuntimeSection {
     /// Environment variable containing the Vault token when `key_source = "vault-kv"`.
     #[serde(default)]
     pub key_vault_token_env: Option<String>,
+    /// Optional PEM CA bundle used to authenticate a private Vault TLS endpoint.
+    /// When absent, the built-in public WebPKI roots are used.
+    #[serde(default)]
+    pub key_vault_ca_cert: Option<String>,
     /// KV v2 mount name when `key_source = "vault-kv"`.
     #[serde(default = "default_key_vault_mount")]
     pub key_vault_mount: String,
@@ -399,6 +417,14 @@ pub struct RuntimeSection {
     /// Transit derivation context when `key_source = "vault-transit"`.
     #[serde(default)]
     pub key_vault_transit_context: Option<String>,
+    /// Optional pinned Vault Transit key version. Production should pin this
+    /// value so an external rotation cannot make persisted envelopes unreadable.
+    #[serde(default)]
+    pub key_vault_transit_key_version: Option<u32>,
+    /// Previous pinned version accepted once during a controlled rewrap. After
+    /// a successful node start, remove this value from configuration.
+    #[serde(default)]
+    pub key_vault_transit_previous_key_version: Option<u32>,
     /// AWS region when `key_source = "aws-kms-hmac"`.
     #[serde(default)]
     pub key_aws_kms_region: Option<String>,
@@ -408,6 +434,9 @@ pub struct RuntimeSection {
     /// AWS KMS HMAC key id/arn when `key_source = "aws-kms-hmac"`.
     #[serde(default)]
     pub key_aws_kms_key_id: Option<String>,
+    /// Previous AWS KMS HMAC key id accepted once during controlled rewrap.
+    #[serde(default)]
+    pub key_aws_kms_previous_key_id: Option<String>,
     /// Stable derivation context when `key_source = "aws-kms-hmac"`.
     #[serde(default)]
     pub key_aws_kms_context: Option<String>,
@@ -479,15 +508,19 @@ impl Default for RuntimeSection {
             key_command: Vec::new(),
             key_vault_url: None,
             key_vault_token_env: None,
+            key_vault_ca_cert: None,
             key_vault_mount: default_key_vault_mount(),
             key_vault_path: None,
             key_vault_field: default_key_vault_field(),
             key_vault_transit_mount: default_key_vault_transit_mount(),
             key_vault_transit_key: None,
             key_vault_transit_context: None,
+            key_vault_transit_key_version: None,
+            key_vault_transit_previous_key_version: None,
             key_aws_kms_region: None,
             key_aws_kms_endpoint: None,
             key_aws_kms_key_id: None,
+            key_aws_kms_previous_key_id: None,
             key_aws_kms_context: None,
             cache_directory: None,
             upgrade_signing_public_key: None,
@@ -940,7 +973,7 @@ impl Default for EbpfSection {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct DnsSection {
     #[serde(default)]
     pub platform_domain: Option<String>,

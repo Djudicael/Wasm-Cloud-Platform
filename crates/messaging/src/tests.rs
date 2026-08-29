@@ -12,6 +12,22 @@ mod test_helpers {
     use tokio::time::timeout;
     use tokio_stream::StreamExt;
 
+    #[test]
+    fn secret_delete_subject_is_node_targeted() {
+        let event = Event::SecretDelete {
+            app_id: AppId::new("default/app", "v1"),
+            key: "API_KEY".to_string(),
+            target_node_id: "node-2".to_string(),
+        };
+        assert_eq!(event.subject(), "secrets.delete.default/app:v1.node-2");
+        let encoded = serde_json::to_vec(&event).unwrap();
+        assert!(!String::from_utf8_lossy(&encoded).contains("secret-value"));
+        assert!(matches!(
+            serde_json::from_slice::<Event>(&encoded).unwrap(),
+            Event::SecretDelete { target_node_id, .. } if target_node_id == "node-2"
+        ));
+    }
+
     #[tokio::test]
     async fn test_pub_sub_deploy_app() {
         let _container = NatsContainer::start(4224).expect("Failed to start NATS container");

@@ -11,6 +11,12 @@ This crate handles all configuration concerns for the platform:
 - **Environment variable integration** — Automatically reads and applies environment variable overrides.
 - **CLI override support** — Command-line arguments take the highest precedence in the merge chain.
 
+Production validation requires a pinned non-exportable Vault Transit HMAC or
+AWS KMS HMAC root. For Vault endpoints signed by a private CA, set
+`runtime.key_vault_ca_cert` or
+`WASM_NODE_RUNTIME_KEY_VAULT_CA_CERT` to a PEM CA bundle. An explicitly
+configured empty path is rejected; TLS verification is never disabled.
+
 ## Architecture
 
 ### Cold Config Loading Pipeline

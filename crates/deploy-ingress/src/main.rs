@@ -35,6 +35,7 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let args = Args::parse();
+    args.validate_security_policy()?;
     let store = Store::open(&args.db_path)?;
     let kek = load_kek(&args)?;
     let credential_kek_bytes = *kek.as_bytes();

@@ -1,8 +1,8 @@
 use crate::overrides::CliOverrides;
 use crate::validation::validate_config;
 use common::config::{
-    AdminSection, AuthSection, BillingSection, DatabaseSection, DnsSection, EbpfSection,
-    GatewayCircuitBreakerSection, GatewayRateLimitSection, GatewaySection, GcSection,
+    AdminSection, AuthSection, BillingSection, DatabaseSection, DeploymentEnvironment, DnsSection,
+    EbpfSection, GatewayCircuitBreakerSection, GatewayRateLimitSection, GatewaySection, GcSection,
     HealthSection, LoggingSection, NatsSection, NodeConfig, NodeSection, ProxySection,
     RateLimitSection, RuntimeSection, StorageIntegrityFailureMode, StorageOpenFailureMode,
     StorageSection,
@@ -55,6 +55,7 @@ pub(crate) fn merge_config(base: NodeConfig, overlay: NodeConfig) -> NodeConfig 
     NodeConfig {
         node: NodeSection {
             node_id: overlay.node.node_id,
+            environment: overlay.node.environment,
         },
         storage: StorageSection {
             db_path: overlay.storage.db_path,
@@ -120,6 +121,10 @@ pub(crate) fn merge_config(base: NodeConfig, overlay: NodeConfig) -> NodeConfig 
                 .runtime
                 .key_vault_token_env
                 .or(base.runtime.key_vault_token_env),
+            key_vault_ca_cert: overlay
+                .runtime
+                .key_vault_ca_cert
+                .or(base.runtime.key_vault_ca_cert),
             key_vault_mount: if overlay.runtime.key_vault_mount.is_empty() {
                 base.runtime.key_vault_mount.clone()
             } else {
@@ -147,6 +152,14 @@ pub(crate) fn merge_config(base: NodeConfig, overlay: NodeConfig) -> NodeConfig 
                 .runtime
                 .key_vault_transit_context
                 .or(base.runtime.key_vault_transit_context),
+            key_vault_transit_key_version: overlay
+                .runtime
+                .key_vault_transit_key_version
+                .or(base.runtime.key_vault_transit_key_version),
+            key_vault_transit_previous_key_version: overlay
+                .runtime
+                .key_vault_transit_previous_key_version
+                .or(base.runtime.key_vault_transit_previous_key_version),
             key_aws_kms_region: overlay
                 .runtime
                 .key_aws_kms_region
@@ -159,6 +172,10 @@ pub(crate) fn merge_config(base: NodeConfig, overlay: NodeConfig) -> NodeConfig 
                 .runtime
                 .key_aws_kms_key_id
                 .or(base.runtime.key_aws_kms_key_id),
+            key_aws_kms_previous_key_id: overlay
+                .runtime
+                .key_aws_kms_previous_key_id
+                .or(base.runtime.key_aws_kms_previous_key_id),
             key_aws_kms_context: overlay
                 .runtime
                 .key_aws_kms_context
@@ -288,6 +305,17 @@ pub(crate) fn merge_config(base: NodeConfig, overlay: NodeConfig) -> NodeConfig 
 }
 
 pub(crate) fn apply_env_overrides(mut config: NodeConfig) -> NodeConfig {
+    if let Ok(value) = std::env::var("WASM_NODE_ENVIRONMENT") {
+        config.node.environment = match value.trim().to_ascii_lowercase().as_str() {
+            "development" => DeploymentEnvironment::Development,
+            "test" => DeploymentEnvironment::Test,
+            "production" => DeploymentEnvironment::Production,
+            other => {
+                tracing::warn!(value = other, "ignoring invalid WASM_NODE_ENVIRONMENT");
+                config.node.environment
+            }
+        };
+    }
     if let Ok(v) = std::env::var("WASM_NODE_NODE_ID") {
         config.node.node_id = v;
     }
@@ -449,6 +477,9 @@ pub(crate) fn apply_env_overrides(mut config: NodeConfig) -> NodeConfig {
     if let Ok(v) = std::env::var("WASM_NODE_RUNTIME_KEY_VAULT_TOKEN_ENV") {
         config.runtime.key_vault_token_env = Some(v);
     }
+    if let Ok(v) = std::env::var("WASM_NODE_RUNTIME_KEY_VAULT_CA_CERT") {
+        config.runtime.key_vault_ca_cert = Some(v);
+    }
     if let Ok(v) = std::env::var("WASM_NODE_RUNTIME_KEY_VAULT_MOUNT") {
         config.runtime.key_vault_mount = v;
     }
@@ -467,6 +498,16 @@ pub(crate) fn apply_env_overrides(mut config: NodeConfig) -> NodeConfig {
     if let Ok(v) = std::env::var("WASM_NODE_RUNTIME_KEY_VAULT_TRANSIT_CONTEXT") {
         config.runtime.key_vault_transit_context = Some(v);
     }
+    if let Ok(v) = std::env::var("WASM_NODE_RUNTIME_KEY_VAULT_TRANSIT_KEY_VERSION") {
+        if let Ok(version) = v.parse() {
+            config.runtime.key_vault_transit_key_version = Some(version);
+        }
+    }
+    if let Ok(v) = std::env::var("WASM_NODE_RUNTIME_KEY_VAULT_TRANSIT_PREVIOUS_KEY_VERSION") {
+        if let Ok(version) = v.parse() {
+            config.runtime.key_vault_transit_previous_key_version = Some(version);
+        }
+    }
     if let Ok(v) = std::env::var("WASM_NODE_RUNTIME_KEY_AWS_KMS_REGION") {
         config.runtime.key_aws_kms_region = Some(v);
     }
@@ -475,6 +516,9 @@ pub(crate) fn apply_env_overrides(mut config: NodeConfig) -> NodeConfig {
     }
     if let Ok(v) = std::env::var("WASM_NODE_RUNTIME_KEY_AWS_KMS_KEY_ID") {
         config.runtime.key_aws_kms_key_id = Some(v);
+    }
+    if let Ok(v) = std::env::var("WASM_NODE_RUNTIME_KEY_AWS_KMS_PREVIOUS_KEY_ID") {
+        config.runtime.key_aws_kms_previous_key_id = Some(v);
     }
     if let Ok(v) = std::env::var("WASM_NODE_RUNTIME_KEY_AWS_KMS_CONTEXT") {
         config.runtime.key_aws_kms_context = Some(v);
@@ -517,6 +561,9 @@ pub(crate) fn apply_env_overrides(mut config: NodeConfig) -> NodeConfig {
 pub(crate) fn apply_cli_overrides(mut config: NodeConfig, cli: &CliOverrides) -> NodeConfig {
     if let Some(v) = &cli.node_id {
         config.node.node_id = v.clone();
+    }
+    if let Some(v) = cli.environment {
+        config.node.environment = v;
     }
     if let Some(v) = &cli.db_path {
         config.storage.db_path = PathBuf::from(v);
@@ -589,6 +636,9 @@ pub(crate) fn apply_cli_overrides(mut config: NodeConfig, cli: &CliOverrides) ->
     }
     if let Some(v) = &cli.key_vault_token_env {
         config.runtime.key_vault_token_env = Some(v.clone());
+    }
+    if let Some(v) = &cli.key_vault_ca_cert {
+        config.runtime.key_vault_ca_cert = Some(v.clone());
     }
     if let Some(v) = &cli.key_vault_mount {
         config.runtime.key_vault_mount = v.clone();

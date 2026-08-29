@@ -4,7 +4,7 @@ use crate::loader::{apply_cli_overrides, apply_env_overrides, merge_config};
 use crate::validation::validate_config;
 use crate::validation::validate_hot_config;
 use common::config::NodeConfig;
-use common::config::{StorageIntegrityFailureMode, StorageOpenFailureMode};
+use common::config::{DeploymentEnvironment, StorageIntegrityFailureMode, StorageOpenFailureMode};
 use common::error::PlatformError;
 
 fn validate_hot(config: &HotConfig) -> Result<(), PlatformError> {
@@ -15,6 +15,61 @@ fn validate_hot(config: &HotConfig) -> Result<(), PlatformError> {
 fn test_default_config_valid() {
     let config = NodeConfig::default();
     assert!(validate_config(&config).is_ok());
+}
+
+#[test]
+fn production_rejects_local_secret_defaults() {
+    let mut config = NodeConfig::default();
+    config.node.environment = DeploymentEnvironment::Production;
+    let error = validate_config(&config).unwrap_err().to_string();
+    assert!(error.contains("auth.enabled"));
+    assert!(error.contains("runtime.key_source"));
+    assert!(error.contains("nats.creds_file"));
+    assert!(error.contains("tls:// NATS"));
+}
+
+#[test]
+fn production_accepts_non_exportable_external_key_policy() {
+    let mut config = NodeConfig::default();
+    config.node.environment = DeploymentEnvironment::Production;
+    config.auth.enabled = true;
+    config.auth.read_token =
+        Some("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string());
+    config.auth.write_token =
+        Some("fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210".to_string());
+    config.admin.tls_cert = Some("/run/secrets/admin.crt".to_string());
+    config.admin.tls_key = Some("/run/secrets/admin.key".to_string());
+    config.nats.url = "tls://nats.internal:4222".to_string();
+    config.nats.creds_file = Some("/run/secrets/nats.creds".to_string());
+    config.runtime.key_source = "vault-transit".to_string();
+    config.runtime.key_vault_url = Some("https://vault.internal".to_string());
+    config.runtime.key_vault_token_env = Some("VAULT_TOKEN".to_string());
+    config.runtime.key_vault_transit_key = Some("wasm-node-seal".to_string());
+    config.runtime.key_vault_transit_context = Some("node-0".to_string());
+    config.runtime.key_vault_transit_key_version = Some(1);
+    assert!(validate_config(&config).is_ok());
+}
+
+#[test]
+fn production_rejects_exportable_or_insecure_secret_sources() {
+    let mut config = NodeConfig::default();
+    config.node.environment = DeploymentEnvironment::Production;
+    config.auth.enabled = true;
+    config.auth.read_token = Some("a".repeat(64));
+    config.auth.write_token = Some("not-a-production-token".to_string());
+    config.admin.tls_cert = Some("cert".to_string());
+    config.admin.tls_key = Some("key".to_string());
+    config.nats.url = "nats://nats.internal:4222".to_string();
+    config.nats.creds_file = Some("creds".to_string());
+    config.runtime.key_source = "file".to_string();
+    config.runtime.key_file = Some("/run/secrets/exported-key".to_string());
+    config.dns.webhook_token = Some("inline-secret".to_string());
+    let error = validate_config(&config).unwrap_err().to_string();
+    assert!(error.contains("non-exportable"));
+    assert!(error.contains("64 hexadecimal"));
+    assert!(error.contains("repeated-character"));
+    assert!(error.contains("tls:// NATS"));
+    assert!(error.contains("inline dns.webhook_token"));
 }
 
 #[test]

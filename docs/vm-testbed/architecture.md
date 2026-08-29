@@ -104,10 +104,19 @@ We chose the bridge approach because network partition testing (L5 chaos) requir
 ├── ...
 ├── 172.20.0.10   nats-0
 ├── 172.20.0.11   nats-1 (if clustered)
+├── 172.20.0.20   optional PostgreSQL application service
+├── 172.20.0.21   optional Vault Transit integration service
 └── 172.20.0.255  broadcast
 ```
 
 This is hardcoded in the testbed for simplicity. For multi-tenant scenarios, you'd use a larger subnet or VLANs.
+
+PostgreSQL and Vault are independent service microVMs and are not included in
+the platform-node count. The local PostgreSQL image validates an application's
+database path. The local Vault image validates the platform's external
+seal-root client and failure behavior. Neither service is deployed or managed
+by the Wasm Cloud Platform in production. See
+[Local service microVMs](./service-microvms.md) for their state and lifecycle.
 
 ### MAC Address Allocation
 

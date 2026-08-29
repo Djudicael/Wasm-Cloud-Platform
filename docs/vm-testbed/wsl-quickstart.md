@@ -77,10 +77,16 @@ sudo apt-get install -y \
     libssl-dev \
     libelf-dev \
     curl \
+    e2fsprogs \
     iproute2 \
     iptables \
+    jq \
+    openssl \
+    python3 \
     qemu-utils \
-    pkg-config
+    pkg-config \
+    unzip \
+    util-linux
 
 # Verify KVM is available
 ls -la /dev/kvm
@@ -103,7 +109,7 @@ source $HOME/.cargo/env
 rustup target add wasm32-wasip2
 
 # Verify
-rustc --version  # Should be 1.80+
+rustc --version  # Must match the repository's rust-toolchain.toml
 ```
 
 ## Project Setup in WSL
@@ -147,6 +153,20 @@ RUSTFLAGS='--cfg tokio_unstable' \
 
 # 3. Run tests
 sudo cargo test -p vm-testbed --test single_node_deploy -- --nocapture
+```
+
+`build-all-images.sh` also builds optional PostgreSQL and initialized Vault
+service fixtures. The Vault rootfs contains local initialized state and a TLS
+private key, while its unseal/root bootstrap is protected on the WSL Linux
+filesystem outside the repository. Neither artifact is a production image or a
+release artifact. Read [Local service microVMs](./service-microvms.md) before
+provisioning, copying, or cleaning up these fixtures.
+
+When the checkout is under `/mnt/<drive>`, keep Rust build output on the Linux
+filesystem:
+
+```bash
+export CARGO_TARGET_DIR=/tmp/wasm-cloud-platform-target
 ```
 
 ### Option B: Manual Steps
@@ -317,19 +337,17 @@ Never run `cargo build` from Windows PowerShell/CMD for this project. Always use
 ## Cleanup
 
 ```bash
-# Kill all Firecracker processes
-sudo pkill -f firecracker
-
-# Remove bridge and TAP devices
-sudo ip link del br-wasm 2>/dev/null || true
-for i in $(ip link show | grep tap- | awk -F: '{print $2}' | xargs); do
-    sudo ip link del $i 2>/dev/null || true
-done
-
-# Clean up temp files
-sudo rm -rf /tmp/vm-testbed-*
-sudo rm -rf /tmp/fc-*
+# Use the exact state file used during provisioning.
+bash scripts/vm/destroy-testbed.sh \
+  --state-file .prod-validation-single-host-state.json
 ```
+
+Never use broad `pkill`, interface-name searches, or `/tmp` globs for cleanup:
+they can affect unrelated Firecracker environments. The canonical teardown
+validates and removes only recorded PIDs, VMs, TAP/bridge state, host services,
+and state-scoped runtime credentials. See
+[Local service microVMs](./service-microvms.md#teardown-and-retained-build-artifacts)
+for the build artifacts it intentionally retains.
 
 ## Next Steps
 

@@ -1,7 +1,7 @@
 use clap::Parser;
 
 /// CLI surface for node startup and one-shot maintenance commands.
-#[derive(Parser, Debug)]
+#[derive(Parser)]
 #[command(name = "wasm-node", about = "Wasm Cloud Platform Node")]
 pub(crate) struct Args {
     /// Path to a TOML configuration file. Values in the file are used as
@@ -86,6 +86,10 @@ pub(crate) struct Args {
 
     #[arg(long)]
     pub(crate) key_vault_token_env: Option<String>,
+
+    /// PEM CA bundle used to authenticate a private Vault TLS endpoint.
+    #[arg(long)]
+    pub(crate) key_vault_ca_cert: Option<String>,
 
     #[arg(long)]
     pub(crate) key_vault_mount: Option<String>,
@@ -219,6 +223,11 @@ pub(crate) struct Args {
     /// Validate a config file without starting the node, then exit.
     #[arg(long)]
     pub(crate) validate_config: Option<String>,
+
+    /// Remove the legacy plaintext auth override from redb and exit. Rotate
+    /// both affected tokens in the external manager before using this command.
+    #[arg(long)]
+    pub(crate) clear_persisted_auth_override: bool,
 
     /// Log output format: "json" or "text"
     #[arg(long, default_value = "json", env = "WASM_NODE_LOG_FORMAT")]

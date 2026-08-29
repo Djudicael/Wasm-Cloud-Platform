@@ -16,6 +16,23 @@ description: Provision a local Wasm Cloud Platform test environment with Firecra
 
 When PostgreSQL is required, build `assets/postgres-rootfs.ext4` with `bash scripts/vm/build-postgres-rootfs.sh`, then add it to the running topology with `bash scripts/vm/provision-postgres-service.sh --state-file PATH`. The service is persisted in the same VM state and must report TCP readiness before provisioning is considered successful. Do not count this service VM as a platform node.
 
+When a real external secret-manager rehearsal is required, build the sealed
+local Vault image with `bash scripts/vm/build-vault-rootfs.sh`, add it with
+`bash scripts/vm/provision-vault-service.sh --state-file PATH`, and validate
+Transit interoperability with
+`bash scripts/vm/validate-vault-transit-microvm.sh --state-file PATH`. Vault is
+a separate service microVM, not a platform node. Its AppRole-derived tokens and
+test-only unseal material are written to a mode-0700 state-scoped runtime
+directory and must never be copied into production. The drill must use TLS and
+the generated private CA; do not replace it with Vault dev mode or plaintext
+HTTP and claim equivalent evidence.
+
+Before building or attaching a service VM, follow
+`docs/vm-testbed/service-microvms.md`. In particular, treat the initialized
+Vault rootfs and its build/runtime bootstrap as sensitive local fixtures, keep
+protected files on the Linux filesystem, and report that external-service HA is
+outside the platform release boundary.
+
 For a disposable production-validation rehearsal, add the state-scoped Prometheus, Alertmanager, exporters, and OpenTelemetry Collector with `bash scripts/vm/provision-observability.sh --state-file PATH`. It uses Podman on the WSL/Linux host, records exact container identities in the companion service state, and is not a substitute for production telemetry storage, access control, or retention.
 
 The production-like preset is a local rehearsal, not a production deployment. It does not create production TLS certificates, a persistent external secrets backend, durable production monitoring/alerting, or a highly available NATS cluster. State these gaps rather than claiming production readiness.

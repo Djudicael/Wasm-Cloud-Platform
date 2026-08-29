@@ -12,6 +12,7 @@
 #   ./assets/wasm-node-rootfs.ext4
 #   ./assets/nats-rootfs.ext4
 #   ./assets/postgres-rootfs.ext4
+#   ./assets/vault-rootfs.ext4
 
 set -euo pipefail
 
@@ -60,8 +61,17 @@ postgres_rootfs_is_current() {
     [[ "$schema" == "4" ]]
 }
 
+vault_rootfs_is_current() {
+    local image=$1
+    local schema
+
+    command -v debugfs >/dev/null || return 1
+    schema=$(debugfs -R 'cat /etc/vault-image-schema-version' "$image" 2>/dev/null || true)
+    [[ "$schema" == "1" ]]
+}
+
 # Build kernel
-echo "[1/4] Building kernel..."
+echo "[1/5] Building kernel..."
 if [[ ! -f "./assets/vmlinux-6.1" ]]; then
     "$SCRIPT_DIR/build-kernel.sh"
 elif ! kernel_is_current "./assets/vmlinux-6.1"; then
@@ -74,7 +84,7 @@ fi
 
 # Build NATS rootfs
 echo ""
-echo "[2/4] Building NATS rootfs..."
+echo "[2/5] Building NATS rootfs..."
 if [[ ! -f "./assets/nats-rootfs.ext4" ]]; then
     "$SCRIPT_DIR/build-nats-rootfs.sh"
 elif ! nats_rootfs_is_current "./assets/nats-rootfs.ext4"; then
@@ -87,7 +97,7 @@ fi
 
 # Build wasm-node rootfs
 echo ""
-echo "[3/4] Building wasm-node rootfs..."
+echo "[3/5] Building wasm-node rootfs..."
 if [[ ! -f "./assets/wasm-node-rootfs.ext4" ]]; then
     "$SCRIPT_DIR/build-node-rootfs.sh"
 elif ! node_rootfs_is_current "./assets/wasm-node-rootfs.ext4"; then
@@ -98,7 +108,7 @@ else
     echo "       To rebuild explicitly: $SCRIPT_DIR/build-node-rootfs.sh"
 fi
 
-echo "[4/4] Building PostgreSQL rootfs..."
+echo "[4/5] Building PostgreSQL rootfs..."
 if [[ ! -f "./assets/postgres-rootfs.ext4" ]]; then
     "$SCRIPT_DIR/build-postgres-rootfs.sh"
 elif ! postgres_rootfs_is_current "./assets/postgres-rootfs.ext4"; then
@@ -106,6 +116,18 @@ elif ! postgres_rootfs_is_current "./assets/postgres-rootfs.ext4"; then
     "$SCRIPT_DIR/build-postgres-rootfs.sh"
 else
     echo "       PostgreSQL rootfs already exists, skipping."
+fi
+
+echo ""
+echo "[5/5] Building Vault rootfs..."
+vault_bootstrap=${VAULT_BOOTSTRAP_FILE:-${XDG_RUNTIME_DIR:-/tmp}/wasm-cloud-platform-vault-build-$(id -u)/bootstrap.json}
+if [[ ! -f "./assets/vault-rootfs.ext4" || ! -f "$vault_bootstrap" || ! -f "./assets/vault-test-ca.crt" ]]; then
+    "$SCRIPT_DIR/build-vault-rootfs.sh"
+elif ! vault_rootfs_is_current "./assets/vault-rootfs.ext4"; then
+    echo "       Existing Vault rootfs uses a legacy boot schema; rebuilding."
+    "$SCRIPT_DIR/build-vault-rootfs.sh"
+else
+    echo "       Vault rootfs already exists, skipping."
 fi
 
 echo ""

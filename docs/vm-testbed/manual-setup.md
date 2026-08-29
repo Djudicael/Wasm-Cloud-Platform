@@ -38,6 +38,13 @@ The testbed consists of three artifacts:
 | `nats-rootfs.ext4` | Alpine Linux + NATS Server | ~50 MB |
 | `wasm-node-rootfs.ext4` | Alpine Linux + wasm-node binary | ~100 MB |
 
+The core topology uses those artifacts. The aggregate image builder also
+creates optional PostgreSQL and Vault service fixtures for application and
+external seal-root integration tests. They are not platform components and the
+initialized Vault image contains sensitive local fixture state. Follow
+[Local service microVMs](./service-microvms.md) rather than manually extracting
+credentials or starting those services with ad-hoc Firecracker commands.
+
 And a network setup:
 
 | Component | Purpose |
@@ -71,8 +78,14 @@ sudo apt-get install -y \
     libssl-dev \
     libelf-dev \
     curl \
+    e2fsprogs \
     iproute2 \
     iptables \
+    jq \
+    openssl \
+    python3 \
+    unzip \
+    util-linux \
     qemu-utils
 
 # Fedora/RHEL
@@ -99,7 +112,7 @@ source $HOME/.cargo/env
 rustup target add wasm32-wasip2
 
 # Verify
-rustc --version  # Should be 1.80+
+rustc --version  # Must match the repository's rust-toolchain.toml
 ```
 
 ---

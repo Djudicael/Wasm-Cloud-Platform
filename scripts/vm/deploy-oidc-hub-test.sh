@@ -75,13 +75,25 @@ echo "Building both WASI components in WSL..."
   -p oidc-admin-wasi -p openid-connect-wasi --target wasm32-wasip2 --release)
 
 echo "Applying migrations and creating repeatable local test data..."
-(cd "$app_dir" && \
+seed_log=$(mktemp)
+chmod 600 "$seed_log"
+trap 'rm -f -- "${seed_log:-}"' EXIT
+if ! (cd "$app_dir" && \
   OIDC_DATABASE_URL="$database_url" \
   OIDC_PROXY_PORT=8088 \
   DEFAULT_EMAIL="$admin_email" \
   DEFAULT_PASSWORD="$admin_password" \
   CARGO_TARGET_DIR="$app_target_dir" \
-  cargo run -p oidc-wasm-dev --release -- seed)
+  cargo run -p oidc-wasm-dev --release -- seed) >"$seed_log" 2>&1; then
+  sed -E '/(password|token|database|postgres)/I{s/.*/[REDACTED credential-bearing seeder output]/;}' "$seed_log" >&2
+  rm -f -- "$seed_log"
+  seed_log=
+  exit 1
+fi
+sed -E '/(password|token|database|postgres)/I{s/.*/[REDACTED credential-bearing seeder output]/;}' "$seed_log"
+rm -f -- "$seed_log"
+seed_log=
+trap - EXIT
 
 frontend_wasm="$app_target_dir/wasm32-wasip2/release/oidc_admin_wasi.wasm"
 backend_wasm="$app_target_dir/wasm32-wasip2/release/openid_connect_wasi.wasm"
@@ -272,5 +284,6 @@ EOF
 chmod 600 "$secret_dir/credentials.txt"
 
 echo "OIDC Hub is ready for browser testing: $public_url"
-echo "Admin login: $admin_email / $admin_password"
+echo "Admin email: $admin_email"
+echo "Admin password is stored only in the mode-0600 test credential file: $secret_dir/credentials.txt"
 echo "HAProxy stats: http://${front_door%:*}:8404/stats"

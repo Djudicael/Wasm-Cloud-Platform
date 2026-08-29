@@ -22,6 +22,13 @@ Repository-scoped Open Agent Skills live in `.agents/skills` and are intended fo
 - For a close-to-production local rehearsal, use `--preset production-like --nodes N` with at least three nodes. This adds a host HAProxy front door in front of the reverse proxy embedded in every platform node. Do not describe it as production-ready: TLS, external secrets, observability, and highly available NATS remain operator concerns.
 - Use `$deploy-test-application` to build, deploy, route, and verify a Wasm application in that topology.
 - Service microVMs are not platform nodes. PostgreSQL uses `scripts/vm/build-postgres-rootfs.sh` and `scripts/vm/provision-postgres-service.sh`, and its lifecycle is recorded in the same state file.
+- A real local Vault Transit rehearsal uses `scripts/vm/build-vault-rootfs.sh`,
+  `scripts/vm/provision-vault-service.sh`, and
+  `scripts/vm/validate-vault-transit-microvm.sh`. Vault runs as a separate
+  sealed service microVM with TLS and AppRole-derived least-privilege tokens;
+  its test credentials remain in the recorded state-scoped runtime directory.
+  Follow `docs/vm-testbed/service-microvms.md` for sensitive-artifact handling,
+  idempotent reprovisioning, scope boundaries, and teardown behavior.
 - Production-validation rehearsals can add the disposable Podman observability stack with `scripts/vm/provision-observability.sh`; its exact container identities and runtime directory are recorded in the companion service state and removed by the canonical teardown script.
 - For the two-WASI OpenID Connect Hub rehearsal, use `scripts/vm/deploy-oidc-hub-test.sh`; it runs migrations and configures the recorded HAProxy with the required same-origin route split.
 - Use `$destroy-microvm-testbed` only after the user is finished testing. If interactive testing was requested, leave the environment running until teardown is explicitly requested.

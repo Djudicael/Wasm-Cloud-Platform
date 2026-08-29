@@ -33,25 +33,72 @@ enum SecretsCmd {
         app: String,
         #[arg(long)]
         key: String,
-        /// If not provided, reads from stdin (safe, not visible in shell history)
-        #[arg(long)]
+        /// Inline value (prefer the hidden prompt or --value-file)
+        #[arg(long, conflicts_with = "value_file")]
         value: Option<String>,
+        /// Read the value from a mode-0600 file, or use '-' for standard input
+        #[arg(long, value_name = "PATH", conflicts_with = "value")]
+        value_file: Option<std::path::PathBuf>,
     },
     /// Set a credential used for remote artifact fetch during deploy ingress
     SetArtifactCredential {
         #[arg(long)]
         key: String,
-        /// If not provided, reads from stdin (safe, not visible in shell history)
-        #[arg(long)]
+        /// Inline value (prefer the hidden prompt or --value-file)
+        #[arg(long, conflicts_with = "value_file")]
         value: Option<String>,
+        /// Read the value from a mode-0600 file, or use '-' for standard input
+        #[arg(long, value_name = "PATH", conflicts_with = "value")]
+        value_file: Option<std::path::PathBuf>,
     },
-    /// Delete a secret (not yet implemented)
+    /// Revoke a secret on every node recorded in the authoritative registry
     Delete {
         #[arg(long)]
         app: String,
         #[arg(long)]
         key: String,
     },
+}
+
+fn read_secret_value(
+    value: Option<String>,
+    value_file: Option<std::path::PathBuf>,
+    key: &str,
+) -> Result<String> {
+    let mut value = if let Some(value) = value {
+        value
+    } else if let Some(path) = value_file {
+        if path.as_os_str() == "-" {
+            let mut input = String::new();
+            std::io::Read::read_to_string(&mut std::io::stdin().lock(), &mut input)?;
+            input
+        } else {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mode = std::fs::metadata(&path)?.permissions().mode();
+                if mode & 0o077 != 0 {
+                    anyhow::bail!(
+                        "secret value file {} must use mode 0600 or stricter",
+                        path.display()
+                    );
+                }
+            }
+            std::fs::read_to_string(&path)?
+        }
+    } else {
+        rpassword::prompt_password(format!("Value for {}: ", key.cyan()))?
+    };
+    if value.ends_with('\n') {
+        value.pop();
+        if value.ends_with('\r') {
+            value.pop();
+        }
+    }
+    if value.is_empty() {
+        anyhow::bail!("secret value must not be empty");
+    }
+    Ok(value)
 }
 
 async fn load_cluster_node_registry(
@@ -129,6 +176,36 @@ async fn distribute_secret_value(
     Ok(())
 }
 
+fn select_delete_targets(mut nodes: Vec<ClusterNodeRecord>) -> Vec<String> {
+    nodes.sort_by(|a, b| a.node_id.cmp(&b.node_id));
+    nodes.into_iter().map(|node| node.node_id).collect()
+}
+
+async fn distribute_secret_delete(
+    bus: &NatsBus,
+    http: &reqwest::Client,
+    node_api: &str,
+    app_id: AppId,
+    key: String,
+) -> Result<()> {
+    let registry = load_cluster_node_registry(http, node_api).await?;
+    let targets = select_delete_targets(registry.nodes);
+    if targets.is_empty() {
+        anyhow::bail!(
+            "authoritative cluster node registry contains no nodes for secret revocation"
+        );
+    }
+    for target_node_id in targets {
+        bus.publish(&Event::SecretDelete {
+            app_id: app_id.clone(),
+            key: key.clone(),
+            target_node_id,
+        })
+        .await?;
+    }
+    Ok(())
+}
+
 async fn store_artifact_credential_via_deploy_api(
     http: &reqwest::Client,
     deploy_api: &str,
@@ -165,11 +242,13 @@ pub async fn run(
     http: &reqwest::Client,
 ) -> Result<()> {
     match args.cmd {
-        SecretsCmd::Set { app, key, value } => {
-            let plaintext = match value {
-                Some(v) => v,
-                None => rpassword::prompt_password(format!("Value for {}: ", key.cyan()))?,
-            };
+        SecretsCmd::Set {
+            app,
+            key,
+            value,
+            value_file,
+        } => {
+            let plaintext = read_secret_value(value, value_file, &key)?;
 
             let (name, version) = app
                 .split_once(':')
@@ -185,11 +264,12 @@ pub async fn run(
                 app.yellow()
             );
         }
-        SecretsCmd::SetArtifactCredential { key, value } => {
-            let plaintext = match value {
-                Some(v) => v,
-                None => rpassword::prompt_password(format!("Value for {}: ", key.cyan()))?,
-            };
+        SecretsCmd::SetArtifactCredential {
+            key,
+            value,
+            value_file,
+        } => {
+            let plaintext = read_secret_value(value, value_file, &key)?;
             if let Some(deploy_api) = deploy_api {
                 store_artifact_credential_via_deploy_api(http, deploy_api, key.clone(), plaintext)
                     .await?;
@@ -206,10 +286,16 @@ pub async fn run(
             );
         }
         SecretsCmd::Delete { app, key } => {
-            anyhow::bail!(
-                "Secret delete for {}/{} - not yet implemented (add Event::SecretDelete)",
-                app,
-                key
+            let (name, version) = app
+                .split_once(':')
+                .ok_or_else(|| anyhow::anyhow!("app must be <name>:<version>"))?;
+            let app_id = AppId::new(name, version);
+            distribute_secret_delete(bus, http, node_api, app_id, key.clone()).await?;
+            println!(
+                "{} Secret '{}' revoked for {}",
+                "\u{2713}".green(),
+                key.cyan(),
+                app.yellow()
             );
         }
     }
@@ -262,5 +348,18 @@ mod tests {
         .unwrap();
         assert_eq!(targets.len(), 1);
         assert_eq!(targets[0].0, "node-a");
+    }
+
+    #[test]
+    fn delete_targets_include_stale_nodes_for_eventual_revocation() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let nodes = vec![
+            active_node("node-b", now.saturating_sub(500), "00"),
+            active_node("node-a", now, "00"),
+        ];
+        assert_eq!(select_delete_targets(nodes), vec!["node-a", "node-b"]);
     }
 }
