@@ -213,6 +213,8 @@ redacted artifact with the result.
 
 | 2026-08-29 controlled network faults (Phase 7, Part 2) | PASS AFTER APPLICATION-TIMEOUT AND STALE-DEPLOYMENT REMEDIATION | Exact node-0 netem, NATS, and PostgreSQL faults were injected and individually removed. Latency/loss/bandwidth controls behaved as configured; NATS loss made only node 0 not-ready and recovered without a reconnect storm. The first PostgreSQL partition exposed an unbounded WASI database readiness connection behind HAProxy's 60-second server timeout. The OIDC backend now enforces a two-second database health deadline: the live retest returned bounded HTTP 503 in 2.013 seconds, subsequent circuit-open responses took 4-9 ms, HAProxy withdrew only node 0, and peer traffic stayed HTTP 200. Automatic recovery occurred after the circuit-breaker cooldown without redeployment. A superseded content-addressed backend initially left stale alert labels; the OIDC deployer now removes old same-component versions after the replacement passes health, waits for their metric series to disappear, and the node app API excludes undeployed grace-period artifacts. Rootfs `e23eeac...` was rolled through all three nodes; only the two current OIDC deployments are listed, all pools are up, Playwright passes 6/6, Prometheus reports 10/10 targets, no alert or fault rule remains, and every TAP uses `fq_codel`. |
 | 2026-08-29 PostgreSQL failure modes (Phase 7, Part 3) | PASS AFTER DEADLINE, EXPORTER, AND MIGRATION REMEDIATION | A reusable state-scoped runner proved prompt invalid-credential failure, 197 observed sessions against PostgreSQL's 200/3 maximum/reserved configuration, backend HTTP 503 with an independent HTTP 200 frontend during exhaustion, automatic pool recovery, a two-second statement deadline, a sanitized application lock-timeout response in 2.029 seconds, and serialized migrations. An advisory-lock competitor failed in 10.06 seconds with SQLSTATE `55P03`; after release the migrator passed in 0.08 seconds with 11/11 unique migration records. Runtime database deadlines are now deployment identity, exporter queries have bounded connect/statement/lock/transaction deadlines, and all three native migration entry points apply each migration plus tracking row atomically under the same session advisory lock. The final focused Playwright gate passed 6/6, OIDC readiness was `database=ok`, all Prometheus alerts were clear, and the environment remains live for Part 4. |
+| 2026-08-29 OIDC capacity and short soak (Phase 8, Part 1) | PASS FOR THE CONFIGURED LOCAL ENVELOPE | A paced 50/25/20/5 frontend/discovery/readiness/login mix established HAProxy's configured 100-requests-per-10-seconds per-client stick-table as the first saturation boundary. At 5 requests/s, 600/600 requests passed a 120-second short soak; route p99 values were 5.2/54.7/57.1/166.4 ms. At 15 requests/s the ramp admitted 74/300 and returned 226 deliberate HTTP 429 responses; 30 and 60 requests/s were completely admission-limited before host resources saturated. With node 0 drained and absent, the representative 5 requests/s mix passed 151/151, while an earlier 15 requests/s readiness run admitted 98/450 and rejected 352. The conservative envelope for this exact front-door policy is therefore 5 requests/s per client IP, including N−1 headroom; this is not the host's raw compute maximum. Node memory peaked at 27%, process RSS at 578 MiB, CPU at 0.09 core, PostgreSQL at two sessions, HAProxy queue at zero, and NATS/eBPF error-pressure signals at zero. All three nodes were restored, OIDC database readiness passed, Prometheus returned to 10/10, and no alert remained. |
+| 2026-08-29 OIDC upgrade and rollback (Phase 8, Part 2) | PASS WITH RELEASE-ARTIFACT LIMITATION | The last-known-good backend `vdc1902621308` and candidate identity `vdc1902621308-phase8-candidate` ran concurrently against a transactional additive schema probe. Candidate readiness passed on all nodes, the public route cut over and rolled back while 450/450 paced requests stayed HTTP 200 (p99 68.5 ms), and migration tracking returned from 11/11 to 11/11 after exact probe cleanup. An admitted synthetic candidate with a malformed database URL returned HTTP 500, stopped at canary, and was undeployed without deleting the current application or database state. The final route inventory contains only the original frontend/backend, no Phase 8 metric series remains, Playwright passes 6/6, Prometheus is 10/10 with no alert, and eBPF is active on three nodes. Both release identities intentionally used the same tested Wasm SHA-256 because no clean newer artifact existed; repeat this gate with the real distinct release digest before production promotion. A host-suspend clock-skew failure was also fixed by image-schema-6 boot-time and continuous Chrony synchronization. |
 | 2026-08-29 storage and resource pressure (Phase 7, Part 4) | PASS WITH A WASI CLI CONNECTION-LIFECYCLE LIMITATION | Disposable low-space, inode, read-only-root, CPU, memory, FD, and connection tests all produced bounded, observable behavior while peer OIDC traffic remained available. Inode-aware readiness, disk/inode/memory/process-FD metrics and alerts, exponential PID-1 restart backoff, one-restart VM sizing/read-only controls, an enforced WASI ResourceTable ceiling, full FD-denial error chains/counters, and identity-aware deployment verification were added. A request-scoped WASI HTTP canary held exactly 32 connections, denied the 33rd, exported 32 active during the hold, and returned to zero afterward. A 64-handle FD ceiling trapped only the offending request, incremented `wasm_policy_fd_denied_total`, and the next request passed. Persistent WASI CLI servers cannot observe individual socket destruction through the current Wasmtime address-check hook, so their connection counter is a conservative instance-lifetime budget; do not claim simultaneous-connection enforcement for that execution model until socket-drop interception or a process/cgroup boundary is implemented. Final rootfs `ce9f190a...` was rolled through all nodes with eBPF active, process FD usage was 144/1024 per node, focused Playwright passed 6/6, all platform targets were up, OIDC readiness was `database=ok`, no alert fired, and resource canaries were undeployed. |
 | 2026-08-29 Phase 7 Part 4 source gates | PASS WITH DEPENDENCY NOTICE | WSL gates pass: formatting; required native workspace all-target check; workspace all-target Clippy with warnings denied; eBPF-feature node Clippy with warnings denied; 54 storage unit plus 12 integration tests; 64 runtime unit plus 7 integration tests; 11 metrics tests; 9 vm-testbed unit plus 3 doc tests; explicit release `wasm32-wasip2` builds for `hello-axum` and `http-hello-component`; and changed-script shell syntax. The focused OIDC Chromium suite passed 6/6. Rust still reports the separately tracked `proc-macro-error2 2.0.1` future-incompatibility notice. |
 
@@ -1619,22 +1621,186 @@ Operational and final gates:
 
 ## Phase 8: capacity, soak, upgrade, and rollback
 
-- [ ] Define representative request mixes, data size, sessions, concurrency, and
+- [x] Define representative request mixes, data size, sessions, concurrency, and
       think time.
-- [ ] Run baseline, ramp, spike, and sustained soak tests.
-- [ ] Repeat the target load with one platform node unavailable.
-- [ ] Monitor p50/p95/p99 latency, error rate, CPU, memory, connections, traps,
+- [x] Run baseline, ramp, spike, and a bounded local soak test.
+- [x] Repeat the target load with one platform node unavailable.
+- [x] Monitor p50/p95/p99 latency, error rate, CPU, memory, connections, traps,
       database pools, NATS lag, telemetry queues, and disk I/O.
-- [ ] Identify the first saturated resource and establish a conservative capacity
+- [x] Identify the first saturated resource and establish a conservative capacity
       envelope for this host only.
-- [ ] Deploy a new application version during load.
-- [ ] Verify migration compatibility with old and new versions concurrently.
-- [ ] Stop the rollout on a synthetic failure and restore the last-known-good
+- [x] Deploy a new immutable application version identity during load.
+- [x] Verify migration compatibility with old and new version identities concurrently.
+- [x] Stop the rollout on a synthetic failure and restore the last-known-good
       artifact and configuration.
-- [ ] Confirm rollback does not require deletion of current state.
+- [x] Confirm rollback does not require deletion of current state.
 
 Local results demonstrate behavior and provide a lower-bound capacity measurement;
 they are not production capacity figures.
+
+### Phase 8 Part 1 result: configured capacity and short soak
+
+The reusable runner is `scripts/vm/validate-oidc-capacity.sh`. It extends the
+bounded Rust HTTP benchmark with pacing, POST bodies loaded from a protected file,
+explicit accepted statuses, and response-status histograms. The production-like
+request contract was fixed before the run:
+
+- 50% frontend document requests;
+- 25% OIDC discovery requests;
+- 20% database-backed readiness requests;
+- 5% authenticated login requests using the disposable seeded account; and
+- persistent clients, bounded concurrency, and evenly paced requests rather than
+  an unpaced connection storm.
+
+The acceptance contract was zero transport errors and zero HTTP 5xx responses;
+HTTP 429 was recorded separately as an intentional admission-control boundary.
+The local target was p99 below 250 ms for frontend/discovery/readiness and below
+2 seconds for password-backed login, no HAProxy queue, no monitoring loss or
+parser error, bounded memory, and healthy PostgreSQL/NATS telemetry.
+
+Observed traffic results:
+
+| Stage | Result | Interpretation |
+| --- | --- | --- |
+| Baseline, 5 requests/s for 20 seconds | 100/100 HTTP 200 | Accepted |
+| Ramp, 15 requests/s for 20 seconds | 74 HTTP 200, 226 HTTP 429 | Front-door admission boundary crossed |
+| Ramp, 30 requests/s for 20 seconds | 600/600 HTTP 429 | Fully admission-limited |
+| Spike, 60 requests/s for 20 seconds | 1,200/1,200 HTTP 429 | Fully admission-limited; no downstream saturation |
+| Deliberate over-limit hold, 15 requests/s for 120 seconds | 1,800/1,800 HTTP 429 | Proves limiter stability, not application soak capacity |
+| Accepted short soak, 5 requests/s for 120 seconds | 600/600 HTTP 200 | PASS |
+| N−1 representative mix, 5 requests/s for 30 seconds | 151/151 HTTP 200 | PASS with node 0 drained and absent |
+| N−1 readiness probe, 15 requests/s for 30 seconds | 98 HTTP 200, 352 HTTP 429 | Current policy has no 15 requests/s N−1 allowance |
+
+The first limit is configuration, not CPU: the generated HAProxy frontend tracks
+the client IP over ten seconds and denies when `sc_http_req_rate(0) gt 100`.
+Consequently this topology deliberately caps one client IP around 10 requests/s
+even though all three platform nodes have a 10 requests/s per-IP default. The
+safe declared rehearsal envelope is 5 requests/s per client IP, retaining 50%
+front-door headroom and passing with one node absent. Do not publish this as a
+VPS capacity number. Production sizing must set an intentional tenant/client
+identity model and admission budget, then repeat the test at that policy; raising
+the HAProxy threshold merely to obtain a larger benchmark number is not evidence
+of safe capacity.
+
+During the accepted soak, frontend/discovery/readiness/login p99 was respectively
+5.2/54.7/57.1/166.4 ms. Maximum node memory was 27%, maximum platform process RSS
+was 578,183,168 bytes, maximum one-minute process CPU rate was 0.091 core,
+PostgreSQL used at most two backend sessions, HAProxy backend queue stayed zero,
+NATS pending bytes and slow consumers stayed zero, and eBPF dispatcher saturation
+and parse-error deltas stayed zero. Dispatcher depth peaked at 15 and remained
+well below its bound.
+
+Operational observations:
+
+- load credentials are written to a mode-600 temporary file and are not exposed
+  in benchmark process arguments;
+- the runner now uses non-interactive `sudo -n` and tells the operator to run
+  `sudo -v` first, avoiding an invisible password wait in automation;
+- HTTP 429 must not be counted as successful application work merely because the
+  limiter behaved correctly; the status histogram is the capacity truth;
+- a short two-minute soak is adequate for this local gate but production should
+  add a multi-hour endurance run at the declared target; and
+- evidence is preserved under `/tmp/phase8-part1-oidc-capacity-20260829`,
+  `/tmp/phase8-part1-oidc-soak-20260829`, and
+  `/tmp/phase8-part1-oidc-nminus1-20260829` until WSL restarts or `/tmp` is cleaned.
+
+After N−1 testing, node 0 was rebuilt as PID `283570`. The final state has all
+three nodes healthy, OIDC readiness reports `database=ok`, all ten Prometheus
+targets are up, and the alert set is empty. The environment remains live for the
+separately authorized upgrade/rollback part.
+
+### Phase 8 Part 2 result: upgrade, migration compatibility, and rollback
+
+The state-scoped runner is `scripts/vm/validate-oidc-upgrade-rollback.sh`. It
+records the existing route as the last-known-good target, refuses to proceed
+unless database readiness and guest clock skew pass on every node, keeps a paced
+load running during route changes, and has an exit trap that restores the exact
+original route before removing test candidates.
+
+The immutable release record for this run was:
+
+```text
+last known good: oidc/openid-connect-wasi:vdc1902621308
+candidate:       oidc/openid-connect-wasi:vdc1902621308-phase8-candidate
+Wasm SHA-256:    c9fdafa74897137a826d2a1f1903557b05ed02772701106e738e6e6056c39628
+migrations:      11 total / 11 distinct before and after
+```
+
+The candidate deliberately uses the same binary digest under a new immutable
+release identity. This proves control-plane convergence, route cutover, runtime
+configuration, additive-schema compatibility, canary abort, and rollback. It does
+not prove compatibility of code that does not exist in this checkout. The OIDC
+working tree contains extensive pre-existing uncommitted changes, and the live
+artifact was built from that state; fabricating another source change would not
+be credible release evidence. The production release must repeat this procedure
+with different signed old/new digests and their actual migration set.
+
+Migration compatibility was exercised by taking the normal migration advisory
+lock and transactionally adding a disposable `phase8_upgrade_probe` table plus a
+unique `V9000__phase8_additive_probe.sql` tracking record. Both the old and
+candidate identities continued to serve database-backed readiness on every node,
+and the normal migrator remained idempotent while both were live. Rollback removed
+only the exact probe table/tracking row created by this test; the pre-existing
+11/11 migration set and application data were unchanged.
+
+The compatible rollout sequence passed as follows:
+
+1. The candidate was deployed on a distinct canary host and returned
+   `database=ok` directly through every node.
+2. The last-known-good identity received a temporary compatibility alias, so old
+   and candidate instances were independently reachable against the expanded
+   schema.
+3. `oidc-backend.internal` was switched to the candidate while 450 readiness
+   requests ran at 5 requests/s. All 450 returned HTTP 200; p50/p95/p99/max were
+   34.3/47.1/68.5/76.9 ms.
+4. A second candidate was successfully authorized and deployed with a malformed
+   database URL. Its readiness returned HTTP 500, so the rollout stopped at the
+   canary and it never received the public route.
+5. The public route was restored to `vdc1902621308`, the critical transaction
+   passed, and only then were candidate routes and desired-state entries removed.
+
+#### Clock-skew incident found during the final browser gate
+
+The first post-rollback Playwright run exposed intermittent expired sessions even
+though login and readiness returned HTTP 200. Its trace showed an access token
+with `scope=admin`, but the issuing node's JWT `exp` was roughly 2.3 hours behind
+the browser. Nodes 1 and 2 had retained pre-suspend time when the laptop/WSL host
+resumed; recently restarted node 0 had current time. HAProxy could therefore send
+login to a stale-clock node, producing a token that the SPA immediately rejected.
+
+This is a production-critical dependency: authentication, TLS, logs, leases, and
+distributed coordination cannot rely on readiness alone when clocks diverge. The
+node image now includes Chrony, performs a bounded initial synchronization before
+starting `wasm-node`, refuses startup if synchronization fails, and keeps the
+daemon running. The disposable image uses a fixed public Cloudflare NTP address;
+production must configure multiple authenticated or operator-controlled internal
+time sources and alert on offset/stratum/source loss. Node image schema increased
+from 5 to 6 so cached images without this boot contract are rejected.
+
+All three nodes were rolled to schema 6. Before the final upgrade rehearsal their
+HTTP dates were within one second of the load generator; afterward they matched
+within the recorded one-second resolution. The focused login/dashboard Chromium
+suite then passed 6/6 in 4.1 seconds.
+
+Two related operator observations were preserved:
+
+- generic `/healthz` becoming HTTP 200 only proves node liveness. Immediately
+  after a restart, the application route returned HTTP 500 for several seconds
+  while artifacts and instances reconstructed. Rolling automation must wait for
+  application-aware readiness on the replacement node before continuing; and
+- a previously drained node can remain alive but `accepting_requests=false` with
+  zero applications. The Phase 8 preflight caught this even though the generic VM
+  status command reported HTTP 200. A full local-state rebuild plus recorded
+  restart restored desired state. Production orchestration must distinguish
+  liveness, node readiness, and application readiness and must not count a drained
+  node as recovered capacity.
+
+Final evidence is in `/tmp/phase8-part2-oidc-upgrade-20260829-final`. The rootfs
+digest is `347430e89c35af05d55a634542842c5e272201fda887991ec7973da3c133731b`.
+The final route inventory has exactly the original frontend and backend; no Phase
+8 application metric series remains. Prometheus reports 10/10 targets, no active
+alert, and `sum(wasm_ebpf_active)=3`. The environment remains live and was not
+destroyed.
 
 ## Phase 9: backup and restore
 

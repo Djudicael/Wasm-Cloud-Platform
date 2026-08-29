@@ -84,7 +84,7 @@ command -v debootstrap >/dev/null || {
 echo "Creating minimal Ubuntu $UBUNTU_RELEASE rootfs..."
 run_privileged debootstrap \
     --variant=minbase \
-    --include=ca-certificates,curl,iproute2,iptables,libelf1t64 \
+    --include=ca-certificates,chrony,curl,iproute2,iptables,libelf1t64 \
     "$UBUNTU_RELEASE" \
     "$ROOTFS_DIR" \
     http://archive.ubuntu.com/ubuntu
@@ -159,7 +159,7 @@ EOF
 # Keep a guest-readable schema marker so provisioning can reject legacy cached
 # images before starting Firecracker. Bump this value whenever the early-boot
 # contract (PID 1, kernel arguments, or network bootstrap) changes.
-echo "5" > "$ROOTFS_DIR/etc/wasm-node/image-schema-version"
+echo "6" > "$ROOTFS_DIR/etc/wasm-node/image-schema-version"
 
 # Set hostname
 echo "wasm-node-vm" > "$ROOTFS_DIR/etc/hostname"
@@ -247,6 +247,23 @@ else
     ip route replace 169.254.169.254 dev eth0
     /usr/local/bin/setup-mmds-network
     NODE_ID=$(sed -n 's/^node_id = "\([^"]*\)"/\1/p' /etc/wasm-node/config.toml)
+fi
+# Firecracker guest clocks can lag after a laptop/WSL host is suspended. That
+# makes freshly issued JWTs appear expired to clients even while readiness is
+# green. Synchronize before accepting traffic and keep chronyd running. The
+# public source is appropriate only for this disposable local test image;
+# production images must use operator-controlled redundant time sources.
+if command -v chronyd >/dev/null 2>&1; then
+    chronyd -q -t 15 'server 162.159.200.1 iburst' || {
+        echo "initial clock synchronization failed; refusing to start wasm-node" >&2
+        poweroff -f
+        exit 1
+    }
+    chronyd 'server 162.159.200.1 iburst' || {
+        echo "failed to start continuous clock synchronization" >&2
+        poweroff -f
+        exit 1
+    }
 fi
 NODE_PID=
 SHUTDOWN_REQUESTED=0
