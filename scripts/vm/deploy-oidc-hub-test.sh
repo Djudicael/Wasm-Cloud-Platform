@@ -87,9 +87,20 @@ frontend_wasm="$app_target_dir/wasm32-wasip2/release/oidc_admin_wasi.wasm"
 backend_wasm="$app_target_dir/wasm32-wasip2/release/openid_connect_wasi.wasm"
 frontend_version="v$(sha256sum "$frontend_wasm" | cut -c1-12)"
 backend_fuel=10000000000
+database_connect_timeout_secs=2
+database_statement_timeout_ms=5000
+database_lock_timeout_ms=2000
+database_idle_transaction_timeout_ms=30000
+database_url_separator='?'
+[[ "$database_url" == *'?'* ]] && database_url_separator='&'
+runtime_database_url="${database_url}${database_url_separator}connect_timeout=${database_connect_timeout_secs}&statement_timeout=${database_statement_timeout_ms}&lock_timeout=${database_lock_timeout_ms}&idle_in_transaction_session_timeout=${database_idle_transaction_timeout_ms}"
 # Runtime configuration is part of deployment identity. Otherwise a same-artifact
 # redeploy can leave an already-running instance on its previous resource limits.
-backend_version="v$(printf '%s\nfuel=%s\n' "$(sha256sum "$backend_wasm" | cut -d' ' -f1)" "$backend_fuel" | sha256sum | cut -c1-12)"
+backend_version="v$(printf '%s\nfuel=%s\nconnect_timeout_secs=%s\nstatement_timeout_ms=%s\nlock_timeout_ms=%s\nidle_transaction_timeout_ms=%s\n' \
+  "$(sha256sum "$backend_wasm" | cut -d' ' -f1)" "$backend_fuel" \
+  "$database_connect_timeout_secs" "$database_statement_timeout_ms" \
+  "$database_lock_timeout_ms" "$database_idle_transaction_timeout_ms" |
+  sha256sum | cut -c1-12)"
 frontend_app_id="oidc/oidc-admin-wasi:$frontend_version"
 backend_app_id="oidc/openid-connect-wasi:$backend_version"
 
@@ -111,7 +122,7 @@ scripts/vm/deploy-test-application.sh \
   --route-host oidc-backend.internal \
   --fuel "$backend_fuel" \
   --verify-path /health/ready \
-  --env "OIDC_DATABASE_URL=$database_url" \
+  --env "OIDC_DATABASE_URL=$runtime_database_url" \
   --env "OIDC_ISSUER=$public_url" \
   --env "OIDC_ENCRYPTION_KEY=$encryption_key" \
   --env "OIDC_PAIRWISE_SALT=$pairwise_salt" \

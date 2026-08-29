@@ -120,7 +120,7 @@ chmod 700 "$runtime_root" "$runtime_dir"
 
 printf '%s' "$metrics_token" > "$runtime_dir/metrics-token"
 cat > "$runtime_dir/postgres.env" <<'EOF'
-DATA_SOURCE_NAME=postgresql://oidc:oidc-local-test@172.20.0.20:5432/oidc?sslmode=disable
+DATA_SOURCE_NAME=postgresql://oidc:oidc-local-test@172.20.0.20:5432/oidc?sslmode=disable&connect_timeout=2&options=-c%20statement_timeout%3D2000%20-c%20lock_timeout%3D1000%20-c%20idle_in_transaction_session_timeout%3D5000
 EOF
 chmod 600 "$runtime_dir/metrics-token" "$runtime_dir/postgres.env"
 cp deploy/prometheus/admin_auth_alerts.yml deploy/prometheus/wasi_policy_alerts.yml "$runtime_dir/rules/"

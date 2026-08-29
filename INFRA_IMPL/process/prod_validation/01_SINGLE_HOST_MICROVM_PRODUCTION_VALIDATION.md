@@ -212,6 +212,7 @@ redacted artifact with the result.
 | 2026-08-29 controlled platform-node drain (Phase 7, Part 1) | PASS AFTER OPERATOR-DRAIN REMEDIATION | Firecracker's guest reboot action alone did not invoke the platform application-drain path. A scoped `wasm-ctl node --target NODE drain` command was added, ambiguous untargeted drains are refused, and the target now fences new traffic/readiness before instance shutdown. Node 0 became HTTP 503-ready immediately, HAProxy removed both pools, both instances reached zero, and an orderly guest stop followed. With node 0 absent, 20 paced OIDC readiness requests at 4 requests/s passed 20/20 in 33–52 ms. A deliberately unpaced 30-request burst produced 29 HTTP 200 and one node-local HTTP 429, proving admission limits—not availability—must be aligned with the Phase 8 load profile. State-driven rebuild restored fresh identities; all three nodes were rolled to rootfs `b6512b8b...`, Playwright passed 6/6, Prometheus returned to 10/10, and no alert remained. |
 
 | 2026-08-29 controlled network faults (Phase 7, Part 2) | PASS AFTER APPLICATION-TIMEOUT AND STALE-DEPLOYMENT REMEDIATION | Exact node-0 netem, NATS, and PostgreSQL faults were injected and individually removed. Latency/loss/bandwidth controls behaved as configured; NATS loss made only node 0 not-ready and recovered without a reconnect storm. The first PostgreSQL partition exposed an unbounded WASI database readiness connection behind HAProxy's 60-second server timeout. The OIDC backend now enforces a two-second database health deadline: the live retest returned bounded HTTP 503 in 2.013 seconds, subsequent circuit-open responses took 4-9 ms, HAProxy withdrew only node 0, and peer traffic stayed HTTP 200. Automatic recovery occurred after the circuit-breaker cooldown without redeployment. A superseded content-addressed backend initially left stale alert labels; the OIDC deployer now removes old same-component versions after the replacement passes health, waits for their metric series to disappear, and the node app API excludes undeployed grace-period artifacts. Rootfs `e23eeac...` was rolled through all three nodes; only the two current OIDC deployments are listed, all pools are up, Playwright passes 6/6, Prometheus reports 10/10 targets, no alert or fault rule remains, and every TAP uses `fq_codel`. |
+| 2026-08-29 PostgreSQL failure modes (Phase 7, Part 3) | PASS AFTER DEADLINE, EXPORTER, AND MIGRATION REMEDIATION | A reusable state-scoped runner proved prompt invalid-credential failure, 197 observed sessions against PostgreSQL's 200/3 maximum/reserved configuration, backend HTTP 503 with an independent HTTP 200 frontend during exhaustion, automatic pool recovery, a two-second statement deadline, a sanitized application lock-timeout response in 2.029 seconds, and serialized migrations. An advisory-lock competitor failed in 10.06 seconds with SQLSTATE `55P03`; after release the migrator passed in 0.08 seconds with 11/11 unique migration records. Runtime database deadlines are now deployment identity, exporter queries have bounded connect/statement/lock/transaction deadlines, and all three native migration entry points apply each migration plus tracking row atomically under the same session advisory lock. The final focused Playwright gate passed 6/6, OIDC readiness was `database=ok`, all Prometheus alerts were clear, and the environment remains live for Part 4. |
 
 ### Execution notes
 
@@ -1418,9 +1419,98 @@ the separately tracked `proc-macro-error2 2.0.1` future-incompatibility notice.
 - [x] Stop PostgreSQL and verify readiness becomes not-ready without exhausting
       connections, CPU, or logs.
 - [x] Restore PostgreSQL and verify connection-pool recovery.
-- [ ] Test invalid credentials, maximum connections, slow queries, and migration
+- [x] Test invalid credentials, maximum connections, slow queries, and migration
       locking behavior.
 - [x] Confirm frontend/static routes do not conceal backend database failure.
+
+### Part 3 record - PostgreSQL authentication, pressure, deadlines, and migrations
+
+Status: **PASS on 2026-08-29 after closing runtime deadline, telemetry
+amplification, and migration serialization/atomicity gaps.** The canonical local
+runner is:
+
+```bash
+PGPASSWORD='set-without-shell-history' \
+  CARGO_TARGET_DIR=/tmp/openid-connect-wasi-target \
+  bash scripts/vm/validate-postgres-failure-modes.sh \
+    --state-file .prod-validation-single-host-state.json \
+    --application-dir /mnt/d/dev/openid_connect_wasi
+```
+
+The runner resolves PostgreSQL and HAProxy only from the selected state and
+labels every temporary container with a hash of that state. Cleanup inspects the
+exact container identity and label before removal. The runner is disruptive and
+local-test-only; never point it at production.
+
+Authentication and exhaustion evidence:
+
+- a disposable PostgreSQL 17 client using an invalid password failed with
+  `password authentication failed` in 1.21 seconds. The native `oidc-migrate`
+  binary failed with the same bad credential without retrying, while live OIDC
+  database readiness remained healthy;
+- PostgreSQL reported `max_connections=200` and
+  `superuser_reserved_connections=3`. A deterministic 196-client `pgbench`
+  workload plus the exporter produced 197 observed sessions, the full
+  non-superuser capacity. Additional connections received the expected reserved
+  slot error;
+- public backend readiness returned HTTP 503 in about 1.2 ms once HAProxy had
+  withdrawn the exhausted pool. The frontend remained HTTP 200 in about 2.9 ms,
+  every platform node stayed alive, and NATS/eBPF health was unaffected; and
+- all 196 held client transactions completed without failure. After release,
+  backend readiness recovered to HTTP 200 and `database=ok` in 37.7 ms, the
+  exporter returned to one session, and no lingering validation session or alert
+  remained.
+
+Slow-query and telemetry evidence:
+
+- the WASI backend deployment URL now applies a two-second connect timeout, a
+  five-second statement timeout, a two-second lock timeout, and a 30-second
+  idle-in-transaction timeout. These non-secret values are included in the
+  content-addressed deployment identity, so a configuration change cannot reuse
+  an already-running instance with stale deadlines;
+- an exclusive lock on `users` followed by a valid-shape login request forced
+  the real application database path. It returned a sanitized
+  `server_error` HTTP 500 in 2.029 seconds without exposing database details.
+  Readiness concurrently remained HTTP 200 because its independent `SELECT 1`
+  was not blocked. A direct `pg_sleep(10)` with a two-second statement timeout
+  was canceled as expected;
+- the first table-lock experiment exposed monitoring amplification: PostgreSQL
+  exporter queries against `pg_stat_user_tables` waited on the application lock
+  and accumulated across scrapes. The exporter DSN now limits connect to two
+  seconds, statements to two seconds, locks to one second, and idle transactions
+  to five seconds; and
+- during the corrected 30-second lock retest, six samples over 12 seconds each
+  found zero lock-waiting sessions. The table-statistics query count stayed at
+  the sampling query itself rather than growing, proving bounded cancellation.
+  Exporter failure is allowed to appear as monitoring degradation during a long
+  database lock; it must never amplify the database incident.
+
+Migration evidence and implementation:
+
+- `oidc-migrate`, `oidc-wasm-dev`, and `oidc-dev` now acquire the same
+  session-level PostgreSQL advisory lock (`734662019`) before creating or reading
+  `_migrations`. Acquisition has a ten-second lock timeout, so parallel release
+  jobs serialize without waiting forever;
+- each migration SQL batch and its `_migrations` insert now execute in one
+  explicit transaction. An error rolls back both schema work and the tracking
+  row. The embedded migration files contain no independent transaction control,
+  so they are compatible with this outer transaction;
+- while another session held the advisory lock, the release migrator failed in
+  10.06 seconds with the explicit context
+  `failed to acquire the migration lock within 10s` and PostgreSQL SQLSTATE
+  `55P03`. OIDC remained ready because the advisory lock is migration-specific;
+  and
+- after release, the migrator completed in 0.08 seconds. `_migrations` contained
+  11 rows and 11 distinct filenames, proving no duplicate tracking state. The
+  full reusable runner repeated every fault and passed, and the focused Chromium
+  login/dashboard suite then passed 6/6 in 4.0 seconds.
+
+Production requirements remain stricter: use a dedicated least-privilege
+migration identity, run exactly one migration job before application rollout,
+alert on lock timeout and prolonged connection saturation, budget administrative
+connections separately, and set pool limits below PostgreSQL's non-superuser
+ceiling. Transactional DDL protects these PostgreSQL migrations, but any future
+non-transactional operation must have an explicit idempotent recovery design.
 
 ### Storage and resources
 
