@@ -293,6 +293,7 @@ fn test_memory_pressure_recovery() {
         anon_pages: 50000,
     });
     assert!(dispatcher.is_backpressure_active());
+    assert!(dispatcher.is_degraded());
 
     dispatcher.dispatch(MonitorEvent::MemPressure {
         pid: 1,
@@ -303,10 +304,56 @@ fn test_memory_pressure_recovery() {
         anon_pages: 10000,
     });
     assert!(!dispatcher.is_backpressure_active());
+    assert!(!dispatcher.is_degraded());
 
     let recovered = callbacks.node_pressure_recovered.lock().unwrap();
     assert_eq!(recovered.len(), 1);
     assert_eq!(recovered[0], "test-node");
+}
+
+#[test]
+fn test_slow_io_degraded_mode_recovers_after_quiet_cooldown() {
+    let callbacks = Arc::new(TestCallbacks::default());
+    let dispatcher = make_dispatcher(callbacks);
+
+    dispatcher.mark_slow_io_degraded_for("test slow I/O", Duration::from_millis(10));
+    assert!(dispatcher.is_degraded());
+
+    std::thread::sleep(Duration::from_millis(50));
+    assert!(!dispatcher.is_degraded());
+}
+
+#[test]
+fn test_new_slow_io_event_fences_older_recovery_timer() {
+    let callbacks = Arc::new(TestCallbacks::default());
+    let dispatcher = make_dispatcher(callbacks);
+
+    dispatcher.mark_slow_io_degraded_for("first slow I/O", Duration::from_millis(100));
+    std::thread::sleep(Duration::from_millis(5));
+    dispatcher.mark_slow_io_degraded_for("second slow I/O", Duration::from_millis(100));
+    std::thread::sleep(Duration::from_millis(50));
+    assert!(dispatcher.is_degraded());
+
+    std::thread::sleep(Duration::from_millis(160));
+    assert!(!dispatcher.is_degraded());
+}
+
+#[test]
+fn test_slow_io_burst_uses_one_recovery_worker() {
+    let callbacks = Arc::new(TestCallbacks::default());
+    let dispatcher = make_dispatcher(callbacks);
+
+    for _ in 0..1000 {
+        dispatcher.mark_slow_io_degraded_for("slow I/O burst", Duration::from_millis(10));
+    }
+    assert!(dispatcher.is_degraded());
+    assert!(dispatcher.slow_io_recovery.lock().unwrap().worker_running);
+
+    std::thread::sleep(Duration::from_millis(50));
+    let recovery = dispatcher.slow_io_recovery.lock().unwrap();
+    assert!(!recovery.active);
+    assert!(!recovery.worker_running);
+    assert!(!dispatcher.is_degraded());
 }
 
 #[test]

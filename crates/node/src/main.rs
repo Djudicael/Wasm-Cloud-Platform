@@ -1519,6 +1519,17 @@ async fn main() -> anyhow::Result<()> {
     });
     let gateway = Arc::new(proxy::gateway::Gateway::new(oidc_provider));
 
+    // Construct the application limiter before the event dispatcher so
+    // DeployApp and ConfigUpdate can apply per-application overrides.
+    let initial_hot = hot_config_handle.read().await;
+    let default_rate_config = proxy::rate_limiter::RateLimitConfig {
+        requests_per_second: initial_hot.rate_limit.default_requests_per_second,
+        burst_capacity: initial_hot.rate_limit.default_burst_capacity,
+        per_ip_limit: initial_hot.rate_limit.default_per_ip_limit,
+    };
+    drop(initial_hot);
+    let rate_limiter = Arc::new(proxy::rate_limiter::RateLimiter::new(default_rate_config));
+
     // -- Embedded DNS Stub (resolves *.internal without external DNS) --
     let _dns_stub_addr = if config.dns.stub_enabled {
         match dns_stub::start_dns_stub(
@@ -1560,6 +1571,7 @@ async fn main() -> anyhow::Result<()> {
             config.dns.webhook_token.clone(),
         ),
         node_table: node_load_table.clone(),
+        rate_limiter: rate_limiter.clone(),
         cluster_node_stale_after_secs: config.health.cluster_node_stale_after_secs,
         gateway: Some(gateway.clone()),
     });
@@ -1687,17 +1699,17 @@ async fn main() -> anyhow::Result<()> {
     let ebpf_metrics_admin = ebpf_metrics.clone();
     let ebpf_dispatcher_admin = ebpf_dispatcher.clone();
     let ebpf_dispatcher_sync = ebpf_dispatcher.clone();
-    let _ebpf_handle =
+    let ebpf_handle =
         ebpf_monitor::init(ebpf_config, ebpf_metrics, ebpf_dispatcher, node_pid).await;
-    let ebpf_runtime_state = _ebpf_handle.runtime_state();
+    let ebpf_runtime_state = ebpf_handle.runtime_state();
     let ebpf_runtime_state_admin = ebpf_runtime_state.clone();
-    let ebpf_namespace_map_admin = _ebpf_handle.namespace_map.clone();
+    let ebpf_namespace_map_admin = ebpf_handle.namespace_map.clone();
     let ebpf_startup = ebpf_runtime_state.snapshot();
     if config.ebpf.required && (!ebpf_startup.ebpf_active || ebpf_startup.monitoring_degraded) {
         let reason = ebpf_startup.reason.unwrap_or_else(|| "unknown".to_string());
         anyhow::bail!("required eBPF monitoring failed to initialize: {reason}");
     }
-    if _ebpf_handle.is_ebpf_active() {
+    if ebpf_handle.is_ebpf_active() {
         info!("eBPF monitor initialized with kernel-level monitoring");
     } else {
         info!("eBPF monitor running in userspace fallback mode (5s polling interval)");
@@ -1706,23 +1718,13 @@ async fn main() -> anyhow::Result<()> {
     // Wire namespace_map from eBPF monitor to supervisor for TID registration.
     // The supervisor has already been cloned by startup tasks, so this setter
     // uses interior mutability rather than relying on Arc::get_mut().
-    supervisor.set_namespace_map(_ebpf_handle.namespace_map.clone());
-
-    // Read initial rate-limit defaults from hot config (may have persisted overrides)
-    let initial_hot = hot_config_handle.read().await;
-    let default_rate_config = proxy::rate_limiter::RateLimitConfig {
-        requests_per_second: initial_hot.rate_limit.default_requests_per_second,
-        burst_capacity: initial_hot.rate_limit.default_burst_capacity,
-        per_ip_limit: initial_hot.rate_limit.default_per_ip_limit,
-    };
-    drop(initial_hot);
+    supervisor.set_namespace_map(ebpf_handle.namespace_map.clone());
 
     // Initialize rate limit metrics (register with the same registry)
     let rate_limit_metrics = Arc::new(proxy::metrics::RateLimitMetrics::new(
         &prom_metrics.registry,
     ));
 
-    let rate_limiter = Arc::new(proxy::rate_limiter::RateLimiter::new(default_rate_config));
     let rate_limiter_sync = rate_limiter.clone();
 
     // -- Gateway Config Load -------------------------------------------
@@ -1828,9 +1830,10 @@ async fn main() -> anyhow::Result<()> {
         gateway.clone(),
     )
     .with_bind_port(config.ebpf.gateway_port)
-    .with_namespace_map(_ebpf_handle.namespace_map.clone())
-    .with_ebpf_active(_ebpf_handle.is_ebpf_active())
+    .with_namespace_map(ebpf_handle.namespace_map.clone())
+    .with_ebpf_active(ebpf_handle.is_ebpf_active())
     .with_cold_start(cold_start.clone());
+    let ebpf_handle = Arc::new(tokio::sync::Mutex::new(ebpf_handle));
     tokio::spawn(async move {
         if let Err(e) = internal_gw.run().await {
             tracing::error!(error = %e, "internal gateway exited");
@@ -3408,6 +3411,7 @@ async fn main() -> anyhow::Result<()> {
         let sync_hot = hot_config_handle.clone();
         let sync_rate_limiter = rate_limiter_sync.clone();
         let sync_ebpf_dispatcher = ebpf_dispatcher_sync.clone();
+        let sync_ebpf_handle = ebpf_handle.clone();
         let sync_gc_tx = gc_config_tx;
         let sync_health_tx = health_interval_tx;
         let sync_log_handle = log_reload_handle.clone();
@@ -3442,7 +3446,14 @@ async fn main() -> anyhow::Result<()> {
                         gateway_port: hot.ebpf.gateway_port,
                         enable_forged_header_detect: hot.ebpf.enable_forged_header_detect,
                     });
-                sync_ebpf_dispatcher.update_thresholds(new_ebpf_config);
+                sync_ebpf_dispatcher.update_thresholds(new_ebpf_config.clone());
+                if let Err(error) = sync_ebpf_handle
+                    .lock()
+                    .await
+                    .update_kernel_thresholds(&new_ebpf_config)
+                {
+                    tracing::warn!(%error, "failed to hot-reload eBPF kernel thresholds");
+                }
 
                 // 3. GC config (interval + disk threshold)
                 let new_gc_config = common::gc::GcConfig {

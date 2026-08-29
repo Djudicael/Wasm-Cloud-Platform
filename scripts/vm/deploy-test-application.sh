@@ -19,6 +19,9 @@ Usage: deploy-test-application.sh [options]
   --timeout SECONDS      verification timeout (default: 90)
   --fuel UNITS           per-request Wasm fuel quota (default: 500000000)
   --memory-mb MIB        per-instance linear-memory limit (default: 128)
+  --rate-limit-rps N     sustained per-node application request limit
+  --rate-limit-burst N   token-bucket burst capacity (requires rate-limit-rps)
+  --rate-limit-per-ip N  per-client-IP request limit (requires rate-limit-rps)
   --target-node NAME     request deployment on a specific platform node
   --allowed-cidr CIDR    allowed outbound CIDR; repeat as needed
   --denied-cidr CIDR     denied outbound CIDR; repeat as needed
@@ -38,6 +41,9 @@ state_file=.vm-testbed-state.json
 timeout=90
 fuel=500000000
 memory_mb=128
+rate_limit_rps=
+rate_limit_burst=
+rate_limit_per_ip=
 target_node=
 verify_direct_node=false
 max_outbound_connections=100
@@ -67,6 +73,9 @@ while (($#)); do
     --timeout) timeout=${2:?missing timeout}; shift 2 ;;
     --fuel) fuel=${2:?missing fuel quota}; shift 2 ;;
     --memory-mb) memory_mb=${2:?missing memory limit}; shift 2 ;;
+    --rate-limit-rps) rate_limit_rps=${2:?missing rate limit}; shift 2 ;;
+    --rate-limit-burst) rate_limit_burst=${2:?missing burst limit}; shift 2 ;;
+    --rate-limit-per-ip) rate_limit_per_ip=${2:?missing per-IP limit}; shift 2 ;;
     --target-node) target_node=${2:?missing target node}; shift 2 ;;
     --allowed-cidr) allowed_cidrs+=("${2:?missing allowed CIDR}"); shift 2 ;;
     --denied-cidr) denied_cidrs+=("${2:?missing denied CIDR}"); shift 2 ;;
@@ -111,7 +120,10 @@ target = next(
 )
 if target is None:
     raise SystemExit("manifest has no Wasm binary or cdylib target")
-print(target["name"].replace("-", "_") + ".wasm")
+if "bin" in target["kind"]:
+    print(target["name"] + ".wasm")
+else:
+    print(target["name"].replace("-", "_") + ".wasm")
 ' "$manifest_abs")
   wasm="$target_dir/wasm32-wasip2/release/$artifact_name"
 fi
@@ -128,6 +140,14 @@ deploy_args=(deploy-app \
   --memory-mb "$memory_mb" \
   --health-check-path "$health_path")
 deploy_args+=(--max-outbound-connections "$max_outbound_connections")
+if [[ -n "$rate_limit_rps" ]]; then
+  deploy_args+=(--rate-limit-rps "$rate_limit_rps")
+  [[ -z "$rate_limit_burst" ]] || deploy_args+=(--rate-limit-burst "$rate_limit_burst")
+  [[ -z "$rate_limit_per_ip" ]] || deploy_args+=(--rate-limit-per-ip "$rate_limit_per_ip")
+elif [[ -n "$rate_limit_burst" || -n "$rate_limit_per_ip" ]]; then
+  echo "--rate-limit-burst and --rate-limit-per-ip require --rate-limit-rps." >&2
+  exit 2
+fi
 if [[ -n "$target_node" ]]; then
   deploy_args+=(--target-node "$target_node")
 fi

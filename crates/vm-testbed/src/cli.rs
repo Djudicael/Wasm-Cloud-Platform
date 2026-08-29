@@ -2,7 +2,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use common::artifact_transfer::{ArtifactManifestBatchRequest, ArtifactManifestBatchResponse};
 use common::policy::{FilesystemPolicyConfig, NetworkPolicyConfig, PolicyConfig};
-use common::types::{AppConfig, AppId, FuelQuota, MemoryPages, Route};
+use common::types::{AppConfig, AppId, AppRateLimitConfig, FuelQuota, MemoryPages, Route};
 use messaging::{events::Event, NatsBus};
 use serde::{Deserialize, Serialize};
 use sha2::Digest;
@@ -186,6 +186,15 @@ enum Commands {
         memory_mb: u32,
         #[arg(long, default_value = "10")]
         max_instances: u32,
+        /// Sustained per-node request limit for this application.
+        #[arg(long)]
+        rate_limit_rps: Option<u32>,
+        /// Token-bucket burst capacity; requires --rate-limit-rps.
+        #[arg(long)]
+        rate_limit_burst: Option<u32>,
+        /// Per-client-IP request limit; requires --rate-limit-rps.
+        #[arg(long)]
+        rate_limit_per_ip: Option<u32>,
         #[arg(long, default_value = "100")]
         max_outbound_connections: u32,
         /// Restrict outbound traffic to these CIDRs; repeat as needed.
@@ -337,6 +346,9 @@ struct DeployRequest {
     fuel: u64,
     memory_mb: u32,
     max_instances: u32,
+    rate_limit_rps: Option<u32>,
+    rate_limit_burst: Option<u32>,
+    rate_limit_per_ip: Option<u32>,
     max_outbound_connections: u32,
     allowed_cidrs: Vec<String>,
     denied_cidrs: Vec<String>,
@@ -557,6 +569,9 @@ async fn main() -> Result<()> {
             fuel,
             memory_mb,
             max_instances,
+            rate_limit_rps,
+            rate_limit_burst,
+            rate_limit_per_ip,
             max_outbound_connections,
             allowed_cidrs,
             denied_cidrs,
@@ -581,6 +596,9 @@ async fn main() -> Result<()> {
                     fuel,
                     memory_mb,
                     max_instances,
+                    rate_limit_rps,
+                    rate_limit_burst,
+                    rate_limit_per_ip,
                     max_outbound_connections,
                     allowed_cidrs,
                     denied_cidrs,
@@ -930,6 +948,11 @@ async fn restart_node_from_state(
 }
 
 async fn deploy_app_to_state(state: &PersistedClusterState, req: DeployRequest) -> Result<()> {
+    if req.rate_limit_rps.is_none()
+        && (req.rate_limit_burst.is_some() || req.rate_limit_per_ip.is_some())
+    {
+        bail!("--rate-limit-burst and --rate-limit-per-ip require --rate-limit-rps");
+    }
     let node = select_target_vm(state, req.target_node.as_deref())?;
     let mut bus = NatsBus::connect(&state.nats_url).await?;
     bus.set_node_id("vm-testbed-cli".to_string());
@@ -1018,7 +1041,13 @@ async fn deploy_app_to_state(state: &PersistedClusterState, req: DeployRequest) 
         extended_limits: None,
         health_check_path: req.health_check_path,
         db_max_connections: None,
-        rate_limit: None,
+        rate_limit: req
+            .rate_limit_rps
+            .map(|requests_per_second| AppRateLimitConfig {
+                requests_per_second,
+                burst_capacity: req.rate_limit_burst.unwrap_or(requests_per_second),
+                per_ip_limit: req.rate_limit_per_ip.unwrap_or(requests_per_second),
+            }),
         tenant_id: None,
         policy: Some(policy),
         namespace: req.namespace.clone(),

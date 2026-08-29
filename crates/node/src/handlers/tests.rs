@@ -8,7 +8,7 @@ use common::{
         ArtifactTransferAuthority, ARTIFACT_TRANSFER_MANIFEST_HEADER,
         ARTIFACT_TRANSFER_REQUESTER_NODE_HEADER,
     },
-    types::AppId,
+    types::{AppConfig, AppId, AppRateLimitConfig},
 };
 use e2e::NatsContainer;
 use messaging::{events::Event, NatsBus};
@@ -31,6 +31,33 @@ static NATS_PORT_COUNTER: AtomicU16 = AtomicU16::new(0);
 fn allocate_nats_port() -> u16 {
     let base = 25000 + ((std::process::id() as u16) % 1000);
     base + NATS_PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+}
+
+#[tokio::test]
+async fn test_app_rate_limit_override_is_applied_and_removed() {
+    let temp = NamedTempFile::new().unwrap();
+    let store = Store::open(temp.path()).unwrap();
+    let dispatcher = build_test_dispatcher(store, None, None).await;
+    let app_id = AppId("default/limited:v1".to_string());
+    let mut config = AppConfig::default_for(app_id.clone());
+    config.rate_limit = Some(AppRateLimitConfig {
+        requests_per_second: 5_000,
+        burst_capacity: 10_000,
+        per_ip_limit: 4_000,
+    });
+
+    dispatcher.apply_rate_limit(&app_id, &config);
+    let applied = dispatcher.rate_limiter.get_app_config(&app_id.0);
+    assert_eq!(applied.requests_per_second, 5_000);
+    assert_eq!(applied.burst_capacity, 10_000);
+    assert_eq!(applied.per_ip_limit, 4_000);
+
+    config.rate_limit = None;
+    dispatcher.apply_rate_limit(&app_id, &config);
+    let restored = dispatcher.rate_limiter.get_app_config(&app_id.0);
+    assert_eq!(restored.requests_per_second, 1_000);
+    assert_eq!(restored.burst_capacity, 50);
+    assert_eq!(restored.per_ip_limit, 100);
 }
 
 async fn start_test_nats() -> Result<NatsContainer, String> {
@@ -88,6 +115,9 @@ async fn build_test_dispatcher(
         bus,
         dns_webhook,
         node_table: Arc::new(proxy::node_table::NodeLoadTable::default()),
+        rate_limiter: Arc::new(proxy::rate_limiter::RateLimiter::new(
+            proxy::rate_limiter::RateLimitConfig::default(),
+        )),
         cluster_node_stale_after_secs: 120,
         gateway: None,
     }

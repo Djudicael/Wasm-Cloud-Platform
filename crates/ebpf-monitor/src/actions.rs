@@ -20,6 +20,13 @@ use tracing::{debug, error, info, warn};
 pub use callbacks::{EventCallbacks, NoopCallbacks};
 pub use model::{MonitorEvent, NamespaceIncidentType, RecoveryAction};
 
+#[derive(Default)]
+struct SlowIoRecoveryState {
+    active: bool,
+    generation: u64,
+    worker_running: bool,
+}
+
 /// Process monitor events and determine recovery actions.
 ///
 /// The dispatcher updates metrics for every event, decides the recovery action,
@@ -35,6 +42,10 @@ pub struct ActionDispatcher {
     backpressure_active: Arc<std::sync::atomic::AtomicBool>,
     /// Whether the node is in degraded mode.
     degraded_mode: Arc<std::sync::atomic::AtomicBool>,
+    /// Whether critical memory pressure currently requires degraded mode.
+    memory_pressure_degraded: Arc<std::sync::atomic::AtomicBool>,
+    /// Slow-I/O cause and its single generation-fenced recovery worker.
+    slow_io_recovery: Arc<std::sync::Mutex<SlowIoRecoveryState>>,
     /// Last memory pressure level, used to detect recovery.
     last_pressure_level: Arc<std::sync::atomic::AtomicU32>,
     /// Monotonic pressure-event generation used to fence recovery timers.
@@ -58,6 +69,8 @@ impl ActionDispatcher {
             node_id,
             backpressure_active: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             degraded_mode: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            memory_pressure_degraded: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            slow_io_recovery: Arc::new(std::sync::Mutex::new(SlowIoRecoveryState::default())),
             last_pressure_level: Arc::new(std::sync::atomic::AtomicU32::new(0)),
             pressure_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             config: std::sync::RwLock::new(MonitorConfig::default()),
@@ -88,6 +101,8 @@ impl ActionDispatcher {
             node_id,
             backpressure_active: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             degraded_mode: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            memory_pressure_degraded: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            slow_io_recovery: Arc::new(std::sync::Mutex::new(SlowIoRecoveryState::default())),
             last_pressure_level: Arc::new(std::sync::atomic::AtomicU32::new(0)),
             pressure_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             config: std::sync::RwLock::new(config),
@@ -364,6 +379,9 @@ impl ActionDispatcher {
                             self.callbacks
                                 .publish_node_pressure_recovered(&self.node_id);
                         }
+                        self.memory_pressure_degraded
+                            .store(false, std::sync::atomic::Ordering::Relaxed);
+                        self.refresh_degraded_mode("Memory pressure recovered");
                     }
                     1 => {
                         warn!(
@@ -391,7 +409,9 @@ impl ActionDispatcher {
                         self.callbacks.prune_idle_instances();
                         self.activate_backpressure_if_needed("Memory pressure: CRITICAL");
                         self.callbacks.publish_node_under_pressure(&self.node_id, 2);
-                        self.enter_degraded_mode_if_needed("Memory pressure: CRITICAL");
+                        self.memory_pressure_degraded
+                            .store(true, std::sync::atomic::Ordering::Relaxed);
+                        self.refresh_degraded_mode("Memory pressure: CRITICAL");
                     }
                     _ => {
                         warn!(pressure_level, free_pages, "Unknown memory pressure level");
@@ -436,7 +456,7 @@ impl ActionDispatcher {
                 );
                 self.metrics.observe_disk_latency_ns(latency_ns);
                 self.metrics.add_disk_io_bytes(io_type_str, bytes);
-                self.enter_degraded_mode_if_needed(&format!(
+                self.mark_slow_io_degraded(&format!(
                     "Slow disk I/O on {}:{} ({:.1}ms)",
                     dev_major, dev_minor, latency_ms
                 ));
@@ -646,17 +666,96 @@ impl ActionDispatcher {
         });
     }
 
-    fn enter_degraded_mode_if_needed(&self, reason: &str) {
-        if !self
+    fn mark_slow_io_degraded(&self, reason: &str) {
+        self.mark_slow_io_degraded_for(reason, Duration::from_secs(30));
+    }
+
+    fn mark_slow_io_degraded_for(&self, reason: &str, cooldown: Duration) {
+        let should_start_worker = {
+            let mut recovery = self
+                .slow_io_recovery
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            recovery.active = true;
+            recovery.generation = recovery.generation.wrapping_add(1);
+            if recovery.worker_running {
+                false
+            } else {
+                recovery.worker_running = true;
+                true
+            }
+        };
+        self.refresh_degraded_mode(reason);
+
+        if !should_start_worker {
+            return;
+        }
+
+        let slow_io_recovery = Arc::clone(&self.slow_io_recovery);
+        let memory_pressure_degraded = Arc::clone(&self.memory_pressure_degraded);
+        let degraded_mode = Arc::clone(&self.degraded_mode);
+        std::thread::spawn(move || loop {
+            let observed_generation = {
+                let recovery = slow_io_recovery
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner());
+                recovery.generation
+            };
+            std::thread::sleep(cooldown);
+
+            let mut recovery = slow_io_recovery
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if !recovery.active {
+                recovery.worker_running = false;
+                return;
+            }
+            if recovery.generation != observed_generation {
+                continue;
+            }
+
+            recovery.active = false;
+            recovery.worker_running = false;
+            if !memory_pressure_degraded.load(std::sync::atomic::Ordering::Relaxed)
+                && degraded_mode.swap(false, std::sync::atomic::Ordering::Relaxed)
+            {
+                info!("Slow-I/O cooldown elapsed - exiting degraded mode");
+            }
+            return;
+        });
+    }
+
+    fn refresh_degraded_mode(&self, reason: &str) {
+        let should_be_degraded = self
+            .memory_pressure_degraded
+            .load(std::sync::atomic::Ordering::Relaxed)
+            || self
+                .slow_io_recovery
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .active;
+        let was_degraded = self
             .degraded_mode
-            .swap(true, std::sync::atomic::Ordering::Relaxed)
-        {
+            .swap(should_be_degraded, std::sync::atomic::Ordering::Relaxed);
+        if should_be_degraded && !was_degraded {
             warn!(reason, "Entering degraded mode");
+        } else if !should_be_degraded && was_degraded {
+            info!(reason, "Exiting degraded mode - recovered");
         }
     }
 
     /// Exit degraded mode if currently active.
     pub fn exit_degraded_mode(&self) {
+        self.memory_pressure_degraded
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        {
+            let mut recovery = self
+                .slow_io_recovery
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            recovery.active = false;
+            recovery.generation = recovery.generation.wrapping_add(1);
+        }
         if self
             .degraded_mode
             .swap(false, std::sync::atomic::Ordering::Relaxed)

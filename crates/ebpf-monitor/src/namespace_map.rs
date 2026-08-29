@@ -20,17 +20,149 @@ pub struct MonitoredTidStatus {
     pub namespace: String,
     pub app_id: String,
     pub registered_at_ns: u64,
+    /// Linux scheduler counters for the dedicated application executor thread.
+    pub performance: Option<TaskPerformanceStatus>,
+}
+
+/// Cumulative Linux scheduler counters for one thread.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct TaskPerformanceStatus {
+    pub user_cpu_ticks: u64,
+    pub system_cpu_ticks: u64,
+    pub voluntary_context_switches: u64,
+    pub nonvoluntary_context_switches: u64,
+}
+
+/// Cumulative Linux resource counters for the node process.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ProcessPerformanceStatus {
+    pub pid: u32,
+    pub user_cpu_ticks: u64,
+    pub system_cpu_ticks: u64,
+    pub resident_memory_bytes: u64,
+    pub voluntary_context_switches: u64,
+    pub nonvoluntary_context_switches: u64,
 }
 
 /// Bounded lifecycle snapshot for the authenticated admin API.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct NamespaceMapStatus {
     pub active_tids: Vec<MonitoredTidStatus>,
+    /// Number of scheduler ticks per second used by the CPU tick fields.
+    pub clock_ticks_per_second: u64,
+    /// Resource counters for the complete `wasm-node` process.
+    pub process_performance: Option<ProcessPerformanceStatus>,
     pub recent_tombstones: usize,
     pub port_bindings: usize,
     pub kernel_map_entry_counts: Vec<usize>,
     pub bpffs_mounted: bool,
     pub pinned_entries: usize,
+}
+
+fn parse_proc_stat(stat: &str) -> Option<(u64, u64, i64)> {
+    // The command name is parenthesized and may contain spaces or parentheses.
+    // Fields after its final ')' start at Linux procfs field 3 (`state`).
+    let fields: Vec<_> = stat
+        .get(stat.rfind(')')? + 1..)?
+        .split_whitespace()
+        .collect();
+    Some((
+        fields.get(11)?.parse().ok()?,
+        fields.get(12)?.parse().ok()?,
+        fields.get(21)?.parse().ok()?,
+    ))
+}
+
+fn parse_context_switches(status: &str) -> Option<(u64, u64)> {
+    let value = |prefix: &str| {
+        status
+            .lines()
+            .find_map(|line| line.strip_prefix(prefix))?
+            .trim()
+            .parse()
+            .ok()
+    };
+    Some((
+        value("voluntary_ctxt_switches:")?,
+        value("nonvoluntary_ctxt_switches:")?,
+    ))
+}
+
+#[cfg(target_os = "linux")]
+fn process_context_switches() -> Option<(u64, u64)> {
+    let mut voluntary = 0_u64;
+    let mut nonvoluntary = 0_u64;
+    let mut observed = false;
+    for entry in std::fs::read_dir("/proc/self/task")
+        .ok()?
+        .filter_map(Result::ok)
+    {
+        let Ok(status) = std::fs::read_to_string(entry.path().join("status")) else {
+            continue;
+        };
+        let Some((task_voluntary, task_nonvoluntary)) = parse_context_switches(&status) else {
+            continue;
+        };
+        voluntary = voluntary.saturating_add(task_voluntary);
+        nonvoluntary = nonvoluntary.saturating_add(task_nonvoluntary);
+        observed = true;
+    }
+    observed.then_some((voluntary, nonvoluntary))
+}
+
+#[cfg(target_os = "linux")]
+fn task_performance(tid: u32) -> Option<TaskPerformanceStatus> {
+    let root = format!("/proc/self/task/{tid}");
+    let stat = std::fs::read_to_string(format!("{root}/stat")).ok()?;
+    let status = std::fs::read_to_string(format!("{root}/status")).ok()?;
+    let (user_cpu_ticks, system_cpu_ticks, _) = parse_proc_stat(&stat)?;
+    let (voluntary_context_switches, nonvoluntary_context_switches) =
+        parse_context_switches(&status)?;
+    Some(TaskPerformanceStatus {
+        user_cpu_ticks,
+        system_cpu_ticks,
+        voluntary_context_switches,
+        nonvoluntary_context_switches,
+    })
+}
+
+#[cfg(not(target_os = "linux"))]
+fn task_performance(_tid: u32) -> Option<TaskPerformanceStatus> {
+    None
+}
+
+#[cfg(target_os = "linux")]
+fn process_performance() -> Option<ProcessPerformanceStatus> {
+    let stat = std::fs::read_to_string("/proc/self/stat").ok()?;
+    let (user_cpu_ticks, system_cpu_ticks, resident_pages) = parse_proc_stat(&stat)?;
+    let resident_pages = u64::try_from(resident_pages).ok()?;
+    let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+    let page_size = u64::try_from(page_size).ok()?;
+    let (voluntary_context_switches, nonvoluntary_context_switches) = process_context_switches()?;
+    Some(ProcessPerformanceStatus {
+        pid: std::process::id(),
+        user_cpu_ticks,
+        system_cpu_ticks,
+        resident_memory_bytes: resident_pages.saturating_mul(page_size),
+        voluntary_context_switches,
+        nonvoluntary_context_switches,
+    })
+}
+
+#[cfg(not(target_os = "linux"))]
+fn process_performance() -> Option<ProcessPerformanceStatus> {
+    None
+}
+
+#[cfg(target_os = "linux")]
+fn clock_ticks_per_second() -> u64 {
+    let ticks = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
+    u64::try_from(ticks).unwrap_or(0)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn clock_ticks_per_second() -> u64 {
+    0
 }
 
 fn count_directory_entries(path: &std::path::Path) -> usize {
@@ -312,6 +444,7 @@ impl NamespaceMap {
                 namespace: identity.namespace_str().to_string(),
                 app_id: identity.app_id_str().to_string(),
                 registered_at_ns: identity.registered_at_ns,
+                performance: task_performance(*tid),
             })
             .collect();
         active_tids.sort_by_key(|identity| identity.tid);
@@ -335,6 +468,8 @@ impl NamespaceMap {
 
         NamespaceMapStatus {
             active_tids,
+            clock_ticks_per_second: clock_ticks_per_second(),
+            process_performance: process_performance(),
             recent_tombstones,
             port_bindings: self.port_to_tid.read().unwrap().len(),
             kernel_map_entry_counts,
@@ -536,6 +671,19 @@ mod tests {
         assert!(removed.active_tids.is_empty());
         assert_eq!(removed.recent_tombstones, 1);
         assert_eq!(removed.port_bindings, 0);
+    }
+
+    #[test]
+    fn test_parse_proc_stat_with_parenthesized_command() {
+        let stat = "42 (worker (one)) R 1 2 3 4 5 6 7 8 9 10 120 30 14 15 16 17 18 19 20 21 64";
+        assert_eq!(parse_proc_stat(stat), Some((120, 30, 64)));
+    }
+
+    #[test]
+    fn test_parse_context_switches() {
+        let status =
+            "Name:\tworker\nvoluntary_ctxt_switches:\t123\nnonvoluntary_ctxt_switches:\t45\n";
+        assert_eq!(parse_context_switches(status), Some((123, 45)));
     }
 
     #[test]

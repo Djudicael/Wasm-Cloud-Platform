@@ -98,6 +98,8 @@ pub struct EventDispatcher {
     pub bus: messaging::NatsBus,
     pub dns_webhook: Option<DnsWebhookManager>,
     pub node_table: Arc<NodeLoadTable>,
+    /// Node-local application limiter, updated from each persisted AppConfig.
+    pub rate_limiter: Arc<proxy::rate_limiter::RateLimiter>,
     pub cluster_node_stale_after_secs: u64,
     /// In-memory gateway cache (also updated when persistent storage changes).
     pub gateway: Option<Arc<proxy::gateway::Gateway>>,
@@ -401,6 +403,7 @@ impl EventDispatcher {
         // 6. Store compiled artifact, config, and hash
         self.store.store_artifact(&app_id, &artifact_bytes)?;
         self.store.save_config(&config)?;
+        self.apply_rate_limit(&app_id, &config);
         self.store.save_artifact_hash(&app_id, &sha256)?;
         self.store.mark_deployed(&app_id.0)?;
         info!(
@@ -432,6 +435,7 @@ impl EventDispatcher {
         // Actual deletion happens after grace period expires in GC loop
         self.store.mark_undeployed(&app_id.0)?;
         self.supervisor.forget_app(&app_id).await?;
+        self.rate_limiter.remove_app_config(&app_id.0);
 
         // Note: We don't immediately delete artifacts/configs anymore
         // The GC loop will purge them after the grace period
@@ -718,8 +722,24 @@ impl EventDispatcher {
         config: common::types::AppConfig,
     ) -> Result<(), PlatformError> {
         self.store.save_config(&config)?;
+        self.apply_rate_limit(&app_id, &config);
         info!(app = %app_id.0, "config updated");
         Ok(())
+    }
+
+    fn apply_rate_limit(&self, app_id: &AppId, config: &common::types::AppConfig) {
+        if let Some(limit) = &config.rate_limit {
+            self.rate_limiter.set_app_config(
+                &app_id.0,
+                proxy::rate_limiter::RateLimitConfig {
+                    requests_per_second: limit.requests_per_second,
+                    burst_capacity: limit.burst_capacity,
+                    per_ip_limit: limit.per_ip_limit,
+                },
+            );
+        } else {
+            self.rate_limiter.remove_app_config(&app_id.0);
+        }
     }
 
     fn handle_node_upgrade_complete(

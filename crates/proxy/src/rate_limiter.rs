@@ -108,9 +108,9 @@ pub struct RateLimiter {
     /// Per-app token buckets (app_id → bucket).
     app_buckets: DashMap<String, TokenBucket>,
 
-    /// Per-IP token buckets (ip → bucket).
+    /// Per-application, per-IP token buckets ((app_id, ip) → bucket).
     /// Pruned periodically to prevent unbounded growth.
-    ip_buckets: DashMap<IpAddr, TokenBucket>,
+    ip_buckets: DashMap<(String, IpAddr), TokenBucket>,
 
     /// Per-app rate limit configs.
     configs: DashMap<String, RateLimitConfig>,
@@ -160,6 +160,19 @@ impl RateLimiter {
     /// Set a custom rate limit for a specific app.
     pub fn set_app_config(&self, app_id: &str, config: RateLimitConfig) {
         self.configs.insert(app_id.to_string(), config);
+        // An existing bucket was sized from the previous configuration.
+        self.app_buckets.remove(app_id);
+        self.ip_buckets
+            .retain(|(bucket_app, _), _| bucket_app != app_id);
+    }
+
+    /// Remove an application override and its bucket so future requests use
+    /// the current defaults with a freshly sized bucket.
+    pub fn remove_app_config(&self, app_id: &str) {
+        self.configs.remove(app_id);
+        self.app_buckets.remove(app_id);
+        self.ip_buckets
+            .retain(|(bucket_app, _), _| bucket_app != app_id);
     }
 
     /// Get the current config for an app (for introspection/CLI).
@@ -199,7 +212,7 @@ impl RateLimiter {
         {
             let mut bucket = self
                 .ip_buckets
-                .entry(source_ip)
+                .entry((app_id.to_string(), source_ip))
                 .or_insert_with(|| TokenBucket::new(config.per_ip_limit, config.per_ip_limit));
             if !bucket.try_acquire() {
                 return Err(RateLimitDenied::IpLimitExceeded {
@@ -368,6 +381,49 @@ mod tests {
         // ip2 should still work
         assert!(limiter.check_request("test-app", ip2).is_ok());
         assert!(limiter.check_request("test-app", ip2).is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_same_ip_is_isolated_between_applications() {
+        let config = RateLimitConfig {
+            requests_per_second: 1_000,
+            burst_capacity: 100,
+            per_ip_limit: 2,
+        };
+        let limiter = RateLimiter::new(config);
+        let ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+
+        for _ in 0..2 {
+            limiter.check_request("app-a", ip).unwrap();
+        }
+        assert!(limiter.check_request("app-a", ip).is_err());
+        for _ in 0..2 {
+            limiter.check_request("app-b", ip).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn test_config_update_replaces_existing_ip_bucket() {
+        let limiter = RateLimiter::new(RateLimitConfig {
+            requests_per_second: 100,
+            burst_capacity: 100,
+            per_ip_limit: 1,
+        });
+        let ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        limiter.check_request("test-app", ip).unwrap();
+        assert!(limiter.check_request("test-app", ip).is_err());
+
+        limiter.set_app_config(
+            "test-app",
+            RateLimitConfig {
+                requests_per_second: 1_000,
+                burst_capacity: 1_000,
+                per_ip_limit: 100,
+            },
+        );
+        for _ in 0..100 {
+            limiter.check_request("test-app", ip).unwrap();
+        }
     }
 
     #[tokio::test]

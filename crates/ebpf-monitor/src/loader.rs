@@ -25,7 +25,7 @@
 
 use anyhow::{anyhow, Context, Result};
 use aya::{
-    maps::Array,
+    maps::{Array, MapData},
     programs::{KProbe, TracePoint},
     Ebpf,
 };
@@ -47,6 +47,8 @@ pub struct LoadedEbpf {
     /// Independently compiled monitor objects. They must remain owned for as
     /// long as their programs are attached.
     pub monitors: Vec<LoadedMonitor>,
+    /// Owned CONFIG map handles used to apply hot-reloaded thresholds.
+    config_maps: Vec<Array<MapData, MonitorConfigMap>>,
     /// Optional namespace enforcer eBPF object (separate ELF).
     pub ns_ebpf: Option<Ebpf>,
     /// Attachment links for each loaded program.
@@ -77,6 +79,19 @@ pub struct LoadedMonitor {
     pub ebpf: Ebpf,
 }
 
+impl LoadedEbpf {
+    /// Update every independently loaded monitor's kernel CONFIG map.
+    pub fn update_config(&mut self, config: &MonitorConfig, node_pid: u32) -> Result<()> {
+        let kernel_config = kernel_config(config, node_pid);
+        for config_map in &mut self.config_maps {
+            config_map
+                .set(0, kernel_config, 0)
+                .context("failed to hot-reload eBPF CONFIG map")?;
+        }
+        Ok(())
+    }
+}
+
 /// Load and attach all eBPF programs.
 ///
 /// Returns `Ok(Some(LoadedEbpf))` if all programs loaded and attached successfully.
@@ -100,6 +115,7 @@ pub async fn load_and_attach(config: &MonitorConfig, node_pid: u32) -> Result<Op
     info!("Loading independently compiled eBPF monitor objects...");
 
     let mut monitors = Vec::new();
+    let mut config_maps = Vec::new();
     let mut links = Vec::new();
     let mut failures = Vec::new();
 
@@ -172,8 +188,33 @@ pub async fn load_and_attach(config: &MonitorConfig, node_pid: u32) -> Result<Op
             warn!(error = %error_chain, monitor = name, "Failed to attach eBPF monitor — skipping");
             continue;
         }
+        let config_map = match ebpf.take_map("CONFIG") {
+            Some(map) => match Array::try_from(map) {
+                Ok(map) => map,
+                Err(error) => {
+                    failures.push(MonitorLoadFailure {
+                        monitor: name,
+                        stage: "configure",
+                    });
+                    warn!(error = %error, monitor = name, "CONFIG map has wrong type — skipping");
+                    continue;
+                }
+            },
+            None => {
+                failures.push(MonitorLoadFailure {
+                    monitor: name,
+                    stage: "configure",
+                });
+                warn!(
+                    monitor = name,
+                    "CONFIG map disappeared after attachment — skipping"
+                );
+                continue;
+            }
+        };
         info!(monitor = name, "eBPF monitor attached");
         links.push(name.to_string());
+        config_maps.push(config_map);
         monitors.push(LoadedMonitor { name, ebpf });
     }
 
@@ -230,6 +271,7 @@ pub async fn load_and_attach(config: &MonitorConfig, node_pid: u32) -> Result<Op
         warn!("No eBPF programs attached — falling back to userspace monitoring");
         return Ok(Some(LoadedEbpf {
             monitors,
+            config_maps,
             ns_ebpf,
             links,
             failures,
@@ -243,6 +285,7 @@ pub async fn load_and_attach(config: &MonitorConfig, node_pid: u32) -> Result<Op
 
     Ok(Some(LoadedEbpf {
         monitors,
+        config_maps,
         ns_ebpf,
         links,
         failures,
@@ -327,17 +370,7 @@ fn write_config_map(ebpf: &mut Ebpf, config: &MonitorConfig, node_pid: u32) -> R
         .try_into()
         .context("CONFIG map has wrong type")?;
 
-    let kernel_config = MonitorConfigMap {
-        node_pid,
-        fd_soft_limit: config.fd_soft_limit,
-        fd_hard_limit: config.fd_hard_limit,
-        mem_low_threshold_pages: config.mem_low_threshold_pages,
-        mem_critical_threshold_pages: config.mem_critical_threshold_pages,
-        disk_slow_threshold_ns: config.disk_slow_threshold_ns,
-        tcp_conn_limit_per_pid: config.tcp_conn_limit_per_pid,
-        syscall_rate_limit: config.syscall_rate_limit,
-        sampling_period_ns: config.sampling_period_secs * 1_000_000_000,
-    };
+    let kernel_config = kernel_config(config, node_pid);
 
     config_map
         .set(0, kernel_config, 0)
@@ -357,6 +390,20 @@ fn write_config_map(ebpf: &mut Ebpf, config: &MonitorConfig, node_pid: u32) -> R
     );
 
     Ok(())
+}
+
+fn kernel_config(config: &MonitorConfig, node_pid: u32) -> MonitorConfigMap {
+    MonitorConfigMap {
+        node_pid,
+        fd_soft_limit: config.fd_soft_limit,
+        fd_hard_limit: config.fd_hard_limit,
+        mem_low_threshold_pages: config.mem_low_threshold_pages,
+        mem_critical_threshold_pages: config.mem_critical_threshold_pages,
+        disk_slow_threshold_ns: config.disk_slow_threshold_ns,
+        tcp_conn_limit_per_pid: config.tcp_conn_limit_per_pid,
+        syscall_rate_limit: config.syscall_rate_limit,
+        sampling_period_ns: config.sampling_period_secs * 1_000_000_000,
+    }
 }
 
 // ── Program Attachment Helpers ────────────────────────────────────────────────

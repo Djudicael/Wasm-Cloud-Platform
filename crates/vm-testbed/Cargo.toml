@@ -42,3 +42,7 @@ async-nats = { workspace = true }
 [[bin]]
 name = "vm-testbed-cli"
 path = "src/cli.rs"
+
+[[bin]]
+name = "http-benchmark"
+path = "src/bin/http-benchmark.rs"

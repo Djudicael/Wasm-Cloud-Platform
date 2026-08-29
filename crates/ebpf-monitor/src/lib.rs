@@ -276,6 +276,19 @@ impl MonitorHandle {
     pub fn shutdown(&self) {
         let _ = self.shutdown_tx.send(true);
     }
+
+    /// Apply hot-reloaded thresholds to the kernel CONFIG maps.
+    pub fn update_kernel_thresholds(&mut self, config: &MonitorConfig) -> Result<(), String> {
+        #[cfg(feature = "ebpf")]
+        if let Some(loaded) = self._loaded_ebpf.as_mut() {
+            loaded
+                .update_config(config, std::process::id())
+                .map_err(|error| format!("{error:#}"))?;
+        }
+        #[cfg(not(feature = "ebpf"))]
+        let _ = config;
+        Ok(())
+    }
 }
 
 impl Drop for MonitorHandle {

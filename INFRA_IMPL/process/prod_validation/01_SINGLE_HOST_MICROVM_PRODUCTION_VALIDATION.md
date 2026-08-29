@@ -207,6 +207,8 @@ redacted artifact with the result.
 | eBPF lifecycle cleanup (Phase 6, Part 6) | PASS | `scripts/vm/validate-ebpf-lifecycle-cleanup.sh` completed three WASI HTTP deploy/forced-stop/cold-start/remove cycles across all three nodes and one full rolling node restart. Every restart/deploy produced a fresh TID registration; all five kernel identity maps matched the active identity count. Final state on every node is zero active TIDs, tombstones, port bindings, map entries, and bpffs pins; seven node-scoped programs remain attached as designed. Removed routes no longer return 2xx, per-app Prometheus series disappear, no stale identity receives new events, HAProxy remains scrapeable, and Prometheus has no active alert. |
 | Part 6 lifecycle defects | FIXED / PASS | Undeploy now removes routes before instances, removes the empty supervisor pool, retains artifacts only for the GC grace period, and deploy clears the undeploy marker. Local restore and peer bootstrap exclude grace-period apps and routes. Health metrics delete absent application label series. `NatsBus::publish` flushes before returning so short-lived CLI commands cannot report success while dropping buffered control events. The canonical app deployer now supports both Wasm binaries and `cdylib` components. |
 | 2026-08-27 Part 6 source and audit gates | PASS WITH DEPENDENCY NOTICE | WSL gates pass: formatting; required native workspace all-target check; workspace all-target Clippy with warnings denied; eBPF-feature node Clippy; storage 51 unit plus 12 integration tests; messaging 13; metrics 11; supervisor 38 unit plus 10 integration tests; eBPF monitor 121; explicit release `wasm32-wasip2` builds for `http-hello-component` and `wasi-grpc-echo`; changed-script syntax; and `cargo audit --deny warnings` over 749 dependencies. The separately tracked `proc-macro-error2 2.0.1` future-incompatibility notice remains. |
+| 2026-08-29 eBPF overhead (Phase 6, Part 7) | PASS | The final rootfs was measured with two alternating fallback/active blocks, two 20,000-request rounds per mode per block, and concurrency 32: 80,000 requests per mode and 160,000 total. Active eBPF caused 0.12% median-throughput loss, +1.11 ms median p99, +1.72% node CPU per 1,000 requests, +12.00% node context switches, and +8.62 MiB peak RSS; application-TID CPU increased 2.95% and its context switches increased 0.32%. All are inside the predefined 5% throughput/meaningful-p99, 15% CPU, 25% context-switch, and 64-MiB RSS limits. There were zero request failures, parse errors, ring drops, or queue saturations while 170,842 eBPF events were observed. Slow-I/O degraded-state recovery, bounded recovery-worker lifecycle, and kernel CONFIG-map hot reload defects found during the audit were fixed and validated in the guest before this final rerun. |
+| 2026-08-29 OIDC post-eBPF validation (Phase 6, Part 8) | PASS WITH RECORDED PRODUCTION LIMITS | PostgreSQL 17.11 was reprovisioned, OIDC migrations through V37 and repeatable seed data completed, and the versioned frontend/backend WASI components passed database readiness through the same-origin HAProxy gateway. The focused Chromium login/dashboard journey passed 6/6 before and after a one-at-a-time restart of all three platform nodes (5.2 s and 4.9 s). Every replacement reconstructed both applications and registered fresh exact-deployment TIDs in all five identity maps. Runtime evidence tied PostgreSQL connects to the backend identity; process/syscall, FD, TCP, and block-I/O counters were present. Final Prometheus state was 10/10 targets up, three active eBPF nodes, 6,081 processed events, and zero monitoring degradation, parse errors, or queue saturations. The 2-GiB guest images remained traffic-serving but reported low-disk health, and buffered writeback/per-application RSS still require a stronger process/cgroup boundary for tenant-grade attribution. |
 
 ### Execution notes
 
@@ -451,7 +453,7 @@ The next microVM run must still prove the kernel-runtime portion below.
 - [x] Record guest kernel version, configuration, BTF availability, capabilities,
       eBPF object checksum, and release feature set.
 - [x] Confirm every eBPF object is packaged from a production-safe path.
-- [ ] Start in userspace fallback mode and record baseline metrics and overhead.
+- [x] Start in userspace fallback mode and record baseline metrics and overhead.
 - [ ] Enable one probe group at a time.
 - [x] Confirm `wasm_ebpf_active` reflects the actual mode.
 - [ ] Confirm events are scoped to the intended platform cgroup/PID namespace and
@@ -500,7 +502,19 @@ The next microVM run must still prove the kernel-runtime portion below.
         fresh application identities, and finished with zero active identities,
         tombstones, port bindings, kernel-map entries, or bpffs pins.
 - [x] Unload/reload probes without leaving pinned maps or programs.
-- [ ] Compare request latency, CPU, and memory against the fallback baseline.
+- [x] Compare request latency, CPU, memory, and context switches against the
+      fallback baseline.
+  - [x] **Part 7 — final-artifact A/B overhead:** four bounded rounds per mode
+        alternated real capability-denied fallback and seven-program eBPF on the
+        same node. All predefined acceptance limits passed with zero failed
+        requests, parser errors, ring drops, or dispatcher saturations.
+- [x] Repeat the production-representative application validation after the eBPF
+      changes.
+  - [x] **Part 8 — OIDC end-to-end revalidation:** deploy the OIDC frontend and
+        backend, run PostgreSQL migrations, exercise the focused browser journey,
+        verify exact application identities and representative event classes,
+        roll every platform node, and repeat readiness, browser, eBPF, and
+        observability gates.
 
 ### Part 1 record — per-application attribution for WASI HTTP
 
@@ -984,6 +998,206 @@ separately tracked dependency warning.
 
 The environment remains live and contains no deployed lifecycle fixture.
 Teardown has not been run.
+
+### Part 7 record — eBPF overhead
+
+Status: **PASS on 2026-08-29 against the final guest image.** The reusable
+validator and exact final command are:
+
+```bash
+CARGO_TARGET_DIR=/tmp/wasm-cloud-platform-target \
+  bash scripts/vm/validate-ebpf-overhead.sh \
+    --state-file .prod-validation-single-host-state.json \
+    --requests 20000 \
+    --concurrency 32 \
+    --blocks 2 \
+    --rounds-per-block 2 \
+    --output /tmp/phase6-part7-ebpf-overhead-final-v3.json
+```
+
+The runner fixes its acceptance criteria before load begins: at most 5%
+throughput degradation; a p99 increase no larger than the greater of 5% or one
+millisecond; at most 15% more node/application CPU per 1,000 requests; at most
+25% more node/application context switches per 1,000 requests; at most 64 MiB
+additional peak RSS; and zero request failures, parse errors, kernel ring drops,
+or dispatcher saturation transitions. Active mode must also emit real eBPF
+events.
+
+Methodology:
+
+- each of two blocks restarted the same platform node first with the real eBPF
+  capabilities removed and then with all capabilities restored;
+- each mode ran two 20,000-request samples at concurrency 32, for four samples
+  and 80,000 requests per mode (160,000 requests total);
+- a dedicated `wasi:http/incoming-handler` canary ran on node 0, with an explicit
+  10,000 request/s application limit so platform rate limiting did not distort
+  the benchmark;
+- the runner sampled latency percentiles and throughput, aggregate node CPU/RSS
+  and task context switches from procfs, dedicated application-TID CPU/context
+  switches, and Prometheus eBPF event/loss/parser/queue counters; and
+- the modes were alternated rather than measured in one long pair to reduce
+  host thermal, cache, and background-load bias.
+
+Final results:
+
+| Measure | Userspace fallback | Active eBPF | Change / gate |
+|---|---:|---:|---:|
+| Median requests/s | 344.88 | 344.46 | 0.12% loss; <= 5% |
+| Median p99 | 120.00 ms | 121.12 ms | +1.11 ms; <= 6.00 ms allowance |
+| Node CPU / 1,000 requests | 3.821 s | 3.886 s | +1.72%; <= 15% |
+| Application-TID CPU / 1,000 requests | 0.743 s | 0.765 s | +2.95%; <= 15% |
+| Node context switches / 1,000 requests | 3,496.29 | 3,915.68 | +12.00%; <= 25% |
+| Application context switches / 1,000 requests | 594.45 | 596.34 | +0.32%; <= 25% |
+| Peak node RSS | 50.46 MiB | 59.08 MiB | +8.62 MiB; <= 64 MiB |
+| Failed requests | 0 / 80,000 | 0 / 80,000 | zero required |
+| eBPF events | 0 | 170,842 | active evidence present |
+| Parse errors / ring drops / queue saturations | 0 / 0 / 0 | 0 / 0 / 0 | zero required |
+
+Application CPU and context-switch accounting is exact for the dedicated WASI
+executor TID. Per-application RSS cannot be isolated while several applications
+share the `wasm-node` address space, so RSS is conservatively measured for the
+whole node process. Production requiring tenant-level memory attribution must
+give each workload a process/cgroup boundary; this is the same stronger boundary
+already recorded for buffered-write attribution.
+
+The run exposed and closed the following correctness/tooling gaps before the
+final measurement:
+
+1. Application rate-limit settings were persisted but not installed in the
+   node-local limiter. Deploy/config-update/remove now apply and clear overrides.
+   Per-IP buckets are keyed by application and IP, and config replacement clears
+   stale buckets, preventing cross-application throttling and stale limits.
+2. Procfs node context-switch sampling originally read only the process leader;
+   it now aggregates every task under `/proc/self/task`.
+3. Slow block-I/O set action-level `degraded_mode` permanently. Slow-I/O and
+   critical-memory causes are now tracked independently. One generation-fenced
+   recovery worker per node extends the 30-second quiet window for new events,
+   clears only the slow-I/O cause, and exits without leaking threads. A LOW
+   memory event clears only the memory-pressure cause. A 1,000-event unit burst
+   proves that only one worker is active.
+4. Hot-reloaded eBPF thresholds updated userspace dispatch state but not the
+   programs' kernel `CONFIG` maps. The loader now retains owned handles for every
+   monitor CONFIG map and updates all of them from the node config-sync loop.
+5. The canonical deployment script converted Cargo binary target hyphens to
+   underscores and rejected a successfully built artifact. Binary names are now
+   preserved; underscore normalization remains limited to library/cdylib output.
+
+The recovery path was proved in the final Firecracker guest at the established
+validation-only 1-ms slow-I/O threshold. A 256-MiB synchronous canary operation
+returned HTTP 200, produced 1,259 events before the immediate status sample, and
+set `degraded_mode=true`. Delayed filesystem writeback continued producing slow
+events, so the single worker correctly extended rather than prematurely cleared
+the incident. After the normal 50-ms threshold was restored, the count stabilized
+at 1,353 and the worker returned the node to `degraded_mode=false` after a real
+quiet window while eBPF remained active and parse errors stayed at zero. A
+separate 1-ns
+experiment correctly proved live kernel-map update but generated an unreasonable
+system-wide event storm and triggered the explicit `consumer_exited` degraded
+mode; operators must reject near-zero thresholds through deployment policy and
+must use the ring-pressure test rather than such a setting for capacity work.
+
+The corrected image was rolled through all three nodes. Final node-rootfs
+SHA-256 is
+`3f57e9c2bc0cc80d8c95d7e30e048cd8447c641098391e3dbf782f3a4f4da217`;
+kernel SHA-256 remains
+`7d6222139391f70bef3becb514916550c7b824e63a4e72ffa22485e6dab3e3d5`.
+After the final A/B run, node 0 was active again, the benchmark deployment and
+route were removed, NATS remained connected, all three node health checks were
+HTTP 200, and every node reported seven attached programs with no monitoring or
+action degradation. Final node PIDs were `162893`, `156195`, and `156244`; node
+0 reported zero active identities, tombstones, port bindings, kernel-map entries,
+or bpffs pins.
+Prometheus reported all 10 targets up and no alert was active.
+
+Final WSL gates pass: formatting; required native workspace all-target checking;
+workspace all-target Clippy with warnings denied; eBPF-feature node checking;
+126 eBPF-monitor tests; 13 focused proxy limiter tests; 29 node library and 71
+node binary tests; nine vm-testbed unit tests and three doc tests; explicit
+release `wasm32-wasip2` builds for `http-hello-component` and
+`wasi-grpc-echo`; changed-script syntax; and `cargo audit --deny warnings` over
+749 dependencies. Cargo still prints the separately tracked
+`proc-macro-error2 2.0.1` future-incompatibility notice.
+
+The environment remains live for operator inspection; teardown has not been run.
+
+### Part 8 record — OIDC application revalidation
+
+Status: **PASS on 2026-08-29 for the production-representative application
+gate, with the documented process/cgroup and capacity limits.** This completes
+the eight planned Phase 6 parts. It does not turn the single-host rehearsal into
+production approval: system-wide block-I/O scope, shared-process RSS, production
+capability reduction, and real storage sizing remain explicit operator gates.
+
+The canonical OIDC deployment workflow rebuilt the locked frontend and both
+`wasm32-wasip2` components, audited 101 npm packages with no reported
+vulnerability, provisioned PostgreSQL 17.11, applied migrations through V37,
+and completed the repeatable seed. HAProxy served the frontend and backend on
+the same public origin. Backend readiness returned:
+
+```json
+{"checks":{"database":"ok"},"status":"ready"}
+```
+
+The deployed identities were:
+
+```text
+frontend: oidc/oidc-admin-wasi:vd2d032b3c42d
+backend:  oidc/openid-connect-wasi:vb055dfbdf0ae
+```
+
+The focused Playwright Chromium gate used one worker against
+`http://localhost:8088`. Before the rolling restart, all six login/dashboard
+tests passed in 5.2 seconds: form rendering, invalid credentials, successful
+login and redirect, empty-field validation, authenticated navigation, and
+API-backed statistics. The same six tests passed after the rolling restart in
+4.9 seconds. This exercised frontend asset delivery, backend HTTP traffic,
+authentication, database reads/writes, and negative authentication behavior.
+
+Runtime evidence tied connections to `172.20.0.20:5432` to the exact versioned
+backend identity rather than the whole `wasm-node` process. Process-start and
+known-syscall records also carried the corresponding frontend/backend TIDs.
+Prometheus observed process/syscall, FD open/close, TCP
+connect/accept/send/receive/close, and block-I/O event classes. After the final
+browser run the three nodes collectively reported 6,081 processed events,
+including 598 FD opens, eight TCP connects, and two slow block-I/O completions,
+with zero parse errors, monitoring-degraded gauges, or dispatcher saturation
+transitions. This is application-path validation; Part 2 and Part 3 remain the
+deterministic content/accuracy proofs for every individual probe field.
+
+Nodes were replaced one at a time while PostgreSQL, NATS, HAProxy, and the
+observability services stayed running:
+
+```text
+local-test-node-0 -> Firecracker PID 171298
+local-test-node-1 -> Firecracker PID 171366
+local-test-node-2 -> Firecracker PID 171434
+```
+
+After each replacement, the node accepted requests, NATS was connected, all
+seven eBPF programs were attached, both OIDC applications were serving, public
+frontend delivery succeeded, and backend readiness remained `database=ok`.
+Final fresh application TIDs were node 0 backend `73` / frontend `75`, node 1
+frontend `74` / backend `76`, and node 2 frontend `74` / backend `76`. Each node
+reported exactly two entries in each of the five kernel identity maps, zero
+tombstones, zero stale port bindings, and zero bpffs pins. Reuse of a numeric TID
+on a different freshly booted VM is normal; identity freshness is established by
+the new Firecracker process, boot-relative registration timestamp, exact
+deployment ID, and clean map cardinality.
+
+Final service gates were 10/10 Prometheus targets up, no active alert, three
+nodes with `wasm_ebpf_active=1`, and
+`wasm_ebpf_monitoring_degraded=0`. All eBPF action degradation cleared after the
+normal slow-I/O quiet window. The platform nodes still report overall health as
+degraded because their disposable 2-GiB root filesystems have about 1,579 MiB
+free and cross the configured percentage-based low-disk warning. They remain
+startup-complete and accepting traffic, but production sizing must provide a
+separate durable data strategy, growth headroom, and an alert threshold aligned
+with the selected disk size rather than accepting this warning.
+
+Security note: the local development seeder prints disposable credentials and
+a generated API key. They were not copied into this record. Production seeding
+must use an external secret manager and must never emit secrets into build,
+migration, or CI logs.
 
 Post-change repository verification passed in WSL with
 `CARGO_TARGET_DIR=/tmp/wasm-cloud-platform-target`: formatting, the required
