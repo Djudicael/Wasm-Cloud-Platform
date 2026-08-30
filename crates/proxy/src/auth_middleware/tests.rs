@@ -300,10 +300,12 @@ fn test_tls_check_required_and_configured() {
 #[test]
 fn test_auth_metrics_unregistered() {
     let metrics = AuthMetrics::new_unregistered();
+    metrics.auth_enabled.set(1);
     metrics.auth_successes_total.inc();
     metrics.auth_failures_total.inc();
     metrics.rate_limited_total.inc();
 
+    assert_eq!(metrics.auth_enabled.get(), 1);
     assert_eq!(metrics.auth_successes_total.get(), 1);
     assert_eq!(metrics.auth_failures_total.get(), 1);
     assert_eq!(metrics.rate_limited_total.get(), 1);
@@ -313,16 +315,19 @@ fn test_auth_metrics_unregistered() {
 fn test_auth_metrics_registered() {
     let registry = Registry::new();
     let metrics = AuthMetrics::new(&registry);
+    metrics.auth_enabled.set(1);
     metrics.auth_successes_total.inc();
     metrics.auth_failures_total.inc_by(5);
     metrics.rate_limited_total.inc_by(3);
 
+    assert_eq!(metrics.auth_enabled.get(), 1);
     assert_eq!(metrics.auth_successes_total.get(), 1);
     assert_eq!(metrics.auth_failures_total.get(), 5);
     assert_eq!(metrics.rate_limited_total.get(), 3);
 
     let families = registry.gather();
     let names: Vec<&str> = families.iter().map(|f| f.name()).collect();
+    assert!(names.contains(&"wasm_admin_auth_enabled"));
     assert!(names.contains(&"wasm_admin_auth_successes_total"));
     assert!(names.contains(&"wasm_admin_auth_failures_total"));
     assert!(names.contains(&"wasm_admin_rate_limited_total"));

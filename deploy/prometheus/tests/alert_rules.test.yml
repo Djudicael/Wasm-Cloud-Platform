@@ -1,0 +1,181 @@
+rule_files:
+  - ../admin_auth_alerts.yml
+  - ../platform_resource_alerts.yml
+  - ../validation_alerts.yml
+  - ../wasi_policy_alerts.yml
+
+evaluation_interval: 1m
+
+tests:
+  - name: every alert expression crosses its firing threshold
+    interval: 1m
+    input_series:
+      - series: 'wasm_admin_auth_failures_total{instance="node-0",node="node-0"}'
+        values: '0+600x10'
+      - series: 'wasm_admin_auth_successes_total{instance="node-0",node="node-0"}'
+        values: '0x11'
+      - series: 'wasm_admin_rate_limited_total{instance="node-0",node="node-0"}'
+        values: '0+120x10'
+      - series: 'wasm_admin_auth_enabled{instance="node-0",node="node-0"}'
+        values: '0x11'
+      - series: 'wasm_node_disk_free_mb{instance="node-0",node="node-0"}'
+        values: '512x11'
+      - series: 'wasm_node_disk_free_inodes{instance="node-0",node="node-0"}'
+        values: '5000x11'
+      - series: 'wasm_node_memory_usage_percent{instance="node-0",node="node-0"}'
+        values: '90x11'
+      - series: 'process_open_fds{instance="node-0",node="node-0"}'
+        values: '90x11'
+      - series: 'process_max_fds{instance="node-0",node="node-0"}'
+        values: '100x11'
+      - series: 'up{instance="node-0",job="platform-node"}'
+        values: '0x11'
+      - series: 'up{instance="nats",job="nats"}'
+        values: '0x11'
+      - series: 'up{instance="postgresql",job="postgresql"}'
+        values: '0x11'
+      - series: 'up{instance="haproxy",job="haproxy"}'
+        values: '0x11'
+      - series: 'up{instance="otel",job="otel-collector"}'
+        values: '0x11'
+      - series: 'up{instance="tempo",job="tempo"}'
+        values: '0x11'
+      - series: 'wasm_node_app_healthy_instances{app="test/app:v1",instance="node-0",node="node-0"}'
+        values: '0x11'
+      - series: 'haproxy_backend_http_responses_total{code="2xx",proxy="test_backend"}'
+        values: '0+48x10'
+      - series: 'haproxy_backend_http_responses_total{code="5xx",proxy="test_backend"}'
+        values: '0+12x10'
+      - series: 'otelcol_exporter_send_failed_spans_total{exporter="otlp/tempo"}'
+        values: '0+1x10'
+      - series: 'otelcol_exporter_queue_size{exporter="otlp/tempo"}'
+        values: '90x11'
+      - series: 'otelcol_exporter_queue_capacity{exporter="otlp/tempo"}'
+        values: '100x11'
+      - series: 'wasm_ebpf_monitoring_degraded{instance="node-unavailable"}'
+        values: '1x11'
+      - series: 'wasm_ebpf_active{instance="node-unavailable"}'
+        values: '0x11'
+      - series: 'wasm_ebpf_monitoring_degraded{instance="node-incomplete"}'
+        values: '1x11'
+      - series: 'wasm_ebpf_active{instance="node-incomplete"}'
+        values: '1x11'
+      - series: 'wasm_ebpf_ring_buffer_dropped_events_total{instance="node-0"}'
+        values: '0+1x10'
+      - series: 'wasm_ebpf_dispatch_queue_saturations_total{instance="node-0"}'
+        values: '0+1x10'
+      - series: 'wasm_ebpf_ring_buffer_drop_counter_read_errors_total{instance="node-0"}'
+        values: '0+1x10'
+      - series: 'wasm_policy_connection_denied_total{instance="node-0"}'
+        values: '0+20x10'
+      - series: 'wasm_policy_fd_denied_total{instance="node-0"}'
+        values: '0+10x10'
+      - series: 'wasm_policy_egress_denied_total{instance="node-0"}'
+        values: '0+10x10'
+      - series: 'wasm_policy_dns_denied_total{instance="node-0"}'
+        values: '0+10x10'
+      - series: 'wasm_policy_bind_denied_total{instance="node-0"}'
+        values: '0+6x10'
+      - series: 'wasm_policy_fs_write_denied_total{instance="node-0"}'
+        values: '0+10x10'
+      - series: 'wasm_policy_active_outbound_connections{instance="node-0"}'
+        values: '501x11'
+      - series: 'wasm_policy_open_fds{instance="node-0"}'
+        values: '1001x11'
+    promql_expr_test:
+      - expr: count(rate(wasm_admin_auth_failures_total[5m]) > 5)
+        eval_time: 10m
+        exp_samples: [{labels: '{}', value: 1}]
+      - expr: count(rate(wasm_admin_auth_failures_total[1h]) > 0 and rate(wasm_admin_auth_successes_total[1h]) == 0)
+        eval_time: 10m
+        exp_samples: [{labels: '{}', value: 1}]
+      - expr: count(rate(wasm_admin_rate_limited_total[5m]) > 1)
+        eval_time: 10m
+        exp_samples: [{labels: '{}', value: 1}]
+      - expr: count(wasm_admin_auth_enabled == 0)
+        eval_time: 10m
+        exp_samples: [{labels: '{}', value: 1}]
+      - expr: count(rate(wasm_admin_auth_failures_total[30m]) > 0.1)
+        eval_time: 10m
+        exp_samples: [{labels: '{}', value: 1}]
+      - expr: count(wasm_node_disk_free_mb < 1024)
+        eval_time: 10m
+        exp_samples: [{labels: '{}', value: 1}]
+      - expr: count(wasm_node_disk_free_inodes < 10000)
+        eval_time: 10m
+        exp_samples: [{labels: '{}', value: 1}]
+      - expr: count(wasm_node_memory_usage_percent > 85)
+        eval_time: 10m
+        exp_samples: [{labels: '{}', value: 1}]
+      - expr: count(process_open_fds / process_max_fds > 0.80)
+        eval_time: 10m
+        exp_samples: [{labels: '{}', value: 1}]
+      - expr: count(up{job="platform-node"} == 0)
+        eval_time: 10m
+        exp_samples: [{labels: '{}', value: 1}]
+      - expr: count(wasm_node_app_healthy_instances < 1)
+        eval_time: 10m
+        exp_samples: [{labels: '{}', value: 1}]
+      - expr: count(up{job="nats"} == 0)
+        eval_time: 10m
+        exp_samples: [{labels: '{}', value: 1}]
+      - expr: count(up{job="postgresql"} == 0)
+        eval_time: 10m
+        exp_samples: [{labels: '{}', value: 1}]
+      - expr: count(up{job="haproxy"} == 0)
+        eval_time: 10m
+        exp_samples: [{labels: '{}', value: 1}]
+      - expr: count(up{job="otel-collector"} == 0)
+        eval_time: 10m
+        exp_samples: [{labels: '{}', value: 1}]
+      - expr: count(up{job="tempo"} == 0)
+        eval_time: 10m
+        exp_samples: [{labels: '{}', value: 1}]
+      - expr: count(sum by (proxy) (rate(haproxy_backend_http_responses_total{code=~"5.."}[5m])) / clamp_min(sum by (proxy) (rate(haproxy_backend_http_responses_total[5m])), 0.001) > 0.05)
+        eval_time: 10m
+        exp_samples: [{labels: '{}', value: 1}]
+      - expr: count(increase(otelcol_exporter_send_failed_spans_total[5m]) > 0 or increase(otelcol_exporter_enqueue_failed_spans_total[5m]) > 0)
+        eval_time: 10m
+        exp_samples: [{labels: '{}', value: 1}]
+      - expr: count(otelcol_exporter_queue_size / clamp_min(otelcol_exporter_queue_capacity, 1) > 0.80)
+        eval_time: 10m
+        exp_samples: [{labels: '{}', value: 1}]
+      - expr: count(wasm_ebpf_monitoring_degraded == 1 and wasm_ebpf_active == 0)
+        eval_time: 10m
+        exp_samples: [{labels: '{}', value: 1}]
+      - expr: count(wasm_ebpf_monitoring_degraded == 1 and wasm_ebpf_active == 1)
+        eval_time: 10m
+        exp_samples: [{labels: '{}', value: 1}]
+      - expr: count(increase(wasm_ebpf_ring_buffer_dropped_events_total[5m]) > 0)
+        eval_time: 10m
+        exp_samples: [{labels: '{}', value: 1}]
+      - expr: count(increase(wasm_ebpf_dispatch_queue_saturations_total[5m]) > 0)
+        eval_time: 10m
+        exp_samples: [{labels: '{}', value: 1}]
+      - expr: count(increase(wasm_ebpf_ring_buffer_drop_counter_read_errors_total[5m]) > 0)
+        eval_time: 10m
+        exp_samples: [{labels: '{}', value: 1}]
+      - expr: count(rate(wasm_policy_connection_denied_total[5m]) > (10 / 60))
+        eval_time: 10m
+        exp_samples: [{labels: '{}', value: 1}]
+      - expr: count(rate(wasm_policy_fd_denied_total[5m]) > (5 / 60))
+        eval_time: 10m
+        exp_samples: [{labels: '{}', value: 1}]
+      - expr: count(rate(wasm_policy_egress_denied_total[5m]) > (5 / 60))
+        eval_time: 10m
+        exp_samples: [{labels: '{}', value: 1}]
+      - expr: count(rate(wasm_policy_dns_denied_total[5m]) > (5 / 60))
+        eval_time: 10m
+        exp_samples: [{labels: '{}', value: 1}]
+      - expr: count(rate(wasm_policy_bind_denied_total[5m]) > (3 / 60))
+        eval_time: 10m
+        exp_samples: [{labels: '{}', value: 1}]
+      - expr: count(rate(wasm_policy_fs_write_denied_total[5m]) > (5 / 60))
+        eval_time: 10m
+        exp_samples: [{labels: '{}', value: 1}]
+      - expr: count(wasm_policy_active_outbound_connections > 500)
+        eval_time: 10m
+        exp_samples: [{labels: '{}', value: 1}]
+      - expr: count(wasm_policy_open_fds > 1000)
+        eval_time: 10m
+        exp_samples: [{labels: '{}', value: 1}]

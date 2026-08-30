@@ -1,0 +1,77 @@
+groups:
+  - name: local_production_validation
+    rules:
+      - alert: PlatformNodeDown
+        expr: up{job="platform-node"} == 0
+        for: 10s
+        labels: {severity: critical}
+        annotations: {summary: "Platform node scrape is unavailable"}
+      - alert: ApplicationNotReady
+        expr: wasm_node_app_healthy_instances < 1
+        for: 10s
+        labels: {severity: critical}
+        annotations: {summary: "A deployed application has no healthy instance"}
+      - alert: NatsExporterDown
+        expr: up{job="nats"} == 0
+        for: 10s
+        labels: {severity: critical}
+        annotations: {summary: "NATS monitoring is unavailable"}
+      - alert: PostgreSQLExporterDown
+        expr: up{job="postgresql"} == 0
+        for: 10s
+        labels: {severity: critical}
+        annotations: {summary: "PostgreSQL monitoring is unavailable"}
+      - alert: HAProxyExporterDown
+        expr: up{job="haproxy"} == 0
+        for: 10s
+        labels: {severity: warning}
+        annotations: {summary: "HAProxy metrics are unavailable"}
+      - alert: TelemetryCollectorDown
+        expr: up{job="otel-collector"} == 0
+        for: 10s
+        labels: {severity: warning}
+        annotations: {summary: "OpenTelemetry Collector is unavailable"}
+      - alert: TraceBackendDown
+        expr: up{job="tempo"} == 0
+        for: 10s
+        labels: {severity: warning}
+        annotations: {summary: "The local trace query backend is unavailable"}
+      - alert: PlatformHttpErrorRateHigh
+        expr: >-
+          sum by (proxy) (rate(haproxy_backend_http_responses_total{code=~"5.."}[5m]))
+          / clamp_min(sum by (proxy) (rate(haproxy_backend_http_responses_total[5m])), 0.001)
+          > 0.05
+        for: 2m
+        labels: {severity: warning}
+        annotations: {summary: "More than 5% of HAProxy backend responses are 5xx"}
+      - alert: TelemetryExportFailures
+        expr: increase(otelcol_exporter_send_failed_spans_total[5m]) > 0 or increase(otelcol_exporter_enqueue_failed_spans_total[5m]) > 0
+        labels: {severity: warning}
+        annotations: {summary: "The telemetry pipeline failed to queue or export spans"}
+      - alert: TelemetryQueueNearCapacity
+        expr: otelcol_exporter_queue_size / clamp_min(otelcol_exporter_queue_capacity, 1) > 0.80
+        for: 30s
+        labels: {severity: warning}
+        annotations: {summary: "The persistent telemetry export queue is near capacity"}
+      - alert: EbpfMonitoringUnavailable
+        expr: wasm_ebpf_monitoring_degraded == 1 and wasm_ebpf_active == 0
+        for: 10s
+        labels: {severity: warning}
+        annotations: {summary: "Kernel eBPF monitoring is unavailable; the application node may still be serving"}
+      - alert: EbpfMonitoringIncomplete
+        expr: wasm_ebpf_monitoring_degraded == 1 and wasm_ebpf_active == 1
+        for: 10s
+        labels: {severity: warning}
+        annotations: {summary: "One or more requested eBPF probes are unavailable"}
+      - alert: EbpfRingBufferEventsDropped
+        expr: increase(wasm_ebpf_ring_buffer_dropped_events_total[5m]) > 0
+        labels: {severity: warning}
+        annotations: {summary: "The kernel eBPF ring buffer dropped monitoring events"}
+      - alert: EbpfDispatchQueueSaturated
+        expr: increase(wasm_ebpf_dispatch_queue_saturations_total[5m]) > 0
+        labels: {severity: warning}
+        annotations: {summary: "The eBPF action-dispatch queue reached capacity"}
+      - alert: EbpfDropCounterUnavailable
+        expr: increase(wasm_ebpf_ring_buffer_drop_counter_read_errors_total[5m]) > 0
+        labels: {severity: warning}
+        annotations: {summary: "The node cannot read an eBPF ring-buffer drop counter"}

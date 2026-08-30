@@ -172,6 +172,7 @@ redacted artifact with the result.
 | Alert delivery and recovery | PASS (TELEMETRY FAILURE) | Stopping only the recorded Collector container caused `TelemetryCollectorDown` to progress through pending to firing and arrive in Alertmanager with stable cluster/environment/instance labels. Restarting the same container restored `up=1`; Alertmanager returned no active alerts and the OIDC database readiness remained ready |
 | OpenTelemetry pipeline | RECEIVER ONLY / NOT APPLICATION-INTEGRATED | The Collector accepts OTLP on loopback and exposes self-metrics, but effective node configuration has `otlp_endpoint=null`. No platform/app logs or traces reached it, so trace continuity, buffering, retry, sampling, and shutdown flushing remain unvalidated |
 | P10-03 telemetry remediation (2026-08-30) | LOCAL PASS WITH COLLECTOR-OUTAGE DURABILITY BOUNDARY | Node OTLP activation, W3C extraction/injection, exact deployment/status/latency fields, node identity, structured operational logs, separated audit envelopes, a 2048-batch disk-backed Collector queue, and backend/Collector outage alerts were implemented and exercised. Tempo trace `eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee` identifies `local-test-node-0`, environment `local-validation`, the exact OIDC backend, `/health/ready`, and HTTP 200. Trace `99999999999999999999999999999999` correlated the request with WASI TCP, PostgreSQL authentication, and `SELECT 1`. A Tempo outage queued and recovered trace `55555555555555555555555555555555`; OIDC stayed ready. A span created while the immediate Collector was stopped was not recovered because the node exporter has no WAL. Production therefore requires a supervised local Collector per host or an accepted-loss policy/node-side WAL, plus authenticated TLS and independently operated off-host retention. See the [runbook](../PRODUCTION_TELEMETRY_VALIDATION.md) and [evidence](evidence/2026-08-30-single-host/P10-03-telemetry/README.md) |
+| P10-04 alerting remediation (2026-08-30) | LOCAL PASS / PRODUCTION RECEIVER EVIDENCE PENDING | Native tools validate the live Prometheus and Alertmanager configurations and all four tracked rule files. Representative inputs cross all 32 expression thresholds; every expression succeeds against live Prometheus and is inactive in the healthy final state. The schema-10 rollout exposes explicit effective admin-auth state on all nodes. Three identical submissions for each of seven required operational categories produced exactly seven firing and seven resolved webhook deliveries with no duplicate. Six WASI policy thresholds were corrected from accidental per-second comparisons to their documented per-minute rates, an HAProxy 5xx ratio alert was added, and the state-scoped receiver now exits cleanly. Production still needs the authenticated operator receiver, owner/runbook metadata, inhibition/silence policy, HA Alertmanager, and provider delivery evidence. See the [runbook](../PRODUCTION_ALERTING_VALIDATION.md) and [evidence](evidence/2026-08-30-single-host/P10-04-alerting/README.md) |
 | PostgreSQL interruption/recovery | PASS | The exact recorded PostgreSQL Firecracker PID `289481` was paused with `SIGSTOP`. Within the bounded health window, HAProxy returned 503 for backend readiness, the independent frontend remained HTTP 200, the PostgreSQL exporter target went down, and `PostgreSQLExporterDown` fired in Alertmanager. The paused VMM stayed near 1% memory without CPU/log escalation. `SIGCONT` restored the same VM; readiness returned `database=ok`, `pg_up=1`, and the alert resolved without redeployment |
 | NATS interruption/recovery | PASS AFTER REMEDIATION | Pausing only recorded NATS Firecracker PID `223906` made the exporter target go down and fired `NatsExporterDown`; frontend and backend data-plane routes remained HTTP 200. The original nodes incorrectly reported NATS as healthy for more than 65 seconds because `NatsHealthWatcher` refreshed its timestamp without probing the server. A first canary using `Client::flush()` also failed because flush only confirms writes to the local TCP buffer. The final implementation performs a two-second request/reply to `$JS.API.INFO` every five seconds, proving both NATS and required JetStream responsiveness. After rolling the rebuilt image to all three nodes, a whole-cluster freeze made every node health endpoint return HTTP 503 within 12 seconds while both application routes stayed available. `SIGCONT` restored all node health endpoints to HTTP 200 and resolved the alert within 12 seconds without redeployment |
 | Platform-node rolling replacement | PASS | The corrected base image (`sha256:40e1e1c58430fc82e1ec775ed392e2b063e28a93aada85c0aa00e60902ebe7dc`) passed read-only `e2fsck`. Nodes 2, 1, and 0 were restarted sequentially from exact recorded state. Each node became healthy, reconstructed both OIDC deployments from desired state, and served traffic; the HAProxy backend route remained HTTP 200 throughout the observed post-restart gates and no alert remained active |
@@ -425,18 +426,25 @@ accepting this phase.
   promtool check rules deploy/prometheus/*.yml
   ```
 
-- [ ] Unit-test alert expressions using representative input series.
-- [ ] Query every alert expression against the live test metrics to catch stale
+- [x] Unit-test alert expressions using representative input series.
+- [x] Query every alert expression against the live test metrics to catch stale
       metric names and labels.
-- [ ] Trigger and receive alerts for node down, application not ready, database
+- [x] Trigger and receive alerts for node down, application not ready, database
       failure, NATS failure, elevated HTTP errors, disk pressure, and telemetry
-      exporter failure.
-- [ ] Confirm alerts resolve and notifications are deduplicated after recovery.
+      exporter failure. Destructive disk/error conditions use deterministic
+      Prometheus inputs plus synthetic receiver-safe delivery; earlier phases
+      retain the real node/NATS/PostgreSQL/telemetry fault evidence.
+- [x] Confirm alerts resolve and notifications are deduplicated after recovery.
 
-**NOT VALIDATED / PRODUCTION BLOCKER:** individual fault runs proved many alert
-firing and resolution paths, but the complete rule set lacks representative
-`promtool` unit inputs, an every-expression live query audit, notification
-receipt, and deduplication evidence.
+**LOCAL PASS ON 2026-08-30:** all 32 expressions have deterministic positive
+inputs, every loaded expression succeeds against live metrics, all always-present
+source metrics exist, and the local receiver proved firing, resolution, and
+deduplication for every required operational category. Three conditional counter
+vectors correctly have no series until their first fault. The remaining
+production boundary is operator integration: authenticated receiver credentials,
+real on-call ownership/runbooks, inhibition and silence policy, Alertmanager HA,
+and provider-side delivery evidence. Repeatable commands are in
+[`PRODUCTION_ALERTING_VALIDATION.md`](../PRODUCTION_ALERTING_VALIDATION.md).
 
 ## Phase 5: logs, traces, and audit records
 

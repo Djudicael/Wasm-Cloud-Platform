@@ -2225,6 +2225,9 @@ async fn main() -> anyhow::Result<()> {
     let auth_metrics = Arc::new(proxy::auth_middleware::AuthMetrics::new(
         &prom_metrics.registry,
     ));
+    auth_metrics
+        .auth_enabled
+        .set(i64::from(effective_auth_config.enabled));
     let admin_rate_limiter = Arc::new(proxy::auth_middleware::AdminRateLimiter::new(
         effective_auth_config.rate_limit_per_second,
         effective_auth_config.rate_limit_burst,

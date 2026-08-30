@@ -123,9 +123,10 @@ except BaseException:
 PY
 fi
 
-mkdir -p "$runtime_dir/rules" "$runtime_dir/otel/storage" \
+mkdir -p "$runtime_dir/rules" "$runtime_dir/notifications" "$runtime_dir/otel/storage" \
   "$runtime_dir/otel/export" "$runtime_dir/tempo/wal" "$runtime_dir/tempo/blocks"
 chmod 700 "$runtime_root" "$runtime_dir"
+chmod 700 "$runtime_dir/notifications"
 chmod 700 "$runtime_dir/otel" "$runtime_dir/otel/storage" \
   "$runtime_dir/otel/export" "$runtime_dir/tempo" \
   "$runtime_dir/tempo/wal" "$runtime_dir/tempo/blocks"
@@ -137,80 +138,9 @@ EOF
 chmod 600 "$runtime_dir/metrics-token" "$runtime_dir/postgres.env"
 cp deploy/prometheus/admin_auth_alerts.yml \
   deploy/prometheus/platform_resource_alerts.yml \
+  deploy/prometheus/validation_alerts.yml \
   deploy/prometheus/wasi_policy_alerts.yml \
   "$runtime_dir/rules/"
-
-cat > "$runtime_dir/rules/validation-alerts.yml" <<'EOF'
-groups:
-  - name: local_production_validation
-    rules:
-      - alert: PlatformNodeDown
-        expr: up{job="platform-node"} == 0
-        for: 10s
-        labels: {severity: critical}
-        annotations: {summary: "Platform node scrape is unavailable"}
-      - alert: ApplicationNotReady
-        expr: wasm_node_app_healthy_instances < 1
-        for: 10s
-        labels: {severity: critical}
-        annotations: {summary: "A deployed application has no healthy instance"}
-      - alert: NatsExporterDown
-        expr: up{job="nats"} == 0
-        for: 10s
-        labels: {severity: critical}
-        annotations: {summary: "NATS monitoring is unavailable"}
-      - alert: PostgreSQLExporterDown
-        expr: up{job="postgresql"} == 0
-        for: 10s
-        labels: {severity: critical}
-        annotations: {summary: "PostgreSQL monitoring is unavailable"}
-      - alert: HAProxyExporterDown
-        expr: up{job="haproxy"} == 0
-        for: 10s
-        labels: {severity: warning}
-        annotations: {summary: "HAProxy metrics are unavailable"}
-      - alert: TelemetryCollectorDown
-        expr: up{job="otel-collector"} == 0
-        for: 10s
-        labels: {severity: warning}
-        annotations: {summary: "OpenTelemetry Collector is unavailable"}
-      - alert: TraceBackendDown
-        expr: up{job="tempo"} == 0
-        for: 10s
-        labels: {severity: warning}
-        annotations: {summary: "The local trace query backend is unavailable"}
-      - alert: TelemetryExportFailures
-        expr: increase(otelcol_exporter_send_failed_spans_total[5m]) > 0 or increase(otelcol_exporter_enqueue_failed_spans_total[5m]) > 0
-        labels: {severity: warning}
-        annotations: {summary: "The telemetry pipeline failed to queue or export spans"}
-      - alert: TelemetryQueueNearCapacity
-        expr: otelcol_exporter_queue_size / clamp_min(otelcol_exporter_queue_capacity, 1) > 0.80
-        for: 30s
-        labels: {severity: warning}
-        annotations: {summary: "The persistent telemetry export queue is near capacity"}
-      - alert: EbpfMonitoringUnavailable
-        expr: wasm_ebpf_monitoring_degraded == 1 and wasm_ebpf_active == 0
-        for: 10s
-        labels: {severity: warning}
-        annotations: {summary: "Kernel eBPF monitoring is unavailable; the application node may still be serving"}
-      - alert: EbpfMonitoringIncomplete
-        expr: wasm_ebpf_monitoring_degraded == 1 and wasm_ebpf_active == 1
-        for: 10s
-        labels: {severity: warning}
-        annotations: {summary: "One or more requested eBPF probes are unavailable"}
-      - alert: EbpfRingBufferEventsDropped
-        expr: increase(wasm_ebpf_ring_buffer_dropped_events_total[5m]) > 0
-        labels: {severity: warning}
-        annotations: {summary: "The kernel eBPF ring buffer dropped monitoring events"}
-      - alert: EbpfDispatchQueueSaturated
-        expr: increase(wasm_ebpf_dispatch_queue_saturations_total[5m]) > 0
-        labels: {severity: warning}
-        annotations: {summary: "The eBPF action-dispatch queue reached capacity"}
-      - alert: EbpfDropCounterUnavailable
-        expr: increase(wasm_ebpf_ring_buffer_drop_counter_read_errors_total[5m]) > 0
-        labels: {severity: warning}
-        annotations: {summary: "The node cannot read an eBPF ring-buffer drop counter"}
-EOF
 
 cat > "$runtime_dir/alertmanager.yml" <<'EOF'
 route:
@@ -221,6 +151,9 @@ route:
   repeat_interval: 1h
 receivers:
   - name: local-validation
+    webhook_configs:
+      - url: http://127.0.0.1:19093/alerts
+        send_resolved: true
 EOF
 
 cat > "$runtime_dir/tempo.yml" <<'EOF'
@@ -456,6 +389,11 @@ run_container postgres quay.io/prometheuscommunity/postgres-exporter:v0.17.1 \
   --env-file "$runtime_dir/postgres.env" -- --web.listen-address=127.0.0.1:9187
 run_container host quay.io/prometheus/node-exporter:v1.9.1 \
   --pid host -v /:/host:ro,rslave -- --path.rootfs=/host --web.listen-address=127.0.0.1:9100
+run_container alert-receiver docker.io/library/python:3.13-alpine \
+  --user 0 \
+  -v "$repo_root/scripts/vm/alert-receiver.py:/app/alert-receiver.py:ro" \
+  -v "$runtime_dir/notifications:/data" \
+  -- python3 /app/alert-receiver.py
 run_container alertmanager docker.io/prom/alertmanager:v0.28.1 \
   --user 0 \
   -v "$runtime_dir/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro" \
@@ -492,6 +430,7 @@ deadline=$((SECONDS + 60))
 while ((SECONDS < deadline)); do
   if curl -fsS http://127.0.0.1:9095/-/ready >/dev/null \
     && curl -fsS http://127.0.0.1:9093/-/ready >/dev/null \
+    && curl -fsS http://127.0.0.1:19093/health >/dev/null \
     && curl -fsS http://127.0.0.1:7777/metrics >/dev/null \
     && curl -fsS http://127.0.0.1:9187/metrics >/dev/null \
     && curl -fsS http://127.0.0.1:9100/metrics >/dev/null \
@@ -503,6 +442,7 @@ while ((SECONDS < deadline)); do
 done
 curl -fsS http://127.0.0.1:9095/-/ready >/dev/null || { echo "Prometheus did not become ready." >&2; exit 1; }
 curl -fsS http://127.0.0.1:9093/-/ready >/dev/null || { echo "Alertmanager did not become ready." >&2; exit 1; }
+curl -fsS http://127.0.0.1:19093/health >/dev/null || { echo "Alert receiver did not become ready." >&2; exit 1; }
 curl -fsS http://127.0.0.1:7777/metrics >/dev/null || { echo "NATS exporter did not become ready." >&2; exit 1; }
 curl -fsS http://127.0.0.1:9187/metrics >/dev/null || { echo "PostgreSQL exporter did not become ready." >&2; exit 1; }
 curl -fsS http://127.0.0.1:9100/metrics >/dev/null || { echo "Host exporter did not become ready." >&2; exit 1; }
@@ -530,6 +470,8 @@ state["observability"] = {
     "containers": containers,
     "prometheus": "http://127.0.0.1:9095",
     "alertmanager": "http://127.0.0.1:9093",
+    "alert_receiver": "http://127.0.0.1:19093",
+    "alert_notification_log": os.path.join(runtime_dir, "notifications", "notifications.jsonl"),
     "otel_grpc": "http://172.20.0.1:4317",
     "tempo": "http://127.0.0.1:3200",
     "operational_log": os.path.join(runtime_dir, "otel", "export", "operational.json"),

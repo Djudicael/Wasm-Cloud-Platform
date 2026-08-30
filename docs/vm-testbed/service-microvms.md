@@ -113,11 +113,17 @@ bash scripts/vm/provision-observability.sh \
 ```
 
 The companion service state records the exact Collector, Tempo, Prometheus,
-Alertmanager, and exporter container identities plus the runtime directory and
+Alertmanager, local alert-receiver, and exporter container identities plus the runtime directory and
 separated operational/audit log paths. The Collector receives node OTLP over
 the private test bridge, tails the exact recorded node serial logs, and uses a
 bounded disk-backed queue when the trace backend is unavailable. Local export
 files are created with mode 0600.
+
+Run `scripts/vm/validate-alerting.sh --state-file <state>` to check all tracked
+expressions against live metrics and exercise the local receiver. Its protected
+notification JSONL path is recorded in companion state. This receiver exists
+only to prove delivery, resolution, and deduplication; replace it with the
+operator's authenticated on-call destination in production.
 
 This fixture validates the platform integration; it is not a production
 telemetry deployment. A production host needs a supervised local agent,

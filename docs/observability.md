@@ -643,123 +643,41 @@ STARTING → HEALTHY → DEGRADED → UNHEALTHY
 
 ## Alerting
 
-### Prometheus Alertmanager rules
+### Prometheus and Alertmanager rules
 
-```yaml
-groups:
-  - name: wasm-platform
-    rules:
-      # Node health
-      - alert: WasmNodeDown
-        expr: up{job="wasm-nodes"} == 0
-        for: 1m
-        labels:
-          severity: critical
-        annotations:
-          summary: "Wasm node {{ $labels.instance }} is down"
+The deployed rule definitions are the four YAML files under
+`deploy/prometheus/`. Do not copy alert names or metric names from an
+illustrative dashboard: the tracked files are the contract.
 
-      # High error rate
-      - alert: WasmHighErrorRate
-        expr: |
-          sum(rate(wasm_proxy_requests_total{status=~"5.."}[5m])) by (app_id)
-          /
-          sum(rate(wasm_proxy_requests_total[5m])) by (app_id)
-          > 0.1
-        for: 2m
-        labels:
-          severity: warning
-        annotations:
-          summary: "High error rate for {{ $labels.app_id }}"
+The current set contains 32 rules covering admin authentication, platform
+resources and availability, HAProxy HTTP errors, telemetry, eBPF degraded/loss
+modes, and WASI policy enforcement. All expressions have representative
+threshold inputs in `deploy/prometheus/tests/alert_rules.test.yml`.
 
-      # Rate limiting
-      - alert: WasmRateLimitHit
-        expr: rate(wasm_rate_limit_rejections_total[5m]) > 100
-        for: 1m
-        labels:
-          severity: warning
-        annotations:
-          summary: "Rate limit heavily hit for {{ $labels.app_id }}"
+```bash
+podman run --rm --entrypoint /bin/promtool \
+  -v "$PWD/deploy/prometheus:/rules:ro" -w /rules \
+  docker.io/prom/prometheus:v3.5.0 \
+  test rules tests/alert_rules.test.yml
 
-      # Circuit breaker open
-      - alert: WasmCircuitBreakerOpen
-        expr: wasm_gateway_circuits_open > 0
-        for: 30s
-        labels:
-          severity: warning
-        annotations:
-          summary: "Circuit breaker open for {{ $labels.app_id }}"
-
-      # Instance crashes
-      - alert: WasmInstanceTraps
-        expr: rate(wasm_supervisor_kill_total{reason="trap"}[5m]) > 0.1
-        for: 1m
-        labels:
-          severity: critical
-        annotations:
-          summary: "Instances of {{ $labels.app_id }} are crashing"
-
-      # eBPF alerts
-      - alert: WasmEbpfSecurityIncident
-        expr: rate(wasm_ebpf_security_violations_total[5m]) > 0
-        for: 0s
-        labels:
-          severity: critical
-        annotations:
-          summary: "Security incident detected on {{ $labels.node_id }}"
-
-      - alert: WasmEbpfMemoryPressure
-        expr: wasm_ebpf_memory_pressure >= 2
-        for: 1m
-        labels:
-          severity: warning
-        annotations:
-          summary: "Memory pressure on {{ $labels.node_id }}"
-
-      # Resource exhaustion
-      - alert: WasmDiskFull
-        expr: |
-          node_filesystem_avail_bytes{mountpoint="/var/lib/wasm-node"}
-          /
-          node_filesystem_size_bytes{mountpoint="/var/lib/wasm-node"}
-          < 0.1
-        for: 5m
-        labels:
-          severity: critical
-        annotations:
-          summary: "Disk almost full on {{ $labels.instance }}"
-
-      # NATS
-      - alert: WasmNatsDisconnected
-        expr: wasm_nats_connected == 0
-        for: 1m
-        labels:
-          severity: critical
-        annotations:
-          summary: "NATS disconnected on {{ $labels.node_id }}"
+bash scripts/vm/validate-alerting.sh \
+  --state-file .prod-validation-single-host-state.json
 ```
+
+The live validator checks both configurations, inventories all 32 rules,
+executes every expression against Prometheus, verifies always-present source
+metrics, and proves Alertmanager firing, resolution, and deduplication through
+the state-scoped test receiver. See the
+[production alerting validation runbook](../INFRA_IMPL/process/PRODUCTION_ALERTING_VALIDATION.md).
 
 ### Notification channels
 
-```yaml
-# alertmanager.yml
-route:
-  group_by: ['alertname', 'app_id', 'node_id']
-  group_wait: 30s
-  group_interval: 5m
-  repeat_interval: 12h
-  receiver: 'platform-ops'
-
-receivers:
-  - name: 'platform-ops'
-    slack_configs:
-      - api_url: 'https://hooks.slack.com/services/xxx'
-        channel: '#platform-alerts'
-        title: '{{ .GroupLabels.alertname }}'
-        text: '{{ range .Alerts }}{{ .Annotations.summary }}{{ end }}'
-    pagerduty_configs:
-      - service_key: '<pagerduty-key>'
-        severity: '{{ .CommonLabels.severity }}'
-```
+The local validation receiver writes protected JSONL evidence and is never a
+production destination. Production must configure an authenticated operator
+receiver such as PagerDuty, Opsgenie, a ticketing system, or an internal webhook.
+Keep credentials outside the configuration file, use TLS, assign each alert an
+owner and reachable runbook, and test grouping, inhibition, repetition, firing,
+resolution, and receiver failure in staging.
 
 ---
 
