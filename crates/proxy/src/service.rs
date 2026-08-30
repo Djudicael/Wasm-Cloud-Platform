@@ -41,6 +41,8 @@ pub struct RequestCtx {
     pub matched_prefix: Option<String>,
     /// Trace ID extracted from the incoming `traceparent` header, or generated.
     pub trace_id: Option<String>,
+    /// Server span covering the complete Pingora request lifecycle.
+    pub request_span: tracing::Span,
 
     // ── New gateway fields ──────────────────────────────────────
     /// Gateway configuration for the matched route.
@@ -96,6 +98,7 @@ impl ProxyHttp for WasmProxy {
             strip_prefix: false,
             matched_prefix: None,
             trace_id: None,
+            request_span: tracing::Span::none(),
             route_config: None,
             user_identity: None,
         }

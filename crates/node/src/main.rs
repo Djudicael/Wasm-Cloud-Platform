@@ -1295,7 +1295,19 @@ async fn main() -> anyhow::Result<()> {
         include_source: cfg!(debug_assertions),
     };
 
-    let log_reload_handle = common::logging::init_logging(&logging_config);
+    let (log_reload_handle, _tracing_guard) =
+        if let Some(endpoint) = config.logging.otlp_endpoint.as_deref() {
+            let (reload, guard) = metrics::tracing_setup::init_tracing(
+                "wasm-node",
+                &config.node.node_id,
+                endpoint,
+                &logging_config,
+            )
+            .map_err(anyhow::Error::msg)?;
+            (reload, Some(guard))
+        } else {
+            (common::logging::init_logging(&logging_config), None)
+        };
 
     info!(node_id = %config.node.node_id, "wasm-node starting");
     info!(

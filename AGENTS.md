@@ -29,7 +29,7 @@ Repository-scoped Open Agent Skills live in `.agents/skills` and are intended fo
   its test credentials remain in the recorded state-scoped runtime directory.
   Follow `docs/vm-testbed/service-microvms.md` for sensitive-artifact handling,
   idempotent reprovisioning, scope boundaries, and teardown behavior.
-- Production-validation rehearsals can add the disposable Podman observability stack with `scripts/vm/provision-observability.sh`; its exact container identities and runtime directory are recorded in the companion service state and removed by the canonical teardown script.
+- Production-validation rehearsals can add the disposable Podman observability stack with `scripts/vm/provision-observability.sh`; its exact container identities and runtime directory are recorded in the companion service state and removed by the canonical teardown script. Follow `INFRA_IMPL/process/PRODUCTION_TELEMETRY_VALIDATION.md` for the trace/log/audit contract, outage tests, and the explicit Collector-outage durability boundary.
 - For the two-WASI OpenID Connect Hub rehearsal, use `scripts/vm/deploy-oidc-hub-test.sh`; it runs migrations and configures the recorded HAProxy with the required same-origin route split.
 - Use `$destroy-microvm-testbed` only after the user is finished testing. If interactive testing was requested, leave the environment running until teardown is explicitly requested.
 - The skills delegate operations to the canonical scripts under `scripts/vm/`. Use those scripts directly for human-driven automation.

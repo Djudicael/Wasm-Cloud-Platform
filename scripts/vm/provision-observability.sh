@@ -36,15 +36,23 @@ short_key=${state_key:0:12}
 runtime_root="${XDG_RUNTIME_DIR:-/tmp}/wasm-cloud-platform-observability-$(id -u)"
 runtime_dir="$runtime_root/$state_key"
 
-mapfile -t node_addrs < <(python3 - "$state_file" <<'PY'
+mapfile -t node_records < <(python3 - "$state_file" <<'PY'
 import json, sys
 with open(sys.argv[1], encoding="utf-8") as stream:
     state = json.load(stream)
 for node in state.get("nodes", []):
-    print(node["admin_addr"])
+    print(f'{node["id"]}\t{node["admin_addr"]}')
 PY
 )
-[[ ${#node_addrs[@]} -gt 0 ]] || { echo "No platform nodes recorded." >&2; exit 1; }
+[[ ${#node_records[@]} -gt 0 ]] || { echo "No platform nodes recorded." >&2; exit 1; }
+node_ids=()
+node_addrs=()
+for record in "${node_records[@]}"; do
+  IFS=$'\t' read -r node_id node_addr <<< "$record"
+  [[ "$node_id" =~ ^[A-Za-z0-9._-]+$ ]] || { echo "Unsafe node id in state: $node_id" >&2; exit 1; }
+  node_ids+=("$node_id")
+  node_addrs+=("$node_addr")
+done
 
 if python3 - "$services_file" <<'PY'
 import json, sys
@@ -115,8 +123,12 @@ except BaseException:
 PY
 fi
 
-mkdir -p "$runtime_dir/rules"
+mkdir -p "$runtime_dir/rules" "$runtime_dir/otel/storage" \
+  "$runtime_dir/otel/export" "$runtime_dir/tempo/wal" "$runtime_dir/tempo/blocks"
 chmod 700 "$runtime_root" "$runtime_dir"
+chmod 700 "$runtime_dir/otel" "$runtime_dir/otel/storage" \
+  "$runtime_dir/otel/export" "$runtime_dir/tempo" \
+  "$runtime_dir/tempo/wal" "$runtime_dir/tempo/blocks"
 
 printf '%s' "$metrics_token" > "$runtime_dir/metrics-token"
 cat > "$runtime_dir/postgres.env" <<'EOF'
@@ -162,6 +174,20 @@ groups:
         for: 10s
         labels: {severity: warning}
         annotations: {summary: "OpenTelemetry Collector is unavailable"}
+      - alert: TraceBackendDown
+        expr: up{job="tempo"} == 0
+        for: 10s
+        labels: {severity: warning}
+        annotations: {summary: "The local trace query backend is unavailable"}
+      - alert: TelemetryExportFailures
+        expr: increase(otelcol_exporter_send_failed_spans_total[5m]) > 0 or increase(otelcol_exporter_enqueue_failed_spans_total[5m]) > 0
+        labels: {severity: warning}
+        annotations: {summary: "The telemetry pipeline failed to queue or export spans"}
+      - alert: TelemetryQueueNearCapacity
+        expr: otelcol_exporter_queue_size / clamp_min(otelcol_exporter_queue_capacity, 1) > 0.80
+        for: 30s
+        labels: {severity: warning}
+        annotations: {summary: "The persistent telemetry export queue is near capacity"}
       - alert: EbpfMonitoringUnavailable
         expr: wasm_ebpf_monitoring_degraded == 1 and wasm_ebpf_active == 0
         for: 10s
@@ -197,18 +223,112 @@ receivers:
   - name: local-validation
 EOF
 
+cat > "$runtime_dir/tempo.yml" <<'EOF'
+server:
+  http_listen_address: 127.0.0.1
+  http_listen_port: 3200
+  grpc_listen_address: 127.0.0.1
+  grpc_listen_port: 14319
+distributor:
+  receivers:
+    otlp:
+      protocols:
+        grpc:
+          endpoint: 127.0.0.1:14317
+ingester:
+  max_block_duration: 1m
+compactor:
+  compaction:
+    block_retention: 1h
+storage:
+  trace:
+    backend: local
+    wal:
+      path: /var/tempo/wal
+    local:
+      path: /var/tempo/blocks
+usage_report:
+  reporting_enabled: false
+EOF
+
 cat > "$runtime_dir/otel-collector.yml" <<'EOF'
+extensions:
+  file_storage:
+    directory: /var/lib/otelcol/storage
+    create_directory: true
+    timeout: 1s
+    compaction:
+      directory: /var/lib/otelcol/storage
+      on_start: true
+      on_rebound: true
 receivers:
   otlp:
     protocols:
       grpc:
-        endpoint: 127.0.0.1:4317
+        endpoint: 172.20.0.1:4317
       http:
-        endpoint: 127.0.0.1:4318
+        endpoint: 172.20.0.1:4318
+  filelog/platform:
+    include: [/var/log/wcp/*.log]
+    start_at: end
+    storage: file_storage
+    operators:
+      - type: json_parser
+        if: 'body matches "^\\{"'
+processors:
+  batch:
+    send_batch_size: 256
+    timeout: 1s
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 192
+    spike_limit_mib: 48
+  resource/local_validation:
+    attributes:
+      - key: deployment.environment
+        value: local-validation
+        action: upsert
+  filter/operational:
+    error_mode: ignore
+    logs:
+      log_record:
+        - 'attributes["target"] == "audit"'
+  filter/audit:
+    error_mode: ignore
+    logs:
+      log_record:
+        - 'attributes["target"] != "audit"'
 exporters:
-  debug:
-    verbosity: basic
+  otlp/tempo:
+    endpoint: 127.0.0.1:14317
+    tls:
+      insecure: true
+    sending_queue:
+      enabled: true
+      num_consumers: 2
+      queue_size: 2048
+      storage: file_storage
+    retry_on_failure:
+      enabled: true
+      initial_interval: 1s
+      max_interval: 10s
+      max_elapsed_time: 0s
+  file/operational:
+    path: /var/lib/otelcol/export/operational.json
+    rotation:
+      max_megabytes: 20
+      max_days: 1
+      max_backups: 5
+    flush_interval: 1s
+  file/audit:
+    path: /var/lib/otelcol/export/audit.json
+    rotation:
+      max_megabytes: 20
+      max_days: 7
+      max_backups: 10
+    flush_interval: 1s
 service:
+  extensions: [file_storage]
   telemetry:
     metrics:
       level: detailed
@@ -221,13 +341,16 @@ service:
   pipelines:
     traces:
       receivers: [otlp]
-      exporters: [debug]
-    metrics:
-      receivers: [otlp]
-      exporters: [debug]
-    logs:
-      receivers: [otlp]
-      exporters: [debug]
+      processors: [memory_limiter, resource/local_validation, batch]
+      exporters: [otlp/tempo]
+    logs/operational:
+      receivers: [filelog/platform, otlp]
+      processors: [memory_limiter, resource/local_validation, filter/operational, batch]
+      exporters: [file/operational]
+    logs/audit:
+      receivers: [filelog/platform, otlp]
+      processors: [memory_limiter, resource/local_validation, filter/audit, batch]
+      exporters: [file/audit]
 EOF
 
 {
@@ -279,6 +402,10 @@ EOF
     static_configs:
       - targets: [127.0.0.1:8888]
         labels: {role: telemetry}
+  - job_name: tempo
+    static_configs:
+      - targets: [127.0.0.1:3200]
+        labels: {role: tracing}
   - job_name: prometheus
     static_configs:
       - targets: [127.0.0.1:9095]
@@ -289,7 +416,8 @@ EOF
         labels: {role: alerting}
 EOF
 } > "$runtime_dir/prometheus.yml"
-chmod 600 "$runtime_dir/prometheus.yml" "$runtime_dir/alertmanager.yml" "$runtime_dir/otel-collector.yml"
+chmod 600 "$runtime_dir/prometheus.yml" "$runtime_dir/alertmanager.yml" \
+  "$runtime_dir/otel-collector.yml" "$runtime_dir/tempo.yml"
 
 containers=()
 cleanup_failed_start() {
@@ -332,9 +460,23 @@ run_container alertmanager docker.io/prom/alertmanager:v0.28.1 \
   --user 0 \
   -v "$runtime_dir/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro" \
   -- --config.file=/etc/alertmanager/alertmanager.yml --web.listen-address=127.0.0.1:9093
-run_container otel docker.io/otel/opentelemetry-collector-contrib:0.130.1 \
+run_container tempo docker.io/grafana/tempo:2.10.7 \
   --user 0 \
-  -v "$runtime_dir/otel-collector.yml:/etc/otelcol-contrib/config.yaml:ro" \
+  -v "$runtime_dir/tempo.yml:/etc/tempo.yml:ro" \
+  -v "$runtime_dir/tempo:/var/tempo" \
+  -- --config.file=/etc/tempo.yml
+otel_mounts=(
+  --user 0
+  -v "$runtime_dir/otel-collector.yml:/etc/otelcol-contrib/config.yaml:ro"
+  -v "$runtime_dir/otel:/var/lib/otelcol"
+)
+for node_id in "${node_ids[@]}"; do
+  serial_log="/tmp/vm-testbed-${node_id}/serial.log"
+  [[ -f "$serial_log" ]] || { echo "Missing serial log for $node_id: $serial_log" >&2; exit 1; }
+  otel_mounts+=(-v "$serial_log:/var/log/wcp/${node_id}.log:ro")
+done
+run_container otel docker.io/otel/opentelemetry-collector-contrib:0.130.1 \
+  "${otel_mounts[@]}" \
   -- --config=/etc/otelcol-contrib/config.yaml
 run_container prometheus docker.io/prom/prometheus:v3.5.0 \
   --user 0 \
@@ -353,6 +495,7 @@ while ((SECONDS < deadline)); do
     && curl -fsS http://127.0.0.1:7777/metrics >/dev/null \
     && curl -fsS http://127.0.0.1:9187/metrics >/dev/null \
     && curl -fsS http://127.0.0.1:9100/metrics >/dev/null \
+    && curl -fsS http://127.0.0.1:3200/ready >/dev/null \
     && curl -fsS http://127.0.0.1:8888/metrics >/dev/null; then
     break
   fi
@@ -363,6 +506,7 @@ curl -fsS http://127.0.0.1:9093/-/ready >/dev/null || { echo "Alertmanager did n
 curl -fsS http://127.0.0.1:7777/metrics >/dev/null || { echo "NATS exporter did not become ready." >&2; exit 1; }
 curl -fsS http://127.0.0.1:9187/metrics >/dev/null || { echo "PostgreSQL exporter did not become ready." >&2; exit 1; }
 curl -fsS http://127.0.0.1:9100/metrics >/dev/null || { echo "Host exporter did not become ready." >&2; exit 1; }
+curl -fsS http://127.0.0.1:3200/ready >/dev/null || { echo "Tempo did not become ready." >&2; exit 1; }
 curl -fsS http://127.0.0.1:8888/metrics >/dev/null || { echo "OpenTelemetry Collector metrics did not become ready." >&2; exit 1; }
 
 python3 - "$services_file" "$runtime_dir" "$state_key" "${containers[@]}" <<'PY'
@@ -386,7 +530,10 @@ state["observability"] = {
     "containers": containers,
     "prometheus": "http://127.0.0.1:9095",
     "alertmanager": "http://127.0.0.1:9093",
-    "otel_grpc": "http://127.0.0.1:4317",
+    "otel_grpc": "http://172.20.0.1:4317",
+    "tempo": "http://127.0.0.1:3200",
+    "operational_log": os.path.join(runtime_dir, "otel", "export", "operational.json"),
+    "audit_log": os.path.join(runtime_dir, "otel", "export", "audit.json"),
 }
 directory = os.path.dirname(path)
 fd, temporary = tempfile.mkstemp(prefix=".services-", dir=directory, text=True)
@@ -406,4 +553,5 @@ PY
 trap - EXIT
 echo "Prometheus ready at http://127.0.0.1:9095"
 echo "Alertmanager ready at http://127.0.0.1:9093"
-echo "OpenTelemetry OTLP receiver ready at http://127.0.0.1:4317"
+echo "OpenTelemetry OTLP receiver ready for microVMs at http://172.20.0.1:4317"
+echo "Tempo query API ready at http://127.0.0.1:3200"

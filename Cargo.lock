@@ -4982,6 +4982,7 @@ dependencies = [
  "http 1.5.0",
  "jsonwebtoken",
  "messaging",
+ "opentelemetry",
  "pingora",
  "pingora-core",
  "pingora-load-balancing",
@@ -4997,6 +4998,7 @@ dependencies = [
  "tokio",
  "tower",
  "tracing",
+ "tracing-opentelemetry",
 ]
 
 [[package]]

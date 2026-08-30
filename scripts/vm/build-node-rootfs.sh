@@ -159,7 +159,7 @@ EOF
 # Keep a guest-readable schema marker so provisioning can reject legacy cached
 # images before starting Firecracker. Bump this value whenever the early-boot
 # contract (PID 1, kernel arguments, or network bootstrap) changes.
-echo "6" > "$ROOTFS_DIR/etc/wasm-node/image-schema-version"
+echo "9" > "$ROOTFS_DIR/etc/wasm-node/image-schema-version"
 
 # Set hostname
 echo "wasm-node-vm" > "$ROOTFS_DIR/etc/hostname"
@@ -177,12 +177,16 @@ if [ -n "$CONFIG" ]; then
     NATS_URL=$(echo "$CONFIG" | sed -n 's/.*"nats_url":"\([^"]*\)".*/\1/p')
     IP_ADDRESS=$(echo "$CONFIG" | sed -n 's/.*"ip":"\([^"]*\)".*/\1/p')
     GATEWAY=$(echo "$CONFIG" | sed -n 's/.*"gateway":"\([^"]*\)".*/\1/p')
+    OTLP_ENDPOINT=$(echo "$CONFIG" | sed -n 's/.*"otlp_endpoint":"\([^"]*\)".*/\1/p')
     if [ -n "$NODE_ID" ]; then
         sed -i "s|node_id = .*|node_id = \"$NODE_ID\"|" /etc/wasm-node/config.toml
         hostname "$NODE_ID"
     fi
     if [ -n "$NATS_URL" ]; then
         sed -i "s|url = .*|url = \"$NATS_URL\"|" /etc/wasm-node/config.toml
+    fi
+    if [ -n "$OTLP_ENDPOINT" ]; then
+        sed -i "/^\[logging\]$/a otlp_endpoint = \"$OTLP_ENDPOINT\"" /etc/wasm-node/config.toml
     fi
     if [ -n "$IP_ADDRESS" ] && [ -n "$GATEWAY" ]; then
         ip address flush dev eth0 scope global
@@ -215,6 +219,7 @@ GATEWAY=172.20.0.1
 EBPF_TEST_FAULT=
 EBPF_REQUIRED=0
 EBPF_DROP_CAPABILITIES=0
+OTLP_ENDPOINT=
 for ARGUMENT in $(cat /proc/cmdline); do
     case "$ARGUMENT" in
         wcp.node_id=*) NODE_ID=${ARGUMENT#wcp.node_id=} ;;
@@ -223,6 +228,7 @@ for ARGUMENT in $(cat /proc/cmdline); do
         wcp.ebpf_test_fault=*) EBPF_TEST_FAULT=${ARGUMENT#wcp.ebpf_test_fault=} ;;
         wcp.ebpf_required=1) EBPF_REQUIRED=1 ;;
         wcp.ebpf_drop_capabilities=1) EBPF_DROP_CAPABILITIES=1 ;;
+        wcp.otlp_endpoint=*) OTLP_ENDPOINT=${ARGUMENT#wcp.otlp_endpoint=} ;;
     esac
 done
 case "$EBPF_TEST_FAULT" in
@@ -237,6 +243,9 @@ if [ "$EBPF_REQUIRED" -eq 1 ]; then
 fi
 if [ -n "$EBPF_TEST_FAULT" ]; then
     export WASM_EBPF_TEST_FAULT="$EBPF_TEST_FAULT"
+fi
+if [ -n "$OTLP_ENDPOINT" ]; then
+    export WASM_NODE_LOGGING_OTLP_ENDPOINT="$OTLP_ENDPOINT"
 fi
 if [ -n "$IP_ADDRESS" ]; then
     ip address flush dev eth0 scope global

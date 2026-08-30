@@ -171,6 +171,7 @@ redacted artifact with the result.
 | Prometheus configuration/rules | PASS WITH ONE SEMANTIC GAP | `promtool check config` passes with three rule files and 19 rules; live rule evaluation health is `ok`. The existing `AdminAuthDisabled` expression depends on `process_start_time_seconds`, which is not emitted by platform-node metrics and therefore cannot prove auth mode; add an explicit auth-enabled gauge before production acceptance |
 | Alert delivery and recovery | PASS (TELEMETRY FAILURE) | Stopping only the recorded Collector container caused `TelemetryCollectorDown` to progress through pending to firing and arrive in Alertmanager with stable cluster/environment/instance labels. Restarting the same container restored `up=1`; Alertmanager returned no active alerts and the OIDC database readiness remained ready |
 | OpenTelemetry pipeline | RECEIVER ONLY / NOT APPLICATION-INTEGRATED | The Collector accepts OTLP on loopback and exposes self-metrics, but effective node configuration has `otlp_endpoint=null`. No platform/app logs or traces reached it, so trace continuity, buffering, retry, sampling, and shutdown flushing remain unvalidated |
+| P10-03 telemetry remediation (2026-08-30) | LOCAL PASS WITH COLLECTOR-OUTAGE DURABILITY BOUNDARY | Node OTLP activation, W3C extraction/injection, exact deployment/status/latency fields, node identity, structured operational logs, separated audit envelopes, a 2048-batch disk-backed Collector queue, and backend/Collector outage alerts were implemented and exercised. Tempo trace `eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee` identifies `local-test-node-0`, environment `local-validation`, the exact OIDC backend, `/health/ready`, and HTTP 200. Trace `99999999999999999999999999999999` correlated the request with WASI TCP, PostgreSQL authentication, and `SELECT 1`. A Tempo outage queued and recovered trace `55555555555555555555555555555555`; OIDC stayed ready. A span created while the immediate Collector was stopped was not recovered because the node exporter has no WAL. Production therefore requires a supervised local Collector per host or an accepted-loss policy/node-side WAL, plus authenticated TLS and independently operated off-host retention. See the [runbook](../PRODUCTION_TELEMETRY_VALIDATION.md) and [evidence](evidence/2026-08-30-single-host/P10-03-telemetry/README.md) |
 | PostgreSQL interruption/recovery | PASS | The exact recorded PostgreSQL Firecracker PID `289481` was paused with `SIGSTOP`. Within the bounded health window, HAProxy returned 503 for backend readiness, the independent frontend remained HTTP 200, the PostgreSQL exporter target went down, and `PostgreSQLExporterDown` fired in Alertmanager. The paused VMM stayed near 1% memory without CPU/log escalation. `SIGCONT` restored the same VM; readiness returned `database=ok`, `pg_up=1`, and the alert resolved without redeployment |
 | NATS interruption/recovery | PASS AFTER REMEDIATION | Pausing only recorded NATS Firecracker PID `223906` made the exporter target go down and fired `NatsExporterDown`; frontend and backend data-plane routes remained HTTP 200. The original nodes incorrectly reported NATS as healthy for more than 65 seconds because `NatsHealthWatcher` refreshed its timestamp without probing the server. A first canary using `Client::flush()` also failed because flush only confirms writes to the local TCP buffer. The final implementation performs a two-second request/reply to `$JS.API.INFO` every five seconds, proving both NATS and required JetStream responsiveness. After rolling the rebuilt image to all three nodes, a whole-cluster freeze made every node health endpoint return HTTP 503 within 12 seconds while both application routes stayed available. `SIGCONT` restored all node health endpoints to HTTP 200 and resolved the alert within 12 seconds without redeployment |
 | Platform-node rolling replacement | PASS | The corrected base image (`sha256:40e1e1c58430fc82e1ec775ed392e2b063e28a93aada85c0aa00e60902ebe7dc`) passed read-only `e2fsck`. Nodes 2, 1, and 0 were restarted sequentially from exact recorded state. Each node became healthy, reconstructed both OIDC deployments from desired state, and served traffic; the HAProxy backend route remained HTTP 200 throughout the observed post-restart gates and no alert remained active |
@@ -439,37 +440,50 @@ receipt, and deduplication evidence.
 
 ## Phase 5: logs, traces, and audit records
 
-- [ ] Emit structured JSON logs to stdout/journald.
-- [ ] Deploy a host log agent such as Vector, Fluent Bit, or an OpenTelemetry
+- [x] Emit structured JSON logs to stdout/journald.
+- [x] Deploy a host log agent such as Vector, Fluent Bit, or an OpenTelemetry
       Collector with a bounded disk buffer.
-- [ ] Send application/platform logs and security audit records to distinct
+- [x] Send application/platform logs and security audit records to distinct
       destinations or streams with different access and retention policies.
-- [ ] Verify records contain timestamp, environment, node ID, application ID,
+- [x] Verify request records contain timestamp, environment, node ID,
+      application ID,
       instance ID, request ID, trace ID, severity, and component.
 - [ ] Verify multiline failures remain parseable.
-- [ ] Disconnect the log backend, fill the configured buffer to a safe test limit,
-      restore connectivity, and confirm delivery without unbounded node memory.
-- [ ] Alert on dropped records, saturated buffers, and unavailable audit sinks.
+- [x] Disconnect the trace backend, exercise the configured disk buffer at a safe
+      bounded load, restore connectivity, and confirm delivery without
+      unbounded node memory.
+- [ ] Exercise log-backend saturation and every drop/audit-sink alert to its
+      threshold. The alerts and counters exist, but P10-04 owns their exhaustive
+      firing, recovery, and deduplication proof.
 
-The `logging.otlp_endpoint` setting must not be accepted until the running node
-actually integrates the OpenTelemetry layer; the presence of configuration alone
-is not evidence of export.
+The running node now integrates the OpenTelemetry layer when
+`logging.otlp_endpoint` is configured. Static-IP test guests receive the
+persisted endpoint through `wcp.otlp_endpoint` on the kernel command line.
 
-- [ ] Export traces through a local OpenTelemetry Collector.
-- [ ] Verify W3C trace context across HAProxy, platform proxy, frontend/backend
-      routing, WASI HTTP calls, and PostgreSQL spans where instrumentation exists.
-- [ ] Confirm one OIDC browser journey can be followed using a single correlated
-      trace/request identity.
-- [ ] Confirm exporter initialization returns a controlled error rather than
+- [x] Export traces through a local OpenTelemetry Collector.
+- [x] Verify W3C trace context through HAProxy and the platform proxy into the
+      OIDC WASI backend, including correlated PostgreSQL client activity.
+- [x] Confirm one OIDC request can be followed using a single correlated
+      trace/request identity. Full browser child spans require frontend/client
+      instrumentation and are not implied by this server-side proof.
+- [x] Confirm exporter initialization returns a controlled error rather than
       panicking.
-- [ ] Test collector interruption, bounded retry, recovery, and shutdown flushing.
+- [x] Test Collector and trace-backend interruption, bounded retry, recovery,
+      and graceful exporter shutdown behavior.
 - [ ] Confirm sampling retains errors and does not create uncontrolled cardinality.
 
-**FAIL / NOT VALIDATED / PRODUCTION BLOCKER:** structured serial logs exist, but
-no bounded host log shipper, separated audit stream, or backend interruption test
-was completed. The healthy OTLP Collector accepted no application spans/logs,
-the node OTLP configuration is not wired to the subscriber, and no correlated
-HAProxy-to-WASI-to-PostgreSQL trace exists.
+**LOCAL PASS ON 2026-08-30 WITH AN EXPLICIT DURABILITY BOUNDARY:** structured
+logs, separated audit export, W3C propagation, queryable OIDC traces, a bounded
+disk-backed Collector queue, and outage alerts were proven. Tempo interruption
+recovered queued telemetry without application failure. A trace created while
+the immediate Collector itself was stopped was not recovered: the node's batch
+processor is bounded memory, not a WAL. Production must supervise a local agent
+per host or explicitly accept/fix that loss window, and must add authenticated
+TLS, independently operated off-host/immutable retention, capacity sizing,
+sampling policy, and the exhaustive alert proof tracked by P10-04. Evidence and
+repeatable commands are in
+[`PRODUCTION_TELEMETRY_VALIDATION.md`](../PRODUCTION_TELEMETRY_VALIDATION.md) and
+[`P10-03-telemetry`](evidence/2026-08-30-single-host/P10-03-telemetry/README.md).
 
 ## Phase 6: eBPF functional validation
 
@@ -1985,8 +1999,9 @@ bash scripts/vm/destroy-testbed.sh --state-file "$STATE_FILE"
 
 Teardown is **NOT PERFORMED** for this current run. The two removal checks are
 intentionally unchecked, and the live environment remains available until the
-user gives separate explicit authorization. No trace payload could be preserved
-because Phase 5 produced none; that absence is recorded in the result summary.
+user gives separate explicit authorization. Phase 5 now has a redacted,
+queryable trace record and summarized interruption evidence under
+`evidence/2026-08-30-single-host/P10-03-telemetry/`.
 
 ## Handoff to multi-host validation
 

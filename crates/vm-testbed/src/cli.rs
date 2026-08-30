@@ -44,6 +44,9 @@ enum Commands {
         /// vCPUs per node.
         #[arg(long, default_value = "2")]
         node_vcpus: usize,
+        /// OTLP gRPC endpoint configured on every platform node.
+        #[arg(long)]
+        node_otlp_endpoint: Option<String>,
         /// Memory for the NATS VM in MiB.
         #[arg(long, default_value = "256")]
         nats_memory: usize,
@@ -120,6 +123,9 @@ enum Commands {
         /// Attach the cloned root filesystem read-only for a local fault test.
         #[arg(long)]
         rootfs_read_only: bool,
+        /// Persist a new OTLP gRPC endpoint for this and later node restarts.
+        #[arg(long)]
+        otlp_endpoint: Option<String>,
     },
 
     /// Scale a detached topology to the requested node count.
@@ -340,6 +346,8 @@ struct PersistedClusterState {
     node_data_drive_path: Option<PathBuf>,
     node_memory_mb: usize,
     node_vcpus: usize,
+    #[serde(default)]
+    node_otlp_endpoint: Option<String>,
     next_node_index: u8,
     nats: Option<PersistedVm>,
     nodes: Vec<PersistedVm>,
@@ -382,6 +390,7 @@ struct RestartNodeOptions {
     memory: Option<usize>,
     vcpus: Option<usize>,
     rootfs_read_only: bool,
+    otlp_endpoint: Option<String>,
 }
 
 #[tokio::main]
@@ -395,6 +404,7 @@ async fn main() -> Result<()> {
             nodes,
             node_memory,
             node_vcpus,
+            node_otlp_endpoint,
             nats_memory,
             nats_vcpus,
             state_file,
@@ -407,6 +417,7 @@ async fn main() -> Result<()> {
             };
 
             let mut cluster = ClusterFixture::new(name.clone()).await?;
+            cluster.set_node_otlp_endpoint(node_otlp_endpoint);
             cluster.start_nats(nats_memory, nats_vcpus).await?;
             for _ in 0..requested_nodes {
                 cluster.start_node(node_memory, node_vcpus).await?;
@@ -475,6 +486,7 @@ async fn main() -> Result<()> {
             memory,
             vcpus,
             rootfs_read_only,
+            otlp_endpoint,
         } => {
             let mut state = read_state(&state_file)?;
             let vm = restart_node_from_state(
@@ -489,6 +501,7 @@ async fn main() -> Result<()> {
                     memory,
                     vcpus,
                     rootfs_read_only,
+                    otlp_endpoint,
                 },
             )
             .await?;
@@ -729,6 +742,7 @@ fn detach_cluster_state(
         node_data_drive_path: cluster.node_data_drive.clone(),
         node_memory_mb,
         node_vcpus,
+        node_otlp_endpoint: cluster.node_otlp_endpoint.clone(),
         next_node_index: cluster.node_count() as u8,
         nats,
         nodes: nodes.into_values().collect(),
@@ -760,6 +774,11 @@ async fn spawn_service_from_state(
     let rootfs = rootfs
         .canonicalize()
         .with_context(|| format!("service rootfs does not exist: {}", rootfs.display()))?;
+    let mut extra_kernel_args = Vec::new();
+    if let Some(endpoint) = &state.node_otlp_endpoint {
+        extra_kernel_args.push(format!("wcp.otlp_endpoint={endpoint}"));
+    }
+
     let config = VmConfig {
         id: id.clone(),
         kernel_path: state.kernel_path.clone(),
@@ -772,7 +791,7 @@ async fn spawn_service_from_state(
         gateway: state.gateway.clone(),
         bridge_name: state.bridge_name.clone(),
         tap_device: network::tap_name_for_id(&id),
-        extra_kernel_args: Vec::new(),
+        extra_kernel_args,
         mmds_data: Some(serde_json::json!({
             "service_config": {
                 "id": id,
@@ -870,6 +889,7 @@ async fn spawn_node_from_state(
                 "proxy_port": 8080,
                 "admin_port": 9090,
                 "artifact_port": 9091,
+                "otlp_endpoint": state.node_otlp_endpoint,
             }
         })),
     };
@@ -931,6 +951,12 @@ async fn restart_node_from_state(
     if options.drop_ebpf_capabilities {
         extra_kernel_args.push("wcp.ebpf_drop_capabilities=1".to_string());
     }
+    if let Some(endpoint) = options.otlp_endpoint {
+        state.node_otlp_endpoint = Some(endpoint);
+    }
+    if let Some(endpoint) = &state.node_otlp_endpoint {
+        extra_kernel_args.push(format!("wcp.otlp_endpoint={endpoint}"));
+    }
 
     let kernel_path = match options.kernel {
         Some(path) => path
@@ -969,6 +995,7 @@ async fn restart_node_from_state(
                 "proxy_port": 8080,
                 "admin_port": 9090,
                 "artifact_port": 9091,
+                "otlp_endpoint": state.node_otlp_endpoint,
             }
         })),
     };

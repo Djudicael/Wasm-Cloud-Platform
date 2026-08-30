@@ -12,6 +12,8 @@ pingora-load-balancing = { workspace = true }
 pingora-core = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
+tracing-opentelemetry = "0.33.0"
+opentelemetry = { version = "0.32.0", features = ["trace"] }
 common = { version = "0.1.0", path = "../common" }
 async-trait = "0.1.92"
 futures = "0.3.34"

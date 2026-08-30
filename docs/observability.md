@@ -348,29 +348,40 @@ traceparent: 00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01
 
 ```
 Trace: 4bf92f3577b34da6a3ce929d0e0e4736
-├── [proxy] request_filter
-│   ├── [proxy] route_resolution (host=shop.example.com)
-│   ├── [proxy] auth_check
-│   ├── [proxy] rate_limit_check
-│   └── [proxy] upstream_request_filter
-├── [supervisor] instance_ready (cold_start)
-├── [upstream] handle_request
-│   ├── [upstream] db_query
-│   └── [upstream] internal_call (payment-service.internal)
-│       ├── [proxy] request_filter (internal)
-│       ├── [upstream] process_payment
-│       └── [proxy] response_filter (internal)
-└── [proxy] response_filter
+└── [proxy] http.server.request
+    service.name=wasm-node
+    service.instance.id=<node-id>
+    application.id=<exact-deployment-id>
+    http.request.method=GET
+    url.path=/api/orders
+    http.response.status_code=200
+    http.server.request.duration_ms=45
 ```
+
+The platform currently emits one server span around proxy routing and WASI
+execution. Application logs created while handling that request inherit the
+same trace context. Child spans for database queries or internal calls exist
+only when the application or its client library explicitly instruments them;
+the platform does not invent those spans.
 
 ### OTLP export
 
 ```bash
-# Start the node with an OTLP endpoint
-wasm-node \
-  --otlp-endpoint http://tempo:4317 \
-  --config /etc/wasm-node/config.toml
+# Configure the node's local OTLP agent endpoint
+# config.toml
+[logging]
+otlp_endpoint = "http://127.0.0.1:4317"
 ```
+
+Each host should run a supervised local Collector with a bounded disk-backed
+export queue. The node's Rust batch exporter is bounded in memory, but it is
+not a write-ahead log: a span can be lost if the immediate Collector is down.
+Use authenticated TLS outside the isolated local test network. Trace resources
+include `service.name`, `service.version`, and `service.instance.id`; the local
+validation Collector adds `deployment.environment`.
+
+The complete production contract and interruption tests are in
+[`INFRA_IMPL/process/PRODUCTION_TELEMETRY_VALIDATION.md`](../INFRA_IMPL/process/PRODUCTION_TELEMETRY_VALIDATION.md).
 
 ### Trace IDs in logs
 

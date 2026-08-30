@@ -4,12 +4,30 @@
 //! upstream, shape the forwarded request, adjust the response, and emit the
 //! final request log record.
 
+use opentelemetry::global;
+use opentelemetry::propagation::Injector;
+use opentelemetry::trace::TraceContextExt as _;
 use pingora::http::{RequestHeader, ResponseHeader};
 use pingora_core::upstreams::peer::HttpPeer;
 use pingora_core::Result as PingoraResult;
 use pingora_proxy::Session;
 
 use super::{strip_uri_prefix, RequestCtx, WasmProxy};
+use tracing_opentelemetry::OpenTelemetrySpanExt as _;
+
+struct RequestHeaderInjector<'a>(&'a mut RequestHeader);
+
+impl Injector for RequestHeaderInjector<'_> {
+    fn set(&mut self, key: &str, value: String) {
+        let Ok(name) = http::HeaderName::from_bytes(key.as_bytes()) else {
+            return;
+        };
+        let Ok(value) = http::HeaderValue::from_str(&value) else {
+            return;
+        };
+        let _ = self.0.insert_header(name, value);
+    }
+}
 
 pub(super) async fn upstream_peer(
     proxy: &WasmProxy,
@@ -45,21 +63,25 @@ pub(super) async fn upstream_request_filter(
     if let Some(ref tid) = ctx.trace_id {
         let _ = upstream_request.insert_header("X-Trace-Id", tid.as_str());
     }
-    if let Some(tp) = session
-        .req_header()
-        .headers
-        .get("traceparent")
-        .and_then(|v| v.to_str().ok())
-    {
-        let _ = upstream_request.insert_header("traceparent", tp);
-    }
-    if let Some(ts) = session
-        .req_header()
-        .headers
-        .get("tracestate")
-        .and_then(|v| v.to_str().ok())
-    {
-        let _ = upstream_request.insert_header("tracestate", ts);
+    let telemetry_context = ctx.request_span.context();
+    if telemetry_context.span().span_context().is_valid() {
+        global::get_text_map_propagator(|propagator| {
+            propagator.inject_context(
+                &telemetry_context,
+                &mut RequestHeaderInjector(upstream_request),
+            );
+        });
+    } else {
+        for header in ["traceparent", "tracestate"] {
+            if let Some(value) = session
+                .req_header()
+                .headers
+                .get(header)
+                .and_then(|value| value.to_str().ok())
+            {
+                let _ = upstream_request.insert_header(header, value);
+            }
+        }
     }
 
     if ctx.strip_prefix {
@@ -130,6 +152,7 @@ pub(super) async fn logging(proxy: &WasmProxy, session: &mut Session, ctx: &mut 
         .response_written()
         .map(|r| r.status.as_u16())
         .unwrap_or(0);
+    ctx.request_span.record("http.response.status_code", status);
 
     proxy
         .gateway
@@ -137,14 +160,17 @@ pub(super) async fn logging(proxy: &WasmProxy, session: &mut Session, ctx: &mut 
         .circuits_open
         .set(proxy.gateway.circuit_breaker.open_circuit_count());
 
-    tracing::info!(
-        app_id = ctx
-            .app_id
-            .as_ref()
-            .map(|a| a.0.as_str())
-            .unwrap_or("unknown"),
-        status,
-        latency_ms,
-        "request completed"
-    );
+    ctx.request_span.in_scope(|| {
+        tracing::info!(
+            app_id = ctx
+                .app_id
+                .as_ref()
+                .map(|a| a.0.as_str())
+                .unwrap_or("unknown"),
+            trace_id = ctx.trace_id.as_deref().unwrap_or("unknown"),
+            status,
+            latency_ms,
+            "request completed"
+        );
+    });
 }

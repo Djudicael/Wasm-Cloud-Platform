@@ -5,13 +5,13 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilte
 
 use super::{LogFormat, LogOutput, LoggingConfig, NodeJsonFormatter, SamplingLayer};
 
-pub(crate) enum LogWriter {
+pub enum LogWriter {
     Stdout,
     Stderr,
     File(Arc<std::sync::Mutex<std::fs::File>>),
 }
 
-pub(crate) fn build_log_writer(output: &LogOutput) -> Result<LogWriter, String> {
+pub fn build_log_writer(output: &LogOutput) -> Result<LogWriter, String> {
     match output {
         LogOutput::Stdout => Ok(LogWriter::Stdout),
         LogOutput::Stderr => Ok(LogWriter::Stderr),
@@ -40,13 +40,13 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogWriter {
     }
 }
 
-pub(crate) enum LogWriterGuard<'a> {
+pub enum LogWriterGuard<'a> {
     Stdout(std::io::Stdout),
     Stderr(std::io::Stderr),
     File(FileWriterGuard<'a>),
 }
 
-pub(crate) struct FileWriterGuard<'a> {
+pub struct FileWriterGuard<'a> {
     guard: std::sync::MutexGuard<'a, std::fs::File>,
 }
 

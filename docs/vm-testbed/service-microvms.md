@@ -96,6 +96,37 @@ bootstrap together.
 The full security model, acceptance checks, evidence, and problems found are in
 [Vault Transit microVM validation](../../INFRA_IMPL/process/VAULT_TRANSIT_MICROVM_VALIDATION.md).
 
+## Attach the disposable telemetry stack
+
+Persist the node OTLP endpoint when creating the topology, then provision the
+state-scoped host stack:
+
+```bash
+bash scripts/vm/provision-testbed.sh \
+  --preset production-like \
+  --nodes 3 \
+  --node-otlp-endpoint http://172.20.0.1:4317 \
+  --state-file .prod-validation-single-host-state.json
+
+bash scripts/vm/provision-observability.sh \
+  --state-file .prod-validation-single-host-state.json
+```
+
+The companion service state records the exact Collector, Tempo, Prometheus,
+Alertmanager, and exporter container identities plus the runtime directory and
+separated operational/audit log paths. The Collector receives node OTLP over
+the private test bridge, tails the exact recorded node serial logs, and uses a
+bounded disk-backed queue when the trace backend is unavailable. Local export
+files are created with mode 0600.
+
+This fixture validates the platform integration; it is not a production
+telemetry deployment. A production host needs a supervised local agent,
+authenticated TLS, monitored queue storage, and independently operated
+off-host trace, operational-log, and immutable audit destinations. The current
+node exporter has no WAL, so spans created while its immediate Collector is
+stopped are not guaranteed to survive. Follow the complete
+[production telemetry validation](../../INFRA_IMPL/process/PRODUCTION_TELEMETRY_VALIDATION.md).
+
 ## State and credential locations
 
 Keep the same `--state-file` value throughout provisioning, validation, and
@@ -105,6 +136,7 @@ teardown.
 |---|---|---|
 | `<state-file>` | Bridge, NATS, platform-node and service-VM identities/PIDs | No Vault tokens or unseal material |
 | `<state-file>.services.json` | HAProxy, observability, and Vault lifecycle metadata and protected-file paths | Paths only |
+| Recorded observability runtime directory | Collector queue, filelog offsets, generated configs, and mode-0600 operational/audit exports | Redacted telemetry only; still treat as protected evidence |
 | `${XDG_RUNTIME_DIR:-/tmp}/wasm-cloud-platform-vault-$(id -u)/<state-hash>/` | State-scoped bootstrap, CA, curl config, and short-lived tokens | Yes; directory 0700 and secret files 0600 |
 | `${XDG_RUNTIME_DIR:-/tmp}/wasm-cloud-platform-vault-build-$(id -u)/bootstrap.json` | Build-time unseal key, initial root token, role IDs | Yes; mode 0600 |
 | `assets/vault-rootfs.ext4` | Initialized disposable Vault storage and TLS key | Sensitive local fixture |
@@ -154,4 +186,3 @@ build-time Vault bootstrap. Those retained local fixtures must be protected and
 must never be committed or promoted. Delete or rebuild them deliberately when
 the local fixture is no longer needed; never use broad process names, globs, or
 directory searches for teardown.
-

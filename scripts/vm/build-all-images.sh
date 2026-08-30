@@ -35,7 +35,7 @@ node_rootfs_is_current() {
 
     command -v debugfs >/dev/null || return 1
     schema=$(debugfs -R 'cat /etc/wasm-node/image-schema-version' "$image" 2>/dev/null || true)
-    [[ "$schema" == "6" ]]
+    [[ "$schema" == "9" ]]
 }
 
 kernel_is_current() {
