@@ -122,6 +122,8 @@ fn test_multiple_instances_with_real_component() {
         tenant_id: None,
         policy: None,
         namespace: "default".to_string(),
+        placement: common::types::PlacementPolicy::EveryNode,
+        local_dependencies: Vec::new(),
     };
 
     let prepared = rt.prepare(&artifact, config).expect("failed to prepare");
@@ -159,6 +161,8 @@ fn test_memory_limit_config() {
         tenant_id: None,
         policy: None,
         namespace: "default".to_string(),
+        placement: common::types::PlacementPolicy::EveryNode,
+        local_dependencies: Vec::new(),
     };
 
     assert_eq!(config.memory_limit.0, 10);
@@ -184,6 +188,8 @@ fn test_fuel_quota_config() {
         tenant_id: None,
         policy: None,
         namespace: "default".to_string(),
+        placement: common::types::PlacementPolicy::EveryNode,
+        local_dependencies: Vec::new(),
     };
 
     let low_fuel = AppConfig {
@@ -202,6 +208,8 @@ fn test_fuel_quota_config() {
         tenant_id: None,
         policy: None,
         namespace: "default".to_string(),
+        placement: common::types::PlacementPolicy::EveryNode,
+        local_dependencies: Vec::new(),
     };
 
     assert_eq!(high_fuel.fuel_quota.0, 10_000_000);

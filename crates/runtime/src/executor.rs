@@ -1,5 +1,7 @@
 // crates/runtime/src/executor.rs
-use crate::limits::{configure_store, read_fuel_remaining, IoStats, MemoryLimiter};
+use crate::limits::{
+    configure_service_store, configure_store, read_fuel_remaining, IoStats, MemoryLimiter,
+};
 use crate::policy_tracker::{PolicyCounters, PolicyEnforcer};
 mod socket_policy;
 use common::{
@@ -368,7 +370,7 @@ impl PreparedModule {
         store.limiter(|s| &mut s.limiter);
 
         // Apply CPU/fuel limits
-        configure_store(&mut store, self.config.fuel_quota)?;
+        configure_service_store(&mut store, self.config.fuel_quota)?;
 
         // Link WASI host functions (Component Model Preview 2)
         let linker = build_runtime_linker(&self.engine)?;

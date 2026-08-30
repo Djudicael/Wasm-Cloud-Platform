@@ -12,6 +12,9 @@ Usage: provision-testbed.sh [options]
   --node-memory MIB       memory per platform node (default: 512)
   --node-vcpus COUNT      vCPUs per platform node (default: 2)
   --node-otlp-endpoint URL  OTLP gRPC endpoint configured in every node
+  --node-oidc-issuer-url URL  Public issuer used for token validation
+  --node-oidc-audience VALUE Expected token audience
+  --node-oidc-jwks-url URL    Private JWKS endpoint reachable by every node
   --front-door TYPE       none or haproxy (production-like default: haproxy)
   --front-door-bind ADDR  HAProxy listen address (default: 127.0.0.1:8088)
   --prepare-assets        install/build missing Firecracker assets
@@ -26,6 +29,9 @@ state_file=.vm-testbed-state.json
 node_memory=
 node_vcpus=
 node_otlp_endpoint=
+node_oidc_issuer_url=
+node_oidc_audience=
+node_oidc_jwks_url=
 front_door=
 front_door_bind=127.0.0.1:8088
 prepare_assets=false
@@ -40,6 +46,9 @@ while (($#)); do
     --node-memory) node_memory=${2:?missing memory}; shift 2 ;;
     --node-vcpus) node_vcpus=${2:?missing vCPU count}; shift 2 ;;
     --node-otlp-endpoint) node_otlp_endpoint=${2:?missing OTLP endpoint}; shift 2 ;;
+    --node-oidc-issuer-url) node_oidc_issuer_url=${2:?missing OIDC issuer URL}; shift 2 ;;
+    --node-oidc-audience) node_oidc_audience=${2:?missing OIDC audience}; shift 2 ;;
+    --node-oidc-jwks-url) node_oidc_jwks_url=${2:?missing OIDC JWKS URL}; shift 2 ;;
     --front-door) front_door=${2:?missing front-door type}; shift 2 ;;
     --front-door-bind) front_door_bind=${2:?missing front-door bind address}; shift 2 ;;
     --prepare-assets) prepare_assets=true; shift ;;
@@ -50,6 +59,14 @@ done
 
 if [[ -n "$preset" && -n "$profile" ]]; then
   echo "Use either --preset or --profile, not both." >&2
+  exit 2
+fi
+oidc_option_count=0
+[[ -n "$node_oidc_issuer_url" ]] && ((oidc_option_count += 1))
+[[ -n "$node_oidc_audience" ]] && ((oidc_option_count += 1))
+[[ -n "$node_oidc_jwks_url" ]] && ((oidc_option_count += 1))
+if ((oidc_option_count != 0 && oidc_option_count != 3)); then
+  echo "OIDC issuer, audience, and JWKS URL must be supplied together." >&2
   exit 2
 fi
 if [[ -z "$preset" && -z "$profile" ]]; then
@@ -181,8 +198,8 @@ if [[ "$nats_image_schema" != 2 ]]; then
   exit 1
 fi
 node_image_schema=$(debugfs -R 'cat /etc/wasm-node/image-schema-version' assets/wasm-node-rootfs.ext4 2>/dev/null || true)
-if [[ "$node_image_schema" != 10 ]]; then
-  echo "assets/wasm-node-rootfs.ext4 is stale or incompatible (expected image schema 10)." >&2
+if [[ "$node_image_schema" != 12 ]]; then
+  echo "assets/wasm-node-rootfs.ext4 is stale or incompatible (expected image schema 12)." >&2
   echo "Rebuild it with: scripts/vm/build-node-rootfs.sh" >&2
   exit 1
 fi
@@ -202,6 +219,11 @@ cli="$target_dir/debug/vm-testbed-cli"
 args=(up --profile "$profile" --name "$name" --state-file "$state_file" --node-memory "$node_memory" --node-vcpus "$node_vcpus")
 [[ -n "$nodes" ]] && args+=(--nodes "$nodes")
 [[ -n "$node_otlp_endpoint" ]] && args+=(--node-otlp-endpoint "$node_otlp_endpoint")
+if ((oidc_option_count == 3)); then
+  args+=(--node-oidc-issuer-url "$node_oidc_issuer_url")
+  args+=(--node-oidc-audience "$node_oidc_audience")
+  args+=(--node-oidc-jwks-url "$node_oidc_jwks_url")
+fi
 run_privileged "$cli" "${args[@]}"
 run_privileged "$cli" status --state-file "$state_file"
 

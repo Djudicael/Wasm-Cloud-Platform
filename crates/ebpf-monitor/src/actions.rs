@@ -247,6 +247,8 @@ impl ActionDispatcher {
                 if self.metrics.tcp_connection_count.get() > 0 {
                     self.metrics.tcp_connection_count.dec();
                 }
+                self.callbacks
+                    .tcp_connection_closed(tid, src_port, dst_port);
             }
             MonitorEvent::TcpRetransmit {
                 pid,

@@ -2,18 +2,24 @@
 
 This guide explains how applications communicate with each other **inside the platform** — the East-West traffic path. The key principle is **transparency**: the Wasm application writes normal HTTP code, and the platform handles routing, security, and policy enforcement automatically.
 
-The platform is **self-sufficient**: it includes an embedded DNS stub so `<app>.<namespace>.internal` hostnames resolve without any external DNS server (CoreDNS) or `/etc/hosts` manipulation.
+The mesh is intentionally **node-local**. Every production node runs the same
+dependency closure, resolves `<app>.<namespace>.internal` to its own loopback
+gateway, and never searches another node when a local dependency is absent.
+Cross-host workload-mesh identity is explicitly out of scope, not a missing
+platform feature. Public ingress, control-plane replication, and explicitly
+configured external service URLs may still cross hosts.
 
 ## Table of Contents
 
 1. [The Transparency Principle](#the-transparency-principle)
 2. [Namespaces](#namespaces)
 3. [Embedded DNS Stub](#embedded-dns-stub)
-4. [Service Discovery](#service-discovery)
-5. [Network Interception](#network-interception)
-6. [Internal HTTP Gateway](#internal-http-gateway)
-7. [Cross-Namespace Rules](#cross-namespace-rules)
-8. [Example: Two Apps Talking](#example-two-apps-talking)
+4. [Placement and Local Dependencies](#placement-and-local-dependencies)
+5. [Service Discovery](#service-discovery)
+6. [Network Interception](#network-interception)
+7. [Internal HTTP Gateway](#internal-http-gateway)
+8. [Cross-Namespace Rules](#cross-namespace-rules)
+9. [Example: Two Apps Talking](#example-two-apps-talking)
 
 ---
 
@@ -112,8 +118,8 @@ App calls getaddrinfo("payment-service.production.internal")
 │  Host OS resolver                      │
 │  (reads /etc/resolv.conf)              │
 │                                        │
-│  nameserver 127.0.0.1:15353  ←───┐     │
-│  nameserver 8.8.8.8              │     │
+│  nameserver 127.0.0.1         ←───┐     │
+│  nameserver <operator DNS>        │     │
 └────────────────────────────────────────┘
                                    │
                                    ▼
@@ -126,7 +132,10 @@ App calls getaddrinfo("payment-service.production.internal")
                          └─────────────────┘
 ```
 
-The node **provides** the DNS service. The operator **configures** the system to use it. The node never modifies system files at runtime.
+The node **provides** the DNS service. The production image or node installer
+**configures** the system to use it; the running node process does not rewrite
+resolver files. The repository microVM image binds the stub to UDP port 53 and
+places `nameserver 127.0.0.1` first in `/etc/resolv.conf`.
 
 ### Production setup
 
@@ -180,18 +189,48 @@ Set `stub_enabled = false` if you prefer to use an external DNS server or `/etc/
 | Query | Response |
 |-------|----------|
 | `A` record for `*.*.internal` | `127.0.0.1` |
-| Any other query | `NXDOMAIN` (falls through to next nameserver) |
+| Any other query | `SERVFAIL` (allows the resolver to try the operator nameserver) |
 
-### Testing without DNS setup
+### Installation gate
 
-In test environments where DNS is not configured, add entries to `/etc/hosts`:
+Do not accept a loopback URL plus a manually supplied `Host` header as
+production DNS evidence. From every signed node image, a WASI component must
+resolve and call the literal URL:
 
 ```bash
-127.0.0.1 echo-service.production.internal
-127.0.0.1 payment-service.production.internal
+http://payment-service.production.internal:9080/health
 ```
 
-The e2e test suite does this automatically via `ensure_hosts_entry()`.
+The 2026-08-30 three-node Firecracker rehearsal passed this exact path.
+
+---
+
+## Placement and Local Dependencies
+
+The only supported internal-mesh placement policy is currently `every_node`.
+Declare every service that must exist beside the caller:
+
+```toml
+[placement]
+policy = "every_node"
+local_dependencies = ["production/payment-service:v1"]
+```
+
+The dependency IDs must be fully qualified, unique, and in the caller's
+namespace. Deploy dependencies before dependants. Each node validates that the
+dependency configuration and artifact are present locally before admitting the
+caller or cold-starting it.
+
+If a required local dependency is removed or cannot start:
+
+- the caller remains deployed, but its call returns HTTP 502;
+- retained grace-period artifacts cannot resurrect the removed dependency;
+- the node does not query the cluster or forward the call to another host;
+- redeploying the dependency on every node restores local service.
+
+This fail-local behavior preserves the shared-nothing data plane. Operators
+must alert on the 502/dependency condition and choose whether the public route
+should remain available, degrade, or be withdrawn for that application.
 
 ---
 
@@ -284,7 +323,7 @@ Internal Gateway (127.0.0.1:9080)
 App B (payment-service) on port 10101
 ```
 
-### Cross namespace → direct ports blocked; gateway port open
+### Cross namespace → denied by default
 
 **Direct app ports are namespace-enforced.** If an app somehow learns the real loopback port of an app in another namespace and connects directly, the `socket_addr_check` blocks it:
 
@@ -298,7 +337,12 @@ socket_addr_check
   3. ❌ Cross-namespace — connection refused
 ```
 
-**The internal gateway port (9080) is currently open to all namespaces.** The `socket_addr_check` explicitly allows connections to port 9080 regardless of the caller's namespace:
+The socket policy permits a connection to port 9080 so the internal gateway can
+make the authorization decision. This is not an authorization bypass. The eBPF
+namespace enforcer observes the established TCP connection, binds its ephemeral
+source port to the registered workload TID, and the gateway resolves the caller
+identity from that kernel-derived binding. Caller-supplied `X-Namespace`,
+`X-Source-App`, and `X-Source-Tid` headers are stripped.
 
 ```
 App A (payments:v1) in namespace "staging"
@@ -310,19 +354,20 @@ App A (payments:v1) in namespace "staging"
 │ socket_addr_check                      │
 │  1. Dest = 127.0.0.1:9080              │
 │  2. Port 9080 is the internal gateway  │
-│  3. ✅ Allowed (namespace not checked) │
+│  3. ✅ Pass to the policy gateway      │
 └────────────────────────────────────────┘
   │
   ▼
 Internal Gateway (127.0.0.1:9080)
-  │  ⚠️ Gateway does not enforce namespace boundaries
-  │  Request is forwarded to the target app
-  │
-  ▼
-App B (production/api-users) on port 10101
+  │  1. Resolves source port → registered workload identity
+  │  2. Compares caller and target namespaces
+  │  3. ❌ Denies unless an explicit cross-namespace rule allows it
 ```
 
-The primary namespace boundary is **service discovery isolation**: the Supervisor only injects `<APP>_SERVICE_URL` environment variables for apps in the same namespace. An app that does not know the hostname of a cross-namespace service cannot reach it through the gateway. However, a malicious app that discovers or guesses a cross-namespace hostname can currently reach it via the gateway port.
+Identity publication through the eBPF ring buffer is asynchronous. The gateway
+waits for at most 50 ms for the source-port binding and then returns 401 if the
+identity is still unresolved. It never falls back to a caller-provided identity.
+When eBPF enforcement is unavailable, required enforcement also fails closed.
 
 For intentional cross-namespace communication, use the external hostname (`https://api-users.production.example.com/`), which flows through the Pingora gateway with full TLS/auth/audit.
 
@@ -371,7 +416,15 @@ The app **does not know** which path was taken. Both are transparent.
 
 ### Limitations
 
-- The internal gateway does not enforce namespace boundaries. The `socket_addr_check` blocks cross-namespace connections to direct app ports, but the gateway port (9080) is currently open to all namespaces. Namespace isolation relies on service discovery: the Supervisor only injects service URLs for same-namespace apps.
+- The internal gateway is node-local by design. There is no cross-host
+  `.internal` discovery, forwarding fallback, or workload-mesh identity.
+- A separate application protocol may use an explicit external URL through the
+  public gateway. That is not part of the internal mesh.
+- Namespace enforcement depends on active eBPF identity attribution. Mandatory
+  enforcement fails closed when the program, map, consumer, or binding is absent.
+- Active outbound-connection accounting relies on eBPF TCP-close events. If
+  `max_outbound_connections` is an enforcement control, production must set
+  eBPF as required rather than accepting degraded monitoring.
 - **Endpoint-level rate limiting** is structural but uses simplified checks; full distributed rate limiting is applied at the external Pingora gateway.
 
 ---
@@ -390,7 +443,7 @@ The app **does not know** which path was taken. Both are transparent.
                                 │
                                 │ Cross-namespace
                                 │ direct ports blocked;
-                                │ gateway port open
+                                │ gateway policy enforced
                                 ▼
 ┌─────────────────────────────────────────────────────────────┐
 │                      Namespace: staging                     │
@@ -400,9 +453,8 @@ The app **does not know** which path was taken. Both are transparent.
 │                                                              │
 │  ┌──────────────┐                                           │
 │  │  payments:v1 │ ──► api-users.production.internal:9080    │
-│  └──────────────┘     ⚠️ Allowed (gateway port open)       │
-│       (but hostname not injected — service discovery        │
-│        only provides URLs for same-namespace apps)          │
+│  └──────────────┘     ❌ Denied by kernel-derived identity │
+│       unless an explicit cross-namespace allow rule exists  │
 │                                                              │
 │  To reach production intentionally, use external hostname:  │
 │  https://api-users.production.example.com/                   │
@@ -417,7 +469,7 @@ The app **does not know** which path was taken. Both are transparent.
 | Same namespace, no endpoint rules | Direct TCP | Rate limit, circuit breaker (at external gateway for ingress) |
 | Same namespace, endpoint rules | Internal gateway | Auth, rate limit, circuit breaker, transforms |
 | Cross namespace (direct port) | Blocked at WASI layer | — |
-| Cross namespace (gateway port 9080) | Not enforced | Service discovery isolation only |
+| Cross namespace (gateway port 9080) | Denied by default | eBPF workload identity and gateway allowlist |
 | Cross namespace (intentional) | External hostname through Pingora | TLS, OIDC, audit, distributed rate limit |
 
 ---
@@ -443,6 +495,9 @@ max_instances = 5
 
 [policy]
 profile = "http_api"
+
+[placement]
+policy = "every_node"
 
 [[gateway.endpoints]]
 path = "/process"
@@ -471,6 +526,10 @@ max_instances = 10
 
 [policy]
 profile = "http_api"
+
+[placement]
+policy = "every_node"
+local_dependencies = ["production/payment-service:v1"]
 
 [gateway]
 host = "orders.example.com"
@@ -598,18 +657,22 @@ wasm-ctl app list --namespace production
 | Bypass the proxy | All outbound TCP is intercepted by `socket_addr_check` |
 | Scan arbitrary ports | Unknown loopback destinations are blocked |
 | Reach cross-namespace apps (direct port) | `ECONNREFUSED` at WASI layer — direct app ports are namespace-checked |
-| Reach cross-namespace apps (gateway port) | ⚠️ Not currently blocked — gateway port 9080 is open to all namespaces; relies on service discovery isolation |
+| Reach cross-namespace apps (gateway port) | Kernel-derived caller identity is resolved and cross-namespace access is denied unless explicitly allowed |
 | Exhaust internal gateway | Rate limits and circuit breakers apply |
 
 ### Known limitations
 
-- The internal gateway does not enforce namespace boundaries. The `socket_addr_check` blocks cross-namespace connections to direct app ports, but the gateway port (9080) is currently open to all namespaces. Namespace isolation relies on service discovery: the Supervisor only injects `<APP>_SERVICE_URL` for same-namespace apps. A malicious app that discovers a cross-namespace hostname can currently reach it through the gateway.
+- Enforcement is node-local and requires active eBPF source-port/TID attribution.
+  The gateway fails closed when attribution is unavailable.
+- Cross-host mesh identity is intentionally out of scope. Applications requiring
+  remote traffic must use an explicit external route and its TLS/auth policy.
 
 ### Defense in depth
 
 1. **WASI sandbox** — Wasm cannot access host system calls directly
 2. **Network policy** — CIDR restrictions, connection limits, egress bytes
-3. **Namespace isolation** — Cross-namespace direct connections blocked at WASI layer; gateway port (9080) relies on service discovery isolation
+3. **Namespace isolation** — Direct ports are checked by the WASI policy; port
+   9080 uses kernel-derived workload identity and deny-by-default gateway policy
 4. **Rate limiting** — Per-app token buckets
 5. **Circuit breaker** — Per-app failure detection
 6. **eBPF monitoring** — Kernel-level syscall anomaly detection (Linux)

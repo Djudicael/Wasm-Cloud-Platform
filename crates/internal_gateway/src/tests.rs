@@ -34,6 +34,38 @@ async fn setup_gateway() -> (Arc<InternalGateway>, common::types::AppId) {
     (gw, app_id)
 }
 
+#[tokio::test]
+async fn test_caller_identity_waits_for_asynchronous_ebpf_binding() {
+    let namespace_map = Arc::new(ebpf_monitor::NamespaceMap::new_fallback());
+    namespace_map
+        .register_tid(
+            4242,
+            ebpf_monitor::common::TidIdentity::new("default", "caller:v1"),
+        )
+        .unwrap();
+
+    let delayed_map = namespace_map.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        delayed_map.bind_port(54321, 4242);
+    });
+
+    let identity = resolve_caller_identity(&namespace_map, 54321)
+        .await
+        .expect("identity should resolve after the asynchronous binding arrives");
+    assert_eq!(identity.namespace, "default");
+    assert_eq!(identity.app_id, "caller:v1");
+    assert_eq!(identity.tid, 4242);
+}
+
+#[tokio::test]
+async fn test_caller_identity_wait_remains_fail_closed() {
+    let namespace_map = ebpf_monitor::NamespaceMap::new_fallback();
+    assert!(resolve_caller_identity(&namespace_map, 54321)
+        .await
+        .is_none());
+}
+
 async fn setup_gateway_with(
     gateway_config: Arc<proxy::gateway::Gateway>,
     endpoint: supervisor::network::RegisteredEndpoint,
@@ -82,6 +114,7 @@ async fn test_gateway_with_provider() -> (Arc<proxy::gateway::Gateway>, String, 
         common::types::OidcConfig {
             issuer_url: "https://test-issuer.example.com".to_string(),
             audience: "test-audience".to_string(),
+            jwks_url: None,
             jwks_refresh_secs: 3600,
             clock_skew_secs: 30,
         },

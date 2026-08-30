@@ -54,6 +54,8 @@ fn create_test_config(app_id: AppId) -> AppConfig {
         tenant_id: None,
         policy: None,
         namespace: "default".to_string(),
+        placement: common::types::PlacementPolicy::EveryNode,
+        local_dependencies: Vec::new(),
     }
 }
 

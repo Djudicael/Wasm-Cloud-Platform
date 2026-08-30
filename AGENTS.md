@@ -32,6 +32,12 @@ Repository-scoped Open Agent Skills live in `.agents/skills` and are intended fo
 - Production-validation rehearsals can add the disposable Podman observability stack with `scripts/vm/provision-observability.sh`; its exact container identities and runtime directory are recorded in the companion service state and removed by the canonical teardown script. Follow `INFRA_IMPL/process/PRODUCTION_TELEMETRY_VALIDATION.md` for the trace/log/audit contract, outage tests, and the explicit Collector-outage durability boundary.
 - Validate the tracked Prometheus rules and state-scoped Alertmanager delivery path with `scripts/vm/validate-alerting.sh`. Follow `INFRA_IMPL/process/PRODUCTION_ALERTING_VALIDATION.md`; the local webhook recorder is evidence tooling, not a production receiver.
 - For the two-WASI OpenID Connect Hub rehearsal, use `scripts/vm/deploy-oidc-hub-test.sh`; it runs migrations and configures the recorded HAProxy with the required same-origin route split.
+- The application internal mesh is node-local by design. Use literal
+  `<app>.<namespace>.internal` URLs, `placement.policy = "every_node"`, and
+  same-namespace `local_dependencies` to co-locate dependency closures. Never
+  add remote-node lookup or forwarding fallback for `.internal`; cross-host
+  mesh identity is explicitly out of scope. Remote application traffic must use
+  an explicit external endpoint and its separately validated security policy.
 - Use `$destroy-microvm-testbed` only after the user is finished testing. If interactive testing was requested, leave the environment running until teardown is explicitly requested.
 - The skills delegate operations to the canonical scripts under `scripts/vm/`. Use those scripts directly for human-driven automation.
 - Run skill scripts in WSL2. Keep the same `--state-file` value across all three skills.

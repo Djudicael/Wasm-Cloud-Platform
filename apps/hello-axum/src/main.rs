@@ -27,13 +27,21 @@ fn main() {
             continue;
         }
 
-        // Drain remaining headers (read until empty line)
+        // Preserve only the bearer credential needed for delegated east-west
+        // authorization. Platform identity headers are intentionally ignored.
+        let mut authorization = None;
         loop {
             let mut line = String::new();
             match reader.read_line(&mut line) {
                 Ok(0) => break,
                 Ok(_) if line.trim().is_empty() => break,
-                Ok(_) => continue,
+                Ok(_) => {
+                    if let Some((name, value)) = line.split_once(':') {
+                        if name.eq_ignore_ascii_case("authorization") {
+                            authorization = Some(value.trim().to_string());
+                        }
+                    }
+                }
                 Err(_) => break,
             }
         }
@@ -41,7 +49,8 @@ fn main() {
         // Parse method and full path (including query string)
         let full_path = request_line.split_whitespace().nth(1).unwrap_or("/");
 
-        let (status, content_type, body, should_shutdown) = route(full_path);
+        let (status, content_type, body, should_shutdown) =
+            route(full_path, authorization.as_deref());
 
         let response = format!(
             "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -77,7 +86,7 @@ fn extract_query_param(path: &str, key: &str) -> Option<String> {
 }
 
 #[cfg(target_family = "wasm")]
-fn route(path: &str) -> (u16, &'static str, String, bool) {
+fn route(path: &str, authorization: Option<&str>) -> (u16, &'static str, String, bool) {
     // Strip query string for exact matches
     let base_path = path.split('?').next().unwrap_or(path);
 
@@ -108,6 +117,7 @@ fn route(path: &str) -> (u16, &'static str, String, bool) {
             let echo_host = std::env::var("ECHO_SERVICE_SERVICE_URL")
                 .unwrap_or_else(|_| "http://echo-service.internal:9080".to_string());
             let url = format!("{}/echo", echo_host);
+            let internal_host = std::env::var("ECHO_SERVICE_HOST").ok();
 
             eprintln!(
                 "DEBUG: ECHO_SERVICE_SERVICE_URL env var = {:?}",
@@ -115,10 +125,25 @@ fn route(path: &str) -> (u16, &'static str, String, bool) {
             );
             eprintln!("DEBUG: Calling echo-service at: {}", url);
 
-            let result = make_http_request(&url);
+            let result = make_http_request(&url, authorization, internal_host.as_deref());
 
             match result {
-                Ok(response) => (200, "text/plain", response, false),
+                Ok((status, response)) => (status, "text/plain", response, false),
+                Err(e) => (
+                    500,
+                    "text/plain",
+                    format!("Failed to call echo-service: {}", e),
+                    false,
+                ),
+            }
+        }
+        "/call-echo-info" => {
+            let echo_host = std::env::var("ECHO_SERVICE_SERVICE_URL")
+                .unwrap_or_else(|_| "http://echo-service.internal:9080".to_string());
+            let url = format!("{}/info", echo_host);
+            let internal_host = std::env::var("ECHO_SERVICE_HOST").ok();
+            match make_http_request(&url, authorization, internal_host.as_deref()) {
+                Ok((status, response)) => (status, "text/plain", response, false),
                 Err(e) => (
                     500,
                     "text/plain",
@@ -613,13 +638,21 @@ fn populate_page_cache(mib: u32) -> Result<u64, String> {
 }
 
 #[cfg(target_family = "wasm")]
-fn make_http_request(url: &str) -> Result<String, String> {
+fn make_http_request(
+    url: &str,
+    authorization: Option<&str>,
+    host_override: Option<&str>,
+) -> Result<(u16, String), String> {
     use std::io::{Read, Write};
 
     let parsed = url::Url::parse(url).map_err(|e| e.to_string())?;
     let host = parsed.host_str().ok_or("no host")?;
     let port = parsed.port().unwrap_or(80);
     let path = parsed.path();
+    let request_host = host_override.unwrap_or(host);
+    if request_host.contains('\r') || request_host.contains('\n') {
+        return Err("invalid internal host override".to_string());
+    }
 
     let mut stream =
         std::net::TcpStream::connect(format!("{}:{}", host, port)).map_err(|e| e.to_string())?;
@@ -627,12 +660,18 @@ fn make_http_request(url: &str) -> Result<String, String> {
     // Per the "Blind App" principle, the app never injects identity headers.
     // The Host (wasmtime runtime) will transparently inject identity metadata
     // when wasmtime-wasi provides hooks for wrapping TCP output streams.
-    // For now, namespace isolation relies on service discovery filtering.
-    // socket_addr_check blocks cross-namespace connections to direct app ports,
-    // but the gateway port (9080) is open to all namespaces.
+    // Port 9080 is admitted by the WASI socket policy so the internal gateway
+    // can enforce kernel-derived workload identity and namespace policy.
+    let authorization_header = match authorization {
+        Some(value) if !value.contains('\r') && !value.contains('\n') => {
+            format!("Authorization: {value}\r\n")
+        }
+        Some(_) => return Err("invalid authorization header".to_string()),
+        None => String::new(),
+    };
     let request = format!(
-        "GET {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
-        path, host
+        "GET {} HTTP/1.1\r\nHost: {}\r\n{}Connection: close\r\n\r\n",
+        path, request_host, authorization_header
     );
 
     stream
@@ -644,11 +683,18 @@ fn make_http_request(url: &str) -> Result<String, String> {
         .read_to_string(&mut response)
         .map_err(|e| e.to_string())?;
 
-    // Extract body from HTTP response (skip headers)
+    let status = response
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .and_then(|value| value.parse::<u16>().ok())
+        .ok_or_else(|| "invalid upstream HTTP status".to_string())?;
+
+    // Extract body from HTTP response (skip headers) and preserve its status.
     if let Some(body_start) = response.find("\r\n\r\n") {
-        Ok(response[body_start + 4..].to_string())
+        Ok((status, response[body_start + 4..].to_string()))
     } else {
-        Ok(response)
+        Ok((status, response))
     }
 }
 

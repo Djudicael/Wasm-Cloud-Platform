@@ -68,6 +68,8 @@ pub(super) fn build_deploy_payload(
             tenant_id: None,
             policy,
             namespace: namespace.to_string(),
+            placement: common::types::PlacementPolicy::EveryNode,
+            local_dependencies: Vec::new(),
         };
         (config, gateway_config, Vec::new(), Vec::new())
     })

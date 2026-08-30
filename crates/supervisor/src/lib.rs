@@ -92,6 +92,13 @@ pub enum SupervisorCommand {
 
     /// Kill the application instance assigned to an eBPF-monitored OS thread.
     KillInstanceByTid { tid: u32, reason: String },
+
+    /// Release one eBPF-observed outbound TCP reservation for an instance.
+    TcpConnectionClosed {
+        tid: u32,
+        src_port: u16,
+        dst_port: u16,
+    },
 }
 
 #[allow(clippy::type_complexity, clippy::too_many_arguments)]

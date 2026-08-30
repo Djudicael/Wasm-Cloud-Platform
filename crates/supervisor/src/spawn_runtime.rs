@@ -70,6 +70,13 @@ impl Supervisor {
     /// Spawn a new instance for the given app.
     /// Returns the SocketAddr where the instance is listening.
     pub async fn spawn(&self, app_id: &AppId) -> Result<SocketAddr, PlatformError> {
+        if self.store.is_undeployed(&app_id.0)? {
+            return Err(PlatformError::AppNotFound(format!(
+                "{} is undeployed",
+                app_id.0
+            )));
+        }
+
         let (config, prepared) = {
             let pools = self.pools.read().await;
             if let Some(pool) = pools.get(&app_id.0) {
@@ -91,6 +98,18 @@ impl Supervisor {
                 (config, prepared)
             }
         };
+
+        for dependency in &config.local_dependencies {
+            let dependency_is_available = !self.store.is_undeployed(&dependency.0)?
+                && self.store.load_config(dependency)?.is_some()
+                && self.store.load_artifact(dependency)?.is_some();
+            if !dependency_is_available {
+                return Err(PlatformError::AppNotFound(format!(
+                    "required node-local dependency {} for {} is unavailable",
+                    dependency.0, app_id.0
+                )));
+            }
+        }
 
         // Build a qualified AppId that includes the namespace from config.
         let version = app_id.bare_name().split(':').nth(1).unwrap_or("v1");

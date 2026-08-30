@@ -10,6 +10,9 @@ pub trait EventCallbacks: Send + Sync {
     fn prune_idle_instances(&self);
     fn remove_from_upstream(&self, pid: u32);
     fn kill_instance_by_tid(&self, tid: u32, reason: &str);
+    /// Report a kernel-observed TCP close so runtime connection-policy
+    /// reservations can be released for the attributed workload.
+    fn tcp_connection_closed(&self, _tid: u32, _src_port: u16, _dst_port: u16) {}
 }
 
 /// A no-op implementation used in tests and safe defaults.

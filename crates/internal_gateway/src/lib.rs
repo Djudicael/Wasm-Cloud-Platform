@@ -26,6 +26,12 @@ mod tests;
 /// Default request timeout for forwarded requests (30 seconds).
 const FORWARDING_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// The kernel emits the TCP identity event before the request is accepted, but
+/// the userspace ring-buffer consumer runs asynchronously. Give it a small,
+/// bounded window to publish the source-port binding before failing closed.
+const CALLER_IDENTITY_WAIT_TIMEOUT: Duration = Duration::from_millis(50);
+const CALLER_IDENTITY_POLL_INTERVAL: Duration = Duration::from_millis(1);
+
 type ColdStartFn =
     dyn Fn(common::types::AppId) -> BoxFuture<'static, Option<SocketAddr>> + Send + Sync;
 
@@ -358,6 +364,22 @@ fn parse_internal_host(host: &str) -> Option<(&str, &str)> {
     }
 }
 
+async fn resolve_caller_identity(
+    namespace_map: &ebpf_monitor::NamespaceMap,
+    source_port: u16,
+) -> Option<ebpf_monitor::CallerIdentity> {
+    let deadline = tokio::time::Instant::now() + CALLER_IDENTITY_WAIT_TIMEOUT;
+    loop {
+        if let Some(identity) = namespace_map.resolve_identity(source_port) {
+            return Some(identity);
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return None;
+        }
+        tokio::time::sleep(CALLER_IDENTITY_POLL_INTERVAL).await;
+    }
+}
+
 async fn proxy_handler(
     State(gw): State<Arc<InternalGateway>>,
     ConnectInfo(peer_addr): ConnectInfo<SocketAddr>,
@@ -404,7 +426,7 @@ async fn proxy_handler(
             return Err(StatusCode::UNAUTHORIZED);
         };
 
-        match ns_map.resolve_identity(peer_addr.port()) {
+        match resolve_caller_identity(ns_map, peer_addr.port()).await {
             Some(identity) => {
                 tracing::info!(
                     source_port = peer_addr.port(),

@@ -184,6 +184,14 @@ and attach its external-manager and redaction evidence to the change record.
 - [ ] Read and write identities are separate, least-privilege, rotated, revocable,
       audited, and not shared by humans and automation.
 - [ ] Admin and artifact access is identity-aware at the network and application layers.
+- [ ] Gateway OIDC has an exact HTTPS issuer, expected audience, accepted algorithms,
+      claim mapping, token lifetime/skew policy, and fail-closed behaviour.
+- [ ] If JWKS uses a private split-horizon endpoint, it has independent DNS/TLS/egress
+      controls while token `iss` validation remains bound to the public issuer.
+- [ ] JWKS refresh, overlapping old/new signing keys, provider outage, malformed,
+      expired, wrong-issuer, wrong-audience, missing-scope, and wrong-role paths are tested.
+- [ ] Public, authenticated, role-protected, and scope-protected routes are verified
+      through every node and the production front door using a non-production test identity.
 - [ ] Set `node.environment = "production"`; prove admission rejects local defaults.
 - [ ] The node runtime sealing root uses pinned Vault Transit HMAC or AWS KMS HMAC
       with a non-exportable key. Generated, file, command, KV-exported, environment,
@@ -275,6 +283,26 @@ hardening for environments with mutually untrusted nodes or stronger supply-chai
 - [ ] WASI filesystem, outbound TCP, DNS, bind, environment, file descriptor, memory,
       table, fuel, epoch, and connection policies are tested on the live execution path.
 - [ ] Namespace boundaries and internal service discovery deny cross-namespace access by default.
+- [ ] Node-local internal-gateway callers are attributed from a non-spoofable
+      workload boundary; unresolved identity, inactive eBPF, unavailable maps,
+      and consumer failure remain fail-closed and alert distinctly.
+- [ ] Realm and client-specific role claims are tested positively and negatively,
+      and a valid user role cannot bypass workload namespace authorization.
+- [ ] The exact signed WASI/node image resolves `.internal` names through the
+      production resolver path; a loopback-plus-Host test override is not accepted
+      as DNS evidence.
+- [ ] Every internal-mesh dependency closure uses `placement.policy = "every_node"`;
+      each fully qualified `local_dependencies` entry is same-namespace and is
+      deployed before its dependants on every node.
+- [ ] Removing or failing a local dependency produces the documented bounded 502
+      behavior, cannot cold-start from a retained artifact, alerts operators, and
+      never searches or forwards to another platform node.
+- [ ] Architecture and network policy explicitly prohibit cross-host `.internal`
+      discovery, forwarding fallback, and workload identity. Cross-host mesh
+      identity is recorded as out of scope by design, not as a missing feature.
+- [ ] Applications that intentionally call a remote service use an explicit
+      external endpoint with independently validated TLS, identity, authorization,
+      revocation, audit, and failure semantics.
 - [ ] Administrative configuration cannot accidentally widen every application's policy.
 - [ ] Host-level network/cgroup/eBPF controls cover capabilities that are not fully
       authoritative inside Wasmtime host-call wrappers.
@@ -302,6 +330,8 @@ decision instead of assuming all policy surfaces are equally authoritative.
       losing one node and while compiling/restarting applications.
 - [ ] Platform default fuel and epoch deadlines are benchmarked separately and do not
       reject legitimate p99 work or permit unbounded execution.
+- [ ] Long-lived CLI-style service stores survive beyond the request epoch window;
+      per-request WASI HTTP stores still enforce their finite wall-clock deadline.
 - [ ] Wasmtime code cache is on suitable storage and bounded; pooling allocator is
       enabled only when the exact workload benchmark demonstrates a benefit.
 - [ ] HAProxy/load-balancer health-check fan-out and database readiness checks are

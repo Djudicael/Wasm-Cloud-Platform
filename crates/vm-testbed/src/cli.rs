@@ -47,6 +47,15 @@ enum Commands {
         /// OTLP gRPC endpoint configured on every platform node.
         #[arg(long)]
         node_otlp_endpoint: Option<String>,
+        /// Public OIDC issuer used to validate token `iss` claims.
+        #[arg(long, requires_all = ["node_oidc_audience", "node_oidc_jwks_url"])]
+        node_oidc_issuer_url: Option<String>,
+        /// Expected OIDC token audience.
+        #[arg(long, requires_all = ["node_oidc_issuer_url", "node_oidc_jwks_url"])]
+        node_oidc_audience: Option<String>,
+        /// Private JWKS URL reachable from platform nodes.
+        #[arg(long, requires_all = ["node_oidc_issuer_url", "node_oidc_audience"])]
+        node_oidc_jwks_url: Option<String>,
         /// Memory for the NATS VM in MiB.
         #[arg(long, default_value = "256")]
         nats_memory: usize,
@@ -126,6 +135,15 @@ enum Commands {
         /// Persist a new OTLP gRPC endpoint for this and later node restarts.
         #[arg(long)]
         otlp_endpoint: Option<String>,
+        /// Persist a public OIDC issuer for this and later node restarts.
+        #[arg(long, requires_all = ["oidc_audience", "oidc_jwks_url"])]
+        oidc_issuer_url: Option<String>,
+        /// Persist the expected OIDC audience for this and later node restarts.
+        #[arg(long, requires_all = ["oidc_issuer_url", "oidc_jwks_url"])]
+        oidc_audience: Option<String>,
+        /// Persist a private JWKS URL reachable from platform nodes.
+        #[arg(long, requires_all = ["oidc_issuer_url", "oidc_audience"])]
+        oidc_jwks_url: Option<String>,
     },
 
     /// Scale a detached topology to the requested node count.
@@ -348,6 +366,12 @@ struct PersistedClusterState {
     node_vcpus: usize,
     #[serde(default)]
     node_otlp_endpoint: Option<String>,
+    #[serde(default)]
+    node_oidc_issuer_url: Option<String>,
+    #[serde(default)]
+    node_oidc_audience: Option<String>,
+    #[serde(default)]
+    node_oidc_jwks_url: Option<String>,
     next_node_index: u8,
     nats: Option<PersistedVm>,
     nodes: Vec<PersistedVm>,
@@ -391,6 +415,9 @@ struct RestartNodeOptions {
     vcpus: Option<usize>,
     rootfs_read_only: bool,
     otlp_endpoint: Option<String>,
+    oidc_issuer_url: Option<String>,
+    oidc_audience: Option<String>,
+    oidc_jwks_url: Option<String>,
 }
 
 #[tokio::main]
@@ -405,6 +432,9 @@ async fn main() -> Result<()> {
             node_memory,
             node_vcpus,
             node_otlp_endpoint,
+            node_oidc_issuer_url,
+            node_oidc_audience,
+            node_oidc_jwks_url,
             nats_memory,
             nats_vcpus,
             state_file,
@@ -418,6 +448,12 @@ async fn main() -> Result<()> {
 
             let mut cluster = ClusterFixture::new(name.clone()).await?;
             cluster.set_node_otlp_endpoint(node_otlp_endpoint);
+            validate_oidc_boot_config(
+                node_oidc_issuer_url.as_deref(),
+                node_oidc_audience.as_deref(),
+                node_oidc_jwks_url.as_deref(),
+            )?;
+            cluster.set_node_oidc(node_oidc_issuer_url, node_oidc_audience, node_oidc_jwks_url);
             cluster.start_nats(nats_memory, nats_vcpus).await?;
             for _ in 0..requested_nodes {
                 cluster.start_node(node_memory, node_vcpus).await?;
@@ -487,6 +523,9 @@ async fn main() -> Result<()> {
             vcpus,
             rootfs_read_only,
             otlp_endpoint,
+            oidc_issuer_url,
+            oidc_audience,
+            oidc_jwks_url,
         } => {
             let mut state = read_state(&state_file)?;
             let vm = restart_node_from_state(
@@ -502,6 +541,9 @@ async fn main() -> Result<()> {
                     vcpus,
                     rootfs_read_only,
                     otlp_endpoint,
+                    oidc_issuer_url,
+                    oidc_audience,
+                    oidc_jwks_url,
                 },
             )
             .await?;
@@ -743,6 +785,9 @@ fn detach_cluster_state(
         node_memory_mb,
         node_vcpus,
         node_otlp_endpoint: cluster.node_otlp_endpoint.clone(),
+        node_oidc_issuer_url: cluster.node_oidc_issuer_url.clone(),
+        node_oidc_audience: cluster.node_oidc_audience.clone(),
+        node_oidc_jwks_url: cluster.node_oidc_jwks_url.clone(),
         next_node_index: cluster.node_count() as u8,
         nats,
         nodes: nodes.into_values().collect(),
@@ -879,7 +924,7 @@ async fn spawn_node_from_state(
         gateway: state.gateway.clone(),
         bridge_name: state.bridge_name.clone(),
         tap_device: tap,
-        extra_kernel_args: Vec::new(),
+        extra_kernel_args: node_runtime_kernel_args(state),
         mmds_data: Some(serde_json::json!({
             "node_config": {
                 "node_id": node_id,
@@ -890,6 +935,9 @@ async fn spawn_node_from_state(
                 "admin_port": 9090,
                 "artifact_port": 9091,
                 "otlp_endpoint": state.node_otlp_endpoint,
+                "oidc_issuer_url": state.node_oidc_issuer_url,
+                "oidc_audience": state.node_oidc_audience,
+                "oidc_jwks_url": state.node_oidc_jwks_url,
             }
         })),
     };
@@ -954,9 +1002,21 @@ async fn restart_node_from_state(
     if let Some(endpoint) = options.otlp_endpoint {
         state.node_otlp_endpoint = Some(endpoint);
     }
-    if let Some(endpoint) = &state.node_otlp_endpoint {
-        extra_kernel_args.push(format!("wcp.otlp_endpoint={endpoint}"));
+    validate_oidc_boot_config(
+        options.oidc_issuer_url.as_deref(),
+        options.oidc_audience.as_deref(),
+        options.oidc_jwks_url.as_deref(),
+    )?;
+    if let (Some(issuer), Some(audience), Some(jwks)) = (
+        options.oidc_issuer_url,
+        options.oidc_audience,
+        options.oidc_jwks_url,
+    ) {
+        state.node_oidc_issuer_url = Some(issuer);
+        state.node_oidc_audience = Some(audience);
+        state.node_oidc_jwks_url = Some(jwks);
     }
+    extra_kernel_args.extend(node_runtime_kernel_args(state));
 
     let kernel_path = match options.kernel {
         Some(path) => path
@@ -996,6 +1056,9 @@ async fn restart_node_from_state(
                 "admin_port": 9090,
                 "artifact_port": 9091,
                 "otlp_endpoint": state.node_otlp_endpoint,
+                "oidc_issuer_url": state.node_oidc_issuer_url,
+                "oidc_audience": state.node_oidc_audience,
+                "oidc_jwks_url": state.node_oidc_jwks_url,
             }
         })),
     };
@@ -1014,6 +1077,57 @@ async fn restart_node_from_state(
     let persisted = detach_vm_state(&mut vm);
     state.nodes[index] = persisted.clone();
     Ok(persisted)
+}
+
+fn node_runtime_kernel_args(state: &PersistedClusterState) -> Vec<String> {
+    let mut args = Vec::new();
+    if let Some(endpoint) = &state.node_otlp_endpoint {
+        args.push(format!("wcp.otlp_endpoint={endpoint}"));
+    }
+    if let (Some(issuer), Some(audience), Some(jwks)) = (
+        &state.node_oidc_issuer_url,
+        &state.node_oidc_audience,
+        &state.node_oidc_jwks_url,
+    ) {
+        args.push(format!("wcp.oidc_issuer_url={issuer}"));
+        args.push(format!("wcp.oidc_audience={audience}"));
+        args.push(format!("wcp.oidc_jwks_url={jwks}"));
+    }
+    args
+}
+
+fn validate_oidc_boot_config(
+    issuer_url: Option<&str>,
+    audience: Option<&str>,
+    jwks_url: Option<&str>,
+) -> Result<()> {
+    let supplied = [issuer_url.is_some(), audience.is_some(), jwks_url.is_some()];
+    if supplied.iter().any(|value| *value) && !supplied.iter().all(|value| *value) {
+        bail!("OIDC issuer, audience, and JWKS URL must be supplied together");
+    }
+    for (name, value) in [("issuer URL", issuer_url), ("JWKS URL", jwks_url)] {
+        if let Some(value) = value {
+            if !(value.starts_with("http://") || value.starts_with("https://")) {
+                bail!("OIDC {name} must use http:// or https://");
+            }
+            if value
+                .chars()
+                .any(|ch| ch.is_whitespace() || matches!(ch, '"' | '\\'))
+            {
+                bail!("OIDC {name} contains an unsafe character");
+            }
+        }
+    }
+    if let Some(audience) = audience {
+        if audience.is_empty()
+            || audience
+                .chars()
+                .any(|ch| ch.is_whitespace() || matches!(ch, '"' | '\\'))
+        {
+            bail!("OIDC audience is empty or contains an unsafe character");
+        }
+    }
+    Ok(())
 }
 
 async fn deploy_app_to_state(state: &PersistedClusterState, req: DeployRequest) -> Result<()> {
@@ -1121,6 +1235,8 @@ async fn deploy_app_to_state(state: &PersistedClusterState, req: DeployRequest) 
         tenant_id: None,
         policy: Some(policy),
         namespace: req.namespace.clone(),
+        placement: common::types::PlacementPolicy::EveryNode,
+        local_dependencies: Vec::new(),
     };
 
     bus.publish(&Event::DeployApp {

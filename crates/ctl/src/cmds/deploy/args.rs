@@ -99,6 +99,10 @@ pub struct DeployArgs {
     #[arg(long)]
     pub node_api: Option<String>,
 
+    /// Artifact API URL when it is served separately from the admin API.
+    #[arg(long)]
+    pub artifact_api: Option<String>,
+
     /// Deploy ingress API URL for remote deploy intent (overrides global --deploy-api)
     #[arg(long)]
     pub deploy_api: Option<String>,

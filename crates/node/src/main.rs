@@ -1086,6 +1086,19 @@ impl EventCallbacks for NodeEbpfCallbacks {
             );
         }
     }
+
+    fn tcp_connection_closed(&self, tid: u32, src_port: u16, dst_port: u16) {
+        if let Err(error) = self
+            .supervisor_tx
+            .try_send(SupervisorCommand::TcpConnectionClosed {
+                tid,
+                src_port,
+                dst_port,
+            })
+        {
+            warn!(tid, src_port, dst_port, %error, "failed to release outbound TCP reservation");
+        }
+    }
 }
 
 mod args;
@@ -1969,9 +1982,9 @@ async fn main() -> anyhow::Result<()> {
 
     // -- Internal Mesh Gateway -----------------------------------------
     // Starts a local Axum proxy for East-West traffic between apps.
-    // Listens on a configured loopback port. Namespace isolation relies on
-    // service discovery: the Supervisor only injects service URLs for
-    // same-namespace apps. The gateway port is open to all namespaces.
+    // Listens on a configured loopback port and derives caller identity from
+    // the eBPF source-port/TID map. Unresolved callers fail closed; resolved
+    // cross-namespace callers require an explicit gateway allow rule.
     let internal_gw = internal_gateway::InternalGateway::new(
         service_registry.clone(),
         rate_limiter.clone(),

@@ -58,6 +58,43 @@ fn test_extract_request_host_prefers_host_header_value() {
     );
 }
 
+#[test]
+fn untrusted_platform_identity_and_trace_headers_are_removed() {
+    use pingora::http::RequestHeader;
+
+    let mut request = RequestHeader::build("GET", b"/", None).unwrap();
+    for (name, value) in [
+        ("x-app-id", "attacker-app"),
+        ("x-trace-id", "attacker-trace"),
+        (
+            "traceparent",
+            "00-11111111111111111111111111111111-2222222222222222-01",
+        ),
+        ("tracestate", "vendor=attacker"),
+        ("authorization", "Bearer must-remain-forwardable"),
+        ("cookie", "session=must-remain-forwardable"),
+    ] {
+        request.insert_header(name, value).unwrap();
+    }
+
+    super::forwarding::remove_untrusted_platform_headers(&mut request);
+
+    for name in ["x-app-id", "x-trace-id", "traceparent", "tracestate"] {
+        assert!(
+            request.headers.get(name).is_none(),
+            "{name} must be removed"
+        );
+    }
+    assert_eq!(
+        request.headers.get("authorization").unwrap(),
+        "Bearer must-remain-forwardable"
+    );
+    assert_eq!(
+        request.headers.get("cookie").unwrap(),
+        "session=must-remain-forwardable"
+    );
+}
+
 #[tokio::test]
 async fn test_wasm_proxy_cold_start() {
     use crate::rate_limiter::RateLimitConfig;

@@ -5,7 +5,10 @@
 Use this plan after the single-host microVM plan passes. It validates failures
 that cannot be created honestly when every microVM shares one computer: complete
 host shutdown, host-kernel failure, physical disk loss, network-interface loss,
-and cross-host routing.
+and cross-host routing for ingress, control-plane, stateful services, telemetry,
+and explicit external application endpoints. The `.internal` application mesh
+remains node-local; this plan must not introduce cross-host mesh forwarding or
+identity.
 
 The two hosts may be:
 
@@ -32,6 +35,11 @@ This plan can validate:
 - primary/replica database behavior with manual or properly arbitrated failover;
 - telemetry continuity when one collector/host disappears; and
 - eBPF behavior on two real kernels and hardware configurations.
+
+For application-to-application `.internal` calls, the two-host proof is that
+each host independently deploys the complete `every_node` dependency closure,
+resolves to its own loopback gateway, and fails locally when a dependency is
+absent. Cross-host mesh identity is out of scope by design.
 
 Two physical hosts alone do **not** prove:
 
@@ -199,6 +207,8 @@ test -r /dev/kvm && test -w /dev/kvm && echo "KVM available"
 - [ ] Ensure NATS advertises addresses reachable from all platform nodes.
 - [ ] Ensure PostgreSQL and internal gateway addresses are reachable only from
       intended networks.
+- [ ] Firewall policy prevents `.internal` gateway traffic from leaving its
+      platform node; there is no remote-node discovery or fallback route.
 - [ ] Ensure administration and artifact endpoints are never exposed to the public
       LAN without TLS and authorization.
 - [ ] Verify MTU across LAN/VPN, WSL, bridge, TAP, and guest interfaces.
@@ -212,7 +222,7 @@ Capture successful bidirectional tests for every required flow:
 | NATS members | Other NATS members | Cluster routes and JetStream replication |
 | Platform nodes A/B | PostgreSQL | Application database traffic |
 | HAProxy A/B | Platform proxies A/B | North-south routing |
-| Platform nodes | Other platform nodes | Internal routing/artifact transfer as designed |
+| Platform nodes | Other platform nodes | Explicit control/artifact flows only; never `.internal` mesh traffic |
 | Prometheus/collectors | All monitored targets | Metrics/logs/traces |
 | Operators | Admin endpoints | Authenticated management only |
 

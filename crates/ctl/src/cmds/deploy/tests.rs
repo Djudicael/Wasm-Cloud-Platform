@@ -76,6 +76,30 @@ fn test_deploy_gateway_rate_limit_defaults_to_node_local() {
 }
 
 #[test]
+fn test_deploy_accepts_separate_artifact_api() {
+    let parsed = DeployCliTestHarness::parse_from([
+        "wasm-ctl",
+        "--app",
+        "api",
+        "--wasm",
+        "./test.wasm",
+        "--node-api",
+        "http://node.internal:9090",
+        "--artifact-api",
+        "http://node.internal:9091",
+    ]);
+
+    assert_eq!(
+        parsed.args.node_api.as_deref(),
+        Some("http://node.internal:9090")
+    );
+    assert_eq!(
+        parsed.args.artifact_api.as_deref(),
+        Some("http://node.internal:9091")
+    );
+}
+
+#[test]
 fn test_deploy_gateway_rate_limit_supports_explicit_distributed_opt_in() {
     let parsed = DeployCliTestHarness::parse_from([
         "wasm-ctl",
@@ -247,6 +271,7 @@ fn test_build_deploy_payload_extracts_manifest_routes() {
         secrets: HashMap::new(),
         api_keys: Vec::new(),
         artifact: None,
+        placement: super::super::manifest::PlacementManifestSection::default(),
     };
     let app_id = common::types::AppId::new_namespaced("tenant-a", "api", "v1");
 

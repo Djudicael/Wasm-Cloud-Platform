@@ -988,6 +988,8 @@ async fn test_handle_state_snapshot_accepts_first_matching_session_only() {
         tenant_id: None,
         policy: None,
         namespace: "default".to_string(),
+        placement: common::types::PlacementPolicy::EveryNode,
+        local_dependencies: Vec::new(),
     };
     let accepted_config = common::types::AppConfig {
         id: AppId("accepted-app:v1".to_string()),

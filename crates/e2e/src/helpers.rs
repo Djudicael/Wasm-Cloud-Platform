@@ -250,6 +250,8 @@ pub fn build_app_config_with_namespace(
         tenant_id: None,
         policy: None,
         namespace: namespace.to_string(),
+        placement: common::types::PlacementPolicy::EveryNode,
+        local_dependencies: Vec::new(),
     }
 }
 

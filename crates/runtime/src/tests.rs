@@ -793,7 +793,7 @@ fn test_zero_fuel_immediate_trap() {
 
 #[test]
 #[cfg_attr(windows, ignore = "MSVC unwinding issue on traps")]
-fn test_epoch_interruption_traps_long_running_guest() {
+fn test_long_running_service_guest_is_still_bounded_by_fuel() {
     let runtime = WasmRuntime::new().expect("Failed to create WasmRuntime");
     let wasm_bytes = wat::parse_str(
         r#"
@@ -815,7 +815,7 @@ fn test_epoch_interruption_traps_long_running_guest() {
 
     let artifact = runtime.compile(&wasm_bytes).unwrap();
     let mut config = base_config();
-    config.fuel_quota = FuelQuota(50_000_000_000);
+    config.fuel_quota = FuelQuota(10_000);
 
     let prepared = runtime.prepare(&artifact, config).unwrap();
     let mut instance = prepared.spawn_instance(vec![], 8080, None).unwrap();
@@ -823,7 +823,7 @@ fn test_epoch_interruption_traps_long_running_guest() {
 
     assert!(
         stats.trap.is_some(),
-        "long-running guest should trap due to epoch interruption"
+        "long-running service guest should trap when its fuel is exhausted"
     );
 }
 

@@ -1,5 +1,29 @@
 # Step 41 — eBPF Namespace Enforcement for Internal Mesh Gateway
 
+## Current implementation status (2026-08-30)
+
+The source-port lookup is synchronous once published, but publication is not:
+`inet_sock_set_state` writes a `TidConnection` event to a ring buffer and the
+userspace consumer then calls `bind_port()`. The gateway therefore waits up to
+50 ms in 1-ms intervals for the binding and returns 401 if it never appears.
+It does not fall back to `NamespaceRegistry.port_to_app`, caller headers, or an
+anonymous identity. Inactive eBPF and an unavailable map also fail closed.
+
+The currently implemented enforcement is the userspace internal-gateway
+authorization decision backed by kernel-observed identity. The SK_MSG/sockmap
+design described later in this document remains proposed defense-in-depth and
+must not be reported as implemented. Likewise, non-Linux/old-kernel fallback is
+not an authorization mode for required namespace enforcement.
+
+The final 2026-08-30 three-node microVM run used literal `.internal` DNS,
+resolved exact same-namespace and cross-namespace callers, passed 24 OIDC
+realm/client-role and namespace checks, and completed 96/96 concurrent calls
+per node. TCP-close events release each mapped instance's outbound connection
+reservation; deployments that enforce that limit must require eBPF. Dependency
+removal returned 502 on every node without a remote fallback and redeployment
+restored 200. Cross-host mesh identity is out of scope by design. See
+`INFRA_IMPL/process/INTERNAL_MESH_OIDC_ROLE_VALIDATION.md`.
+
 ## Goal
 
 Add **identity attribution** to the internal gateway so it knows *which Wasm
@@ -7,9 +31,10 @@ instance* is making each East-West request and *which namespace* that instance
 belongs to. This closes the current gap where the gateway port (9080) is open
 to all namespaces with no caller identity.
 
-The design uses a **pull model**: when the gateway receives a request, it asks
-the identity map "who is calling from source port X?" and gets back the
-namespace and app ID. No events, no async propagation, no race conditions.
+The design uses a **pull-at-decision model**: when the gateway receives a
+request, it asks the identity map "who is calling from source port X?" and gets
+back the namespace and app ID. The source-port binding reaches that map through
+an asynchronous eBPF event and bounded userspace consumer handoff.
 
 Three cooperating layers:
 
@@ -17,12 +42,12 @@ Three cooperating layers:
    registers its OS Thread ID (TID) with `{namespace, app_id}` in a shared map.
    It also tracks which source ports belong to which TIDs.
 2. **Gateway identity query** — On each request, the gateway looks up the
-   source port → TID → {namespace, app_id} chain synchronously. Same process,
-   same memory, no race conditions.
-3. **eBPF audit + enforcement** — eBPF monitors traffic at the kernel level for
-   audit logging and forged-header detection. On Linux 5.8+, SK_MSG drops
-   packets from unregistered TIDs. eBPF is **not** the identity propagation
-   mechanism — it's the audit and enforcement layer.
+   source port → TID → {namespace, app_id} chain in the same process, after the
+   bounded publication handoff described above.
+3. **eBPF attribution + audit** — eBPF observes gateway TCP state, publishes
+   source-port/TID bindings, and audits forged identity headers. The gateway is
+   the current enforcement point. SK_MSG packet dropping remains proposed
+   defense-in-depth.
 
 No separate processes. No containers. Everything runs inside the single
 `wasm-node` process or is observed by eBPF at the kernel level.

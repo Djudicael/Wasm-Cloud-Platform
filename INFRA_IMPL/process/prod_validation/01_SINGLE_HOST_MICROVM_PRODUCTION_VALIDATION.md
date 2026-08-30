@@ -173,6 +173,9 @@ redacted artifact with the result.
 | OpenTelemetry pipeline | RECEIVER ONLY / NOT APPLICATION-INTEGRATED | The Collector accepts OTLP on loopback and exposes self-metrics, but effective node configuration has `otlp_endpoint=null`. No platform/app logs or traces reached it, so trace continuity, buffering, retry, sampling, and shutdown flushing remain unvalidated |
 | P10-03 telemetry remediation (2026-08-30) | LOCAL PASS WITH COLLECTOR-OUTAGE DURABILITY BOUNDARY | Node OTLP activation, W3C extraction/injection, exact deployment/status/latency fields, node identity, structured operational logs, separated audit envelopes, a 2048-batch disk-backed Collector queue, and backend/Collector outage alerts were implemented and exercised. Tempo trace `eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee` identifies `local-test-node-0`, environment `local-validation`, the exact OIDC backend, `/health/ready`, and HTTP 200. Trace `99999999999999999999999999999999` correlated the request with WASI TCP, PostgreSQL authentication, and `SELECT 1`. A Tempo outage queued and recovered trace `55555555555555555555555555555555`; OIDC stayed ready. A span created while the immediate Collector was stopped was not recovered because the node exporter has no WAL. Production therefore requires a supervised local Collector per host or an accepted-loss policy/node-side WAL, plus authenticated TLS and independently operated off-host retention. See the [runbook](../PRODUCTION_TELEMETRY_VALIDATION.md) and [evidence](evidence/2026-08-30-single-host/P10-03-telemetry/README.md) |
 | P10-04 alerting remediation (2026-08-30) | LOCAL PASS / PRODUCTION RECEIVER EVIDENCE PENDING | Native tools validate the live Prometheus and Alertmanager configurations and all four tracked rule files. Representative inputs cross all 32 expression thresholds; every expression succeeds against live Prometheus and is inactive in the healthy final state. The schema-10 rollout exposes explicit effective admin-auth state on all nodes. Three identical submissions for each of seven required operational categories produced exactly seven firing and seven resolved webhook deliveries with no duplicate. Six WASI policy thresholds were corrected from accidental per-second comparisons to their documented per-minute rates, an HAProxy 5xx ratio alert was added, and the state-scoped receiver now exits cleanly. Production still needs the authenticated operator receiver, owner/runbook metadata, inhibition/silence policy, HA Alertmanager, and provider delivery evidence. See the [runbook](../PRODUCTION_ALERTING_VALIDATION.md) and [evidence](evidence/2026-08-30-single-host/P10-04-alerting/README.md) |
+| P10-05 redaction and OIDC negative security (2026-08-30) | SOURCE REMEDIATED + OIDC MICROVM PASS / PRODUCTION PIPELINE EVIDENCE PENDING | Platform source strips untrusted application/trace identity headers, HAProxy and OIDC middleware log paths without query values, and the OIDC authorize endpoint validates a redirect before trusting it for any response. A state-scoped sentinel test found no injected authorization, cookie, identity, malformed trace, or query value in 25 captured artifacts; invalid admin credentials were rejected on every node, exact frontend/backend attribution did not cross, and an attacker redirect stayed on `/oidc/error`. The OIDC security suite covers code replay/expiry and session expiry. RP state/nonce mismatch and the complete production retention path remain operator/release gates. See the [runbook](../PLATFORM_REDACTION_AND_OIDC_SECURITY_VALIDATION.md) and [evidence](evidence/2026-08-30-single-host/P10-05-security/README.md) |
+| P10-05 platform API gateway with OIDC Hub (2026-08-30) | LOCAL MICROVM PASS / PRODUCTION IDP AND PKI GATES PENDING | Node image schema 11 persists a public issuer, expected audience, and private JWKS URL so split-horizon key retrieval does not weaken `iss` validation. The three-node rolling update stayed healthy. A digest-pinned `hello-axum` deployment exposed public, authenticated, and scope-protected endpoints. Every node and HAProxy accepted a real Hub token; missing, malformed, wrong-audience, and correctly signed expired tokens returned 401; present/absent scopes returned 200/403. The rehearsal also fixed `wasm-ctl` deployment against separate admin and artifact ports. OIDC is a test fixture, not a platform production dependency. See the [runbook](../API_GATEWAY_OIDC_MICROVM_VALIDATION.md) and [evidence](evidence/2026-08-30-single-host/P10-05-api-gateway-oidc/README.md) |
+| P10-05 node-local internal mesh production contract (2026-08-30) | SINGLE-HOST MICROVM PASS / SIGNED PRODUCTION-IMAGE REPETITION PENDING | Node image schema 12 wired the literal `.internal` resolver path on every node. Explicit `every_node` placement and same-namespace `local_dependencies` enforce the co-located dependency closure. eBPF resolved exact workload identity during 96/96 concurrent calls per node (288/288 total); all 24 OIDC role/negative/namespace checks passed. Removing the target returned 502 on all three nodes with no retained-artifact cold start or remote fallback; redeployment restored 200 everywhere. TCP-close events now release outbound connection reservations, and long-lived CLI-style services survived beyond the former 30-second epoch trap. Cross-host mesh identity is explicitly out of scope by design. See the [runbook](../INTERNAL_MESH_OIDC_ROLE_VALIDATION.md) and [evidence](evidence/2026-08-30-single-host/P10-05-node-local-mesh-production/README.md) |
 | PostgreSQL interruption/recovery | PASS | The exact recorded PostgreSQL Firecracker PID `289481` was paused with `SIGSTOP`. Within the bounded health window, HAProxy returned 503 for backend readiness, the independent frontend remained HTTP 200, the PostgreSQL exporter target went down, and `PostgreSQLExporterDown` fired in Alertmanager. The paused VMM stayed near 1% memory without CPU/log escalation. `SIGCONT` restored the same VM; readiness returned `database=ok`, `pg_up=1`, and the alert resolved without redeployment |
 | NATS interruption/recovery | PASS AFTER REMEDIATION | Pausing only recorded NATS Firecracker PID `223906` made the exporter target go down and fired `NatsExporterDown`; frontend and backend data-plane routes remained HTTP 200. The original nodes incorrectly reported NATS as healthy for more than 65 seconds because `NatsHealthWatcher` refreshed its timestamp without probing the server. A first canary using `Client::flush()` also failed because flush only confirms writes to the local TCP buffer. The final implementation performs a two-second request/reply to `$JS.API.INFO` every five seconds, proving both NATS and required JetStream responsiveness. After rolling the rebuilt image to all three nodes, a whole-cluster freeze made every node health endpoint return HTTP 503 within 12 seconds while both application routes stayed available. `SIGCONT` restored all node health endpoints to HTTP 200 and resolved the alert within 12 seconds without redeployment |
 | Platform-node rolling replacement | PASS | The corrected base image (`sha256:40e1e1c58430fc82e1ec775ed392e2b063e28a93aada85c0aa00e60902ebe7dc`) passed read-only `e2fsck`. Nodes 2, 1, and 0 were restarted sequentially from exact recorded state. Each node became healthy, reconstructed both OIDC deployments from desired state, and served traffic; the HAProxy backend route remained HTTP 200 throughout the observed post-restart gates and no alert remained active |
@@ -393,17 +396,27 @@ command succeeded.
 - [x] Callback, token/session handling, authenticated API access, refresh where
       supported, and logout all work through the public origin.
 - [x] Invalid credentials fail safely in the focused Playwright journey.
-- [ ] Invalid redirect URIs, expired state/nonce, and expired
-      sessions fail safely.
-- [ ] No password, JWT, cookie, authorization header, database URL, or client
+- [x] Invalid redirect URIs, expired authorization codes, replayed codes, and
+      expired sessions fail safely.
+- [x] No injected password/token sentinel, cookie, authorization header,
+      caller-controlled application/trace identity, or query value appears in
+      the captured local logs or traces. Production retention remains a separate
+      gate.
+- [ ] The real relying party rejects state mismatch and ID-token nonce mismatch.
+- [ ] No real production password, JWT, cookie, database URL, or client
       secret appears in logs or traces.
 
 Direct `database=ok` probes through each node during Phase 8 and both Phase 9
 recovery rehearsals prove the scheduled backend can authenticate to PostgreSQL
-from every platform node. **NOT VALIDATED / PRODUCTION BLOCKER:** invalid redirect
-URI, expired state/nonce/session, and systematic secret absence from logs/traces
-remain open. The disposable development seeder is already known to print local
-test credentials, so it cannot be promoted.
+from every platform node. **LOCAL P10-05 PASS / PRODUCTION RETENTION GATE OPEN:**
+the fixed OIDC component rejected an unregistered redirect, expired/replayed
+authorization codes and an expired session are covered, and a high-entropy
+sentinel was absent from the selected platform logs, audit/operational exports,
+and traces. `state` is RP-generated and `nonce` is transaction/ID-token-bound;
+the real RP must validate their mismatch rather than treating them as independent
+authorization-server expiry credentials. The disposable development seeder is
+already known to print local test credentials, so it cannot be promoted. See
+[`PLATFORM_REDACTION_AND_OIDC_SECURITY_VALIDATION.md`](../PLATFORM_REDACTION_AND_OIDC_SECURITY_VALIDATION.md).
 
 Retain the environment for interactive browser testing. Do not destroy it until
 the user explicitly finishes testing.
@@ -1999,17 +2012,19 @@ If interactive testing is complete and the user explicitly authorizes teardown:
 bash scripts/vm/destroy-testbed.sh --state-file "$STATE_FILE"
 ```
 
-- [ ] Verify only PIDs, TAP devices, bridges, HAProxy configuration, and service
+- [x] Verify only PIDs, TAP devices, bridges, HAProxy configuration, and service
       state recorded for this testbed were removed.
-- [ ] Verify the state file and companion state were removed.
+- [x] Verify the state file and companion state were removed.
 - [x] Preserve reports, metrics snapshots, relevant redacted logs/traces, checksums,
       and the final decision record.
 
-Teardown is **NOT PERFORMED** for this current run. The two removal checks are
-intentionally unchecked, and the live environment remains available until the
-user gives separate explicit authorization. Phase 5 now has a redacted,
-queryable trace record and summarized interruption evidence under
-`evidence/2026-08-30-single-host/P10-03-telemetry/`.
+Teardown was explicitly authorized and completed on 2026-08-30 using
+`scripts/vm/destroy-testbed.sh` with the exact recorded state file. A
+post-teardown audit confirmed all seven recorded Firecracker/HAProxy PIDs, the
+bridge and six TAP devices, eight recorded observability containers, the
+state-scoped observability/Vault/OIDC credential directories, lifecycle files,
+and ports 8088, 8405, 9095, 9093, 19093, 3200, and 4317 were absent. Validation
+evidence was preserved.
 
 ## Handoff to multi-host validation
 
@@ -2018,3 +2033,9 @@ artifacts, configuration schema, application artifacts, synthetic journeys, load
 profiles, dashboards, and alert rules into the two-host plan. The multi-host plan
 focuses on real host loss, routed cross-host networking, independent storage, and
 N-1 capacity.
+
+The two-host plan must not add cross-host behavior to the internal mesh.
+`.internal` remains node-local, and each host must independently contain the
+declared `every_node` dependency closure. Cross-host tests apply to ingress,
+control-plane convergence, explicit external service endpoints, and host-loss
+capacity. Cross-host mesh identity is out of scope by design.

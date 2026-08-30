@@ -29,6 +29,15 @@ impl Injector for RequestHeaderInjector<'_> {
     }
 }
 
+/// Remove caller-controlled platform identity and trace headers before the
+/// proxy writes authoritative values. This also prevents duplicate header
+/// values from surviving `insert_header` implementation changes.
+pub(super) fn remove_untrusted_platform_headers(request: &mut RequestHeader) {
+    for header in ["x-app-id", "x-trace-id", "traceparent", "tracestate"] {
+        request.remove_header(header);
+    }
+}
+
 pub(super) async fn upstream_peer(
     proxy: &WasmProxy,
     ctx: &mut RequestCtx,
@@ -52,10 +61,12 @@ pub(super) async fn upstream_peer(
 }
 
 pub(super) async fn upstream_request_filter(
-    session: &mut Session,
+    _session: &mut Session,
     upstream_request: &mut RequestHeader,
     ctx: &mut RequestCtx,
 ) -> PingoraResult<()> {
+    remove_untrusted_platform_headers(upstream_request);
+
     if let Some(id) = &ctx.app_id {
         let _ = upstream_request.insert_header("X-App-Id", &id.0);
     }
@@ -71,17 +82,6 @@ pub(super) async fn upstream_request_filter(
                 &mut RequestHeaderInjector(upstream_request),
             );
         });
-    } else {
-        for header in ["traceparent", "tracestate"] {
-            if let Some(value) = session
-                .req_header()
-                .headers
-                .get(header)
-                .and_then(|value| value.to_str().ok())
-            {
-                let _ = upstream_request.insert_header(header, value);
-            }
-        }
     }
 
     if ctx.strip_prefix {

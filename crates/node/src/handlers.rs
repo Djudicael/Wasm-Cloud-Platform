@@ -346,6 +346,8 @@ impl EventDispatcher {
     ) -> Result<(), PlatformError> {
         tracing::info!(app = %app_id.0, "handle_deploy invoked");
 
+        self.validate_local_placement(&config)?;
+
         let sha256 = expected_hash
             .clone()
             .ok_or_else(|| PlatformError::messaging("deploy event missing expected_hash"))?;
@@ -750,9 +752,29 @@ impl EventDispatcher {
         app_id: AppId,
         config: common::types::AppConfig,
     ) -> Result<(), PlatformError> {
+        self.validate_local_placement(&config)?;
         self.store.save_config(&config)?;
         self.apply_rate_limit(&app_id, &config);
         info!(app = %app_id.0, "config updated");
+        Ok(())
+    }
+
+    fn validate_local_placement(
+        &self,
+        config: &common::types::AppConfig,
+    ) -> Result<(), PlatformError> {
+        supervisor::config_validator::validate_placement_contract(config)?;
+        for dependency in &config.local_dependencies {
+            let dependency_is_available = !self.store.is_undeployed(&dependency.0)?
+                && self.store.load_config(dependency)?.is_some()
+                && self.store.load_artifact(dependency)?.is_some();
+            if !dependency_is_available {
+                return Err(PlatformError::ConfigValidation(format!(
+                    "required node-local dependency {} for {} is not deployed on node {}; deploy the dependency first with the same every_node placement",
+                    dependency.0, config.id.0, self.node_id
+                )));
+            }
+        }
         Ok(())
     }
 

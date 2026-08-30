@@ -144,7 +144,7 @@ format = "json"
 
 [dns]
 stub_enabled = true
-stub_port = 15353
+stub_port = 53
 
 [auth]
 trusted_proxies = ["172.20.0.1/32"]
@@ -159,7 +159,7 @@ EOF
 # Keep a guest-readable schema marker so provisioning can reject legacy cached
 # images before starting Firecracker. Bump this value whenever the early-boot
 # contract (PID 1, kernel arguments, or network bootstrap) changes.
-echo "10" > "$ROOTFS_DIR/etc/wasm-node/image-schema-version"
+echo "12" > "$ROOTFS_DIR/etc/wasm-node/image-schema-version"
 
 # Set hostname
 echo "wasm-node-vm" > "$ROOTFS_DIR/etc/hostname"
@@ -220,6 +220,9 @@ EBPF_TEST_FAULT=
 EBPF_REQUIRED=0
 EBPF_DROP_CAPABILITIES=0
 OTLP_ENDPOINT=
+OIDC_ISSUER_URL=
+OIDC_AUDIENCE=
+OIDC_JWKS_URL=
 for ARGUMENT in $(cat /proc/cmdline); do
     case "$ARGUMENT" in
         wcp.node_id=*) NODE_ID=${ARGUMENT#wcp.node_id=} ;;
@@ -229,6 +232,9 @@ for ARGUMENT in $(cat /proc/cmdline); do
         wcp.ebpf_required=1) EBPF_REQUIRED=1 ;;
         wcp.ebpf_drop_capabilities=1) EBPF_DROP_CAPABILITIES=1 ;;
         wcp.otlp_endpoint=*) OTLP_ENDPOINT=${ARGUMENT#wcp.otlp_endpoint=} ;;
+        wcp.oidc_issuer_url=*) OIDC_ISSUER_URL=${ARGUMENT#wcp.oidc_issuer_url=} ;;
+        wcp.oidc_audience=*) OIDC_AUDIENCE=${ARGUMENT#wcp.oidc_audience=} ;;
+        wcp.oidc_jwks_url=*) OIDC_JWKS_URL=${ARGUMENT#wcp.oidc_jwks_url=} ;;
     esac
 done
 case "$EBPF_TEST_FAULT" in
@@ -247,6 +253,22 @@ fi
 if [ -n "$OTLP_ENDPOINT" ]; then
     export WASM_NODE_LOGGING_OTLP_ENDPOINT="$OTLP_ENDPOINT"
 fi
+if [ -n "$OIDC_ISSUER_URL" ] || [ -n "$OIDC_AUDIENCE" ] || [ -n "$OIDC_JWKS_URL" ]; then
+    if [ -z "$OIDC_ISSUER_URL" ] || [ -z "$OIDC_AUDIENCE" ] || [ -z "$OIDC_JWKS_URL" ]; then
+        echo "incomplete OIDC boot configuration; refusing to start wasm-node" >&2
+        poweroff -f
+        exit 1
+    fi
+    cat >> /etc/wasm-node/config.toml <<OIDC_CONFIG
+
+[gateway.oidc]
+issuer_url = "$OIDC_ISSUER_URL"
+audience = "$OIDC_AUDIENCE"
+jwks_url = "$OIDC_JWKS_URL"
+jwks_refresh_secs = 30
+clock_skew_secs = 30
+OIDC_CONFIG
+fi
 if [ -n "$IP_ADDRESS" ]; then
     ip address flush dev eth0 scope global
     ip address add "$IP_ADDRESS/24" dev eth0
@@ -257,6 +279,14 @@ else
     /usr/local/bin/setup-mmds-network
     NODE_ID=$(sed -n 's/^node_id = "\([^"]*\)"/\1/p' /etc/wasm-node/config.toml)
 fi
+# Use the platform's loopback split-DNS stub for `.internal` and retain a
+# secondary resolver for public/operator-managed names. Production images must
+# replace the secondary address with operator-controlled recursive resolvers.
+cat > /etc/resolv.conf <<'RESOLV_CONF'
+nameserver 127.0.0.1
+nameserver 1.1.1.1
+options timeout:1 attempts:2
+RESOLV_CONF
 # Firecracker guest clocks can lag after a laptop/WSL host is suspended. That
 # makes freshly issued JWTs appear expired to clients even while readiness is
 # green. Synchronize before accepting traffic and keep chronyd running. The

@@ -2,7 +2,7 @@
 use common::error::PlatformError;
 use common::types::{ExtendedLimits, FuelQuota, MemoryPages};
 use std::sync::Arc;
-use wasmtime::{ResourceLimiter, Store};
+use wasmtime::{ResourceLimiter, Store, UpdateDeadline};
 
 use crate::policy_tracker::{PolicyCounters, PolicyEnforcer};
 
@@ -20,22 +20,48 @@ pub const EPOCH_DEADLINE_TICKS: u64 = 3_000;
 pub const EPOCH_DEADLINE_TICKS: u64 = 10;
 
 pub fn configure_store<T>(store: &mut Store<T>, fuel: FuelQuota) -> Result<(), PlatformError> {
-    // Set fuel limit (CPU metering).
-    // Every Wasm instruction decrements this counter.
-    store
-        .set_fuel(fuel.0)
-        .map_err(|e| PlatformError::runtime(format!("fuel error: {e}")))?;
+    configure_fuel(store, fuel)?;
 
-    // Also configure coarse-grained epoch interruption so runaway guests can be
-    // interrupted even if fuel quotas are very large.
+    // Per-request WASI HTTP stores have a finite wall-clock budget.
+    // CLI-style HTTP servers must use `configure_service_store` instead: their
+    // entry point intentionally remains active for the service lifetime.
     store.epoch_deadline_trap();
     store.set_epoch_deadline(EPOCH_DEADLINE_TICKS);
 
     tracing::debug!(
         fuel = fuel.0,
         epoch_deadline_ticks = EPOCH_DEADLINE_TICKS,
-        "store fuel and epoch limits configured"
+        "request store fuel and epoch limits configured"
     );
+    Ok(())
+}
+
+/// Apply limits to a long-lived CLI-style service store.
+///
+/// Epoch checkpoints continue execution rather than imposing a fixed lifetime.
+/// Fuel still bounds guest CPU instructions, while shutdown and health policy
+/// remain owned by the supervisor.
+pub fn configure_service_store<T>(
+    store: &mut Store<T>,
+    fuel: FuelQuota,
+) -> Result<(), PlatformError> {
+    configure_fuel(store, fuel)?;
+    store.epoch_deadline_callback(|_| Ok(UpdateDeadline::Continue(EPOCH_DEADLINE_TICKS)));
+    store.set_epoch_deadline(EPOCH_DEADLINE_TICKS);
+
+    tracing::debug!(
+        fuel = fuel.0,
+        epoch_deadline_ticks = EPOCH_DEADLINE_TICKS,
+        "long-lived service store fuel and epoch checkpoints configured"
+    );
+    Ok(())
+}
+
+fn configure_fuel<T>(store: &mut Store<T>, fuel: FuelQuota) -> Result<(), PlatformError> {
+    // Every Wasm instruction decrements this counter.
+    store
+        .set_fuel(fuel.0)
+        .map_err(|e| PlatformError::runtime(format!("fuel error: {e}")))?;
     Ok(())
 }
 

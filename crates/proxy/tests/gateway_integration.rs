@@ -56,6 +56,7 @@ async fn test_full_gateway_pipeline_authenticated_route() {
     let oidc_config = proxy::gateway::oidc::OidcConfig {
         issuer_url: "https://test-issuer.example.com".to_string(),
         audience: "test-audience".to_string(),
+        jwks_url: None,
         jwks_refresh_secs: 3600,
         clock_skew_secs: 30,
     };
@@ -336,6 +337,7 @@ async fn test_jwks_cache_refresh_on_stale() {
     let oidc_config = proxy::gateway::oidc::OidcConfig {
         issuer_url: "https://test-issuer.example.com".to_string(),
         audience: "test-audience".to_string(),
+        jwks_url: None,
         jwks_refresh_secs: 1, // 1 second for testing
         clock_skew_secs: 30,
     };

@@ -66,10 +66,56 @@ pub(crate) fn start_command_loop(supervisor: Arc<Supervisor>) {
                 SupervisorCommand::KillInstanceByTid { tid, reason } => {
                     kill_instance_by_tid(&supervisor, tid, &reason).await;
                 }
+                SupervisorCommand::TcpConnectionClosed {
+                    tid,
+                    src_port,
+                    dst_port,
+                } => {
+                    release_outbound_connection(&supervisor, tid, src_port, dst_port).await;
+                }
             }
         }
         warn!("supervisor command loop exited - no more senders");
     });
+}
+
+pub(crate) async fn release_outbound_connection(
+    supervisor: &Supervisor,
+    tid: u32,
+    src_port: u16,
+    dst_port: u16,
+) {
+    let target = {
+        let pools = supervisor.pools.read().await;
+        pools.values().find_map(|pool| {
+            pool.instances
+                .iter()
+                .find(|instance| instance.tid == Some(tid))
+                .and_then(|instance| {
+                    // `inet_sock_set_state` reports the local port as sport.
+                    // A close from the application's listening port belongs to
+                    // an inbound request and did not reserve an outbound slot.
+                    (src_port != instance.addr.port())
+                        .then(|| instance.policy_counters.as_ref().cloned())
+                        .flatten()
+                })
+        })
+    };
+
+    if let Some(counters) = target {
+        use std::sync::atomic::Ordering;
+        let _ = counters.outbound_connections_active.fetch_update(
+            Ordering::AcqRel,
+            Ordering::Acquire,
+            |current| Some(current.saturating_sub(1)),
+        );
+        tracing::debug!(
+            tid,
+            src_port,
+            dst_port,
+            "released eBPF-attributed outbound TCP reservation"
+        );
+    }
 }
 
 pub(crate) async fn kill_instance_by_tid(supervisor: &Supervisor, tid: u32, reason: &str) {
