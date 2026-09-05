@@ -319,6 +319,16 @@ hardening for environments with mutually untrusted nodes or stronger supply-chai
 
 - [ ] The production threat model states whether tenants and applications are trusted,
       semi-trusted, or hostile to one another.
+- [ ] The current release is admitted only with
+      `runtime.isolation_mode = "single-trust-domain"`. All applications sharing
+      a node are controlled by one mutually trusted operator/tenant domain.
+      Hostile or mutually untrusted multi-tenancy is a deployment rejection, not
+      an accepted risk toggle.
+- [ ] Every `wasm-node` process runs in its own cgroup-v2 cgroup, and the recorded
+      cgroup inode/ID matches the `node_cgroup_id` written into the eBPF maps.
+- [ ] Production sets `ebpf.enabled = true` and `ebpf.required = true`; inactive,
+      partially attached, or terminated monitoring fails readiness and pages the
+      platform operator.
 - [ ] WASI filesystem, outbound TCP, DNS, bind, environment, file descriptor, memory,
       table, fuel, epoch, and connection policies are tested on the live execution path.
 - [ ] Namespace boundaries and internal service discovery deny cross-namespace access by default.
@@ -345,17 +355,22 @@ hardening for environments with mutually untrusted nodes or stronger supply-chai
 - [ ] Administrative configuration cannot accidentally widen every application's policy.
 - [ ] Host-level network/cgroup/eBPF controls cover capabilities that are not fully
       authoritative inside Wasmtime host-call wrappers.
+- [ ] Block-I/O and memory-pressure observations exclude other host cgroups.
+      Buffered kernel writeback is not represented as exact per-application I/O;
+      it is accounted only within the documented node/single-trust-domain limit.
 - [ ] Resource accounting is released on normal completion, trap, cancellation,
       idle pruning, node drain, and dependency failure.
 - [ ] Noisy-neighbor tests prove that one application cannot exhaust node CPU, memory,
       ports, sockets, storage, or control-plane consumers for other applications.
 - [ ] Runtime defaults are treated as starting points; application-specific limits
       are derived from measured work and denial-of-service objectives.
-- [ ] eBPF-disabled or unavailable behavior is understood and has compensating host controls.
+- [ ] A request for mutually untrusted tenants is blocked until a separately
+      validated process-per-application/cgroup-per-application execution mode,
+      credentials boundary, non-observation suite, and escape tests exist.
 
-Optional deeper Wasmtime host/resource wrapping remains a hardening opportunity.
-Whether it is a blocker depends on the production tenant threat model; document that
-decision instead of assuming all policy surfaces are equally authoritative.
+Optional deeper Wasmtime host/resource wrapping remains a hardening opportunity
+inside the supported trust domain. It does not upgrade the current in-process
+runtime into a hostile multi-tenant isolation boundary.
 
 ## 11. Capacity and performance gates
 

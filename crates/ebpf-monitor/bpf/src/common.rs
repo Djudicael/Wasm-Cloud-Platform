@@ -163,6 +163,10 @@ pub enum SyscallCategory {
 pub struct MonitorConfigMap {
     /// PID of the wasm-node process (to filter relevant events).
     pub node_pid: u32,
+    pub _padding: u32,
+    /// cgroup v2 ID containing the wasm-node process. System-wide probes must
+    /// ignore events outside this boundary.
+    pub node_cgroup_id: u64,
     /// FD soft limit per Wasm instance PID.
     pub fd_soft_limit: u32,
     /// FD hard limit per Wasm instance PID (trigger kill).

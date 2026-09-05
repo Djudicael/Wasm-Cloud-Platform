@@ -228,6 +228,18 @@ fn validate_production_secret_policy(config: &NodeConfig, errors: &mut Vec<Strin
     if !config.nats.url.trim().starts_with("tls://") {
         errors.push("production requires a tls:// NATS URL".to_string());
     }
+    if config.runtime.isolation_mode.as_deref() != Some("single-trust-domain") {
+        errors.push(
+            "production requires runtime.isolation_mode = \"single-trust-domain\"; the in-process runtime does not claim hostile multi-tenant isolation"
+                .to_string(),
+        );
+    }
+    if !config.ebpf.enabled || !config.ebpf.required {
+        errors.push(
+            "production requires ebpf.enabled = true and ebpf.required = true for workload identity and persistent connection accounting"
+                .to_string(),
+        );
+    }
     if config
         .admin
         .advertised_host
@@ -259,6 +271,18 @@ fn validate_production_secret_policy(config: &NodeConfig, errors: &mut Vec<Strin
 /// Validate the final merged configuration.
 pub(crate) fn validate_config(config: &NodeConfig) -> Result<(), PlatformError> {
     let mut errors = Vec::new();
+
+    if config
+        .runtime
+        .isolation_mode
+        .as_deref()
+        .is_some_and(|mode| mode.trim() != "single-trust-domain")
+    {
+        errors.push(
+            "runtime.isolation_mode supports only \"single-trust-domain\" in the current in-process runtime"
+                .to_string(),
+        );
+    }
 
     if config.nats.client_cert.is_some() != config.nats.client_key.is_some() {
         errors.push("nats.client_cert and nats.client_key must be configured together".to_string());

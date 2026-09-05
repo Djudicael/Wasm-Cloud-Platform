@@ -82,7 +82,7 @@ pub struct LoadedMonitor {
 impl LoadedEbpf {
     /// Update every independently loaded monitor's kernel CONFIG map.
     pub fn update_config(&mut self, config: &MonitorConfig, node_pid: u32) -> Result<()> {
-        let kernel_config = kernel_config(config, node_pid);
+        let kernel_config = kernel_config(config, node_pid)?;
         for config_map in &mut self.config_maps {
             config_map
                 .set(0, kernel_config, 0)
@@ -370,7 +370,7 @@ fn write_config_map(ebpf: &mut Ebpf, config: &MonitorConfig, node_pid: u32) -> R
         .try_into()
         .context("CONFIG map has wrong type")?;
 
-    let kernel_config = kernel_config(config, node_pid);
+    let kernel_config = kernel_config(config, node_pid)?;
 
     config_map
         .set(0, kernel_config, 0)
@@ -378,6 +378,7 @@ fn write_config_map(ebpf: &mut Ebpf, config: &MonitorConfig, node_pid: u32) -> R
 
     info!(
         node_pid,
+        node_cgroup_id = kernel_config.node_cgroup_id,
         fd_soft_limit = config.fd_soft_limit,
         fd_hard_limit = config.fd_hard_limit,
         mem_low_threshold_pages = config.mem_low_threshold_pages,
@@ -392,9 +393,11 @@ fn write_config_map(ebpf: &mut Ebpf, config: &MonitorConfig, node_pid: u32) -> R
     Ok(())
 }
 
-fn kernel_config(config: &MonitorConfig, node_pid: u32) -> MonitorConfigMap {
-    MonitorConfigMap {
+fn kernel_config(config: &MonitorConfig, node_pid: u32) -> Result<MonitorConfigMap> {
+    Ok(MonitorConfigMap {
         node_pid,
+        _padding: 0,
+        node_cgroup_id: current_cgroup_id()?,
         fd_soft_limit: config.fd_soft_limit,
         fd_hard_limit: config.fd_hard_limit,
         mem_low_threshold_pages: config.mem_low_threshold_pages,
@@ -403,7 +406,37 @@ fn kernel_config(config: &MonitorConfig, node_pid: u32) -> MonitorConfigMap {
         tcp_conn_limit_per_pid: config.tcp_conn_limit_per_pid,
         syscall_rate_limit: config.syscall_rate_limit,
         sampling_period_ns: config.sampling_period_secs * 1_000_000_000,
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn current_cgroup_id() -> Result<u64> {
+    use std::os::unix::fs::MetadataExt;
+
+    if !Path::new("/sys/fs/cgroup/cgroup.controllers").is_file() {
+        return Err(anyhow!(
+            "cgroup v2 is not mounted at /sys/fs/cgroup; cannot scope system-wide eBPF probes"
+        ));
     }
+    let membership =
+        std::fs::read_to_string("/proc/self/cgroup").context("failed to read /proc/self/cgroup")?;
+    let relative = membership
+        .lines()
+        .find_map(|line| line.strip_prefix("0::"))
+        .ok_or_else(|| anyhow!("cgroup v2 unified membership was not found"))?;
+    let cgroup_path = Path::new("/sys/fs/cgroup").join(relative.trim_start_matches('/'));
+    let id = std::fs::metadata(&cgroup_path)
+        .with_context(|| format!("failed to stat node cgroup {}", cgroup_path.display()))?
+        .ino();
+    if id == 0 {
+        return Err(anyhow!("node cgroup ID resolved to zero"));
+    }
+    Ok(id)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn current_cgroup_id() -> Result<u64> {
+    Err(anyhow!("cgroup v2 identity is available only on Linux"))
 }
 
 // ── Program Attachment Helpers ────────────────────────────────────────────────
@@ -809,6 +842,8 @@ mod tests {
         let config = MonitorConfig::default();
         let kernel_config = MonitorConfigMap {
             node_pid: 1234,
+            _padding: 0,
+            node_cgroup_id: 5678,
             fd_soft_limit: config.fd_soft_limit,
             fd_hard_limit: config.fd_hard_limit,
             mem_low_threshold_pages: config.mem_low_threshold_pages,
@@ -821,6 +856,7 @@ mod tests {
 
         // Verify the config map values are reasonable
         assert_eq!(kernel_config.node_pid, 1234);
+        assert_eq!(kernel_config.node_cgroup_id, 5678);
         assert_eq!(kernel_config.fd_soft_limit, 8192);
         assert_eq!(kernel_config.fd_hard_limit, 9728);
         assert_eq!(kernel_config.mem_low_threshold_pages, 65536);
@@ -829,6 +865,12 @@ mod tests {
         assert_eq!(kernel_config.tcp_conn_limit_per_pid, 10000);
         assert_eq!(kernel_config.syscall_rate_limit, 100_000);
         assert_eq!(kernel_config.sampling_period_ns, 10_000_000_000); // 10s in ns
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_current_cgroup_id_is_nonzero() {
+        assert!(current_cgroup_id().expect("cgroup v2 identity") > 0);
     }
 
     #[test]

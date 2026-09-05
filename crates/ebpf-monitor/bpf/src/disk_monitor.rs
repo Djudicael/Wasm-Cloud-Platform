@@ -134,6 +134,12 @@ pub fn block_rq_issue(ctx: TracePointContext) -> c_long {
 }
 
 fn try_block_rq_issue(ctx: TracePointContext) -> Result<c_long, c_long> {
+    let config = CONFIG.get(0).ok_or(0)?;
+    let cgroup_id = unsafe { aya_ebpf::helpers::bpf_get_current_cgroup_id() };
+    if cgroup_id != config.node_cgroup_id {
+        return Ok(0);
+    }
+
     let dev: u32 = unsafe { ctx.read_at(8)? };
     let sector: u64 = unsafe { ctx.read_at(16)? };
     let bytes: u32 = unsafe { ctx.read_at(28)? };
@@ -145,7 +151,7 @@ fn try_block_rq_issue(ctx: TracePointContext) -> Result<c_long, c_long> {
     let pid_tgid = aya_ebpf::helpers::bpf_get_current_pid_tgid();
     let start = IoStart {
         timestamp_ns: now,
-        cgroup_id: unsafe { aya_ebpf::helpers::bpf_get_current_cgroup_id() },
+        cgroup_id,
         pid: (pid_tgid >> 32) as u32,
         tid: pid_tgid as u32,
         bytes,

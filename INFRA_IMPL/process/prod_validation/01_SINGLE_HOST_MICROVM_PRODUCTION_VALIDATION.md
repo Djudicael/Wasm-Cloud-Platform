@@ -2134,6 +2134,58 @@ not platform components. Evidence is under
 contract and production handoff are in
 `../PLATFORM_TLS_AND_NATS_PRODUCTION_VALIDATION.md`.
 
+#### P10-10 workload isolation (source remediated, declared-model local pass)
+
+On 2026-09-05 the runtime boundary was made explicit rather than implying
+tenant isolation from an in-process architecture. Production admission now
+requires `runtime.isolation_mode = "single-trust-domain"` plus
+`ebpf.enabled = true` and `ebpf.required = true`. Unsupported isolation-mode
+values, omitted production acknowledgement, or optional/disabled production
+eBPF are configuration errors.
+
+Application-aware TCP, file-descriptor, syscall, namespace, and process probes
+continue to use the supervisor-registered dedicated WASI runtime TID. The
+formerly system-wide memory-pressure and block-I/O issue paths now filter on a
+`node_cgroup_id` resolved from cgroup v2. Buffered writeback may lose the
+originating application context, so this is intentionally a node/trust-domain
+boundary rather than a per-application block-I/O accounting claim.
+
+The Firecracker node image advanced from schema 14 to 15. It mounts cgroup v2,
+creates `/sys/fs/cgroup/wasm-node`, and uses an exec wrapper to enter that cgroup
+before eBPF initialization. The loader also rejects an ordinary/unmounted
+`/sys/fs/cgroup` path. Stale testbed images are rejected before provisioning.
+
+`local-test-node-0` was rolled from the new image while the other two nodes
+remained online. Its guest reported cgroup ID 21, all six threshold BPF maps
+were configured with ID 21, and application process events also carried ID 21.
+The authenticated status reported mandatory, active, non-degraded monitoring,
+7/7 attached programs, 926 processed events, and zero parse errors. Both OIDC
+components rehydrated; public readiness returned HTTP 200 with `database=ok`;
+all three nodes were healthy; and Prometheus reported eBPF active on all three.
+
+The first post-roll evidence assertion incorrectly assumed LF-only serial output
+and a readiness status named `ready`. The VM itself was healthy. The validator
+was corrected to normalize CR and require the API's real `healthy` value, then
+passed without another restart.
+
+Static and focused validation passed formatting, Clippy with warnings denied,
+the native all-target check, both explicit WASI builds, the clean seven-object
+BPF build, 90 common tests, 53 configuration tests, 127 eBPF-feature tests, and
+126 node tests across its library/binary/integration suites. Two acceptance
+tests remained explicitly ignored. `cargo audit --deny warnings` passed the
+current RustSec database for 765 locked crates. An all-at-once GNU-linker
+workspace test attempt saturated this 15-GiB WSL build host; the affected node
+suite passed with Clang/LLD, two jobs, and a Linux-native `/tmp` target. This is
+build-host capacity evidence, not guest runtime capacity.
+
+This closes P10-10 for the supported single-trust-domain source contract, not
+for hostile multitenancy. Production must repeat the gate on the exact signed
+candidate and every host class. Mutually untrusted applications must use
+separate node processes/VMs until process-per-application execution, credentials
+and cgroups are implemented and independently security-tested. Evidence is in
+`evidence/2026-09-05-single-host/P10-10-workload-isolation/`; the repeatable
+operator procedure is `../PLATFORM_WORKLOAD_ISOLATION_VALIDATION.md`.
+
 ## Phase 10: result and teardown
 
 Final decision: **NO-GO FOR PRODUCTION PROMOTION.** The local core-platform

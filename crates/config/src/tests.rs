@@ -29,6 +29,9 @@ fn production_config_with_non_exportable_key() -> NodeConfig {
     config.runtime.key_vault_transit_key = Some("wasm-node-seal".to_string());
     config.runtime.key_vault_transit_context = Some("node-0".to_string());
     config.runtime.key_vault_transit_key_version = Some(1);
+    config.runtime.isolation_mode = Some("single-trust-domain".to_string());
+    config.ebpf.enabled = true;
+    config.ebpf.required = true;
     config
 }
 
@@ -67,6 +70,26 @@ fn production_rejects_local_secret_defaults() {
 fn production_accepts_non_exportable_external_key_policy() {
     let config = production_config_with_non_exportable_key();
     assert!(validate_config(&config).is_ok());
+}
+
+#[test]
+fn production_requires_explicit_single_trust_domain_and_ebpf() {
+    let mut config = production_config_with_non_exportable_key();
+    config.runtime.isolation_mode = None;
+    config.ebpf.required = false;
+
+    let error = validate_config(&config).unwrap_err().to_string();
+    assert!(error.contains("runtime.isolation_mode = \"single-trust-domain\""));
+    assert!(error.contains("ebpf.enabled = true and ebpf.required = true"));
+}
+
+#[test]
+fn unsupported_hostile_multi_tenant_claim_is_rejected() {
+    let mut config = NodeConfig::default();
+    config.runtime.isolation_mode = Some("hostile-multi-tenant".to_string());
+
+    let error = validate_config(&config).unwrap_err().to_string();
+    assert!(error.contains("supports only \"single-trust-domain\""));
 }
 
 #[test]
@@ -344,6 +367,7 @@ fn test_merge_priority_cli_over_env() {
         artifact_bind_address: Some("0.0.0.0".to_string()),
         admin_tls_key: Some("/tmp/admin.key".to_string()),
         runtime_cache_directory: Some("/tmp/cli-wasmtime-cache".to_string()),
+        runtime_isolation_mode: Some("single-trust-domain".to_string()),
         runtime_upgrade_signing_public_key: Some(
             "2222222222222222222222222222222222222222222222222222222222222222".to_string(),
         ),
@@ -362,6 +386,10 @@ fn test_merge_priority_cli_over_env() {
     assert_eq!(
         config.runtime.cache_directory.as_deref(),
         Some("/tmp/cli-wasmtime-cache")
+    );
+    assert_eq!(
+        config.runtime.isolation_mode.as_deref(),
+        Some("single-trust-domain")
     );
     assert_eq!(
         config.runtime.upgrade_signing_public_key.as_deref(),

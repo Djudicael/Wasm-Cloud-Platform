@@ -1265,6 +1265,7 @@ async fn main() -> anyhow::Result<()> {
         key_aws_kms_key_id: args.key_aws_kms_key_id.clone(),
         key_aws_kms_context: args.key_aws_kms_context.clone(),
         runtime_cache_directory: args.runtime_cache_directory.clone(),
+        runtime_isolation_mode: args.runtime_isolation_mode.clone(),
         runtime_upgrade_signing_public_key: args.runtime_upgrade_signing_public_key.clone(),
         runtime_pooling_allocator: args.runtime_pooling_allocator,
         runtime_pooling_total_component_instances: args.runtime_pooling_total_component_instances,

@@ -231,6 +231,10 @@ impl SyscallCategory {
 pub struct MonitorConfigMap {
     /// PID of the wasm-node process (to filter relevant events).
     pub node_pid: u32,
+    pub _padding: u32,
+    /// cgroup v2 ID containing the wasm-node process. System-wide probes must
+    /// ignore events outside this boundary.
+    pub node_cgroup_id: u64,
     /// FD soft limit per Wasm instance PID.
     pub fd_soft_limit: u32,
     /// FD hard limit per Wasm instance PID (trigger kill).
@@ -578,6 +582,8 @@ mod tests {
     fn test_monitor_config_map_default_values() {
         let config = MonitorConfigMap {
             node_pid: 1,
+            _padding: 0,
+            node_cgroup_id: 2,
             fd_soft_limit: 8192,
             fd_hard_limit: 9728,
             mem_low_threshold_pages: 65536,
@@ -588,6 +594,7 @@ mod tests {
             sampling_period_ns: 10_000_000_000,
         };
         assert_eq!(config.node_pid, 1);
+        assert_eq!(config.node_cgroup_id, 2);
         assert_eq!(config.fd_soft_limit, 8192);
         assert_eq!(config.sampling_period_ns, 10_000_000_000);
     }

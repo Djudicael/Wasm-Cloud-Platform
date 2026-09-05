@@ -26,6 +26,7 @@ pub struct CliOverrides {
     pub admin_advertised_artifact_url: Option<String>,
     pub port_start: Option<u16>,
     pub port_end: Option<u16>,
+    pub runtime_isolation_mode: Option<String>,
     pub key_source: Option<String>,
     pub key_file: Option<String>,
     pub key_command: Option<Vec<String>>,

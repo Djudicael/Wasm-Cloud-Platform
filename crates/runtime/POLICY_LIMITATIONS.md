@@ -165,46 +165,46 @@ The operational default is now stricter than before:
 
 ---
 
-## 4. eBPF Coordination (PID Registration + Counter Export)
+## 4. eBPF Coordination and Workload Identity
 
-**Status:** Not wired up
-**Root cause:** `complexity`
-**Spec reference:** §7 — Instance PIDs registered in eBPF `MONITORED_PIDS` map
-**Code location:** `crates/supervisor/src/lib.rs` — after instance ready event
+**Status:** Implemented for the supported single-trust-domain model
+**Root cause:** closed for TID lifecycle; process-per-application isolation remains `design`
+**Spec reference:** §7 — runtime execution identity registered in eBPF maps
+**Code location:** `crates/supervisor/src/spawn_runtime.rs` and `shutdown_runtime.rs`
 
 ### What the spec says
 
-When a Wasm instance starts, its host PID should be registered in the eBPF
-monitor's `MONITORED_PIDS` BPF map so the kernel-level monitor can enforce
-per-process limits. The `PolicyCounters` should also be exported to the eBPF
-metrics pipeline for cross-referencing.
+When a Wasm instance starts, its observable execution identity must be
+registered with the eBPF monitor and removed on every stop/failure path.
+System-wide probes must not observe unrelated host workloads.
 
 ### What actually happens
 
-Both subsystems exist independently:
+WASI applications execute in the `wasm-node` process on dedicated
+single-thread Tokio runtimes. The supervisor registers each runtime TID and its
+namespace/application identity in every `MONITORED_TIDS` map before execution,
+and deregisters it on normal completion, cancellation, failure, and shutdown.
+TCP-close events use the port-to-TID correlation table to release persistent
+outbound-connection reservations.
 
-- The eBPF monitor (Step 30) has a `MONITORED_PIDS` map and can kill processes.
-- The `PolicyEnforcer` has atomic `PolicyCounters` that track violations.
-
-But they are not connected. The supervisor spawns instances via
-`tokio::task::spawn_blocking()` and never registers the resulting PID with the
-eBPF monitor.
+Block-I/O and memory-pressure probes are scoped to the dedicated `wasm-node`
+cgroup-v2 ID. This prevents observation of unrelated host cgroups but does not
+turn applications inside one process into mutually isolated tenants. Buffered
+writeback may execute in kernel-worker context and is not claimed as exact
+per-application block-I/O attribution.
 
 ### Fix path
 
-1. After `spawn_blocking` starts, retrieve the thread's PID:
-   ```rust
-   let pid = std::process::id(); // inside spawn_blocking
-   ```
-2. Send the PID to the eBPF monitor via the existing `SupervisorCommand` channel
-   or a new dedicated channel.
-3. The eBPF monitor inserts the PID into `MONITORED_PIDS`.
-4. On instance shutdown, send a deregistration message.
-
-For counter export, the `PolicyCounters` are already `Arc`-shared and atomic.
-The eBPF metrics pipeline can read them periodically or on-demand.
-
-**Estimated effort:** Medium (4–8 hours of integration work + testing).
+- Production must set `runtime.isolation_mode = "single-trust-domain"` and
+  `ebpf.enabled = true`, `ebpf.required = true`; admission rejects weaker or
+  misleading production settings.
+- The operator must run each node in a dedicated cgroup-v2 cgroup.
+- Mutually untrusted tenants require a future process-per-application mode,
+  separate cgroups/credentials, and new cross-tenant non-observation and escape
+  testing. The current platform must not be advertised for that deployment.
+- Runtime `PolicyCounters` and Prometheus policy metrics remain distinct
+  accounting layers; kernel observations do not make unsupported byte-accurate
+  WASI quotas authoritative.
 
 ---
 

@@ -71,6 +71,7 @@ port_end = 19999
 # Bind app instances to loopback so staging traffic still goes through the
 # platform proxy/gateway by default.
 instance_bind_address = "127.0.0.1"
+isolation_mode = "single-trust-domain"
 # Key source: "generate" (ephemeral), "file" (from key_file), "command"
 # (from key_command argv), "vault-kv", "vault-transit", "aws-kms-hmac",
 # "env:VAR_NAME", or "passphrase-env:VAR_NAME"
@@ -147,6 +148,7 @@ default_per_ip_limit = 200
 [ebpf]
 # Enable eBPF monitoring (requires Linux kernel >= 5.8).
 enabled = true
+required = true
 # FD soft limit per Wasm instance (warning at 80%).
 fd_soft_limit = 8192
 # FD hard limit per Wasm instance (kill at 95%).

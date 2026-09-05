@@ -95,6 +95,10 @@ port_end = 19999
 # Bind app instances to loopback so north-south traffic must flow through the
 # platform proxy/gateway rather than reaching instance ports directly.
 instance_bind_address = "127.0.0.1"
+# Applications share the wasm-node process. One node therefore admits only one
+# mutually trusted application/tenant domain until process-per-application
+# isolation exists and is validated.
+isolation_mode = "single-trust-domain"
 # Key source: "generate" (ephemeral), "file" (from key_file), "command"
 # (from key_command argv), "vault-kv", "vault-transit", "aws-kms-hmac",
 # "env:VAR_NAME", or "passphrase-env:VAR_NAME".
@@ -179,6 +183,9 @@ default_per_ip_limit = 200
 [ebpf]
 # Enable eBPF monitoring (requires Linux kernel >= 5.8 with BTF).
 enabled = true
+# Fail startup instead of falling back: node-local workload identity and
+# persistent connection cleanup rely on active kernel probes in production.
+required = true
 # FD soft limit per Wasm instance (warning at 80%).
 fd_soft_limit = 8192
 # FD hard limit per Wasm instance (kill at 95%).

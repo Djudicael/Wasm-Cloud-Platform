@@ -112,6 +112,10 @@ pub(crate) fn merge_config(base: NodeConfig, overlay: NodeConfig) -> NodeConfig 
             } else {
                 overlay.runtime.instance_bind_address
             },
+            isolation_mode: overlay
+                .runtime
+                .isolation_mode
+                .or(base.runtime.isolation_mode),
             key_source: overlay.runtime.key_source,
             key_file: overlay.runtime.key_file.or(base.runtime.key_file),
             key_command: if overlay.runtime.key_command.is_empty() {
@@ -546,6 +550,9 @@ pub(crate) fn apply_env_overrides(mut config: NodeConfig) -> NodeConfig {
     if let Ok(v) = std::env::var("WASM_NODE_RUNTIME_INSTANCE_BIND_ADDRESS") {
         config.runtime.instance_bind_address = v;
     }
+    if let Ok(v) = std::env::var("WASM_NODE_RUNTIME_ISOLATION_MODE") {
+        config.runtime.isolation_mode = Some(v);
+    }
     if let Ok(v) = std::env::var("WASM_NODE_RUNTIME_POOLING_TOTAL_COMPONENT_INSTANCES") {
         if let Ok(count) = v.parse() {
             config.runtime.pooling_total_component_instances = count;
@@ -693,6 +700,9 @@ pub(crate) fn apply_cli_overrides(mut config: NodeConfig, cli: &CliOverrides) ->
     }
     if let Some(v) = &cli.runtime_cache_directory {
         config.runtime.cache_directory = Some(v.clone());
+    }
+    if let Some(v) = &cli.runtime_isolation_mode {
+        config.runtime.isolation_mode = Some(v.clone());
     }
     if let Some(v) = &cli.runtime_upgrade_signing_public_key {
         config.runtime.upgrade_signing_public_key = Some(v.clone());

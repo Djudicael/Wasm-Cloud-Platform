@@ -115,7 +115,7 @@ pub fn try_to_free_pages(ctx: ProbeContext) -> c_long {
 }
 
 fn try_try_to_free_pages(ctx: ProbeContext) -> Result<c_long, c_long> {
-    let _config = CONFIG.get(0).ok_or(0)?;
+    let config = CONFIG.get(0).ok_or(0)?;
 
     // Read function arguments: zonelist, order, gfp_mask
     // arg(0) = zonelist pointer (not useful for us)
@@ -126,6 +126,9 @@ fn try_try_to_free_pages(ctx: ProbeContext) -> Result<c_long, c_long> {
     let _gfp_mask: u32 = ctx.arg(2).ok_or(0)?;
 
     let cgroup_id = unsafe { aya_ebpf::helpers::bpf_get_current_cgroup_id() };
+    if cgroup_id != config.node_cgroup_id {
+        return Ok(0);
+    }
     let pid_tgid = aya_ebpf::helpers::bpf_get_current_pid_tgid();
     let pid = (pid_tgid >> 32) as u32;
     let tid = pid_tgid as u32;
@@ -156,9 +159,12 @@ pub fn direct_reclaim_begin(ctx: TracePointContext) -> c_long {
 }
 
 fn try_direct_reclaim_begin(ctx: TracePointContext) -> Result<c_long, c_long> {
-    let _config = CONFIG.get(0).ok_or(0)?;
+    let config = CONFIG.get(0).ok_or(0)?;
     let order: u32 = unsafe { ctx.read_at(8)? };
     let cgroup_id = unsafe { aya_ebpf::helpers::bpf_get_current_cgroup_id() };
+    if cgroup_id != config.node_cgroup_id {
+        return Ok(0);
+    }
     let pid_tgid = aya_ebpf::helpers::bpf_get_current_pid_tgid();
     let pid = (pid_tgid >> 32) as u32;
     let tid = pid_tgid as u32;
@@ -243,9 +249,12 @@ pub fn vmpressure_level_change(ctx: TracePointContext) -> c_long {
 }
 
 fn try_vmpressure(ctx: TracePointContext) -> Result<c_long, c_long> {
-    let _config = CONFIG.get(0).ok_or(0)?;
+    let config = CONFIG.get(0).ok_or(0)?;
 
     let cgroup_id = unsafe { aya_ebpf::helpers::bpf_get_current_cgroup_id() };
+    if cgroup_id != config.node_cgroup_id {
+        return Ok(0);
+    }
     let pid_tgid = aya_ebpf::helpers::bpf_get_current_pid_tgid();
     let pid = (pid_tgid >> 32) as u32;
     let tid = pid_tgid as u32;

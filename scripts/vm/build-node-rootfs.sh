@@ -137,6 +137,7 @@ port = 9091
 [runtime]
 port_start = 10000
 port_end = 19999
+isolation_mode = "single-trust-domain"
 
 [logging]
 level = "info"
@@ -167,7 +168,7 @@ EOF
 # Keep a guest-readable schema marker so provisioning can reject legacy cached
 # images before starting Firecracker. Bump this value whenever the early-boot
 # contract (PID 1, kernel arguments, or network bootstrap) changes.
-echo "14" > "$ROOTFS_DIR/etc/wasm-node/image-schema-version"
+echo "15" > "$ROOTFS_DIR/etc/wasm-node/image-schema-version"
 
 # Set hostname
 echo "wasm-node-vm" > "$ROOTFS_DIR/etc/hostname"
@@ -219,6 +220,22 @@ mount -t devtmpfs devtmpfs /dev 2>/dev/null || true
 mount -t tracefs tracefs /sys/kernel/tracing 2>/dev/null || true
 mkdir -p /sys/fs/bpf
 mount -t bpf bpf /sys/fs/bpf 2>/dev/null || true
+mkdir -p /sys/fs/cgroup
+mount -t cgroup2 cgroup2 /sys/fs/cgroup || {
+    echo "cgroup v2 mount failed; refusing to start the platform test node" >&2
+    poweroff -f
+    exit 1
+}
+mkdir -p /sys/fs/cgroup/wasm-node
+NODE_CGROUP_ID=$(stat -c '%i' /sys/fs/cgroup/wasm-node)
+case "$NODE_CGROUP_ID" in
+    ''|0|*[!0-9]*)
+        echo "invalid wasm-node cgroup ID: $NODE_CGROUP_ID" >&2
+        poweroff -f
+        exit 1
+        ;;
+esac
+echo "WCP_NODE_CGROUP_ID=$NODE_CGROUP_ID"
 ip link set lo up
 ip link set eth0 up
 NODE_ID=vm-node
@@ -341,6 +358,9 @@ while :; do
     if [ "$EBPF_DROP_CAPABILITIES" -eq 1 ]; then
         set -- setpriv --bounding-set=-bpf,-sys_admin,-perfmon,-net_admin -- /usr/local/bin/wasm-node
     fi
+    # Enter the dedicated cgroup before exec so eBPF startup resolves the same
+    # ID that kernel helpers attach to node and WASI worker activity.
+    set -- /bin/sh -c 'echo $$ > /sys/fs/cgroup/wasm-node/cgroup.procs && exec "$@"' sh "$@"
     "$@" \
         --config /etc/wasm-node/config.toml \
         --node-id "$NODE_ID" \

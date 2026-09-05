@@ -136,6 +136,10 @@ pub(crate) struct Args {
     #[arg(long, env = "WASM_NODE_RUNTIME_CACHE_DIRECTORY")]
     pub(crate) runtime_cache_directory: Option<String>,
 
+    /// Runtime trust boundary. Currently only `single-trust-domain` is supported.
+    #[arg(long, env = "WASM_NODE_RUNTIME_ISOLATION_MODE")]
+    pub(crate) runtime_isolation_mode: Option<String>,
+
     #[arg(long, env = "WASM_NODE_RUNTIME_UPGRADE_SIGNING_PUBLIC_KEY")]
     pub(crate) runtime_upgrade_signing_public_key: Option<String>,
 

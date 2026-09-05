@@ -384,6 +384,11 @@ pub struct RuntimeSection {
     pub port_end: u16,
     #[serde(default = "default_instance_bind_address")]
     pub instance_bind_address: String,
+    /// Workload trust/isolation contract for this node. The current in-process
+    /// runtime supports only `single-trust-domain`; hostile multi-tenancy
+    /// requires a future process-per-application execution mode.
+    #[serde(default)]
+    pub isolation_mode: Option<String>,
     /// KEK/transport seal-key source:
     /// - `generate` for ephemeral in-memory keys only
     /// - `file` for a raw 32-byte key from `key_file`
@@ -515,6 +520,7 @@ impl Default for RuntimeSection {
             port_start: default_port_start(),
             port_end: default_port_end(),
             instance_bind_address: default_instance_bind_address(),
+            isolation_mode: None,
             key_source: default_key_source(),
             key_file: None,
             key_command: Vec::new(),
