@@ -38,8 +38,10 @@ The release workflow:
    subject, plus provenance for the promotion archive;
 
 Fresh hosted runners intentionally fetch the dependency archives named by the
-committed workspace and eBPF lockfiles with `cargo fetch --locked`. Resolution
-is then checked offline and every release build remains `--locked --frozen`.
+committed workspace lockfile with `cargo fetch --locked`. The eBPF fetch uses
+the pinned nightly plus `-Z build-std=core` so it also resolves the pinned Rust
+sysroot crates required for the BPF target. Resolution is then checked offline
+and every release build remains `--locked --frozen`.
 Starting with `cargo metadata --frozen` on an empty runner is invalid because
 `--frozen` implies offline mode; it can report that even foundational crates are
 missing before it has had an opportunity to populate the cache.

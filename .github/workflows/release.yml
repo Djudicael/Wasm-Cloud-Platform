@@ -89,7 +89,9 @@ jobs:
 
       - name: Fetch and verify committed eBPF lockfile
         run: |
-          cargo fetch --locked --manifest-path crates/ebpf-monitor/bpf/Cargo.toml
+          cargo +nightly-2026-08-20 fetch -Z build-std=core --locked \
+            --manifest-path crates/ebpf-monitor/bpf/Cargo.toml \
+            --target bpfel-unknown-none
           cargo metadata --locked --offline \
             --manifest-path crates/ebpf-monitor/bpf/Cargo.toml \
             --format-version 1 > /dev/null
