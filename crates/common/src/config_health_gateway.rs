@@ -54,7 +54,7 @@ fn default_fuel_quota() -> u64 {
 }
 
 fn default_memory_pages() -> u32 {
-    65536
+    2048
 }
 
 fn default_failure_threshold() -> u32 {

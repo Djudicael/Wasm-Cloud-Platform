@@ -25,6 +25,12 @@ pub struct HealthMetrics {
     /// Available filesystem inodes.
     pub disk_free_inodes: IntGauge,
 
+    /// Configured hard free-space reserve in MB.
+    pub disk_min_free_mb: IntGauge,
+
+    /// Configured hard free-inode reserve.
+    pub disk_min_free_inodes: IntGauge,
+
     /// Process memory usage in MB.
     pub memory_used_mb: IntGauge,
 
@@ -100,6 +106,24 @@ impl HealthMetrics {
             .register(Box::new(disk_free_inodes.clone()))
             .unwrap_or(());
 
+        let disk_min_free_mb = IntGauge::new(
+            "wasm_node_disk_min_free_mb",
+            "Configured hard free-space reserve in MB",
+        )
+        .unwrap();
+        registry
+            .register(Box::new(disk_min_free_mb.clone()))
+            .unwrap_or(());
+
+        let disk_min_free_inodes = IntGauge::new(
+            "wasm_node_disk_min_free_inodes",
+            "Configured hard free-inode reserve",
+        )
+        .unwrap();
+        registry
+            .register(Box::new(disk_min_free_inodes.clone()))
+            .unwrap_or(());
+
         let memory_used_mb =
             IntGauge::new("wasm_node_memory_used_mb", "Process memory usage in MB").unwrap();
         registry
@@ -156,6 +180,8 @@ impl HealthMetrics {
             accepting_requests,
             disk_free_mb,
             disk_free_inodes,
+            disk_min_free_mb,
+            disk_min_free_inodes,
             memory_used_mb,
             memory_limit_mb,
             memory_usage_percent,
@@ -163,6 +189,15 @@ impl HealthMetrics {
             app_total_instances,
             previous_app_ids: Mutex::new(HashSet::new()),
         }
+    }
+
+    /// Publish the configured filesystem reserves used by node readiness so
+    /// alert expressions remain aligned with the actual node policy.
+    pub fn set_disk_capacity_limits(&self, min_disk_free_bytes: u64, min_disk_free_inodes: u64) {
+        self.disk_min_free_mb
+            .set(i64::try_from(min_disk_free_bytes / (1024 * 1024)).unwrap_or(i64::MAX));
+        self.disk_min_free_inodes
+            .set(i64::try_from(min_disk_free_inodes).unwrap_or(i64::MAX));
     }
 
     /// Update all metrics from a health report.
@@ -307,5 +342,15 @@ mod tests {
             .collect()
             .iter()
             .all(|family| family.get_metric().is_empty()));
+    }
+
+    #[test]
+    fn configured_disk_reserves_are_exported() {
+        let registry = Registry::new();
+        let metrics = HealthMetrics::new(&registry);
+        metrics.set_disk_capacity_limits(512 * 1024 * 1024, 12_345);
+
+        assert_eq!(metrics.disk_min_free_mb.get(), 512);
+        assert_eq!(metrics.disk_min_free_inodes.get(), 12_345);
     }
 }

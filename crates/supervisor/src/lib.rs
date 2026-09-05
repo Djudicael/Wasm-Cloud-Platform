@@ -112,6 +112,9 @@ pub struct Supervisor {
     pub(crate) host_router: Arc<HostRouter>,
     service_registry: Arc<LocalServiceRegistry>,
     internal_gateway_port: u16,
+    /// Node-local memory budget used for application admission. An app's
+    /// declared maximum instance pool must fit inside this boundary.
+    node_memory_budget_bytes: u64,
     env_resolver: Arc<EnvResolver>,
 
     /// Map of `app_id` to instance pool.
@@ -159,6 +162,7 @@ impl Supervisor {
         host_router: Arc<HostRouter>,
         service_registry: Arc<LocalServiceRegistry>,
         internal_gateway_port: u16,
+        node_memory_budget_bytes: u64,
         env_resolver: Arc<EnvResolver>,
         event_tx: mpsc::Sender<Event>,
         billing_tx: Option<mpsc::Sender<billing::BillingInput>>,
@@ -173,6 +177,7 @@ impl Supervisor {
             host_router,
             service_registry,
             internal_gateway_port,
+            node_memory_budget_bytes,
             env_resolver,
             pools: Arc::new(RwLock::new(HashMap::new())),
             event_tx,

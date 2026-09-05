@@ -18,6 +18,20 @@ fn test_default_config_valid() {
 }
 
 #[test]
+fn resource_budget_rejects_zero_reserves_and_oversized_default_pool() {
+    let mut config = NodeConfig::default();
+    config.health.min_disk_free_bytes = 0;
+    config.health.min_disk_free_inodes = 0;
+    config.health.max_memory_bytes = 128 * 1024 * 1024;
+
+    let error = validate_config(&config).unwrap_err().to_string();
+    assert!(error.contains("min_disk_free_bytes must be > 0"));
+    assert!(error.contains("min_disk_free_inodes must be > 0"));
+    assert!(error
+        .contains("default_memory_pages * default_max_instances must fit within max_memory_bytes"));
+}
+
+#[test]
 fn production_rejects_local_secret_defaults() {
     let mut config = NodeConfig::default();
     config.node.environment = DeploymentEnvironment::Production;

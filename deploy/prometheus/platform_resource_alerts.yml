@@ -2,7 +2,7 @@ groups:
   - name: platform_resources
     rules:
       - alert: PlatformNodeDiskSpaceExhausted
-        expr: wasm_node_disk_free_mb < 1024
+        expr: wasm_node_disk_free_mb < wasm_node_disk_min_free_mb and wasm_node_disk_min_free_mb > 0
         for: 15s
         labels:
           severity: critical
@@ -10,12 +10,12 @@ groups:
         annotations:
           summary: "Platform node filesystem is below its hard free-space reserve"
           description: >-
-            The node has less than 1 GiB available on the filesystem containing
-            its state database. Readiness should withdraw this node before
-            writes fail. Free space or replace the node image.
+            The node is below its configured hard free-space reserve on the
+            filesystem containing its state database. Readiness should withdraw
+            this node before writes fail. Free space or replace the node image.
 
       - alert: PlatformNodeInodesExhausted
-        expr: wasm_node_disk_free_inodes < 10000
+        expr: wasm_node_disk_free_inodes < wasm_node_disk_min_free_inodes and wasm_node_disk_min_free_inodes > 0
         for: 15s
         labels:
           severity: critical
@@ -23,8 +23,29 @@ groups:
         annotations:
           summary: "Platform node filesystem is below its hard inode reserve"
           description: >-
-            The filesystem containing node state has fewer than 10,000 free
-            inodes. Byte-based disk monitoring alone cannot detect this failure.
+            The filesystem containing node state is below its configured hard
+            inode reserve. Byte-based disk monitoring alone cannot detect this
+            failure.
+
+      - alert: PlatformNodeDiskHeadroomLow
+        expr: >-
+          (wasm_node_disk_free_mb < 2 * wasm_node_disk_min_free_mb
+            and wasm_node_disk_free_mb >= wasm_node_disk_min_free_mb
+            and wasm_node_disk_min_free_mb > 0)
+          or
+          (wasm_node_disk_free_inodes < 2 * wasm_node_disk_min_free_inodes
+            and wasm_node_disk_free_inodes >= wasm_node_disk_min_free_inodes
+            and wasm_node_disk_min_free_inodes > 0)
+        for: 5m
+        labels:
+          severity: warning
+          component: platform_node
+        annotations:
+          summary: "Platform node filesystem headroom is below twice its hard reserve"
+          description: >-
+            The node is still ready, but free bytes or inodes have entered the
+            configured warning envelope. Expand or clean the state volume before
+            the hard reserve is reached.
 
       - alert: PlatformNodeMemoryPressure
         expr: wasm_node_memory_usage_percent > 85

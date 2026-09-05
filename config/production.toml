@@ -198,6 +198,16 @@ platform_domain = "myplatform.com"
 [health]
 # Health check loop interval (seconds).
 check_interval_secs = 5
+# Hard filesystem reserves used by readiness and exported to Prometheus. The
+# node becomes degraded below twice either value and unready below the value.
+# Size the production state volume so normal peaks, upgrades, and rollback
+# artifacts remain comfortably above the warning envelope.
+min_disk_free_bytes = 1073741824
+min_disk_free_inodes = 10000
+# Admission budget for each application's declared maximum instance pool and
+# the configured process-memory health ceiling. Set this below the host/cgroup
+# hard limit so the kernel and platform overhead retain explicit headroom.
+max_memory_bytes = 4294967296
 # Treat cluster-node registry entries as stale after this many seconds without
 # a fresh event. Used by deploy peer selection and rolling upgrades.
 cluster_node_stale_after_secs = 120

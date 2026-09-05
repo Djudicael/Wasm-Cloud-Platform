@@ -23,6 +23,18 @@ tests:
         values: '512x11'
       - series: 'wasm_node_disk_free_inodes{instance="node-0",node="node-0"}'
         values: '5000x11'
+      - series: 'wasm_node_disk_min_free_mb{instance="node-0",node="node-0"}'
+        values: '1024x11'
+      - series: 'wasm_node_disk_min_free_inodes{instance="node-0",node="node-0"}'
+        values: '10000x11'
+      - series: 'wasm_node_disk_free_mb{instance="node-low",node="node-low"}'
+        values: '1536x11'
+      - series: 'wasm_node_disk_free_inodes{instance="node-low",node="node-low"}'
+        values: '15000x11'
+      - series: 'wasm_node_disk_min_free_mb{instance="node-low",node="node-low"}'
+        values: '1024x11'
+      - series: 'wasm_node_disk_min_free_inodes{instance="node-low",node="node-low"}'
+        values: '10000x11'
       - series: 'wasm_node_memory_usage_percent{instance="node-0",node="node-0"}'
         values: '90x11'
       - series: 'process_open_fds{instance="node-0",node="node-0"}'
@@ -109,10 +121,13 @@ tests:
       - expr: count(rate(wasm_admin_auth_failures_total[30m]) > 0.1)
         eval_time: 10m
         exp_samples: [{labels: '{}', value: 1}]
-      - expr: count(wasm_node_disk_free_mb < 1024)
+      - expr: count(wasm_node_disk_free_mb < wasm_node_disk_min_free_mb and wasm_node_disk_min_free_mb > 0)
         eval_time: 10m
         exp_samples: [{labels: '{}', value: 1}]
-      - expr: count(wasm_node_disk_free_inodes < 10000)
+      - expr: count(wasm_node_disk_free_inodes < wasm_node_disk_min_free_inodes and wasm_node_disk_min_free_inodes > 0)
+        eval_time: 10m
+        exp_samples: [{labels: '{}', value: 1}]
+      - expr: count((wasm_node_disk_free_mb < 2 * wasm_node_disk_min_free_mb and wasm_node_disk_free_mb >= wasm_node_disk_min_free_mb and wasm_node_disk_min_free_mb > 0) or (wasm_node_disk_free_inodes < 2 * wasm_node_disk_min_free_inodes and wasm_node_disk_free_inodes >= wasm_node_disk_min_free_inodes and wasm_node_disk_min_free_inodes > 0))
         eval_time: 10m
         exp_samples: [{labels: '{}', value: 1}]
       - expr: count(wasm_node_memory_usage_percent > 85)

@@ -30,6 +30,7 @@ async fn create_test_supervisor() -> Arc<supervisor::Supervisor> {
         host_router,
         service_registry,
         common::INTERNAL_GATEWAY_PORT,
+        4 * 1024 * 1024 * 1024,
         env_resolver,
         event_tx,
         None,

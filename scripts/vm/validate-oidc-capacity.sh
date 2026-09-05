@@ -5,7 +5,7 @@ state_file=.prod-validation-single-host-state.json
 report_dir=/tmp/wasm-cloud-platform-oidc-capacity
 soak_seconds=120
 only_soak=false
-expected_targets=10
+expected_targets=12
 auth_token=${WASM_CTL_AUTH_TOKEN:-local-test-write-token-change-me}
 
 while (($#)); do

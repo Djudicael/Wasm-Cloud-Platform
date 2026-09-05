@@ -48,6 +48,18 @@ impl Supervisor {
             ));
         }
 
+        let declared_pool_bytes = config
+            .memory_limit
+            .to_bytes()
+            .checked_mul(u64::from(config.max_instances))
+            .ok_or_else(|| PlatformError::runtime("declared application memory pool overflows"))?;
+        if declared_pool_bytes > self.node_memory_budget_bytes {
+            return Err(PlatformError::runtime(format!(
+                "declared application memory pool ({} bytes) exceeds node budget ({} bytes)",
+                declared_pool_bytes, self.node_memory_budget_bytes
+            )));
+        }
+
         Ok(())
     }
 
@@ -98,6 +110,10 @@ impl Supervisor {
                 (config, prepared)
             }
         };
+
+        // Re-check at the execution boundary so legacy persisted state or a
+        // future ingestion path cannot bypass admission policy.
+        self.check_resource_limits(&config)?;
 
         for dependency in &config.local_dependencies {
             let dependency_is_available = !self.store.is_undeployed(&dependency.0)?

@@ -85,12 +85,12 @@ if ! (cd "$app_dir" && \
   DEFAULT_PASSWORD="$admin_password" \
   CARGO_TARGET_DIR="$app_target_dir" \
   cargo run -p oidc-wasm-dev --release -- seed) >"$seed_log" 2>&1; then
-  sed -E '/(password|token|database|postgres)/I{s/.*/[REDACTED credential-bearing seeder output]/;}' "$seed_log" >&2
+  sed -E '/(password|token|database|postgres|api[[:space:]_-]*key|client[[:space:]_-]*secret|credential)/I{s/.*/[REDACTED credential-bearing seeder output]/;}' "$seed_log" >&2
   rm -f -- "$seed_log"
   seed_log=
   exit 1
 fi
-sed -E '/(password|token|database|postgres)/I{s/.*/[REDACTED credential-bearing seeder output]/;}' "$seed_log"
+sed -E '/(password|token|database|postgres|api[[:space:]_-]*key|client[[:space:]_-]*secret|credential)/I{s/.*/[REDACTED credential-bearing seeder output]/;}' "$seed_log"
 rm -f -- "$seed_log"
 seed_log=
 trap - EXIT

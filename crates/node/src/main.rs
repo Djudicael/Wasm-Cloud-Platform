@@ -1567,6 +1567,7 @@ async fn main() -> anyhow::Result<()> {
         host_router.clone(),
         service_registry.clone(),
         config.ebpf.gateway_port,
+        config.health.max_memory_bytes,
         env_resolver,
         event_tx.clone(),
         Some(billing_collector.tx()),
@@ -1834,6 +1835,10 @@ async fn main() -> anyhow::Result<()> {
     let health_metrics = Arc::new(metrics::health_metrics::HealthMetrics::new(
         &prom_metrics.registry,
     ));
+    health_metrics.set_disk_capacity_limits(
+        config.health.min_disk_free_bytes,
+        config.health.min_disk_free_inodes,
+    );
     info!("health check metrics registered with Prometheus");
 
     // -- Initialize eBPF monitor (kernel-level observability) ------------

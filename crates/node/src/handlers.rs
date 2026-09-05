@@ -346,6 +346,7 @@ impl EventDispatcher {
     ) -> Result<(), PlatformError> {
         tracing::info!(app = %app_id.0, "handle_deploy invoked");
 
+        self.supervisor.check_resource_limits(&config)?;
         self.validate_local_placement(&config)?;
 
         let sha256 = expected_hash
@@ -752,6 +753,7 @@ impl EventDispatcher {
         app_id: AppId,
         config: common::types::AppConfig,
     ) -> Result<(), PlatformError> {
+        self.supervisor.check_resource_limits(&config)?;
         self.validate_local_placement(&config)?;
         self.store.save_config(&config)?;
         self.apply_rate_limit(&app_id, &config);

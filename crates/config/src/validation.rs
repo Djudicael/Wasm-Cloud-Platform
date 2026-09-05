@@ -280,6 +280,27 @@ pub(crate) fn validate_config(config: &NodeConfig) -> Result<(), PlatformError> 
     if config.health.default_memory_pages == 0 {
         errors.push("default_memory_pages must be > 0".to_string());
     }
+    if config.health.default_max_instances == 0 {
+        errors.push("default_max_instances must be > 0".to_string());
+    }
+    if config.health.min_disk_free_bytes == 0 {
+        errors.push("min_disk_free_bytes must be > 0".to_string());
+    }
+    if config.health.min_disk_free_inodes == 0 {
+        errors.push("min_disk_free_inodes must be > 0".to_string());
+    }
+    if config.health.max_memory_bytes == 0 {
+        errors.push("max_memory_bytes must be > 0".to_string());
+    }
+    let default_pool_bytes = u64::from(config.health.default_memory_pages)
+        .checked_mul(65_536)
+        .and_then(|bytes| bytes.checked_mul(config.health.default_max_instances as u64));
+    if default_pool_bytes.is_none_or(|bytes| bytes > config.health.max_memory_bytes) {
+        errors.push(
+            "default_memory_pages * default_max_instances must fit within max_memory_bytes"
+                .to_string(),
+        );
+    }
 
     if config.rate_limit.default_requests_per_second == 0 {
         errors.push("default_requests_per_second must be > 0".to_string());
@@ -647,6 +668,27 @@ pub(crate) fn validate_hot_config(config: &crate::hot::HotConfig) -> Result<(), 
     }
     if config.health.default_memory_pages == 0 {
         errors.push("default_memory_pages must be > 0".to_string());
+    }
+    if config.health.default_max_instances == 0 {
+        errors.push("default_max_instances must be > 0".to_string());
+    }
+    if config.health.min_disk_free_bytes == 0 {
+        errors.push("min_disk_free_bytes must be > 0".to_string());
+    }
+    if config.health.min_disk_free_inodes == 0 {
+        errors.push("min_disk_free_inodes must be > 0".to_string());
+    }
+    if config.health.max_memory_bytes == 0 {
+        errors.push("max_memory_bytes must be > 0".to_string());
+    }
+    let default_pool_bytes = u64::from(config.health.default_memory_pages)
+        .checked_mul(65_536)
+        .and_then(|bytes| bytes.checked_mul(config.health.default_max_instances as u64));
+    if default_pool_bytes.is_none_or(|bytes| bytes > config.health.max_memory_bytes) {
+        errors.push(
+            "default_memory_pages * default_max_instances must fit within max_memory_bytes"
+                .to_string(),
+        );
     }
 
     if config.rate_limit.default_requests_per_second == 0 {

@@ -150,6 +150,7 @@ impl Supervisor {
                 .store
                 .load_config(&app_id)?
                 .ok_or_else(|| PlatformError::AppNotFound(app_id.0.clone()))?;
+            self.check_resource_limits(&config)?;
 
             if self.store.artifact_exists(&app_id)? {
                 info!(app = %app_id.0, "restored app from storage (waiting for first request)");

@@ -37,7 +37,7 @@ podman run --rm --entrypoint /bin/promtool \
 ```
 
 The fixture supplies representative series that cross the firing threshold for
-all 35 tracked expressions. Any added, removed, or renamed rule must update the
+all 36 tracked expressions. Any added, removed, or renamed rule must update the
 fixture and the expected inventory in `scripts/vm/validate-alerting.sh`.
 
 ## Live microVM validation
@@ -56,7 +56,7 @@ The validator:
    companion lifecycle state;
 2. checks the live Prometheus and Alertmanager configurations;
 3. checks all five tracked alert-rule files and runs the deterministic test fixture;
-4. requires the exact 35-rule inventory;
+4. requires the exact 36-rule inventory;
 5. executes every loaded expression against live Prometheus;
 6. requires every always-present source metric;
 7. sends three identical test alerts for each required operational category;

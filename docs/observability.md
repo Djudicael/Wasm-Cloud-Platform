@@ -649,7 +649,7 @@ The deployed rule definitions are the five alert-rule YAML files under
 `deploy/prometheus/`. Do not copy alert names or metric names from an
 illustrative dashboard: the tracked files are the contract.
 
-The current set contains 35 rules covering admin authentication, platform
+The current set contains 36 rules covering admin authentication, platform
 resources and availability, HAProxy HTTP errors, telemetry, eBPF degraded/loss
 modes, PostgreSQL clock offset/metric loss, and WASI policy enforcement. All
 expressions have representative threshold inputs in
@@ -665,7 +665,7 @@ bash scripts/vm/validate-alerting.sh \
   --state-file .prod-validation-single-host-state.json
 ```
 
-The live validator checks both configurations, inventories all 35 rules,
+The live validator checks both configurations, inventories all 36 rules,
 executes every expression against Prometheus, verifies always-present source
 metrics, and proves Alertmanager firing, resolution, and deduplication through
 the state-scoped test receiver. See the

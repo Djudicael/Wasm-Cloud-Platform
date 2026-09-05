@@ -151,6 +151,14 @@ trusted_proxies = ["172.20.0.1/32"]
 
 [health]
 check_interval_secs = 2
+# This disposable 2-GiB guest keeps 512 MiB of node filesystem space in
+# reserve and admits application pools against a 1.5-GiB memory budget,
+# leaving the remainder for the kernel and platform process overhead.
+min_disk_free_bytes = 536870912
+min_disk_free_inodes = 10000
+max_memory_bytes = 1610612736
+default_memory_pages = 2048
+default_max_instances = 10
 
 [ebpf]
 required = false
@@ -159,7 +167,7 @@ EOF
 # Keep a guest-readable schema marker so provisioning can reject legacy cached
 # images before starting Firecracker. Bump this value whenever the early-boot
 # contract (PID 1, kernel arguments, or network bootstrap) changes.
-echo "13" > "$ROOTFS_DIR/etc/wasm-node/image-schema-version"
+echo "14" > "$ROOTFS_DIR/etc/wasm-node/image-schema-version"
 
 # Set hostname
 echo "wasm-node-vm" > "$ROOTFS_DIR/etc/hostname"

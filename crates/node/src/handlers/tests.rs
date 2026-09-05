@@ -60,6 +60,23 @@ async fn test_app_rate_limit_override_is_applied_and_removed() {
     assert_eq!(restored.per_ip_limit, 100);
 }
 
+#[tokio::test]
+async fn config_update_rejects_an_application_pool_above_the_node_budget() {
+    let temp = NamedTempFile::new().unwrap();
+    let store = Store::open(temp.path()).unwrap();
+    let dispatcher = build_test_dispatcher(store.clone(), None, None).await;
+    let app_id = AppId("default/oversized:v1".to_string());
+    let mut config = AppConfig::default_for(app_id.clone());
+    config.memory_limit = common::types::MemoryPages(8192);
+    config.max_instances = 9;
+
+    let error = dispatcher
+        .handle_config_update(app_id.clone(), config)
+        .expect_err("oversized application pool must be rejected before persistence");
+    assert!(error.to_string().contains("exceeds node budget"));
+    assert!(store.load_config(&app_id).unwrap().is_none());
+}
+
 async fn start_test_nats() -> Result<NatsContainer, String> {
     NatsContainer::start(allocate_nats_port()).await
 }
@@ -88,6 +105,7 @@ async fn build_test_dispatcher(
         host_router.clone(),
         service_registry,
         0,
+        4 * 1024 * 1024 * 1024,
         Arc::new(|_, _| Vec::new()),
         event_tx,
         None,

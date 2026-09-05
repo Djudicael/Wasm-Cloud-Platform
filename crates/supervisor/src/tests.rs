@@ -4,7 +4,7 @@ use crate::is_instance_bind_allowed;
 use crate::network::LocalServiceRegistry;
 use crate::pool::InstancePool;
 use crate::port_alloc::PortAllocator;
-use common::types::AppId;
+use common::types::{AppConfig, AppId};
 use proxy::{router::HostRouter, upstream::UpstreamRegistry};
 use runtime::executor::{ExecutionStats, PreparedModule};
 use runtime::policy_tracker::PolicyCounters;
@@ -500,6 +500,7 @@ async fn make_test_supervisor(
         host_router,
         service_registry.clone(),
         9080,
+        4 * 1024 * 1024 * 1024,
         Arc::new(|_, _| Vec::new()),
         event_tx,
         None,
@@ -521,6 +522,20 @@ async fn test_namespace_map_can_be_wired_after_supervisor_is_shared() {
         .namespace_map()
         .expect("shared supervisor should observe the installed namespace map");
     assert!(Arc::ptr_eq(&installed, &namespace_map));
+}
+
+#[tokio::test]
+async fn application_pool_must_fit_node_memory_budget() {
+    let (supervisor, _, _, _) =
+        make_test_supervisor(IpAddr::V4(Ipv4Addr::LOCALHOST), 18101, 18110).await;
+    let mut config = AppConfig::default_for(AppId("default/oversized:v1".to_string()));
+    config.memory_limit = common::types::MemoryPages(8192);
+    config.max_instances = 9;
+
+    let error = supervisor
+        .check_resource_limits(&config)
+        .expect_err("4.5 GiB declared pool must not fit a 4 GiB node budget");
+    assert!(error.to_string().contains("exceeds node budget"));
 }
 
 #[tokio::test]

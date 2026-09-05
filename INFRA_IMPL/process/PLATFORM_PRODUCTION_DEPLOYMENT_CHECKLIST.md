@@ -351,6 +351,13 @@ decision instead of assuming all policy surfaces are equally authoritative.
       descriptors, ports, Wasm instances, fuel, traps, and all connection pools.
 - [ ] Node sizing leaves headroom above memory backpressure and disk thresholds after
       losing one node and while compiling/restarting applications.
+- [ ] `health.max_memory_bytes` is explicitly below the enforced VM/container/systemd
+      cgroup limit, and every application's declared instance pool fits that budget.
+- [ ] `health.min_disk_free_bytes` and `health.min_disk_free_inodes` are explicit;
+      steady state and rolling replacement stay above twice both reserves.
+- [ ] Volume growth and inode recovery are owned, timed, and rehearsed before the hard
+      readiness reserve is reached. Follow
+      `INFRA_IMPL/process/RESOURCE_POLICY_PRODUCTION_VALIDATION.md`.
 - [ ] Platform default fuel and epoch deadlines are benchmarked separately and do not
       reject legitimate p99 work or permit unbounded execution.
 - [ ] Long-lived CLI-style service stores survive beyond the request epoch window;

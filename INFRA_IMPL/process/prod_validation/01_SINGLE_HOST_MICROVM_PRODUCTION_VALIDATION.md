@@ -2050,6 +2050,54 @@ operator-controlled sources, NTS or equivalent authenticated private time where
 available, and offset/source-loss/missing-telemetry alerts owned by the database
 operator.
 
+#### P10-08 resource policy (source remediated, local pass)
+
+On 2026-09-05 the local node image advanced to schema 14. Each 2-GiB platform
+guest now has an explicit 1,536-MiB application admission/process-health budget,
+a 512-MiB hard disk reserve, and a 10,000-inode hard reserve. This corrected the
+former fixture mismatch where the default 4-GiB ceiling exceeded the guest and
+the 1-GiB disk reserve kept a 2-GiB image permanently inside its warning
+envelope. The runtime continues to use the smallest configured, physical, or
+cgroup limit.
+
+The supervisor's existing absolute caps were previously unreachable from deploy
+handling. Deploy and configuration-update handlers now enforce them before
+persistence; restore and spawn re-check the policy so legacy state or a future
+ingestion path cannot bypass it. A declared application pool must also fit the
+node budget. Node configuration validation rejects zero reserves, a zero memory
+budget, a zero default pool size, and default pool multiplication that exceeds
+the budget.
+
+Health metrics now publish `wasm_node_disk_min_free_mb` and
+`wasm_node_disk_min_free_inodes`. The critical disk and inode alerts compare
+free capacity with those emitted policy values, while
+`PlatformNodeDiskHeadroomLow` warns when either resource falls below twice its
+hard reserve. Promtool and live Alertmanager validation passed the current 36
+rules and 30 always-present metric names.
+
+The fresh three-node topology deployed the OIDC Hub and completed 600/600 mixed
+requests over 120 seconds at 5 requests/second. All responses were HTTP 200.
+Afterward, every node had 1,571 MiB disk free, 122,908 free inodes, and 286-299
+MiB process RSS (18-19% of the 1,536-MiB budget). A valid component declaring a
+2,048-MiB maximum pool was rejected before persistence on every node, and OIDC
+database readiness remained healthy. Prometheus reported 12/12 healthy targets
+and no final alert. Evidence is under
+`evidence/2026-09-05-single-host/P10-08-resource-policy/`; the production policy
+and remaining operator evidence are in
+`../RESOURCE_POLICY_PRODUCTION_VALIDATION.md`.
+
+The initial optimized GNU-linker build restarted WSL at peak link memory. The
+same LTO profile completed with Clang/LLD and two build jobs. Build-host capacity
+is therefore documented separately from the runtime-node envelope. The OIDC
+frontend also reported one moderate dependency advisory; that remains
+application evidence, not a platform resource-policy result.
+
+The OIDC seeder also exposed a disposable local API key because its output
+label was outside the testbed's original redaction pattern. No credential was
+retained in the evidence package. The deployment script now redacts API-key,
+client-secret, and credential labels as well; production operations must rotate
+any credential that reaches console or CI output.
+
 ## Phase 10: result and teardown
 
 Final decision: **NO-GO FOR PRODUCTION PROMOTION.** The local core-platform
