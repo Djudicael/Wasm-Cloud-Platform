@@ -4,12 +4,15 @@ Run ID: `single-host-2026-08-23--2026-08-29`
 
 Decision time: `2026-08-29T21:42:52Z`
 
-Platform release decision: **GO TO SIGNED RELEASE CANDIDATE**
+Platform release decision (reconciled 2026-09-06): **SIGNED RELEASE CANDIDATE
+VERIFIED — NO PLATFORM-WIDE NO-GO**
 
 Deployment decision: **CONDITIONAL ON THE SELECTED DEPLOYMENT PROFILE**
 
-Platform source decision (reconciled 2026-09-05): **PASS TO CUT A SIGNED
-PRODUCTION CANDIDATE FOR THE SUPPORTED SINGLE-TRUST-DOMAIN MODEL**
+Platform source decision: **PASS FOR THE SUPPORTED SINGLE-TRUST-DOMAIN MODEL**
+
+Release candidate decision: **PASS WITH EXPLICIT, TIME-BOUNDED UPSTREAM
+DEPENDENCY EXCEPTIONS**
 
 Local rehearsal result: **PASS WITH DOCUMENTED SINGLE-HOST LIMITS**
 
@@ -19,7 +22,10 @@ upgrade/rollback, and application-level database restore all worked within the
 documented single-host boundary. That is strong engineering evidence, but it is
 not permission to promote this checkout or topology to production. The
 [Phase 10 reconciliation](PHASE_10_RECONCILIATION.md) separates closed platform
-source work from release-specific and operator-owned production evidence.
+source work from release-specific and operator-owned production evidence. The
+signed workflow artifact and GitHub attestations are the authoritative source
+for the candidate's exact commit and digest; run-specific summaries may be
+retained locally without making them part of the source commit.
 
 ## What the rehearsal proved
 
@@ -58,7 +64,7 @@ external services, not platform release components.
 
 | ID | Severity | Gate | Required closure evidence |
 |---|---|---|---|
-| P10-01 | P1, REMEDIATED IN SOURCE / TAG EVIDENCE PENDING | The former release job was partial. It now enforces an exact clean source SHA, frozen native/WASI/eBPF builds, a closed artifact allowlist, deterministic packaging, SPDX 2.3, GitHub OIDC/Sigstore SLSA and SBOM attestations, pre-publication verification, and fail-closed operator admission. Manual runs are non-promotable. Local positive/reproducibility/tamper tests pass. | Run the workflow from the approved semantic-version tag, preserve its immutable digest and attestation bundles, then have an independent operator run `scripts/verify-release-attestations.sh` on the downloaded bytes. Only that release-specific evidence closes the P1 gate. |
+| P10-01 | SIGNED NON-PROMOTABLE CANDIDATE PASS / GA TAG NOT EXECUTED | The current candidate passed frozen native/WASI/eBPF builds, closed artifact staging, policy audit, deterministic packaging, SPDX 2.3, GitHub OIDC/Sigstore provenance and SBOM attestations, pre-publication verification, upload, download, and independent admission. Manifest schema 3 binds the exact documented audit exceptions. Use the workflow artifact metadata rather than this source document for the immutable candidate identity. | The platform-wide candidate gate is closed. A GA release remains a separate approval: create the semantic-version tag from the reviewed source, rerun the workflow, retain tagged bytes and attestations, and independently admit them. |
 | P10-02 | P1, SOURCE REMEDIATED + REAL VAULT MICROVM PASS / PRODUCTION EVIDENCE PENDING | Production admission rejects insecure defaults and exportable seal roots. Nodes support pinned Vault Transit/AWS KMS HMAC roots, private Vault CA bundles, real base64 HMAC responses, controlled envelope rewrap, encrypted application-secret rotation, durable revocation, and warm-instance invalidation. A sealed Vault 1.21.4 Firecracker VM with TLS, private CA, least-privilege CIDR-bound AppRoles, response-wrapped SecretIDs, a non-exportable 256-bit HMAC key, and socket audit passed actual-node initialization, version 3-to-4 rotation, KEK/transport rewrap, current-only restart, sealed outage, recovery, authorization-negative checks, audit correlation, checksums, and sentinel scanning. | Local Vault protocol compatibility is proven. Production still requires the real workload identity and renewal, HA Vault or KMS/HSM, production PKI, durable audit retention, application-secret rotation/delete acknowledgement from every node, admin new-token success/old-token 401, and candidate-wide log/trace/audit/CI scans. See [Vault evidence](../2026-08-30-single-host/P10-02-vault-microvm/README.md) and [runbook](../../../VAULT_TRANSIT_MICROVM_VALIDATION.md). |
 | P10-03 | P1, SOURCE REMEDIATED + LOCAL MICROVM PASS / PRODUCTION CONTROLS PENDING | Nodes now activate OTLP safely, propagate W3C context, identify node/environment/exact deployment, and emit correlated structured request records. A local Collector separates operational/audit streams and uses a bounded 2048-batch disk queue. Queryable OIDC traces correlate platform handling with PostgreSQL client activity. Tempo and Collector interruption alerts fired while the application remained available; the Tempo queue recovered. | The immediate Collector outage proved an explicit loss window because the node exporter has no WAL. Production needs a supervised local Collector per host or a node-side WAL/accepted-loss policy, authenticated TLS, independently operated immutable audit and off-host telemetry retention, capacity/sampling policy, and the exhaustive drop/notification gates in P10-04. See [telemetry evidence](../2026-08-30-single-host/P10-03-telemetry/README.md) and [runbook](../../../PRODUCTION_TELEMETRY_VALIDATION.md). |
 | P10-04 | P1, SOURCE REMEDIATED + LOCAL MICROVM PASS / PRODUCTION RECEIVER EVIDENCE PENDING | The current five files contain 36 alerts. The 2026-09-05 P10-08 rerun required all 30 always-present metric names and included configuration-aligned disk/inode hard reserves plus an actionable disk-headroom warning. Seven operational categories each produced one deduplicated firing and one resolved delivery after three identical submissions. | Production must attach the real authenticated on-call receiver, assign owners and reachable runbooks, validate inhibition/silence/repeat policy and Alertmanager HA, and preserve provider-side firing/resolution evidence. See [P10-08 evidence](../2026-09-05-single-host/P10-08-resource-policy/README.md), [alerting evidence](../2026-08-30-single-host/P10-04-alerting/README.md), and [runbook](../../../PRODUCTION_ALERTING_VALIDATION.md). |
@@ -71,11 +77,15 @@ external services, not platform release components.
 | P10-09 | P1, SOURCE REMEDIATED + LOCAL PLATFORM CONTRACT PASS / OPERATOR INTEGRATION EVIDENCE PENDING | Nodes, `wasm-ctl`, and deploy ingress now support explicit private-CA and NATS mTLS inputs. Production rejects plaintext NATS and plaintext advertised artifact URLs. Proxy, admin, deploy-ingress, and artifact HTTPS passed; plaintext and missing material failed closed. A real node reported a stopped mTLS NATS service through HTTP 503 readiness and recovered to 200 after restart. Runtime testing also corrected the Rustls provider bootstrap and separated cleartext h2c from TLS/ALPN in Pingora. | Repeat with the exact signed candidate and production-equivalent PKI, NATS accounts/subjects and HA cluster, certificate/credential rotation and revocation, real load balancer, failure domains, and paging. PostgreSQL HA/backups, KMS/HSM/Vault service operation, immutable retention, and provider infrastructure remain operator-owned rather than platform components. See [evidence](../2026-09-05-single-host/P10-09-platform-integration/README.md) and [runbook](../../../PLATFORM_TLS_AND_NATS_PRODUCTION_VALIDATION.md). |
 | P10-10 | P1, SOURCE CONTRACT REMEDIATED + SINGLE-NODE MICROVM PASS / SIGNED HOST-CLASS EVIDENCE PENDING | Production now admits only `runtime.isolation_mode = "single-trust-domain"` and mandatory eBPF. The schema-15 fixture launches `wasm-node` in a dedicated cgroup-v2 cgroup; block-I/O and memory-pressure probes reject other cgroups, while application-aware probes use registered runtime TIDs. A rolled node correlated guest cgroup ID 21 with all BPF maps, attached 7/7 programs, restored both OIDC components, and kept all three nodes healthy. Buffered kernel writeback is explicitly not per-application accounting, and hostile colocated tenants remain unsupported. | Repeat the [workload-isolation runbook](../../../PLATFORM_WORKLOAD_ISOLATION_VALIDATION.md) with the exact signed candidate on every production node class. Preserve dedicated-cgroup, mandatory eBPF/readiness/alerting, sustained TID attribution, and lifecycle-cleanup evidence. If mutually untrusted applications must share a host, isolate them on separate node processes/VMs; process-per-application support requires a new implementation and security campaign. See [local evidence](../2026-09-05-single-host/P10-10-workload-isolation/README.md). |
 
-The separately tracked `proc-macro-error2 2.0.1` future-incompatibility notice is
-release debt, but it is not being misclassified as a current RustSec
-vulnerability. The 2026-09-05 current-database audit found
-RUSTSEC-2026-0268/0269 in Wasmtime 47.0.3; the workspace was updated to 47.0.4,
-after which `cargo audit --deny warnings` and all 64 runtime tests passed.
+The 2026-09-06 candidate policy audit has zero unexcepted vulnerabilities or
+warnings across 747 locked dependencies. It is not an exception-free result:
+seven upstream findings remain explicitly accepted and are bound into the
+release manifest. Their reachability, owners, review deadline, and removal
+conditions are recorded in
+[`DEPENDENCY_SECURITY_EXCEPTIONS.md`](../../../DEPENDENCY_SECURITY_EXCEPTIONS.md).
+The avoidable `RUSTSEC-2023-0071` RSA advisory was removed by switching JWT
+verification to AWS-LC and replacing test-only RSA generation with a fixed test
+fixture. The prior Wasmtime 47.0.3 advisories remain resolved in 47.0.4.
 
 ## Checks that cannot be reconstructed after the run
 
@@ -86,10 +96,10 @@ captured before the next rehearsal.
 
 ## Required next sequence
 
-1. Cut the approved semantic-version tag and preserve the workflow-produced
-   candidate digest, provenance, signatures, and SBOM.
-2. Independently verify the downloaded candidate, then deploy that exact digest
-   to production-equivalent staging using the selected operator infrastructure.
+1. Preserve and review the independently verified candidate digest,
+   provenance, signatures, SBOM, and explicit dependency exceptions.
+2. Deploy that exact digest to production-equivalent staging using the selected
+   operator infrastructure.
 3. Rerun the applicable platform gates on every chosen node class. PostgreSQL
    and OIDC checks apply only when the deployed workload requires them.
 4. Obtain an independent review of the new evidence and approve any explicit,
@@ -100,8 +110,9 @@ captured before the next rehearsal.
 6. Validate the provider controls applicable to the selected deployment profile,
    such as PKI, secret manager, load balancer, storage,
    backup/KMS, and availability behavior in staging.
-7. Issue a new production decision. This record cannot be converted into a
-   production approval by editing the verdict without new evidence.
+7. Issue a deployment decision for that exact digest and environment. If it is
+   approved for GA, create the semantic-version tag and repeat the workflow and
+   independent admission on tagged bytes.
 
 ## Teardown status
 

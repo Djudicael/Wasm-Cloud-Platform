@@ -31,8 +31,9 @@ The release workflow:
 3. uses the pinned Rust 1.97.1 toolchain, pinned eBPF nightly and linker, both
    committed lockfiles, and `--locked --frozen` builds;
 4. creates a deterministic gzip/tar archive using the commit timestamp;
-5. records the pinned `cargo-audit` result, including the explicit temporary
-   `RUSTSEC-2026-0173` unmaintained-dependency exception, rather than hiding it;
+5. records the pinned `cargo-audit` result and the exact deduplicated exception
+   set from `.cargo/audit.toml`, binds that policy file's SHA-256 into the
+   manifest, and verifies that the manifest matches the audit evidence;
 6. generates an SPDX 2.3 SBOM with pinned Anchore Syft automation;
 7. creates GitHub OIDC/Sigstore SLSA provenance and SPDX attestations for every
    subject, plus provenance for the promotion archive;
@@ -50,6 +51,18 @@ The seven eBPF outputs are non-empty ELF data objects, not host executables.
 Their build gate checks regular-file presence and content; release staging
 normalizes them to mode `0644`. Do not use an executable-bit test, because WSL
 DrvFs and native Linux filesystems report that bit differently.
+
+An audit passing under the repository policy means that no *unexcepted*
+advisory or warning was found. It must not be described as an exception-free
+dependency graph. Each retained exception needs a documented dependency path,
+reachability assessment, owner, review date, and removal condition. The RSA
+backend advisory `RUSTSEC-2023-0071` is not accepted: JWT verification uses the
+`aws-lc-rs` backend so that vulnerable `rsa` crate is absent from the release
+graph. Current Pingora constraints still require the scoped protobuf and `lru`
+exceptions recorded by `.cargo/audit.toml`; their presence is visible in both
+`security-audit.json` and `RELEASE-MANIFEST.json`. The complete exception
+rationale, review deadline, ownership, and removal conditions are maintained in
+[`DEPENDENCY_SECURITY_EXCEPTIONS.md`](DEPENDENCY_SECURITY_EXCEPTIONS.md).
 
 8. verifies source commit, source ref, signer workflow, provenance predicate,
    and SPDX predicate before uploading the workflow artifact.

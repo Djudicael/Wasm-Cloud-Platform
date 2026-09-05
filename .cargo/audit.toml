@@ -1,24 +1,19 @@
 [advisories]
 ignore = [
-    # transitive unmaintained crates without practical replacements in the current graph
-    "RUSTSEC-2025-0141", # bincode
+    # Approved, time-bounded exceptions are documented in
+    # INFRA_IMPL/process/DEPENDENCY_SECURITY_EXCEPTIONS.md. Do not pre-ignore
+    # advisories which are absent from the current lockfile.
     "RUSTSEC-2025-0069", # daemonize via pingora
     "RUSTSEC-2024-0388", # derivative via pingora
     "RUSTSEC-2024-0384", # instant via wstd / wasi-pg-client
-    "RUSTSEC-2025-0119", # number_prefix via indicatif
-    "RUSTSEC-2024-0370", # proc-macro-error via tabled
     "RUSTSEC-2026-0173", # proc-macro-error2 via pingora and tabled
     # Pingora 0.8.1 pins lru ^0.16.3 while the fix requires >=0.18.2. Its pop() call
     # sites use integer/connection-ID keys, so the advisory's panicking key-Drop
     # prerequisite is not reachable in this dependency path.
     "RUSTSEC-2026-0253",
-    "RUSTSEC-2025-0134", # rustls-pemfile via axum-server
+    "RUSTSEC-2025-0134", # rustls-pemfile via pingora-rustls
 
-    # upstream stacks currently pin these vulnerable or otherwise flagged crates
+    # Pingora uses protobuf only to construct and encode locally generated metrics;
+    # the advisory's attacker-controlled recursive parsing path is not exposed.
     "RUSTSEC-2024-0437", # protobuf via pingora-core/prometheus 0.13
-    "RUSTSEC-2026-0097", # rand 0.8 ecosystem-wide
-    "RUSTSEC-2023-0071", # rsa via jsonwebtoken dev-dep
-    "RUSTSEC-2026-0098", # rustls-webpki URI constraints
-    "RUSTSEC-2026-0099", # rustls-webpki wildcard constraint acceptance
-    "RUSTSEC-2026-0104", # rustls-webpki CRL panic
 ]

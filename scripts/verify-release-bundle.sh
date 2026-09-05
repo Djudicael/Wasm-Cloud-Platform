@@ -83,7 +83,7 @@ for name, digest in checksums.items():
         raise SystemExit(f"checksum mismatch: {name}")
 
 manifest = json.loads((root / "RELEASE-MANIFEST.json").read_text(encoding="utf-8"))
-if manifest.get("schema_version") != 2 or manifest.get("source_tree_clean") is not True:
+if manifest.get("schema_version") != 3 or manifest.get("source_tree_clean") is not True:
     raise SystemExit("manifest schema or clean-source assertion is invalid")
 if not re.fullmatch(r"[0-9a-f]{40}", manifest.get("git_sha", "")):
     raise SystemExit("manifest git SHA is invalid")
@@ -119,7 +119,15 @@ if sbom.get("spdxVersion") != "SPDX-2.3" or not sbom.get("packages"):
 audit = json.loads((root / "security-audit.json").read_text(encoding="utf-8"))
 if not isinstance(audit, dict) or "vulnerabilities" not in audit or "warnings" not in audit:
     raise SystemExit("cargo-audit evidence is malformed")
-if manifest.get("security_audit", {}).get("ignored_advisories") != ["RUSTSEC-2026-0173"]:
-    raise SystemExit("manifest cargo-audit exception policy is missing or changed")
+audit_policy = manifest.get("security_audit", {})
+ignored = audit.get("settings", {}).get("ignore", [])
+if not isinstance(ignored, list) or not all(re.fullmatch(r"RUSTSEC-[0-9]{4}-[0-9]{4}", item or "") for item in ignored):
+    raise SystemExit("cargo-audit ignored-advisory evidence is malformed")
+if audit_policy.get("ignored_advisories") != sorted(set(ignored)):
+    raise SystemExit("manifest does not record the exact cargo-audit exception policy")
+if audit_policy.get("configuration_path") != ".cargo/audit.toml" or not re.fullmatch(
+    r"[0-9a-f]{64}", audit_policy.get("configuration_sha256", "")
+):
+    raise SystemExit("manifest cargo-audit configuration identity is missing or invalid")
 print(f"verified release bundle: {manifest['release_ref']} ({manifest['promotion_mode']}, {manifest['git_sha']})")
 PY

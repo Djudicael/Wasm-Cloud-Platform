@@ -17,6 +17,15 @@
 
 Repository-scoped Open Agent Skills live in `.agents/skills` and are intended for Codex, Claude Code, OpenCode, and other agents that implement or can read the Agent Skills format.
 
+- Use `$refresh-project-documentation` after changes that can make maintained
+  documentation stale. Treat `docs/` as the primary platform usage and operator
+  manual, keep its root README navigation current, preserve historical
+  production-validation evidence, and distinguish local microVM validation from
+  production guarantees.
+- Use `$update-rust-dependencies` for Cargo dependency updates, Rust toolchain
+  bumps, advisory remediation, and dependency-policy CI failures. It covers the
+  main workspace, explicit WASI targets, and the separate eBPF workspace.
+
 - Use `$provision-microvm-testbed` to create a local Firecracker topology and persist its exact state.
 - Before provisioning, ask for the desired platform-node count when it is not explicit. Clarify that the separate NATS microVM is not part of this count.
 - For a close-to-production local rehearsal, use `--preset production-like --nodes N` with at least three nodes. This adds a host HAProxy front door in front of the reverse proxy embedded in every platform node. Do not describe it as production-ready: TLS, external secrets, observability, and highly available NATS remain operator concerns.

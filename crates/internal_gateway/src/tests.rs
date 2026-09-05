@@ -1,15 +1,14 @@
 use super::*;
 use axum::body::Body;
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use http::HeaderValue;
 use hyper::service::service_fn;
 use jsonwebtoken::{DecodingKey, EncodingKey};
-use rsa::pkcs1::EncodeRsaPrivateKey;
-use rsa::rand_core::OsRng;
-use rsa::{traits::PublicKeyParts, RsaPrivateKey, RsaPublicKey};
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
 use tokio::net::TcpListener;
+
+#[path = "../../proxy/testdata/jwt_test_key.rs"]
+mod jwt_test_key;
 
 async fn setup_gateway() -> (Arc<InternalGateway>, common::types::AppId) {
     let registry = Arc::new(supervisor::network::NamespaceRegistry::default());
@@ -100,15 +99,11 @@ async fn setup_gateway_with(
 }
 
 async fn test_gateway_with_provider() -> (Arc<proxy::gateway::Gateway>, String, String) {
-    let mut rng = OsRng;
-    let private_key = RsaPrivateKey::new(&mut rng, 2048).unwrap();
-    let public_key = RsaPublicKey::from(&private_key);
-
-    let private_pkcs1 = private_key.to_pkcs1_der().unwrap();
-    let encoding_key = EncodingKey::from_rsa_der(private_pkcs1.as_bytes());
-
-    let n_b64 = URL_SAFE_NO_PAD.encode(public_key.n().to_bytes_be());
-    let e_b64 = URL_SAFE_NO_PAD.encode(public_key.e().to_bytes_be());
+    let jwt_test_key::GeneratedRsaKey {
+        encoding_key,
+        modulus,
+        exponent,
+    } = jwt_test_key::generate_rsa_key();
 
     let provider = Arc::new(proxy::gateway::oidc::OidcProvider::new(
         common::types::OidcConfig {
@@ -123,7 +118,7 @@ async fn test_gateway_with_provider() -> (Arc<proxy::gateway::Gateway>, String, 
     provider
         .inject_jwks_key(
             "test-key-1".to_string(),
-            DecodingKey::from_rsa_components(&n_b64, &e_b64).unwrap(),
+            DecodingKey::from_rsa_components(&modulus, &exponent).unwrap(),
         )
         .await;
 

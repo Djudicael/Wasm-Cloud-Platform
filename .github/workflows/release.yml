@@ -112,7 +112,7 @@ jobs:
       - name: Record blocking dependency audit
         run: |
           cargo install cargo-audit --version 0.22.1 --locked
-          cargo audit --json --deny warnings --ignore RUSTSEC-2026-0173 \
+          cargo audit --json --deny warnings \
             > release-artifacts/security-audit.json
 
       - name: Generate SPDX 2.3 SBOM

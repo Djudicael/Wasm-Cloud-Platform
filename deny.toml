@@ -4,19 +4,23 @@ all-features = true
 [advisories]
 version = 2
 yanked = "warn"
+# Match cargo-audit by checking unsound advisories in transitive dependencies,
+# not only workspace crates.
+unsound = "all"
 ignore = [
     # transitive unmaintained crates without practical replacements in the current graph
     "RUSTSEC-2025-0069", # daemonize via pingora
     "RUSTSEC-2024-0388", # derivative via pingora
     "RUSTSEC-2024-0384", # instant via wstd / wasi-pg-client 0.2
     "RUSTSEC-2026-0173", # proc-macro-error2 via pingora/cf-rustracing-jaeger
+    "RUSTSEC-2025-0134", # rustls-pemfile via pingora-rustls
 
     # upstream stacks currently pin these vulnerable or otherwise flagged crates
     "RUSTSEC-2024-0437", # protobuf via pingora-core/prometheus 0.13
-    "RUSTSEC-2023-0071", # rsa via jsonwebtoken dev-dep
-    "RUSTSEC-2026-0098", # rustls-webpki URI constraints
-    "RUSTSEC-2026-0099", # rustls-webpki wildcard constraint acceptance
-    "RUSTSEC-2026-0104", # rustls-webpki CRL panic
+    # Pingora pins lru ^0.16.3 while the fix requires >=0.18.2. Its relevant
+    # call sites use integer/connection-ID keys, so a panicking key Drop is not
+    # reachable through the reviewed dependency path.
+    "RUSTSEC-2026-0253",
 ]
 
 [bans]

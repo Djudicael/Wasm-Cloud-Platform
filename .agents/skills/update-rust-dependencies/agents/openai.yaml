@@ -1,0 +1,4 @@
+interface:
+  display_name: "Update Rust Dependencies"
+  short_description: "Upgrade Rust crates and toolchains safely"
+  default_prompt: "Use $update-rust-dependencies to audit, update, and validate this platform's Rust dependencies and toolchain in WSL."

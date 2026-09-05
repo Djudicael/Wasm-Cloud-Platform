@@ -27,12 +27,14 @@ fi
 
 lock_hash="$(sha256sum Cargo.lock | awk '{print $1}')"
 toolchain_hash="$(sha256sum rust-toolchain.toml | awk '{print $1}')"
+audit_config_hash="$(sha256sum .cargo/audit.toml | awk '{print $1}')"
 rust_version="$(rustc --version | tr -d '\n')"
 cargo_version="$(cargo --version | tr -d '\n')"
 
 ARTIFACT_DIR="$artifact_dir" GIT_SHA="$git_sha" RELEASE_REF="$release_ref" \
 PROMOTION_MODE="$promotion_mode" SOURCE_EPOCH="$source_date_epoch" \
 LOCK_HASH="$lock_hash" TOOLCHAIN_HASH="$toolchain_hash" \
+AUDIT_CONFIG_HASH="$audit_config_hash" \
 RUST_VERSION="$rust_version" CARGO_VERSION="$cargo_version" \
 python3 - "$output_json" <<'PY'
 import hashlib
@@ -43,6 +45,8 @@ import sys
 
 artifact_dir = Path(os.environ["ARTIFACT_DIR"])
 output = Path(sys.argv[1])
+audit = json.loads((artifact_dir / "security-audit.json").read_text(encoding="utf-8"))
+ignored_advisories = sorted(set(audit.get("settings", {}).get("ignore", [])))
 artifacts = []
 for path in sorted(artifact_dir.rglob("*")):
     if not path.is_file() or path.resolve() == output.resolve():
@@ -55,7 +59,7 @@ for path in sorted(artifact_dir.rglob("*")):
                       "size_bytes": len(data)})
 
 document = {
-    "schema_version": 2,
+    "schema_version": 3,
     "git_sha": os.environ["GIT_SHA"],
     "release_ref": os.environ["RELEASE_REF"],
     "promotion_mode": os.environ["PROMOTION_MODE"],
@@ -69,8 +73,10 @@ document = {
     "sbom": {"path": "sbom.spdx.json", "format": "SPDX", "spec_version": "2.3"},
     "security_audit": {
         "path": "security-audit.json",
-        "policy": "cargo audit --deny warnings --ignore RUSTSEC-2026-0173",
-        "ignored_advisories": ["RUSTSEC-2026-0173"],
+        "policy": "cargo audit --json --deny warnings using .cargo/audit.toml",
+        "configuration_path": ".cargo/audit.toml",
+        "configuration_sha256": os.environ["AUDIT_CONFIG_HASH"],
+        "ignored_advisories": ignored_advisories,
     },
     "attestation": {
         "issuer": "GitHub Actions OIDC / Sigstore",

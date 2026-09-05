@@ -1,0 +1,4 @@
+interface:
+  display_name: "Refresh Project Documentation"
+  short_description: "Synchronize platform docs with repository reality"
+  default_prompt: "Use $refresh-project-documentation to audit and synchronize all maintained project documentation with the current implementation."
