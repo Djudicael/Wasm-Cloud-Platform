@@ -33,7 +33,10 @@ env -u CARGO_TARGET_DIR cargo "+$NIGHTLY" build \
 
 output="$REPO_ROOT/crates/ebpf-monitor/bpf/target/bpfel-unknown-none/release"
 for object in process_tracker tcp_monitor fd_watcher mem_pressure disk_monitor syscall_counter namespace_enforcer; do
-    [[ -x "$output/$object" ]] || {
+    # eBPF ELFs are loaded as data and do not need an executable mode bit.
+    # DrvFs commonly reports them executable while native Linux filesystems
+    # preserve Cargo/bpf-linker's non-executable mode, so validate content.
+    [[ -f "$output/$object" && -s "$output/$object" ]] || {
         echo "Expected eBPF object is missing: $output/$object" >&2
         exit 1
     }

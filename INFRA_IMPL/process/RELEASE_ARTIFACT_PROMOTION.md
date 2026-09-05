@@ -46,6 +46,11 @@ Starting with `cargo metadata --frozen` on an empty runner is invalid because
 `--frozen` implies offline mode; it can report that even foundational crates are
 missing before it has had an opportunity to populate the cache.
 
+The seven eBPF outputs are non-empty ELF data objects, not host executables.
+Their build gate checks regular-file presence and content; release staging
+normalizes them to mode `0644`. Do not use an executable-bit test, because WSL
+DrvFs and native Linux filesystems report that bit differently.
+
 8. verifies source commit, source ref, signer workflow, provenance predicate,
    and SPDX predicate before uploading the workflow artifact.
 
