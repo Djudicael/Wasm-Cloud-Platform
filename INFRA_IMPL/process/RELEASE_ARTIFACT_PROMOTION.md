@@ -36,6 +36,14 @@ The release workflow:
 6. generates an SPDX 2.3 SBOM with pinned Anchore Syft automation;
 7. creates GitHub OIDC/Sigstore SLSA provenance and SPDX attestations for every
    subject, plus provenance for the promotion archive;
+
+Fresh hosted runners intentionally fetch the dependency archives named by the
+committed workspace and eBPF lockfiles with `cargo fetch --locked`. Resolution
+is then checked offline and every release build remains `--locked --frozen`.
+Starting with `cargo metadata --frozen` on an empty runner is invalid because
+`--frozen` implies offline mode; it can report that even foundational crates are
+missing before it has had an opportunity to populate the cache.
+
 8. verifies source commit, source ref, signer workflow, provenance predicate,
    and SPDX predicate before uploading the workflow artifact.
 

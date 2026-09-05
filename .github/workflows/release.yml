@@ -72,8 +72,13 @@ jobs:
             ~/.cargo/git
           key: ${{ runner.os }}-cargo-release-${{ hashFiles('Cargo.lock', 'crates/ebpf-monitor/bpf/Cargo.lock') }}
 
-      - name: Verify committed workspace lockfile
-        run: cargo metadata --locked --frozen --format-version 1 > /dev/null
+      - name: Fetch and verify committed workspace lockfile
+        # A new hosted runner may have neither the crates.io index nor crate
+        # archives. Fetch exactly the committed lockfile first, then require
+        # all subsequent resolution and builds to work offline/frozen.
+        run: |
+          cargo fetch --locked
+          cargo metadata --locked --offline --format-version 1 > /dev/null
 
       - name: Install pinned eBPF build toolchain
         run: |
@@ -81,6 +86,13 @@ jobs:
           sudo apt-get install --yes zstd build-essential
           bash scripts/ebpf/install-toolchain.sh
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Fetch and verify committed eBPF lockfile
+        run: |
+          cargo fetch --locked --manifest-path crates/ebpf-monitor/bpf/Cargo.toml
+          cargo metadata --locked --offline \
+            --manifest-path crates/ebpf-monitor/bpf/Cargo.toml \
+            --format-version 1 > /dev/null
 
       - name: Build frozen release artifact set
         # Firecracker, guest kernels, rootfs images, and service VMs belong to
