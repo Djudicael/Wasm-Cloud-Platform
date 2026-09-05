@@ -136,6 +136,15 @@ pub struct NatsSection {
     pub url: String,
     #[serde(default)]
     pub creds_file: Option<String>,
+    /// Optional PEM CA bundle used to authenticate a private NATS PKI.
+    #[serde(default)]
+    pub ca_cert: Option<String>,
+    /// Optional PEM client certificate for NATS mutual TLS.
+    #[serde(default)]
+    pub client_cert: Option<String>,
+    /// Optional PEM client private key for NATS mutual TLS.
+    #[serde(default)]
+    pub client_key: Option<String>,
 }
 
 fn default_nats_url() -> String {
@@ -147,6 +156,9 @@ impl Default for NatsSection {
         NatsSection {
             url: default_nats_url(),
             creds_file: None,
+            ca_cert: None,
+            client_cert: None,
+            client_key: None,
         }
     }
 }

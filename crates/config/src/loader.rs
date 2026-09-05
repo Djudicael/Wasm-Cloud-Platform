@@ -65,6 +65,9 @@ pub(crate) fn merge_config(base: NodeConfig, overlay: NodeConfig) -> NodeConfig 
         nats: NatsSection {
             url: overlay.nats.url,
             creds_file: overlay.nats.creds_file.or(base.nats.creds_file),
+            ca_cert: overlay.nats.ca_cert.or(base.nats.ca_cert),
+            client_cert: overlay.nats.client_cert.or(base.nats.client_cert),
+            client_key: overlay.nats.client_key.or(base.nats.client_key),
         },
         proxy: ProxySection {
             http_port: overlay.proxy.http_port,
@@ -357,6 +360,15 @@ pub(crate) fn apply_env_overrides(mut config: NodeConfig) -> NodeConfig {
     if let Ok(v) = std::env::var("WASM_NODE_NATS_CREDS_FILE") {
         config.nats.creds_file = Some(v);
     }
+    if let Ok(v) = std::env::var("WASM_NODE_NATS_CA_CERT") {
+        config.nats.ca_cert = Some(v);
+    }
+    if let Ok(v) = std::env::var("WASM_NODE_NATS_CLIENT_CERT") {
+        config.nats.client_cert = Some(v);
+    }
+    if let Ok(v) = std::env::var("WASM_NODE_NATS_CLIENT_KEY") {
+        config.nats.client_key = Some(v);
+    }
     if let Ok(v) = std::env::var("WASM_NODE_PROXY_HTTP_PORT") {
         if let Ok(port) = v.parse() {
             config.proxy.http_port = port;
@@ -573,6 +585,15 @@ pub(crate) fn apply_cli_overrides(mut config: NodeConfig, cli: &CliOverrides) ->
     }
     if let Some(v) = &cli.nats_creds {
         config.nats.creds_file = Some(v.clone());
+    }
+    if let Some(v) = &cli.nats_ca_cert {
+        config.nats.ca_cert = Some(v.clone());
+    }
+    if let Some(v) = &cli.nats_client_cert {
+        config.nats.client_cert = Some(v.clone());
+    }
+    if let Some(v) = &cli.nats_client_key {
+        config.nats.client_key = Some(v.clone());
     }
     if let Some(v) = cli.http_port {
         config.proxy.http_port = v;

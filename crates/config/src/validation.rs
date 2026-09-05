@@ -228,6 +228,26 @@ fn validate_production_secret_policy(config: &NodeConfig, errors: &mut Vec<Strin
     if !config.nats.url.trim().starts_with("tls://") {
         errors.push("production requires a tls:// NATS URL".to_string());
     }
+    if config
+        .admin
+        .advertised_host
+        .as_deref()
+        .is_some_and(|host| !host.trim().is_empty())
+        && config.admin.advertised_artifact_url.is_none()
+    {
+        errors.push(
+            "production requires admin.advertised_artifact_url with an explicit https:// URL when advertising artifacts"
+                .to_string(),
+        );
+    }
+    if config
+        .admin
+        .advertised_artifact_url
+        .as_deref()
+        .is_some_and(|url| !url.trim().starts_with("https://"))
+    {
+        errors.push("production advertised artifact URLs must use https://".to_string());
+    }
     if config.dns.webhook_token.is_some() {
         errors.push(
             "production rejects inline dns.webhook_token; inject this credential through the external secret manager"
@@ -239,6 +259,20 @@ fn validate_production_secret_policy(config: &NodeConfig, errors: &mut Vec<Strin
 /// Validate the final merged configuration.
 pub(crate) fn validate_config(config: &NodeConfig) -> Result<(), PlatformError> {
     let mut errors = Vec::new();
+
+    if config.nats.client_cert.is_some() != config.nats.client_key.is_some() {
+        errors.push("nats.client_cert and nats.client_key must be configured together".to_string());
+    }
+    for (label, value) in [
+        ("nats.creds_file", config.nats.creds_file.as_deref()),
+        ("nats.ca_cert", config.nats.ca_cert.as_deref()),
+        ("nats.client_cert", config.nats.client_cert.as_deref()),
+        ("nats.client_key", config.nats.client_key.as_deref()),
+    ] {
+        if value.is_some_and(|path| path.trim().is_empty()) {
+            errors.push(format!("{label} must not be empty when configured"));
+        }
+    }
 
     if config.runtime.port_start >= config.runtime.port_end {
         errors.push("port_start must be less than port_end".to_string());

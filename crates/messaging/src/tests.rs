@@ -12,6 +12,17 @@ mod test_helpers {
     use tokio::time::timeout;
     use tokio_stream::StreamExt;
 
+    #[tokio::test]
+    async fn test_nats_mutual_tls_requires_certificate_and_key_pair() {
+        let error =
+            NatsBus::connect_with_tls("tls://127.0.0.1:1", None, None, Some("client.crt"), None)
+                .await
+                .expect_err("an incomplete mTLS identity must be rejected before connecting");
+        assert!(error
+            .to_string()
+            .contains("certificate and key must be configured together"));
+    }
+
     #[test]
     fn secret_delete_subject_is_node_targeted() {
         let event = Event::SecretDelete {

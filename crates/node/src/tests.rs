@@ -5,9 +5,9 @@ use super::{
     collect_unbacked_node_subscriptions, decode_vault_transit_hmac, load_kek_from_config,
     load_kek_from_env_spec, load_or_create_persisted_kek,
     load_or_create_persisted_secret_transport_keypair, load_passphrase_from_env_spec,
-    load_secret_transport_keypair_from_config, sanitize_subject, serve_admin_app,
-    subject_matches_filter, NODE_SUBSCRIPTION_SPECS, SEAL_KEY_DERIVATION_SALT_META_KEY,
-    SECRET_TRANSPORT_KEY_META_KEY,
+    load_secret_transport_keypair_from_config, sanitize_subject, serve_axum_app,
+    subject_matches_filter, validate_tls_material, NODE_SUBSCRIPTION_SPECS,
+    SEAL_KEY_DERIVATION_SALT_META_KEY, SECRET_TRANSPORT_KEY_META_KEY,
 };
 use common::auth::AuthConfig;
 use common::config::{AdminSection, NodeConfig, ProxySection, RuntimeSection};
@@ -491,11 +491,12 @@ async fn test_serve_admin_app_tls_accepts_https_requests() {
     let port = probe_listener.local_addr().unwrap().port();
     drop(probe_listener);
 
-    let handle = tokio::spawn(serve_admin_app(
+    let handle = tokio::spawn(serve_axum_app(
         format!("127.0.0.1:{port}"),
         test_admin_app(),
         Some(cert_path.to_string_lossy().to_string()),
         Some(key_path.to_string_lossy().to_string()),
+        "admin API",
     ));
 
     let client = reqwest::Client::builder()
@@ -528,23 +529,37 @@ async fn test_serve_admin_app_tls_accepts_https_requests() {
 }
 
 #[tokio::test]
-async fn test_serve_admin_app_tls_rejects_missing_cert_file() {
+async fn test_serve_axum_app_tls_rejects_missing_cert_file() {
     install_test_rustls_provider();
 
-    let err = serve_admin_app(
+    let err = serve_axum_app(
         "127.0.0.1:0".to_string(),
         test_admin_app(),
         Some("/tmp/does-not-exist-admin.crt".to_string()),
         Some("/tmp/does-not-exist-admin.key".to_string()),
+        "admin API",
     )
     .await
     .expect_err("missing TLS files should fail");
 
-    assert!(err.to_string().contains("admin TLS config error"));
+    assert!(err.to_string().contains("admin API TLS config error"));
 }
 
 #[tokio::test]
-async fn test_serve_admin_app_tls_rejects_invalid_pem_contents() {
+async fn test_startup_tls_validation_rejects_missing_material() {
+    install_test_rustls_provider();
+    let error = validate_tls_material(
+        "artifact",
+        Some("/tmp/does-not-exist-artifact.crt"),
+        Some("/tmp/does-not-exist-artifact.key"),
+    )
+    .await
+    .expect_err("missing listener TLS material must fail startup validation");
+    assert!(error.to_string().contains("artifact TLS config error"));
+}
+
+#[tokio::test]
+async fn test_serve_axum_app_tls_rejects_invalid_pem_contents() {
     install_test_rustls_provider();
 
     let temp_dir = TempDir::new().unwrap();
@@ -553,22 +568,23 @@ async fn test_serve_admin_app_tls_rejects_invalid_pem_contents() {
     std::fs::write(&cert_path, b"not a cert").unwrap();
     std::fs::write(&key_path, b"not a key").unwrap();
 
-    let err = serve_admin_app(
+    let err = serve_axum_app(
         "127.0.0.1:0".to_string(),
         test_admin_app(),
         Some(cert_path.to_string_lossy().to_string()),
         Some(key_path.to_string_lossy().to_string()),
+        "admin API",
     )
     .await
     .expect_err("invalid TLS PEM should fail");
 
-    assert!(err.to_string().contains("admin TLS config error"));
+    assert!(err.to_string().contains("admin API TLS config error"));
 }
 
 #[test]
 fn test_build_artifact_server_url_defaults_to_loopback() {
     let admin = AdminSection::default();
-    let url = build_artifact_server_url(&admin).unwrap();
+    let url = build_artifact_server_url(&admin, false).unwrap();
     assert_eq!(url, "http://127.0.0.1:9091");
     assert!(artifact_server_url_is_loopback(&url));
 }
@@ -579,9 +595,19 @@ fn test_build_artifact_server_url_from_advertised_host() {
         advertised_host: Some("node-1.internal".to_string()),
         ..AdminSection::default()
     };
-    let url = build_artifact_server_url(&admin).unwrap();
+    let url = build_artifact_server_url(&admin, false).unwrap();
     assert_eq!(url, "http://node-1.internal:9091");
     assert!(!artifact_server_url_is_loopback(&url));
+}
+
+#[test]
+fn test_build_artifact_server_url_from_advertised_host_with_tls() {
+    let admin = AdminSection {
+        advertised_host: Some("node-1.internal".to_string()),
+        ..AdminSection::default()
+    };
+    let url = build_artifact_server_url(&admin, true).unwrap();
+    assert_eq!(url, "https://node-1.internal:9091");
 }
 
 #[test]
@@ -590,7 +616,7 @@ fn test_build_artifact_server_url_from_explicit_url() {
         advertised_artifact_url: Some("https://artifacts.node-1.internal/base/".to_string()),
         ..AdminSection::default()
     };
-    let url = build_artifact_server_url(&admin).unwrap();
+    let url = build_artifact_server_url(&admin, true).unwrap();
     assert_eq!(url, "https://artifacts.node-1.internal/base");
     assert!(!artifact_server_url_is_loopback(&url));
 }

@@ -15,6 +15,12 @@ The CLI follows a standard command-and-handler pattern:
 3. **Handler Execution** — Each command handler interacts with the platform through the appropriate transport (HTTP for synchronous operations, NATS for event-driven operations).
 4. **Output Formatting** — Results are formatted and printed to stdout/stderr.
 
+For a private NATS PKI, configure `--nats-ca-cert`,
+`--nats-client-cert`, and `--nats-client-key` (or the corresponding
+`WASM_CTL_NATS_*` environment variables). The client certificate and key must
+be supplied together. `--nats-creds` remains available for NATS user/account
+credentials and can be combined with mutual TLS.
+
 ### Commands
 
 | Command | Description |

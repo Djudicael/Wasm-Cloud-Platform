@@ -159,7 +159,10 @@ Use [`docs/deployment-levels.md`](docs/deployment-levels.md) to choose the root-
 All config values can be overridden with the `WASM_NODE_<SECTION>_<KEY>` convention (uppercase, underscores). For example:
 
 - `WASM_NODE_NODE_ID=node-1`
-- `WASM_NODE_NATS_URL=nats://nats.prod:4222`
+- `WASM_NODE_NATS_URL=tls://nats.prod:4222`
+- `WASM_NODE_NATS_CA_CERT=/etc/wasm-node/nats/ca.crt`
+- `WASM_NODE_NATS_CLIENT_CERT=/run/credentials/wasm-node/nats-client.crt`
+- `WASM_NODE_NATS_CLIENT_KEY=/run/credentials/wasm-node/nats-client.key`
 - `WASM_NODE_LOGGING_LEVEL=debug`
 - `WASM_NODE_RATE_LIMIT_DEFAULT_REQUESTS_PER_SECOND=5000`
 

@@ -2098,6 +2098,42 @@ retained in the evidence package. The deployment script now redacts API-key,
 client-secret, and credential labels as well; production operations must rotate
 any credential that reaches console or CI output.
 
+#### P10-09 platform TLS and NATS integration (source remediated, local pass)
+
+On 2026-09-05 a real native candidate node connected to a disposable NATS 2.10
+service through a private CA and required client certificate. The proxy, admin,
+deploy-ingress, and artifact listeners accepted HTTPS and rejected plaintext.
+Removing the NATS service changed readiness to HTTP 503 with the dependency
+unhealthy; restarting it restored HTTP 200 without restarting the node. Missing
+TLS material failed startup before readiness.
+
+The validation found three source/configuration gaps. The production template
+used `nats://` although production admission requires `tls://`; the built-in
+artifact listener stayed plaintext when admin TLS was active; and the node did
+not expose private-CA/client-certificate inputs for NATS. Those contracts are
+now aligned across node configuration, CLI overrides, `wasm-ctl`, and standalone
+deploy ingress.
+
+Two runtime-only failures were also corrected. The final process needed an
+explicit Rustls crypto provider when multiple providers were linked. Separately,
+Pingora's h2c preface detection cannot reliably peek through an established TLS
+stream; sharing h2c and TLS caused ordinary HTTPS to be misclassified as HTTP/2.
+Cleartext h2c and TLS/ALPN now run as separate Pingora services.
+
+The final current-database RustSec gate discovered RUSTSEC-2026-0268 and
+RUSTSEC-2026-0269 in Wasmtime 47.0.3. The workspace was advanced to patched
+47.0.4; `cargo audit --deny warnings` and all 64 runtime tests then passed,
+including the previously unstable component-export test.
+
+This proves platform client/listener behavior, not production external-service
+operation. NATS cluster quorum, accounts/subjects, rotation/revocation, PKI,
+real load-balancer behavior, and failure-domain evidence remain operator gates.
+PostgreSQL HA/backups and Vault/KMS/HSM/retention infrastructure are explicitly
+not platform components. Evidence is under
+`evidence/2026-09-05-single-host/P10-09-platform-integration/`; the repeatable
+contract and production handoff are in
+`../PLATFORM_TLS_AND_NATS_PRODUCTION_VALIDATION.md`.
+
 ## Phase 10: result and teardown
 
 Final decision: **NO-GO FOR PRODUCTION PROMOTION.** The local core-platform

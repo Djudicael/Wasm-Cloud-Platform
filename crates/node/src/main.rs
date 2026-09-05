@@ -745,27 +745,35 @@ fn bind_socket_address(host: &str, port: u16) -> anyhow::Result<String> {
     Ok(format!("{}:{}", host_for_socket_address(trimmed), port))
 }
 
-fn advertised_host_base_url(host: &str, port: u16) -> anyhow::Result<String> {
+fn advertised_host_base_url(host: &str, port: u16, tls_enabled: bool) -> anyhow::Result<String> {
     let trimmed = host.trim();
     if trimmed.is_empty() {
         anyhow::bail!("admin.advertised_host must not be empty");
     }
 
     normalize_artifact_base_url(&format!(
-        "http://{}:{}",
+        "{}://{}:{}",
+        if tls_enabled { "https" } else { "http" },
         host_for_socket_address(trimmed),
         port
     ))
 }
 
-fn build_artifact_server_url(admin: &common::config::AdminSection) -> anyhow::Result<String> {
+fn build_artifact_server_url(
+    admin: &common::config::AdminSection,
+    tls_enabled: bool,
+) -> anyhow::Result<String> {
     if let Some(url) = admin.advertised_artifact_url.as_deref() {
         return normalize_artifact_base_url(url);
     }
     if let Some(host) = admin.advertised_host.as_deref() {
-        return advertised_host_base_url(host, admin.artifact_port);
+        return advertised_host_base_url(host, admin.artifact_port, tls_enabled);
     }
-    Ok(format!("http://127.0.0.1:{}", admin.artifact_port))
+    Ok(format!(
+        "{}://127.0.0.1:{}",
+        if tls_enabled { "https" } else { "http" },
+        admin.artifact_port
+    ))
 }
 
 fn build_proxy_advertised_address(config: &common::config::NodeConfig) -> anyhow::Result<String> {
@@ -804,32 +812,49 @@ fn admin_tls_is_configured(config: &common::config::NodeConfig) -> bool {
     admin_tls_material(config).is_some()
 }
 
-async fn serve_admin_app(
-    admin_addr: String,
-    admin_app: axum::Router,
+async fn validate_tls_material(
+    service: &str,
+    cert: Option<&str>,
+    key: Option<&str>,
+) -> anyhow::Result<()> {
+    if let (Some(cert), Some(key)) = (cert, key) {
+        axum_server::tls_rustls::RustlsConfig::from_pem_file(cert, key)
+            .await
+            .map_err(|e| anyhow::anyhow!("{service} TLS config error: {e}"))?;
+    }
+    Ok(())
+}
+
+async fn serve_axum_app(
+    addr: String,
+    app: axum::Router,
     tls_cert: Option<String>,
     tls_key: Option<String>,
+    service: &'static str,
 ) -> anyhow::Result<()> {
     if let (Some(cert), Some(key)) = (tls_cert, tls_key) {
         let rustls_config = axum_server::tls_rustls::RustlsConfig::from_pem_file(cert, key)
             .await
-            .map_err(|e| anyhow::anyhow!("admin TLS config error: {e}"))?;
-        let bind_addr: std::net::SocketAddr = admin_addr
+            .map_err(|e| anyhow::anyhow!("{service} TLS config error: {e}"))?;
+        let bind_addr: std::net::SocketAddr = addr
             .parse()
-            .map_err(|e| anyhow::anyhow!("invalid admin bind address: {e}"))?;
-        info!(addr = %admin_addr, "admin API listening with TLS");
+            .map_err(|e| anyhow::anyhow!("invalid {service} bind address: {e}"))?;
+        info!(addr = %addr, service, "service listening with TLS");
         axum_server::bind_rustls(bind_addr, rustls_config)
-            .serve(admin_app.into_make_service())
+            .serve(app.into_make_service_with_connect_info::<std::net::SocketAddr>())
             .await
-            .map_err(|e| anyhow::anyhow!("admin HTTPS server error: {e}"))?;
+            .map_err(|e| anyhow::anyhow!("{service} HTTPS server error: {e}"))?;
     } else {
-        let listener = tokio::net::TcpListener::bind(&admin_addr)
+        let listener = tokio::net::TcpListener::bind(&addr)
             .await
-            .map_err(|e| anyhow::anyhow!("admin API bind failed: {e}"))?;
-        info!(addr = %admin_addr, "admin API listening");
-        axum::serve(listener, admin_app.into_make_service())
-            .await
-            .map_err(|e| anyhow::anyhow!("admin HTTP server error: {e}"))?;
+            .map_err(|e| anyhow::anyhow!("{service} bind failed: {e}"))?;
+        info!(addr = %addr, service, "service listening");
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("{service} HTTP server error: {e}"))?;
     }
     Ok(())
 }
@@ -1130,6 +1155,11 @@ fn clear_persisted_auth_override(db_path: &str) -> anyhow::Result<()> {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    if rustls::crypto::CryptoProvider::get_default().is_none() {
+        rustls::crypto::aws_lc_rs::default_provider()
+            .install_default()
+            .map_err(|_| anyhow::anyhow!("failed to install the rustls AWS-LC crypto provider"))?;
+    }
     let args = Args::parse();
 
     // --generate-config: print a default TOML config to stdout and exit
@@ -1194,6 +1224,9 @@ async fn main() -> anyhow::Result<()> {
         nats_url: (!has_config_file || args.nats_url != "nats://127.0.0.1:4222")
             .then(|| args.nats_url.clone()),
         nats_creds: args.nats_creds.clone(),
+        nats_ca_cert: args.nats_ca_cert.clone(),
+        nats_client_cert: args.nats_client_cert.clone(),
+        nats_client_key: args.nats_client_key.clone(),
         http_port: Some(args.proxy_port),
         https_port: Some(args.proxy_https_port),
         tls_cert: args.tls_cert.clone(),
@@ -1264,6 +1297,22 @@ async fn main() -> anyhow::Result<()> {
     // Load configuration with merge priority: defaults < TOML < env < CLI
     let config_path = args.config.as_deref().map(std::path::Path::new);
     let config = load_config(config_path, &cli_overrides)?;
+
+    // Listener tasks run independently after startup. Parse all configured
+    // certificates now so unreadable or malformed production TLS material
+    // fails the node before it can advertise readiness.
+    validate_tls_material(
+        "proxy",
+        config.proxy.tls_cert.as_deref(),
+        config.proxy.tls_key.as_deref(),
+    )
+    .await?;
+    validate_tls_material(
+        "admin, deploy-ingress, and artifact",
+        config.admin.tls_cert.as_deref(),
+        config.admin.tls_key.as_deref(),
+    )
+    .await?;
 
     // Set up structured logging with reload handle (allows runtime log-level changes)
     let format = match config.logging.format.as_str() {
@@ -1467,9 +1516,21 @@ async fn main() -> anyhow::Result<()> {
     let service_registry = Arc::new(supervisor::network::LocalServiceRegistry::default());
     let host_router = Arc::new(proxy::router::HostRouter::default());
 
-    let mut bus = match &config.nats.creds_file {
-        Some(creds) => messaging::NatsBus::connect_secure(&config.nats.url, creds).await?,
-        None => messaging::NatsBus::connect(&config.nats.url).await?,
+    let nats_has_explicit_security = config.nats.creds_file.is_some()
+        || config.nats.ca_cert.is_some()
+        || config.nats.client_cert.is_some()
+        || config.nats.client_key.is_some();
+    let mut bus = if nats_has_explicit_security {
+        messaging::NatsBus::connect_with_tls(
+            &config.nats.url,
+            config.nats.creds_file.as_deref(),
+            config.nats.ca_cert.as_deref(),
+            config.nats.client_cert.as_deref(),
+            config.nats.client_key.as_deref(),
+        )
+        .await?
+    } else {
+        messaging::NatsBus::connect(&config.nats.url).await?
     };
     bus.set_node_id(config.node.node_id.clone());
     info!("NATS connected");
@@ -1650,7 +1711,8 @@ async fn main() -> anyhow::Result<()> {
         None
     };
 
-    let artifact_server_url = build_artifact_server_url(&config.admin)?;
+    let artifact_server_url =
+        build_artifact_server_url(&config.admin, admin_tls_is_configured(&config))?;
     let proxy_address = build_proxy_advertised_address(&config)?;
     let node_load_table = Arc::new(proxy::node_table::NodeLoadTable::default());
     store.save_cluster_node(&common::types::ClusterNodeRecord {
@@ -3691,7 +3753,14 @@ async fn main() -> anyhow::Result<()> {
         None => (None, None),
     };
     tokio::spawn(async move {
-        if let Err(e) = serve_admin_app(admin_addr, admin_app, admin_tls_cert, admin_tls_key).await
+        if let Err(e) = serve_axum_app(
+            admin_addr,
+            admin_app,
+            admin_tls_cert,
+            admin_tls_key,
+            "admin API",
+        )
+        .await
         {
             tracing::error!(error = %e, "admin API server failed");
         }
@@ -3707,11 +3776,12 @@ async fn main() -> anyhow::Result<()> {
         None => (None, None),
     };
     tokio::spawn(async move {
-        if let Err(e) = serve_admin_app(
+        if let Err(e) = serve_axum_app(
             deploy_ingress_addr,
             deploy_ingress_app,
             deploy_ingress_tls_cert,
             deploy_ingress_tls_key,
+            "deploy ingress",
         )
         .await
         {
@@ -3740,17 +3810,23 @@ async fn main() -> anyhow::Result<()> {
         &config.admin.artifact_bind_address,
         config.admin.artifact_port,
     )?;
+    let artifact_tls = admin_tls_material(&config);
+    let (artifact_tls_cert, artifact_tls_key) = match artifact_tls {
+        Some((cert, key)) => (Some(cert), Some(key)),
+        None => (None, None),
+    };
     tokio::spawn(async move {
-        let listener = tokio::net::TcpListener::bind(&artifact_addr)
-            .await
-            .expect("artifact server bind failed");
-        info!(addr = %artifact_addr, "artifact server listening");
-        axum::serve(
-            listener,
-            artifact_app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        if let Err(e) = serve_axum_app(
+            artifact_addr,
+            artifact_app,
+            artifact_tls_cert,
+            artifact_tls_key,
+            "artifact server",
         )
         .await
-        .unwrap();
+        {
+            tracing::error!(error = %e, "artifact server failed");
+        }
     });
 
     // Signal that startup is complete - all probes are now active

@@ -25,7 +25,7 @@ Event flow:
 
 | Type | Description |
 |------|-------------|
-| `NatsBus` | NATS client wrapper: `connect()`, `publish()`, `subscribe()`, `subscribe_durable()`, JetStream stream/consumer setup |
+| `NatsBus` | NATS client wrapper: plaintext/local `connect()`, credentials `connect_secure()`, explicit CA/mTLS `connect_with_tls()`, publish/subscribe, and JetStream setup |
 | `Event` | Enum of all platform events with `subject() -> String` mapping |
 | `NatsHealth` | Connection state holder (connected flag, last update timestamp) |
 | `NatsHealthWatcher` | Background task that periodically updates health timestamp |
@@ -64,8 +64,13 @@ Event flow:
 
 ## Security Considerations
 
-- **No TLS enforcement** — The crate does not enforce or verify TLS configuration for NATS connections. Insecure connections may be used unintentionally.
-- **No authentication/authorization checks** — Any component with access to the bus can publish or subscribe to any subject. There is no subject-level access control.
+- `connect_with_tls()` supports a private CA, credentials, and a client
+  certificate/key pair. Node production admission separately requires a
+  `tls://` URL and credentials; the generic crate keeps plaintext `connect()`
+  for local test fixtures.
+- **Server-side subject authorization remains required** — NATS accounts and
+  permissions must restrict each component to its required subjects. Client TLS
+  proves transport identity but does not define those permissions.
 - **No message integrity verification** — Events are not signed or authenticated, allowing any NATS client on the network to inject forged events.
 - **JetStream data at rest** — No encryption is applied to persisted JetStream messages. Sensitive event payloads may be stored in plaintext on the NATS server.
 - **Subscriber task isolation** — Subscriber tasks share the same Tokio runtime with no resource limits, potentially allowing a misbehaving subscriber to impact other components.

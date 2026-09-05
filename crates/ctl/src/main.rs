@@ -41,6 +41,15 @@ struct Cli {
     #[arg(long, env = "WASM_CTL_NATS_CREDS")]
     nats_creds: Option<String>,
 
+    #[arg(long, env = "WASM_CTL_NATS_CA_CERT")]
+    nats_ca_cert: Option<String>,
+
+    #[arg(long, env = "WASM_CTL_NATS_CLIENT_CERT")]
+    nats_client_cert: Option<String>,
+
+    #[arg(long, env = "WASM_CTL_NATS_CLIENT_KEY")]
+    nats_client_key: Option<String>,
+
     /// Bearer token for admin API authentication.
     /// Can also be set via WASM_CTL_AUTH_TOKEN environment variable,
     /// or in ~/.wasm-ctl/config.toml under [auth] token = "...".
@@ -541,9 +550,21 @@ impl NodeAction {
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
-    let bus = match &cli.nats_creds {
-        Some(creds) => messaging::NatsBus::connect_secure(&cli.nats_url, creds).await?,
-        None => messaging::NatsBus::connect(&cli.nats_url).await?,
+    let nats_has_explicit_security = cli.nats_creds.is_some()
+        || cli.nats_ca_cert.is_some()
+        || cli.nats_client_cert.is_some()
+        || cli.nats_client_key.is_some();
+    let bus = if nats_has_explicit_security {
+        messaging::NatsBus::connect_with_tls(
+            &cli.nats_url,
+            cli.nats_creds.as_deref(),
+            cli.nats_ca_cert.as_deref(),
+            cli.nats_client_cert.as_deref(),
+            cli.nats_client_key.as_deref(),
+        )
+        .await?
+    } else {
+        messaging::NatsBus::connect(&cli.nats_url).await?
     };
     let auth_token = resolve_auth_token(cli.auth_token.as_deref());
     let http = build_http_client(auth_token.as_deref())?;

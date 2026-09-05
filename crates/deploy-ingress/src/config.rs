@@ -27,6 +27,12 @@ pub struct Args {
     pub nats_url: String,
     #[arg(long, env = "WASM_DEPLOY_INGRESS_NATS_CREDS")]
     pub nats_creds: Option<String>,
+    #[arg(long, env = "WASM_DEPLOY_INGRESS_NATS_CA_CERT")]
+    pub nats_ca_cert: Option<String>,
+    #[arg(long, env = "WASM_DEPLOY_INGRESS_NATS_CLIENT_CERT")]
+    pub nats_client_cert: Option<String>,
+    #[arg(long, env = "WASM_DEPLOY_INGRESS_NATS_CLIENT_KEY")]
+    pub nats_client_key: Option<String>,
     #[arg(
         long,
         env = "WASM_DEPLOY_INGRESS_DB_PATH",
@@ -168,6 +174,9 @@ impl Args {
             || !self.nats_url.starts_with("tls://")
         {
             anyhow::bail!("production requires NATS credentials and a tls:// URL");
+        }
+        if self.nats_client_cert.is_some() != self.nats_client_key.is_some() {
+            anyhow::bail!("NATS client certificate and key must be configured together");
         }
         if !self.bind_address.parse::<std::net::IpAddr>()?.is_loopback() {
             anyhow::bail!(

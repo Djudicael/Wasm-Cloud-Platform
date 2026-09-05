@@ -53,6 +53,7 @@ pub struct RequestCtx {
 }
 
 /// The main Pingora proxy service — now with gateway capabilities.
+#[derive(Clone)]
 pub struct WasmProxy {
     pub router: Arc<HostRouter>,
     pub upstream: Arc<UpstreamRegistry>,

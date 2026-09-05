@@ -18,6 +18,18 @@ pub(crate) struct Args {
     #[arg(long)]
     pub(crate) nats_creds: Option<String>,
 
+    /// PEM CA bundle used to authenticate a private NATS server certificate.
+    #[arg(long, env = "WASM_NODE_NATS_CA_CERT")]
+    pub(crate) nats_ca_cert: Option<String>,
+
+    /// PEM client certificate used for NATS mutual TLS.
+    #[arg(long, env = "WASM_NODE_NATS_CLIENT_CERT")]
+    pub(crate) nats_client_cert: Option<String>,
+
+    /// PEM client private key used for NATS mutual TLS.
+    #[arg(long, env = "WASM_NODE_NATS_CLIENT_KEY")]
+    pub(crate) nats_client_key: Option<String>,
+
     #[arg(long, default_value = "8080")]
     pub(crate) proxy_port: u16,
 

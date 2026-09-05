@@ -17,6 +17,7 @@ pub mod upstream_health;
 
 use config::ProxyTimeouts;
 use pingora::apps::HttpServerOptions;
+use pingora::listeners::tls::TlsSettings;
 use pingora::server::Server;
 use pingora_proxy::ProxyServiceBuilder;
 use service::WasmProxy;
@@ -52,22 +53,29 @@ impl ProxyServer {
         let mut server = Server::new(None).expect("Pingora server init failed");
         server.bootstrap();
 
-        let mut server_options = HttpServerOptions::default();
-        server_options.h2c = true;
-        let mut svc = ProxyServiceBuilder::new(&server.configuration, proxy)
-            .server_options(server_options)
+        // Pingora cannot reliably peek for the cleartext HTTP/2 preface after a
+        // TLS handshake. Keep h2c on the cleartext listener only and use ALPN
+        // negotiation for HTTP/2 on the TLS listener.
+        let mut http_options = HttpServerOptions::default();
+        http_options.h2c = true;
+        let mut http_service = ProxyServiceBuilder::new(&server.configuration, proxy.clone())
+            .server_options(http_options)
             .build();
 
         // HTTP listener
-        svc.add_tcp(&format!("0.0.0.0:{http_port}"));
+        http_service.add_tcp(&format!("0.0.0.0:{http_port}"));
+        server.add_service(http_service);
 
         // HTTPS listener (optional)
         if let (Some(port), Some((cert, key))) = (https_port, tls) {
-            svc.add_tls(&format!("0.0.0.0:{port}"), &cert, &key)
-                .expect("Failed to add TLS listener");
-        }
+            let mut tls_settings =
+                TlsSettings::intermediate(&cert, &key).expect("Failed to load TLS settings");
+            tls_settings.enable_h2();
 
-        server.add_service(svc);
+            let mut tls_service = ProxyServiceBuilder::new(&server.configuration, proxy).build();
+            tls_service.add_tls_with_settings(&format!("0.0.0.0:{port}"), None, tls_settings);
+            server.add_service(tls_service);
+        }
         ProxyServer { server }
     }
 

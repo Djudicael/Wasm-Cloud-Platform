@@ -329,6 +329,12 @@ impl ProxyHttp for WasmProxy {
 
 ## 4. TLS Configuration
 
+The implemented server uses separate Pingora services for the cleartext and TLS
+listeners. Cleartext retains h2c preface handling. TLS enables HTTP/2 and
+HTTP/1.1 through ALPN; h2c preface sniffing must not be enabled on that service
+because the TLS stream cannot reliably support Pingora's cleartext peek path.
+The P10-09 runtime contract verifies both HTTPS and plaintext rejection.
+
 ```rust
 // crates/proxy/src/tls.rs
 use pingora_core::listeners::TlsSettings;

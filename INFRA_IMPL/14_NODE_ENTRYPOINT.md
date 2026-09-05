@@ -514,7 +514,10 @@ echo "Admin:   http://localhost:9090/upstreams"
 - [x] HTTP proxy is reachable on `--proxy-port` (default 8080)
 - [x] HTTPS proxy is reachable on `--proxy-https-port` when cert and key are provided
 - [x] Admin API is reachable on `--admin-port` (default 9090)
-- [x] Artifact server is reachable on `--artifact-port` (default 9091)
+- [x] Artifact server is reachable on `--artifact-port` (default 9091) and
+      shares admin/fallback proxy TLS when listener TLS is configured
+- [x] Built-in deploy ingress shares the same admin/fallback TLS contract
+- [x] Configured listener certificates are parsed before startup readiness
 
 ### State Restore
 - [x] On restart with an existing database, all previously deployed apps are restored

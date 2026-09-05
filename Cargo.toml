@@ -47,12 +47,12 @@ tracing               = "0.1"
 tracing-subscriber    = { version = "0.3", features = ["env-filter", "json"] }
 
 # Wasm runtime
-wasmtime              = "47.0.3"
-wasmtime-wasi         = "47.0.3"
-wasmtime-wasi-http    = "47.0.3"
+wasmtime              = "47.0.4"
+wasmtime-wasi         = "47.0.4"
+wasmtime-wasi-http    = "47.0.4"
 
 # Proxy
-pingora               = "0.8.1"
+pingora               = { version = "0.8.1", features = ["rustls"] }
 pingora-proxy         = "0.8.1"
 pingora-load-balancing = "0.8.1"
 pingora-core          = "0.8.1"

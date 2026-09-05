@@ -11,6 +11,27 @@ fn validate_hot(config: &HotConfig) -> Result<(), PlatformError> {
     validate_hot_config(config)
 }
 
+fn production_config_with_non_exportable_key() -> NodeConfig {
+    let mut config = NodeConfig::default();
+    config.node.environment = DeploymentEnvironment::Production;
+    config.auth.enabled = true;
+    config.auth.read_token =
+        Some("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string());
+    config.auth.write_token =
+        Some("fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210".to_string());
+    config.admin.tls_cert = Some("/run/secrets/admin.crt".to_string());
+    config.admin.tls_key = Some("/run/secrets/admin.key".to_string());
+    config.nats.url = "tls://nats.internal:4222".to_string();
+    config.nats.creds_file = Some("/run/secrets/nats.creds".to_string());
+    config.runtime.key_source = "vault-transit".to_string();
+    config.runtime.key_vault_url = Some("https://vault.internal".to_string());
+    config.runtime.key_vault_token_env = Some("VAULT_TOKEN".to_string());
+    config.runtime.key_vault_transit_key = Some("wasm-node-seal".to_string());
+    config.runtime.key_vault_transit_context = Some("node-0".to_string());
+    config.runtime.key_vault_transit_key_version = Some(1);
+    config
+}
+
 #[test]
 fn test_default_config_valid() {
     let config = NodeConfig::default();
@@ -44,23 +65,7 @@ fn production_rejects_local_secret_defaults() {
 
 #[test]
 fn production_accepts_non_exportable_external_key_policy() {
-    let mut config = NodeConfig::default();
-    config.node.environment = DeploymentEnvironment::Production;
-    config.auth.enabled = true;
-    config.auth.read_token =
-        Some("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string());
-    config.auth.write_token =
-        Some("fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210".to_string());
-    config.admin.tls_cert = Some("/run/secrets/admin.crt".to_string());
-    config.admin.tls_key = Some("/run/secrets/admin.key".to_string());
-    config.nats.url = "tls://nats.internal:4222".to_string();
-    config.nats.creds_file = Some("/run/secrets/nats.creds".to_string());
-    config.runtime.key_source = "vault-transit".to_string();
-    config.runtime.key_vault_url = Some("https://vault.internal".to_string());
-    config.runtime.key_vault_token_env = Some("VAULT_TOKEN".to_string());
-    config.runtime.key_vault_transit_key = Some("wasm-node-seal".to_string());
-    config.runtime.key_vault_transit_context = Some("node-0".to_string());
-    config.runtime.key_vault_transit_key_version = Some(1);
+    let config = production_config_with_non_exportable_key();
     assert!(validate_config(&config).is_ok());
 }
 
@@ -528,6 +533,31 @@ fn test_validation_accepts_routable_advertised_artifact_config() {
     config.admin.advertised_artifact_url =
         Some("https://artifacts.node-1.internal/base".to_string());
     assert!(validate_config(&config).is_ok());
+}
+
+#[test]
+fn test_validation_rejects_incomplete_nats_mutual_tls_pair() {
+    let mut config = NodeConfig::default();
+    config.nats.client_cert = Some("/run/secrets/nats-client.crt".to_string());
+    let error = validate_config(&config).unwrap_err().to_string();
+    assert!(error.contains("nats.client_cert and nats.client_key"));
+}
+
+#[test]
+fn production_rejects_plaintext_advertised_artifact_endpoint() {
+    let mut config = production_config_with_non_exportable_key();
+    config.admin.advertised_artifact_url =
+        Some("http://artifacts.node-1.internal:9091".to_string());
+    let error = validate_config(&config).unwrap_err().to_string();
+    assert!(error.contains("advertised artifact URLs must use https://"));
+}
+
+#[test]
+fn production_rejects_implicit_plaintext_artifact_advertisement() {
+    let mut config = production_config_with_non_exportable_key();
+    config.admin.advertised_host = Some("node-1.internal".to_string());
+    let error = validate_config(&config).unwrap_err().to_string();
+    assert!(error.contains("explicit https:// URL"));
 }
 
 #[test]

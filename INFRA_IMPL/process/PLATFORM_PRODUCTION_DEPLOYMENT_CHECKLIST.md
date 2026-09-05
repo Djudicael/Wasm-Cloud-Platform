@@ -194,6 +194,14 @@ NATS/JetStream is a critical production dependency, not a disposable message bus
 The local testbed creates one NATS microVM. It is useful for protocol validation but
 provides no evidence for production NATS high availability.
 
+Apply the platform-owned TLS/NATS contract in
+[`PLATFORM_TLS_AND_NATS_PRODUCTION_VALIDATION.md`](./PLATFORM_TLS_AND_NATS_PRODUCTION_VALIDATION.md).
+The node, `wasm-ctl`, and standalone deploy ingress accept explicit CA,
+client-certificate, and client-key paths. Production node configuration requires
+a `tls://` URL and credentials; a client certificate and key must always be
+configured together. Preserve the external cluster's availability, authorization,
+rotation, and recovery evidence separately from this platform client contract.
+
 ## 6. Identity, authentication, and secrets gates
 
 Apply the detailed [production secret lifecycle](./PRODUCTION_SECRET_LIFECYCLE.md)
@@ -237,6 +245,14 @@ and attach its external-manager and redaction evidence to the change record.
 
 ## 7. TLS and certificate gates
 
+- [ ] The exact signed node passes `scripts/vm/validate-platform-tls-contract.sh`
+      or an equivalent staging contract using the real PKI and NATS identity.
+- [ ] Proxy TLS uses ALPN while cleartext h2c remains on its separate listener;
+      HTTP/1.1 and HTTP/2 both pass through the selected front door.
+- [ ] Admin TLS also protects the built-in deploy-ingress and artifact listeners,
+      or each is protected by an explicitly documented equivalent termination hop.
+- [ ] Multi-node artifact advertisement uses an explicit `https://` URL whose
+      hostname is covered by the serving certificate.
 - [ ] TLS is enabled for public ingress, admin access, remote artifact transfer,
       NATS, databases, secret managers, and observability endpoints as required by the threat model.
 - [ ] Certificate hostname/SAN verification is enabled; trust-all or plaintext fallback is forbidden.
