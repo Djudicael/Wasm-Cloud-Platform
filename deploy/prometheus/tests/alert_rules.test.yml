@@ -1,6 +1,7 @@
 rule_files:
   - ../admin_auth_alerts.yml
   - ../platform_resource_alerts.yml
+  - ../postgres_clock_alerts.yml
   - ../validation_alerts.yml
   - ../wasi_policy_alerts.yml
 
@@ -33,6 +34,16 @@ tests:
       - series: 'up{instance="nats",job="nats"}'
         values: '0x11'
       - series: 'up{instance="postgresql",job="postgresql"}'
+        values: '0x11'
+      - series: 'pg_clock_epoch_seconds{instance="postgresql",job="postgresql"}'
+        values: '0x11'
+      - series: 'up{instance="postgresql",job="postgresql-chrony"}'
+        values: '1x11'
+      - series: 'wcp_postgres_chrony_synchronized{instance="postgresql",job="postgresql-chrony"}'
+        values: '0x11'
+      - series: 'wcp_postgres_chrony_reachable_sources{instance="postgresql",job="postgresql-chrony"}'
+        values: '0x11'
+      - series: 'wcp_postgres_chrony_last_sample_timestamp_seconds{instance="postgresql",job="postgresql-chrony"}'
         values: '0x11'
       - series: 'up{instance="haproxy",job="haproxy"}'
         values: '0x11'
@@ -120,6 +131,15 @@ tests:
         eval_time: 10m
         exp_samples: [{labels: '{}', value: 1}]
       - expr: count(up{job="postgresql"} == 0)
+        eval_time: 10m
+        exp_samples: [{labels: '{}', value: 1}]
+      - expr: count(abs(time() - pg_clock_epoch_seconds) > 5)
+        eval_time: 10m
+        exp_samples: [{labels: '{}', value: 1}]
+      - expr: count(absent(pg_clock_epoch_seconds{instance="missing"}) == 1)
+        eval_time: 10m
+        exp_samples: [{labels: '{}', value: 1}]
+      - expr: count(up{job="postgresql-chrony"} == 0 or wcp_postgres_chrony_synchronized != 1 or wcp_postgres_chrony_reachable_sources < 1 or time() - wcp_postgres_chrony_last_sample_timestamp_seconds > 60)
         eval_time: 10m
         exp_samples: [{labels: '{}', value: 1}]
       - expr: count(up{job="haproxy"} == 0)

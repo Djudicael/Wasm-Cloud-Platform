@@ -80,7 +80,7 @@ printf '%s\n' \
 
 sudo cp -L /etc/resolv.conf "$rootfs_dir/etc/resolv.conf"
 sudo chroot "$rootfs_dir" /sbin/apk add --no-cache \
-  alpine-base chrony openrc iproute2 postgresql postgresql-client postgresql17-contrib \
+  alpine-base busybox-extras chrony openrc iproute2 postgresql postgresql-client postgresql17-contrib \
   su-exec ca-certificates
 postgres_bin=/usr/libexec/postgresql17
 for executable in initdb postgres pg_isready psql createdb; do
@@ -89,6 +89,10 @@ for executable in initdb postgres pg_isready psql createdb; do
     exit 1
   }
 done
+sudo chroot "$rootfs_dir" sh -c 'command -v httpd >/dev/null' || {
+  echo "busybox-extras did not install the required httpd applet." >&2
+  exit 1
+}
 sudo chown -R "$(id -u):$(id -g)" "$rootfs_dir"
 
 mkdir -p \
@@ -101,7 +105,7 @@ mkdir -p \
   "$rootfs_dir/dev" \
   "$rootfs_dir/tmp"
 sudo chroot "$rootfs_dir" chown -R postgres:postgres /var/lib/postgresql /run/postgresql
-echo "4" > "$rootfs_dir/etc/postgresql-image-schema-version"
+echo "5" > "$rootfs_dir/etc/postgresql-image-schema-version"
 
 cat > "$rootfs_dir/etc/init.d/postgresql-testbed" <<'EOF'
 #!/sbin/openrc-run
@@ -190,18 +194,86 @@ ip route replace default via 172.20.0.1 dev eth0
 # Database timestamps participate in backup recovery points, token/session
 # validity, retention, and audit ordering. Firecracker guest clocks can lag when
 # a laptop/WSL host resumes, so synchronize before PostgreSQL accepts traffic and
-# keep chronyd running. This fixed public source is only for the disposable local
-# image; production must use redundant operator-controlled time sources.
-chronyd -q -t 15 'server 162.159.200.1 iburst' || {
+# keep chronyd running. These public sources are only for the disposable local
+# image; production must use at least three independent, operator-controlled
+# sources reachable over the private management network.
+cat > /run/chrony-testbed.conf <<'CHRONY'
+server 162.159.200.1 iburst
+server 216.239.35.0 iburst
+driftfile /var/lib/chrony/drift
+makestep 0.1 -1
+rtcsync
+pidfile /run/chrony/chronyd.pid
+bindcmdaddress /run/chrony/chronyd.sock
+cmdport 0
+CHRONY
+mkdir -p /run/chrony /var/lib/chrony
+chown chrony:chrony /run/chrony
+chmod 0770 /run/chrony
+chown chrony:chrony /var/lib/chrony
+chronyd -q -t 15 -f /run/chrony-testbed.conf || {
   echo "initial clock synchronization failed; refusing to start PostgreSQL" >&2
   poweroff -f
   exit 1
 }
-chronyd 'server 162.159.200.1 iburst' || {
+chronyd -f /run/chrony-testbed.conf || {
   echo "failed to start continuous clock synchronization" >&2
   poweroff -f
   exit 1
 }
+echo "chrony: initial tracking state"
+chronyc -n tracking || true
+chronyc -n sources -v || true
+mkdir -p /var/www/chrony
+write_chrony_metrics() {
+  tracking=$(chronyc -n tracking 2>/dev/null || true)
+  sources=$(chronyc -n sources 2>/dev/null || true)
+  reachable_sources=$(printf '%s\n' "$sources" | awk '$1 ~ /^\^[*+]/ { count++ } END { print count + 0 }')
+  synchronized=0
+  if printf '%s\n' "$tracking" | grep -Eq 'Leap status[[:space:]]*:[[:space:]]*Normal' \
+    && [ "$reachable_sources" -gt 0 ]; then
+    synchronized=1
+  fi
+  sampled_at=$(date +%s)
+  temporary_metrics=/var/www/chrony/.metrics.$$
+  cat > "$temporary_metrics" <<METRICS
+# HELP wcp_postgres_chrony_synchronized Whether Chrony reports a synchronized PostgreSQL guest clock.
+# TYPE wcp_postgres_chrony_synchronized gauge
+wcp_postgres_chrony_synchronized $synchronized
+# HELP wcp_postgres_chrony_reachable_sources Number of currently selected or acceptable time sources.
+# TYPE wcp_postgres_chrony_reachable_sources gauge
+wcp_postgres_chrony_reachable_sources $reachable_sources
+# HELP wcp_postgres_chrony_last_sample_timestamp_seconds Unix time of the latest Chrony health sample.
+# TYPE wcp_postgres_chrony_last_sample_timestamp_seconds gauge
+wcp_postgres_chrony_last_sample_timestamp_seconds $sampled_at
+METRICS
+  mv "$temporary_metrics" /var/www/chrony/metrics
+}
+write_chrony_metrics
+httpd -f -p 9101 -h /var/www/chrony &
+chrony_http_pid=$!
+(
+  recovery_active=0
+  while sleep 30; do
+    echo "chrony: periodic tracking state"
+    chronyc -n tracking || echo "chrony: tracking query failed" >&2
+    chronyc -n sources -v || echo "chrony: source query failed" >&2
+    write_chrony_metrics
+    if [ "$synchronized" -ne 1 ]; then
+      if [ "$recovery_active" -eq 0 ]; then
+        echo "chrony: no usable synchronized source; resetting stale measurements once" >&2
+        chronyc -n reset sources || echo "chrony: source reset failed" >&2
+        recovery_active=1
+      fi
+      echo "chrony: forcing a recovery step and measurement burst" >&2
+      chronyc -n makestep 0.1 1 || echo "chrony: makestep recovery command failed" >&2
+      chronyc -n burst 4/8 || echo "chrony: recovery burst failed" >&2
+    else
+      recovery_active=0
+    fi
+  done
+) &
+chrony_observer_pid=$!
 
 if [ ! -s /var/lib/postgresql/data/PG_VERSION ]; then
   su-exec postgres /usr/libexec/postgresql17/initdb --encoding=UTF8 --locale=C -D /var/lib/postgresql/data
@@ -221,7 +293,7 @@ fi
 
 su-exec postgres /usr/libexec/postgresql17/postgres -D /var/lib/postgresql/data &
 postgres_pid=$!
-trap 'kill -TERM "$postgres_pid" 2>/dev/null || true' TERM INT
+trap 'kill -TERM "$postgres_pid" "$chrony_observer_pid" "$chrony_http_pid" 2>/dev/null || true' TERM INT
 for attempt in $(seq 1 120); do
   su-exec postgres /usr/libexec/postgresql17/pg_isready -q && break
   if ! kill -0 "$postgres_pid" 2>/dev/null; then
@@ -254,6 +326,12 @@ iface eth0 inet static
 EOF
 
 mkdir -p "$OUTPUT_DIR"
+# Package installation and host-side assembly temporarily leave files owned by
+# the invoking host user. Restore the guest trust boundary before sealing the
+# image, then grant only the two service accounts their writable state paths.
+sudo chown -R root:root "$rootfs_dir"
+sudo chroot "$rootfs_dir" chown -R postgres:postgres /var/lib/postgresql /run/postgresql
+sudo chroot "$rootfs_dir" chown -R chrony:chrony /var/lib/chrony
 if [[ -e "$image" ]]; then
   command -v fuser >/dev/null || {
     echo "fuser is required before replacing an existing PostgreSQL image." >&2

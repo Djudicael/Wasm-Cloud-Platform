@@ -25,7 +25,7 @@
 //!     let client = FirecrackerClient::new("/tmp/firecracker-node1.sock");
 //!
 //!     client.configure_machine(2, 512).await?;
-//!     client.set_boot_source("/opt/kernels/vmlinux-6.1", "console=ttyS0 reboot=k panic=1 pci=off").await?;
+//!     client.set_boot_source("/opt/kernels/vmlinux-6.18", "console=ttyS0 reboot=k panic=1 pci=off").await?;
 //!     client.attach_drive("rootfs", "/opt/images/rootfs.ext4", true, false).await?;
 //!     client.add_network_interface("eth0", "AA:FC:00:00:00:01", "tap-node1").await?;
 //!     client.start_instance().await?;

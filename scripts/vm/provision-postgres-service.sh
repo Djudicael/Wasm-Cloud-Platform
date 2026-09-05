@@ -27,18 +27,21 @@ repo_root=$(git rev-parse --show-toplevel 2>/dev/null) || { echo "Run inside the
 cd "$repo_root"
 [[ -f "$state_file" ]] || { echo "Missing topology state: $state_file" >&2; exit 1; }
 [[ -f "$rootfs" ]] || { echo "Missing PostgreSQL rootfs: $rootfs" >&2; exit 1; }
-[[ -f assets/vmlinux-6.1.schema && $(<assets/vmlinux-6.1.schema) == 7 ]] || {
-  echo "assets/vmlinux-6.1 is stale or incompatible (expected kernel schema 7)." >&2
+source scripts/vm/kernel-testbed.env
+kernel_asset="assets/vmlinux-$KERNEL_SERIES"
+[[ -f "$kernel_asset.schema" && $(<"$kernel_asset.schema") == "$KERNEL_SCHEMA" ]] || {
+  echo "$kernel_asset is stale or incompatible (expected kernel schema $KERNEL_SCHEMA)." >&2
   echo "Rebuild it with: scripts/vm/build-kernel.sh" >&2
   exit 1
 }
+bash scripts/vm/audit-kernel-security.sh --kernel "$kernel_asset" --config "$kernel_asset.config" >/dev/null
 command -v debugfs >/dev/null || {
   echo "debugfs is required to validate the PostgreSQL image." >&2
   exit 1
 }
 postgres_image_schema=$(debugfs -R 'cat /etc/postgresql-image-schema-version' "$rootfs" 2>/dev/null || true)
-[[ "$postgres_image_schema" == 4 ]] || {
-  echo "$rootfs is stale or incompatible (expected PostgreSQL image schema 4)." >&2
+[[ "$postgres_image_schema" == 5 ]] || {
+  echo "$rootfs is stale or incompatible (expected PostgreSQL image schema 5)." >&2
   echo "Rebuild it with: scripts/vm/build-postgres-rootfs.sh" >&2
   exit 1
 }

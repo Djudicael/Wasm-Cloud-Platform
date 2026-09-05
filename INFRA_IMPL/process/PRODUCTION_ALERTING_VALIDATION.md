@@ -37,7 +37,7 @@ podman run --rm --entrypoint /bin/promtool \
 ```
 
 The fixture supplies representative series that cross the firing threshold for
-all 32 tracked expressions. Any added, removed, or renamed rule must update the
+all 35 tracked expressions. Any added, removed, or renamed rule must update the
 fixture and the expected inventory in `scripts/vm/validate-alerting.sh`.
 
 ## Live microVM validation
@@ -55,8 +55,8 @@ The validator:
 1. resolves exact Prometheus and Alertmanager container identities from the
    companion lifecycle state;
 2. checks the live Prometheus and Alertmanager configurations;
-3. checks all four tracked rule files and runs the deterministic test fixture;
-4. requires the exact 32-rule inventory;
+3. checks all five tracked alert-rule files and runs the deterministic test fixture;
+4. requires the exact 35-rule inventory;
 5. executes every loaded expression against live Prometheus;
 6. requires every always-present source metric;
 7. sends three identical test alerts for each required operational category;
@@ -67,9 +67,16 @@ The local webhook recorder is deliberately state-scoped and writes a mode-0600
 JSONL file. It proves Alertmanager routing behavior only; it is not a production
 notification destination.
 
+The local `postgres_exporter` image exposes the database epoch through its
+deprecated extended-query compatibility path. This is acceptable for the
+disposable rehearsal only. Production must provide the equivalent SQL metric
+through a maintained exporter or managed-service integration and keep both the
+offset and missing-metric alerts.
+
 Some counter vectors have no live series until their first event. The current
 event-created set is:
 
+- `otelcol_exporter_send_failed_spans_total`;
 - `otelcol_exporter_enqueue_failed_spans_total`;
 - `wasm_ebpf_ring_buffer_dropped_events_total`;
 - `wasm_ebpf_ring_buffer_drop_counter_read_errors_total`.

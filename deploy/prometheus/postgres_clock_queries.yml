@@ -1,0 +1,8 @@
+pg_clock:
+  query: |
+    SELECT EXTRACT(EPOCH FROM clock_timestamp())::double precision AS epoch_seconds
+  master: true
+  metrics:
+    - epoch_seconds:
+        usage: GAUGE
+        description: PostgreSQL wall clock as Unix epoch seconds

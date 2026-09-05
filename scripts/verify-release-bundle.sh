@@ -55,7 +55,8 @@ subjects = {
     "wasm-node", "wasm-ctl", "wasm-deploy-ingress", "hello-axum.wasm",
     "ebpf/process_tracker", "ebpf/tcp_monitor", "ebpf/fd_watcher",
     "ebpf/mem_pressure", "ebpf/disk_monitor", "ebpf/syscall_counter",
-    "ebpf/namespace_enforcer", "sbom.spdx.json", "security-audit.json",
+    "ebpf/namespace_enforcer",
+    "sbom.spdx.json", "security-audit.json",
 }
 required = subjects | {"SHA256SUMS", "RELEASE-MANIFEST.json"}
 actual = set()

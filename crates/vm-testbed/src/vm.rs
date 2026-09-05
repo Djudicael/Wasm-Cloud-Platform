@@ -18,7 +18,7 @@
 //! async fn main() -> Result<(), Box<dyn std::error::Error>> {
 //!     let config = VmConfig {
 //!         id: "node-1".to_string(),
-//!         kernel_path: "/opt/kernels/vmlinux-6.1".into(),
+//!         kernel_path: "/opt/kernels/vmlinux-6.18".into(),
 //!         rootfs_path: "/opt/images/wasm-node.ext4".into(),
 //!         rootfs_read_only: false,
 //!         data_drive_path: Some("/opt/images/node-data.ext4".into()),

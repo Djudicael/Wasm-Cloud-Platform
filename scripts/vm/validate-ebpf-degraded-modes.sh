@@ -158,7 +158,8 @@ run_optional_fault probe-unavailable true partial_probe_set
 # preflight rather than the deterministic loader hook used by the other cases.
 no_btf_kernel=$(mktemp /tmp/wcp-vmlinux-no-btf.XXXXXX)
 trap 'rm -f -- "$no_btf_kernel"' EXIT
-objcopy --remove-section=.BTF --remove-section=.BTF_ids assets/vmlinux-6.1 "$no_btf_kernel"
+source scripts/vm/kernel-testbed.env
+objcopy --remove-section=.BTF --remove-section=.BTF_ids "assets/vmlinux-$KERNEL_SERIES" "$no_btf_kernel"
 if readelf -S "$no_btf_kernel" | grep -q '[.]BTF'; then
   echo "Disposable missing-BTF kernel still contains a BTF section." >&2
   exit 1

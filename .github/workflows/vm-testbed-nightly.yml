@@ -1,5 +1,8 @@
 name: VM Testbed Nightly
 
+# Test infrastructure only. Firecracker and its guest kernel model a VPS-like
+# environment; they are not Wasm Cloud Platform release artifacts.
+
 on:
   schedule:
     - cron: "0 3 * * *"

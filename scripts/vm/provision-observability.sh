@@ -133,14 +133,16 @@ chmod 700 "$runtime_dir/otel" "$runtime_dir/otel/storage" \
 
 printf '%s' "$metrics_token" > "$runtime_dir/metrics-token"
 cat > "$runtime_dir/postgres.env" <<'EOF'
-DATA_SOURCE_NAME=postgresql://oidc:oidc-local-test@172.20.0.20:5432/oidc?sslmode=disable&connect_timeout=2&options=-c%20statement_timeout%3D2000%20-c%20lock_timeout%3D1000%20-c%20idle_in_transaction_session_timeout%3D5000
+DATA_SOURCE_NAME=postgresql://oidc:oidc-local-test@172.20.0.20:5432/oidc?sslmode=disable&connect_timeout=2
 EOF
 chmod 600 "$runtime_dir/metrics-token" "$runtime_dir/postgres.env"
 cp deploy/prometheus/admin_auth_alerts.yml \
   deploy/prometheus/platform_resource_alerts.yml \
+  deploy/prometheus/postgres_clock_alerts.yml \
   deploy/prometheus/validation_alerts.yml \
   deploy/prometheus/wasi_policy_alerts.yml \
   "$runtime_dir/rules/"
+cp deploy/prometheus/postgres_clock_queries.yml "$runtime_dir/postgres-clock-queries.yml"
 
 cat > "$runtime_dir/alertmanager.yml" <<'EOF'
 route:
@@ -327,6 +329,11 @@ EOF
     static_configs:
       - targets: [127.0.0.1:9187]
         labels: {role: database}
+  - job_name: postgresql-chrony
+    fallback_scrape_protocol: PrometheusText0.0.4
+    static_configs:
+      - targets: [172.20.0.20:9101]
+        labels: {role: database-time}
   - job_name: host
     static_configs:
       - targets: [127.0.0.1:9100]
@@ -350,7 +357,8 @@ EOF
 EOF
 } > "$runtime_dir/prometheus.yml"
 chmod 600 "$runtime_dir/prometheus.yml" "$runtime_dir/alertmanager.yml" \
-  "$runtime_dir/otel-collector.yml" "$runtime_dir/tempo.yml"
+  "$runtime_dir/otel-collector.yml" "$runtime_dir/tempo.yml" \
+  "$runtime_dir/postgres-clock-queries.yml"
 
 containers=()
 cleanup_failed_start() {
@@ -386,7 +394,12 @@ run_container() {
 run_container node docker.io/natsio/prometheus-nats-exporter:0.17.3 \
   -- -varz -connz -healthz http://172.20.0.10:8222
 run_container postgres quay.io/prometheuscommunity/postgres-exporter:v0.17.1 \
-  --env-file "$runtime_dir/postgres.env" -- --web.listen-address=127.0.0.1:9187
+  --user 0 \
+  --env-file "$runtime_dir/postgres.env" \
+  -v "$runtime_dir/postgres-clock-queries.yml:/etc/postgres_exporter/clock-queries.yml:ro" \
+  -- --web.listen-address=127.0.0.1:9187 \
+  --no-collector.wal \
+  --extend.query-path=/etc/postgres_exporter/clock-queries.yml
 run_container host quay.io/prometheus/node-exporter:v1.9.1 \
   --pid host -v /:/host:ro,rslave -- --path.rootfs=/host --web.listen-address=127.0.0.1:9100
 run_container alert-receiver docker.io/library/python:3.13-alpine \
@@ -433,6 +446,7 @@ while ((SECONDS < deadline)); do
     && curl -fsS http://127.0.0.1:19093/health >/dev/null \
     && curl -fsS http://127.0.0.1:7777/metrics >/dev/null \
     && curl -fsS http://127.0.0.1:9187/metrics >/dev/null \
+    && curl -fsS http://172.20.0.20:9101/metrics >/dev/null \
     && curl -fsS http://127.0.0.1:9100/metrics >/dev/null \
     && curl -fsS http://127.0.0.1:3200/ready >/dev/null \
     && curl -fsS http://127.0.0.1:8888/metrics >/dev/null; then
@@ -445,9 +459,37 @@ curl -fsS http://127.0.0.1:9093/-/ready >/dev/null || { echo "Alertmanager did n
 curl -fsS http://127.0.0.1:19093/health >/dev/null || { echo "Alert receiver did not become ready." >&2; exit 1; }
 curl -fsS http://127.0.0.1:7777/metrics >/dev/null || { echo "NATS exporter did not become ready." >&2; exit 1; }
 curl -fsS http://127.0.0.1:9187/metrics >/dev/null || { echo "PostgreSQL exporter did not become ready." >&2; exit 1; }
+curl -fsS http://172.20.0.20:9101/metrics >/dev/null || { echo "PostgreSQL Chrony metrics did not become ready." >&2; exit 1; }
 curl -fsS http://127.0.0.1:9100/metrics >/dev/null || { echo "Host exporter did not become ready." >&2; exit 1; }
 curl -fsS http://127.0.0.1:3200/ready >/dev/null || { echo "Tempo did not become ready." >&2; exit 1; }
 curl -fsS http://127.0.0.1:8888/metrics >/dev/null || { echo "OpenTelemetry Collector metrics did not become ready." >&2; exit 1; }
+
+deadline=$((SECONDS + 60))
+while ((SECONDS < deadline)); do
+  database_clock=$(curl -fsS --get \
+    --data-urlencode 'query=pg_clock_epoch_seconds' \
+    http://127.0.0.1:9095/api/v1/query 2>/dev/null || true)
+  chrony_health=$(curl -fsS --get \
+    --data-urlencode 'query=wcp_postgres_chrony_synchronized == 1' \
+    http://127.0.0.1:9095/api/v1/query 2>/dev/null || true)
+  if jq -e '.status == "success" and (.data.result | length) == 1' \
+      >/dev/null 2>&1 <<<"$database_clock" \
+    && jq -e '.status == "success" and (.data.result | length) == 1' \
+      >/dev/null 2>&1 <<<"$chrony_health"; then
+    break
+  fi
+  sleep 1
+done
+jq -e '.status == "success" and (.data.result | length) == 1' \
+  >/dev/null 2>&1 <<<"${database_clock:-}" || {
+  echo "PostgreSQL clock metric did not become queryable in Prometheus." >&2
+  exit 1
+}
+jq -e '.status == "success" and (.data.result | length) == 1' \
+  >/dev/null 2>&1 <<<"${chrony_health:-}" || {
+  echo "PostgreSQL Chrony health did not become synchronized in Prometheus." >&2
+  exit 1
+}
 
 python3 - "$services_file" "$runtime_dir" "$state_key" "${containers[@]}" <<'PY'
 import json, os, subprocess, sys, tempfile

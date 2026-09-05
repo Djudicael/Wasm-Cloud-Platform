@@ -172,21 +172,24 @@ if $prepare_assets; then
   scripts/vm/build-all-images.sh
 fi
 
-for required in assets/vmlinux-6.1 assets/wasm-node-rootfs.ext4 assets/nats-rootfs.ext4; do
+source scripts/vm/kernel-testbed.env
+kernel_asset="assets/vmlinux-$KERNEL_SERIES"
+for required in "$kernel_asset" assets/wasm-node-rootfs.ext4 assets/nats-rootfs.ext4; do
   [[ -f "$required" ]] || {
     echo "Missing $required. Re-run with --prepare-assets." >&2
     exit 1
   }
 done
 kernel_image_schema=
-if [[ -f assets/vmlinux-6.1.schema ]]; then
-  kernel_image_schema=$(<assets/vmlinux-6.1.schema)
+if [[ -f "$kernel_asset.schema" ]]; then
+  kernel_image_schema=$(<"$kernel_asset.schema")
 fi
-if [[ "$kernel_image_schema" != 7 ]]; then
-  echo "assets/vmlinux-6.1 is stale or incompatible (expected kernel schema 7)." >&2
+if [[ "$kernel_image_schema" != "$KERNEL_SCHEMA" ]]; then
+  echo "$kernel_asset is stale or incompatible (expected kernel schema $KERNEL_SCHEMA)." >&2
   echo "Rebuild it with: scripts/vm/build-kernel.sh" >&2
   exit 1
 fi
+bash scripts/vm/audit-kernel-security.sh --kernel "$kernel_asset" --config "$kernel_asset.config" >/dev/null
 command -v debugfs >/dev/null || {
   echo "debugfs is required to validate VM images (Ubuntu/WSL: sudo apt-get install e2fsprogs)." >&2
   exit 1
@@ -198,8 +201,8 @@ if [[ "$nats_image_schema" != 2 ]]; then
   exit 1
 fi
 node_image_schema=$(debugfs -R 'cat /etc/wasm-node/image-schema-version' assets/wasm-node-rootfs.ext4 2>/dev/null || true)
-if [[ "$node_image_schema" != 12 ]]; then
-  echo "assets/wasm-node-rootfs.ext4 is stale or incompatible (expected image schema 12)." >&2
+if [[ "$node_image_schema" != 13 ]]; then
+  echo "assets/wasm-node-rootfs.ext4 is stale or incompatible (expected image schema 13)." >&2
   echo "Rebuild it with: scripts/vm/build-node-rootfs.sh" >&2
   exit 1
 fi

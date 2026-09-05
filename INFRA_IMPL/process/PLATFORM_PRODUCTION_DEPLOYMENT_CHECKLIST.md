@@ -99,8 +99,22 @@ than copying an illustrative unit from an implementation document.
 
 ## 3. Host and operating-system gates
 
-- [ ] CPU virtualization, kernel, KVM, cgroup, BTF, eBPF, filesystem, and clock
-      requirements are verified on the exact production image.
+The platform does not distribute a production kernel or require Firecracker.
+The operator owns the VPS/host image, kernel, firmware, microcode, patching, and
+virtualization policy. The repository's
+[`VM_TESTBED_KERNEL_VALIDATION.md`](VM_TESTBED_KERNEL_VALIDATION.md) applies only
+to the disposable Firecracker rehearsal environment.
+
+- [ ] The exact production host image satisfies the platform's architecture,
+      Linux, filesystem, networking, DNS, and clock requirements.
+- [ ] cgroup v2, BTF, tracefs/perf facilities, and required capabilities are
+      verified when the corresponding resource-control or eBPF features are
+      enabled. Disabled optional features have an explicit operating policy.
+- [ ] The VPS/host provider or operating-system owner supplies the required
+      kernel, firmware/microcode, vulnerability handling, and security updates.
+      This is host admission evidence, not a platform release artifact.
+- [ ] KVM/Firecracker checks are required only for deployments that deliberately
+      run the platform in Firecracker; native VPS deployments do not require KVM.
 - [ ] The node runs as a dedicated unprivileged service account.
 - [ ] Files and directories have explicit ownership and modes for configuration,
       TLS private keys, sealing keys, NATS credentials, redb, caches, artifacts, logs,
@@ -114,6 +128,15 @@ than copying an illustrative unit from an implementation document.
       in an unnecessarily privileged node process.
 - [ ] Time synchronization, entropy availability, DNS resolution, certificate trust,
       log rotation, disk trim/monitoring, and security patching are operational.
+- [ ] Every host, platform guest, and timestamp-sensitive application dependency
+      uses at least three independent operator-approved time sources (NTS or an
+      equivalently authenticated private service where available). Offset,
+      stratum/source loss, synchronization state, and missing telemetry alert
+      before the application clock exceeds its documented five-second maximum.
+- [ ] Host suspend/resume or a controlled clock fault is rehearsed. Services either
+      recover within the clock bound before accepting traffic or fail readiness;
+      backup markers, token/session validity, retention, and audit ordering remain
+      correct after recovery.
 - [ ] Core dumps and crash artifacts follow the security policy and cannot leak secrets.
 - [ ] OS and platform upgrades are rehearsed before production and respect the node disruption budget.
 

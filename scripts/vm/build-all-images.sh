@@ -8,7 +8,7 @@
 #   ./scripts/vm/build-all-images.sh
 #
 # Output:
-#   ./assets/vmlinux-6.1
+#   ./assets/vmlinux-6.18
 #   ./assets/wasm-node-rootfs.ext4
 #   ./assets/nats-rootfs.ext4
 #   ./assets/postgres-rootfs.ext4
@@ -18,6 +18,9 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+# shellcheck source=kernel-testbed.env
+source "$SCRIPT_DIR/kernel-testbed.env"
+KERNEL_ASSET="./assets/vmlinux-$KERNEL_SERIES"
 
 cd "$PROJECT_ROOT"
 
@@ -35,12 +38,14 @@ node_rootfs_is_current() {
 
     command -v debugfs >/dev/null || return 1
     schema=$(debugfs -R 'cat /etc/wasm-node/image-schema-version' "$image" 2>/dev/null || true)
-    [[ "$schema" == "12" ]]
+    [[ "$schema" == "13" ]]
 }
 
 kernel_is_current() {
     local kernel=$1
-    [[ -f "$kernel.schema" ]] && [[ $(<"$kernel.schema") == "7" ]]
+    [[ -f "$kernel.schema" ]] && [[ $(<"$kernel.schema") == "$KERNEL_SCHEMA" ]] &&
+        [[ -f "$kernel.security-audit.json" ]] &&
+        bash "$SCRIPT_DIR/audit-kernel-security.sh" --kernel "$kernel" --config "$kernel.config" >/dev/null
 }
 
 nats_rootfs_is_current() {
@@ -58,7 +63,7 @@ postgres_rootfs_is_current() {
 
     command -v debugfs >/dev/null || return 1
     schema=$(debugfs -R 'cat /etc/postgresql-image-schema-version' "$image" 2>/dev/null || true)
-    [[ "$schema" == "4" ]]
+    [[ "$schema" == "5" ]]
 }
 
 vault_rootfs_is_current() {
@@ -72,10 +77,10 @@ vault_rootfs_is_current() {
 
 # Build kernel
 echo "[1/5] Building kernel..."
-if [[ ! -f "./assets/vmlinux-6.1" ]]; then
+if [[ ! -f "$KERNEL_ASSET" ]]; then
     "$SCRIPT_DIR/build-kernel.sh"
-elif ! kernel_is_current "./assets/vmlinux-6.1"; then
-    echo "       Existing kernel lacks the current Firecracker boot schema; rebuilding."
+elif ! kernel_is_current "$KERNEL_ASSET"; then
+    echo "       Existing kernel fails the current schema/security audit; rebuilding."
     "$SCRIPT_DIR/build-kernel.sh"
 else
     echo "       Kernel already exists, skipping."

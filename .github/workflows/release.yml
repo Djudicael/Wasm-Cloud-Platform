@@ -78,11 +78,13 @@ jobs:
       - name: Install pinned eBPF build toolchain
         run: |
           sudo apt-get update
-          sudo apt-get install --yes zstd
+          sudo apt-get install --yes zstd build-essential
           bash scripts/ebpf/install-toolchain.sh
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Build frozen release artifact set
+        # Firecracker, guest kernels, rootfs images, and service VMs belong to
+        # the separate testbed workflow and are intentionally excluded here.
         run: |
           cargo build --locked --frozen --release --bin wasm-node --features ebpf
           cargo build --locked --frozen --release --bin wasm-ctl

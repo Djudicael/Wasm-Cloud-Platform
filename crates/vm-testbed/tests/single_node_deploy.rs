@@ -137,7 +137,7 @@ fn find_kernel() -> std::path::PathBuf {
             return path;
         }
     }
-    let candidates = ["./assets/vmlinux-6.1", "/opt/vm-testbed/vmlinux-6.1"];
+    let candidates = ["./assets/vmlinux-6.18", "/opt/vm-testbed/vmlinux-6.18"];
     for c in &candidates {
         let p = std::path::PathBuf::from(c);
         if p.exists() {

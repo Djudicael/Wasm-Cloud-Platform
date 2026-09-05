@@ -34,7 +34,7 @@ bash scripts/vm/build-all-images.sh
 
 The command creates or validates these artifacts:
 
-- `assets/vmlinux-6.1`
+- `assets/vmlinux-6.18`
 - `assets/nats-rootfs.ext4`
 - `assets/wasm-node-rootfs.ext4`
 - `assets/postgres-rootfs.ext4`
@@ -67,6 +67,22 @@ bash scripts/vm/provision-postgres-service.sh \
 The service is normally reachable at `172.20.0.20:5432`. Its VM lifecycle is
 recorded in the selected topology state. Application migrations and database
 health checks belong to the application rehearsal, not to platform startup.
+
+The disposable image refuses to start PostgreSQL until Chrony completes an
+initial synchronization, keeps Chrony running, and writes tracking/source
+snapshots to the recorded serial log every 30 seconds. Its two public NTP
+servers are only local-test defaults. Production database hosts require at
+least three independent, operator-controlled time sources on the management
+network, authenticated NTP/NTS where available, a documented maximum offset,
+and paging on both excessive offset and missing clock telemetry.
+
+Chrony's command socket is created in a `chrony:chrony` mode-`0770` directory;
+Alpine Chrony disables the socket when the directory is merely group-accessible
+but owned by root. After a suspend or source-loss episode, the observer resets
+stale measurements once, then issues measurement bursts without resetting the
+new samples on every loop. Repeating `reset sources` prevents source selection
+from converging. The local recovery drill is
+`scripts/vm/validate-postgres-clock.sh`.
 
 ## Attach and validate Vault Transit
 

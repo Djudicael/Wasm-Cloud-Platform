@@ -1507,7 +1507,7 @@ fn parse_env_var(s: &str) -> Result<(String, String), String> {
 }
 
 fn find_kernel() -> PathBuf {
-    let candidates = ["./assets/vmlinux-6.1", "/opt/vm-testbed/vmlinux-6.1"];
+    let candidates = ["./assets/vmlinux-6.18", "/opt/vm-testbed/vmlinux-6.18"];
     for c in &candidates {
         let p = PathBuf::from(c);
         if p.exists() {

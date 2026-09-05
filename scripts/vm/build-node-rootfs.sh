@@ -159,7 +159,7 @@ EOF
 # Keep a guest-readable schema marker so provisioning can reject legacy cached
 # images before starting Firecracker. Bump this value whenever the early-boot
 # contract (PID 1, kernel arguments, or network bootstrap) changes.
-echo "12" > "$ROOTFS_DIR/etc/wasm-node/image-schema-version"
+echo "13" > "$ROOTFS_DIR/etc/wasm-node/image-schema-version"
 
 # Set hostname
 echo "wasm-node-vm" > "$ROOTFS_DIR/etc/hostname"
@@ -244,6 +244,18 @@ case "$EBPF_TEST_FAULT" in
         EBPF_TEST_FAULT=
         ;;
 esac
+# Emit host-class-specific mitigation evidence before the node starts. Static
+# Kconfig auditing alone cannot account for the physical CPU, host kernel,
+# firmware, or microcode presented to this guest.
+echo "WCP_KERNEL_AUDIT_BEGIN"
+echo "WCP_KERNEL_RELEASE=$(uname -r)"
+for VULNERABILITY_FILE in /sys/devices/system/cpu/vulnerabilities/*; do
+    [ -f "$VULNERABILITY_FILE" ] || continue
+    VULNERABILITY_NAME=${VULNERABILITY_FILE##*/}
+    VULNERABILITY_STATUS=$(tr '\n' ' ' < "$VULNERABILITY_FILE")
+    echo "WCP_KERNEL_VULNERABILITY=${VULNERABILITY_NAME}|${VULNERABILITY_STATUS}"
+done
+echo "WCP_KERNEL_AUDIT_END"
 if [ "$EBPF_REQUIRED" -eq 1 ]; then
     sed -i 's/^required = .*/required = true/' /etc/wasm-node/config.toml
 fi

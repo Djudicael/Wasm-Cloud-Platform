@@ -9,6 +9,7 @@ restore_port=55432
 source_database=oidc
 source_user=oidc
 retention_days=7
+max_clock_skew_seconds=5
 auth_token=${WASM_CTL_AUTH_TOKEN:-local-test-write-token-change-me}
 
 while (($#)); do
@@ -18,8 +19,9 @@ while (($#)); do
     --report-dir) report_dir=${2:?missing report directory}; shift 2 ;;
     --restore-port) restore_port=${2:?missing restore port}; shift 2 ;;
     --retention-days) retention_days=${2:?missing retention days}; shift 2 ;;
+    --max-clock-skew-seconds) max_clock_skew_seconds=${2:?missing clock-skew threshold}; shift 2 ;;
     -h|--help)
-      echo "Usage: PGPASSWORD=... validate-oidc-disaster-recovery.sh [--state-file FILE] [--app-dir DIR] [--report-dir DIR] [--restore-port PORT] [--retention-days DAYS]"
+      echo "Usage: PGPASSWORD=... validate-oidc-disaster-recovery.sh [--state-file FILE] [--app-dir DIR] [--report-dir DIR] [--restore-port PORT] [--retention-days DAYS] [--max-clock-skew-seconds SECONDS]"
       exit 0
       ;;
     *) echo "Unknown argument: $1" >&2; exit 2 ;;
@@ -36,6 +38,10 @@ done
 }
 [[ "$retention_days" =~ ^[0-9]+$ ]] && ((retention_days > 0)) || {
   echo "Retention days must be positive." >&2
+  exit 2
+}
+[[ "$max_clock_skew_seconds" =~ ^[0-9]+([.][0-9]+)?$ ]] || {
+  echo "Maximum clock skew must be a non-negative number." >&2
   exit 2
 }
 [[ ! -e "$report_dir" ]] || { echo "Report path already exists: $report_dir" >&2; exit 1; }
@@ -346,6 +352,14 @@ import sys
 print(f"{abs(int(sys.argv[2]) / 1000 - float(sys.argv[1])):.3f}")
 PY
 )
+python3 - "$database_clock_skew_seconds" "$max_clock_skew_seconds" <<'PY'
+import sys
+observed, maximum = map(float, sys.argv[1:])
+if observed > maximum:
+    raise SystemExit(
+        f"source database clock skew {observed:.3f}s exceeds {maximum:.3f}s"
+    )
+PY
 
 python3 - "$state_file" "$routes_file" "$apps_file" "$report_dir/recovery-manifest.json" \
   "$created_at" "$expires_at" "$retention_days" "$plain_sha" "$encrypted_sha" \
@@ -421,7 +435,7 @@ def elapsed(start, end): return round((int(end) - int(start)) / 1000, 3)
 with open(snapshot_path, encoding="utf-8") as stream:
     table_count = sum(1 for line in stream if line.strip())
 result = {
-    "status": "pass-with-database-clock-and-local-encryption-retention-limitations",
+    "status": "pass-with-local-encryption-retention-limitations",
     "observed_rpo_seconds": float(rpo),
     "source_database_clock_skew_seconds": float(database_clock_skew),
     "backup_duration_seconds": elapsed(backup_start, backup_end),
@@ -435,7 +449,7 @@ result = {
     "playwright": "6 focused login/dashboard checks passed",
     "limitations": [
         "Observed RPO measures an on-demand local snapshot boundary, not a scheduled production backup interval.",
-        "The running PostgreSQL schema-3 image had no continuous time synchronization; its database clock skew is recorded separately and is not used to calculate RPO.",
+        "The database clock gate proves the local Chrony-backed fixture stayed within the configured threshold; it does not qualify production time-source availability or NTS authentication.",
         "The disposable encryption passphrase was destroyed after verification; production KMS/HSM custody, key rotation, off-host replication, object lock, and retention enforcement were not validated."]}
 with open(output, "w", encoding="utf-8") as stream:
     json.dump(result, stream, indent=2, sort_keys=True)

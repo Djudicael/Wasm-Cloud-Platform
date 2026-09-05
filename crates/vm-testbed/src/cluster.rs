@@ -409,9 +409,9 @@ fn find_kernel() -> PathBuf {
     }
 
     let candidates = [
-        "./assets/vmlinux-6.1",
+        "./assets/vmlinux-6.18",
         "./assets/vmlinux",
-        "/opt/vm-testbed/vmlinux-6.1",
+        "/opt/vm-testbed/vmlinux-6.18",
         "/opt/vm-testbed/vmlinux",
         "/var/lib/vm-testbed/vmlinux",
     ];

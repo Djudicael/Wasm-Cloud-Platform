@@ -645,14 +645,15 @@ STARTING → HEALTHY → DEGRADED → UNHEALTHY
 
 ### Prometheus and Alertmanager rules
 
-The deployed rule definitions are the four YAML files under
+The deployed rule definitions are the five alert-rule YAML files under
 `deploy/prometheus/`. Do not copy alert names or metric names from an
 illustrative dashboard: the tracked files are the contract.
 
-The current set contains 32 rules covering admin authentication, platform
+The current set contains 35 rules covering admin authentication, platform
 resources and availability, HAProxy HTTP errors, telemetry, eBPF degraded/loss
-modes, and WASI policy enforcement. All expressions have representative
-threshold inputs in `deploy/prometheus/tests/alert_rules.test.yml`.
+modes, PostgreSQL clock offset/metric loss, and WASI policy enforcement. All
+expressions have representative threshold inputs in
+`deploy/prometheus/tests/alert_rules.test.yml`.
 
 ```bash
 podman run --rm --entrypoint /bin/promtool \
@@ -664,11 +665,18 @@ bash scripts/vm/validate-alerting.sh \
   --state-file .prod-validation-single-host-state.json
 ```
 
-The live validator checks both configurations, inventories all 32 rules,
+The live validator checks both configurations, inventories all 35 rules,
 executes every expression against Prometheus, verifies always-present source
 metrics, and proves Alertmanager firing, resolution, and deduplication through
 the state-scoped test receiver. See the
 [production alerting validation runbook](../INFRA_IMPL/process/PRODUCTION_ALERTING_VALIDATION.md).
+
+The local PostgreSQL exporter obtains `pg_clock_epoch_seconds` through its
+deprecated extended-query compatibility option because that is what the pinned
+disposable fixture supports. Do not copy that mechanism into a new production
+monitoring design. Export the equivalent `clock_timestamp()` value through a
+maintained SQL exporter, a managed-database integration, or an independently
+supervised custom collector, and retain the same skew and missing-metric alerts.
 
 ### Notification channels
 

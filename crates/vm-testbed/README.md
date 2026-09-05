@@ -81,7 +81,7 @@ Your existing `crates/e2e` tests run `wasm-node` as a **native process** on the 
 ```
 
 This creates:
-- `./assets/vmlinux-6.1` — Linux kernel with eBPF/BTF support
+- `./assets/vmlinux-6.18` — pinned, audited Linux LTS kernel with eBPF/BTF support
 - `./assets/wasm-node-rootfs.ext4` — Alpine Linux with wasm-node binary
 - `./assets/nats-rootfs.ext4` — Alpine Linux with NATS Server
 - `./assets/postgres-rootfs.ext4` — optional application database fixture
@@ -308,7 +308,7 @@ This testbed is designed to **complement**, not replace, your existing E2E tests
 | Variable | Purpose | Default |
 |----------|---------|---------|
 | `FIRECRACKER_PATH` | Path to firecracker binary | Auto-detect |
-| `VM_KERNEL_PATH` | Path to vmlinux kernel | `./assets/vmlinux-6.1` |
+| `VM_KERNEL_PATH` | Path to vmlinux kernel | `./assets/vmlinux-6.18` |
 | `VM_NATS_ROOTFS` | Path to NATS rootfs image | `./assets/nats-rootfs.ext4` |
 | `VM_NODE_ROOTFS` | Path to wasm-node rootfs | `./assets/wasm-node-rootfs.ext4` |
 | `VM_NODE_DATA_DRIVE` | Optional data drive template | None |

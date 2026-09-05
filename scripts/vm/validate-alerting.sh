@@ -91,7 +91,7 @@ podman exec "$alertmanager_id" amtool check-config /etc/alertmanager/alertmanage
 podman run --rm --entrypoint /bin/promtool \
   -v "$repo_root/deploy/prometheus:/rules:ro" -w /rules "$prometheus_image" \
   check rules admin_auth_alerts.yml platform_resource_alerts.yml \
-  validation_alerts.yml wasi_policy_alerts.yml
+  postgres_clock_alerts.yml validation_alerts.yml wasi_policy_alerts.yml
 podman run --rm --entrypoint /bin/promtool \
   -v "$repo_root/deploy/prometheus:/rules:ro" -w /rules "$prometheus_image" \
   test rules tests/alert_rules.test.yml
@@ -123,6 +123,8 @@ expected_alerts = {
     "PlatformNodeMemoryPressure", "PlatformNodeFileDescriptorsHigh",
     "PlatformNodeDown", "ApplicationNotReady", "NatsExporterDown",
     "PostgreSQLExporterDown", "HAProxyExporterDown", "TelemetryCollectorDown",
+    "PostgreSQLClockSkewHigh", "PostgreSQLClockMetricMissing",
+    "PostgreSQLTimeSourceUnavailable",
     "TraceBackendDown", "PlatformHttpErrorRateHigh", "TelemetryExportFailures",
     "TelemetryQueueNearCapacity", "EbpfMonitoringUnavailable",
     "EbpfMonitoringIncomplete", "EbpfRingBufferEventsDropped",
@@ -168,7 +170,10 @@ required_live_metrics = {
     "wasm_node_disk_free_mb", "wasm_node_disk_free_inodes",
     "wasm_node_memory_usage_percent", "process_open_fds", "process_max_fds",
     "wasm_node_app_healthy_instances", "haproxy_backend_http_responses_total",
-    "otelcol_exporter_send_failed_spans_total", "otelcol_exporter_queue_size",
+    "pg_clock_epoch_seconds",
+    "wcp_postgres_chrony_synchronized", "wcp_postgres_chrony_reachable_sources",
+    "wcp_postgres_chrony_last_sample_timestamp_seconds",
+    "otelcol_exporter_queue_size",
     "otelcol_exporter_queue_capacity", "wasm_ebpf_monitoring_degraded",
     "wasm_ebpf_active", "wasm_ebpf_dispatch_queue_saturations_total",
     "wasm_policy_connection_denied_total", "wasm_policy_fd_denied_total",
@@ -186,6 +191,7 @@ if missing_metrics:
 # matching fault. Their names and behavior are covered by promtool fixtures and
 # the Phase 6 live fault tests; absence during a healthy final scrape is valid.
 event_created_metrics = [
+    "otelcol_exporter_send_failed_spans_total",
     "otelcol_exporter_enqueue_failed_spans_total",
     "wasm_ebpf_ring_buffer_dropped_events_total",
     "wasm_ebpf_ring_buffer_drop_counter_read_errors_total",
