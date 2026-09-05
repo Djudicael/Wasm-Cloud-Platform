@@ -221,7 +221,7 @@ redacted artifact with the result.
 | 2026-08-29 OIDC capacity and short soak (Phase 8, Part 1) | PASS FOR THE CONFIGURED LOCAL ENVELOPE | A paced 50/25/20/5 frontend/discovery/readiness/login mix established HAProxy's configured 100-requests-per-10-seconds per-client stick-table as the first saturation boundary. At 5 requests/s, 600/600 requests passed a 120-second short soak; route p99 values were 5.2/54.7/57.1/166.4 ms. At 15 requests/s the ramp admitted 74/300 and returned 226 deliberate HTTP 429 responses; 30 and 60 requests/s were completely admission-limited before host resources saturated. With node 0 drained and absent, the representative 5 requests/s mix passed 151/151, while an earlier 15 requests/s readiness run admitted 98/450 and rejected 352. The conservative envelope for this exact front-door policy is therefore 5 requests/s per client IP, including N−1 headroom; this is not the host's raw compute maximum. Node memory peaked at 27%, process RSS at 578 MiB, CPU at 0.09 core, PostgreSQL at two sessions, HAProxy queue at zero, and NATS/eBPF error-pressure signals at zero. All three nodes were restored, OIDC database readiness passed, Prometheus returned to 10/10, and no alert remained. |
 | 2026-08-29 OIDC upgrade and rollback (Phase 8, Part 2) | PASS WITH RELEASE-ARTIFACT LIMITATION | The last-known-good backend `vdc1902621308` and candidate identity `vdc1902621308-phase8-candidate` ran concurrently against a transactional additive schema probe. Candidate readiness passed on all nodes, the public route cut over and rolled back while 450/450 paced requests stayed HTTP 200 (p99 68.5 ms), and migration tracking returned from 11/11 to 11/11 after exact probe cleanup. An admitted synthetic candidate with a malformed database URL returned HTTP 500, stopped at canary, and was undeployed without deleting the current application or database state. The final route inventory contains only the original frontend/backend, no Phase 8 metric series remains, Playwright passes 6/6, Prometheus is 10/10 with no alert, and eBPF is active on three nodes. Both release identities intentionally used the same tested Wasm SHA-256 because no clean newer artifact existed; repeat this gate with the real distinct release digest before production promotion. A host-suspend clock-skew failure was also fixed by image-schema-6 boot-time and continuous Chrony synchronization. |
 | 2026-08-29 OIDC disaster recovery (Phase 9) | PASS WITH DATABASE-TIME, KMS, AND RETENTION LIMITATIONS | A state-scoped recovery runner created a PostgreSQL 17 custom-format snapshot, verified an OpenPGP AES-256 encrypt/decrypt checksum round trip, restored into a separate container, and compared all 26 snapshot tables by row count and content hash with 11/11 migrations. A unique recovery backend used the restored database on every platform node; the public route was temporarily cut over and the focused login/dashboard Playwright suite passed 6/6 before automatic rollback and cleanup. The final run measured a 2 ms on-demand snapshot boundary, 1.221 s dump, 6.338 s database restore, 43.470 s application readiness, and 52.053 s through the browser journey. The redacted manifest records only active route-referenced applications, topology, artifact digests, routes, and secret requirements. The live schema-3 PostgreSQL VM was 12,399 seconds behind after host suspend; schema 4 now requires boot-time and continuous Chrony, builds cleanly as `9249f950...`, and the builder refuses to overwrite a disk referenced by a live recorded service. The live VM was not destructively replaced, so the new image must be used for the next environment. Production KMS/HSM custody, off-host replication, immutable retention, and scheduled-backup RPO remain multi-system operator gates. |
-| 2026-08-29 Phase 10 final decision | NO-GO FOR PRODUCTION PROMOTION / LOCAL CORE PASS | The durable decision and redacted evidence package are under `evidence/2026-08-29-single-host/`. Current RustSec audit passes, all three direct-node and public OIDC readiness probes return HTTP 200 with `database=ok`, Prometheus is 10/10 with zero alerts, and three eBPF nodes are active/non-degraded. At that checkpoint, production remained blocked by clean signed platform provenance/SBOM, secret lifecycle and defaults, alerting and telemetry controls, OIDC security gates, resource-policy alignment, and multi-host/provider validation. The later P10-06 correction explicitly removed the Firecracker test kernel as a platform blocker; host OS/kernel admission is operator-owned. |
+| 2026-08-29 Phase 10 final decision, reconciled 2026-09-05 | PLATFORM SOURCE PASS / LOCAL PLAN PASS / PRODUCTION PROMOTION PENDING | The durable decision and redacted evidence package are under `evidence/2026-08-29-single-host/`. Subsequent P10 work closed the supported platform-source contract and retained a no-go only for release-specific and operator-owned evidence. The OIDC Hub, PostgreSQL, Vault, HAProxy, Prometheus stack, and Firecracker environment are fixtures or external integrations rather than shipped platform components. P10-06 is testbed-only. See `evidence/2026-08-29-single-host/PHASE_10_RECONCILIATION.md` for the ownership matrix and minimum promotion path. |
 | 2026-08-30 P10-01 supply-chain remediation | SOURCE PASS / RELEASE-SPECIFIC EVIDENCE PENDING | Release automation now binds an exact clean GitHub source SHA to frozen native, WASI, and all seven eBPF artifacts; rejects non-semver promotion refs; labels manual runs non-promotable; generates a deterministic bundle and SPDX 2.3 SBOM; creates and verifies SLSA provenance plus SPDX attestations through GitHub OIDC/Sigstore; and uploads the archive, manifest, SBOM, checksums, and attestation bundles only after verification. Operator admission independently enforces the artifact allowlist, hashes/sizes, safe archive shape, source SHA/ref, signer workflow, and both predicates. WSL shell syntax, frozen release builds for `wasm-node --features ebpf`, `wasm-ctl`, `wasm-deploy-ingress`, and `hello-axum` for `wasm32-wasip2`, clean frozen builds of all seven eBPF ELFs, and the positive/reproducibility/tamper-rejection tests pass. The existing `proc-macro-error2 2.0.1` future-incompatibility notice remains separately tracked. A clean approved tag workflow and independent verification of its downloaded bytes are still required before this blocker can be marked release-evidence complete. See [release artifact promotion](../RELEASE_ARTIFACT_PROMOTION.md). |
 | 2026-08-30 P10-02 secret-lifecycle remediation | SOURCE PASS + REAL VAULT MICROVM PASS / PRODUCTION-MANAGER EVIDENCE PENDING | Added production admission, pinned non-exportable Vault Transit/AWS KMS roots, private Vault CA support, real base64 HMAC decoding, controlled rewrap, production-only external admin-token lifecycle, encrypted application-secret rotation, durable targeted revocation, warm-instance invalidation, redaction, and sentinel scanning. Source gates passed as previously recorded. A sealed Vault 1.21.4 Firecracker service with TLS, private CA, CIDR-bound least-privilege AppRoles, response-wrapped SecretIDs, a non-exportable 256-bit HMAC key, and socket audit was exercised by the actual node binary. The final run rotated version 3 to 4, rewrapped the KEK and transport key, restarted without the previous version, failed closed while Vault was sealed, recovered after unseal, denied unauthenticated HMAC and node-role rotation, preserved request IDs/audit records, and passed checksums and sentinel scanning. Evidence is under `evidence/2026-08-30-single-host/P10-02-vault-microvm/`. Real testing exposed and fixed private-CA trust, Vault base64 response decoding, invalid `derived=true`, missing HMAC key size, Alpine init-symlink, non-TTY unseal, WSL permission, and retained-stream readiness assumptions. The platform and Vault remain live. Production identity renewal, HA Vault/KMS/HSM, real PKI, durable audit retention, all-node application-secret acknowledgements, and admin old-token rejection remain candidate/operator gates. See [Vault Transit microVM validation](../VAULT_TRANSIT_MICROVM_VALIDATION.md). |
 | 2026-09-01 P10-06 VM-testbed kernel validation | TESTBED PASS / HOST OBSERVATION, NOT A PLATFORM BLOCKER | The former tinyconfig Linux 6.1.80 fixture was replaced by checksum-pinned Linux 6.18.48, Firecracker 1.16.1, and an immutable Firecracker guest configuration so the microVM testbed can exercise the platform consistently. A one-node canary returned HTTP 200, connected to NATS, attached all seven platform eBPF programs, and reported active/non-degraded eBPF. WSL exposed `spec_rstack_overflow=Vulnerable: Safe RET, no microcode`; that describes the selected test host/virtualization layer, not the platform source and not an arbitrary production VPS. The platform release no longer contains this kernel or a kernel audit. Production operators validate their chosen host OS/kernel and optional eBPF prerequisites separately. See [testbed evidence](evidence/2026-09-01-single-host/P10-06-kernel/README.md) and [testbed policy](../VM_TESTBED_KERNEL_VALIDATION.md). |
@@ -2188,23 +2188,31 @@ operator procedure is `../PLATFORM_WORKLOAD_ISOLATION_VALIDATION.md`.
 
 ## Phase 10: result and teardown
 
-Final decision: **NO-GO FOR PRODUCTION PROMOTION.** The local core-platform
-rehearsal passes within its boundary, but unresolved P1 production gates remain.
+Final decision: **THE SUPPORTED PLATFORM SOURCE CONTRACT PASSES AND MAY PROCEED
+TO A SIGNED RELEASE CANDIDATE.** The
+single-host rehearsal is complete within its documented boundary. The remaining
+deployment gates do not represent unfinished source remediation: they bind the
+result to an exact signed candidate and to the controls required by the selected
+deployment profile.
 See [the final decision](evidence/2026-08-29-single-host/FINAL_DECISION.md) and
+[Phase 10 readiness reconciliation](evidence/2026-08-29-single-host/PHASE_10_RECONCILIATION.md), plus the
 [redacted evidence manifest](evidence/2026-08-29-single-host/EVIDENCE_MANIFEST.json).
 
 The single-host plan passes only when:
 
-- [ ] All required build, application, routing, observability, failure, upgrade,
+- [x] All required local build, application, routing, observability, failure, upgrade,
       rollback, and restore checks pass.
 - [x] All limitations are explicitly recorded as `NOT VALIDATED` or approved
       exceptions.
-- [ ] No unresolved P0/P1 defect applies to the tested production design.
+- [x] No unresolved P0/P1 source defect applies to the tested supported
+      single-trust-domain production design.
 - [x] The complete redacted decision package is reviewable by someone other than the test
       operator.
 
-The first and third gates remain unchecked by design. A local functional pass
-does not override the P1 blockers enumerated in the decision record.
+All single-host completion gates are checked. This completes the local plan but
+does not turn it into a production approval: signed-candidate evidence, actual
+host-class qualification, and operator-owned production integrations can exist
+only after the target release and environment are selected.
 
 If interactive testing is complete and the user explicitly authorizes teardown:
 
@@ -2226,7 +2234,16 @@ state-scoped observability/Vault/OIDC credential directories, lifecycle files,
 and ports 8088, 8405, 9095, 9093, 19093, 3200, and 4317 were absent. Validation
 evidence was preserved.
 
-## Handoff to multi-host validation
+That teardown record applies only to the historical 2026-08-29 environment. The
+later `.prod-validation-p10-08-state.json` continuation fixture remains live and
+must not be destroyed until the user explicitly authorizes teardown of that exact
+recorded state.
+
+## Optional handoff to multi-host infrastructure validation
+
+This handoff is required only when a deployment claims physical-host failure
+tolerance or cross-host availability. It does not block publishing the platform,
+and Firecracker is only one possible test harness.
 
 Do not repeat every functional test manually on two hosts. Promote the same release
 artifacts, configuration schema, application artifacts, synthetic journeys, load

@@ -4,15 +4,22 @@ Run ID: `single-host-2026-08-23--2026-08-29`
 
 Decision time: `2026-08-29T21:42:52Z`
 
-Decision: **NO-GO FOR PRODUCTION PROMOTION**
+Platform release decision: **GO TO SIGNED RELEASE CANDIDATE**
 
-Local rehearsal result: **CORE PLATFORM FUNCTIONAL PASS WITH OPEN PRODUCTION GATES**
+Deployment decision: **CONDITIONAL ON THE SELECTED DEPLOYMENT PROFILE**
+
+Platform source decision (reconciled 2026-09-05): **PASS TO CUT A SIGNED
+PRODUCTION CANDIDATE FOR THE SUPPORTED SINGLE-TRUST-DOMAIN MODEL**
+
+Local rehearsal result: **PASS WITH DOCUMENTED SINGLE-HOST LIMITS**
 
 The three-node Firecracker platform, PostgreSQL-backed OIDC application,
 HAProxy routing, failure recovery, eBPF monitoring, capacity envelope,
 upgrade/rollback, and application-level database restore all worked within the
 documented single-host boundary. That is strong engineering evidence, but it is
-not permission to promote this checkout or topology to production.
+not permission to promote this checkout or topology to production. The
+[Phase 10 reconciliation](PHASE_10_RECONCILIATION.md) separates closed platform
+source work from release-specific and operator-owned production evidence.
 
 ## What the rehearsal proved
 
@@ -39,7 +46,15 @@ not permission to promote this checkout or topology to production.
   HTTP 200 with `database=ok`; Prometheus reported 10/10 targets, zero alerts,
   and three active non-degraded eBPF nodes.
 
-## Production blockers
+## Promotion gates and ownership
+
+The historical `P1` labels below identify gates that prevent opening production
+traffic without evidence. They do not mean every row is an unresolved platform
+source defect. P10 source remediation is complete for the supported production
+model. The remaining work is either proof for the exact signed candidate or an
+operator/provider integration gate. P10-06 is testbed-only. PostgreSQL, Vault,
+HAProxy, Prometheus/telemetry backends, and the OIDC Hub remain fixtures or
+external services, not platform release components.
 
 | ID | Severity | Gate | Required closure evidence |
 |---|---|---|---|
@@ -71,16 +86,21 @@ captured before the next rehearsal.
 
 ## Required next sequence
 
-1. Close P10-01 through P10-08 in code and release automation.
-2. Provision a fresh single-host environment from the production candidate,
-   including PostgreSQL image schema 5, and rerun only the affected gates.
-3. Obtain an independent review of the new evidence and approve any explicit,
+1. Cut the approved semantic-version tag and preserve the workflow-produced
+   candidate digest, provenance, signatures, and SBOM.
+2. Independently verify the downloaded candidate, then deploy that exact digest
+   to production-equivalent staging using the selected operator infrastructure.
+3. Rerun the applicable platform gates on every chosen node class. PostgreSQL
+   and OIDC checks apply only when the deployed workload requires them.
+4. Obtain an independent review of the new evidence and approve any explicit,
    time-bounded exceptions.
-4. Execute `02_TWO_PHYSICAL_HOST_PRODUCTION_VALIDATION.md` with the same signed
-   artifacts, application journeys, dashboards, alerts, and load profiles.
-5. Validate provider-specific PKI, secret manager, load balancer, storage,
+5. Execute `02_TWO_PHYSICAL_HOST_PRODUCTION_VALIDATION.md` only if the selected
+   deployment claims host-failure tolerance or cross-host availability. It is
+   not a platform release prerequisite.
+6. Validate the provider controls applicable to the selected deployment profile,
+   such as PKI, secret manager, load balancer, storage,
    backup/KMS, and availability behavior in staging.
-6. Issue a new production decision. This record cannot be converted into a
+7. Issue a new production decision. This record cannot be converted into a
    production approval by editing the verdict without new evidence.
 
 ## Teardown status
@@ -91,3 +111,8 @@ confirmed the recorded platform, NATS, PostgreSQL, Vault, HAProxy, observability
 network, state, and runtime-secret resources were absent and the local service
 ports were closed. The retained evidence remains available for the later
 production-decision review.
+
+This teardown record applies to the historical 2026-08-29 state. The later
+`.prod-validation-p10-08-state.json` continuation environment is separate and
+was intentionally left running pending explicit user authorization to destroy
+that exact recorded state.

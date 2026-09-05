@@ -25,6 +25,12 @@ Platform release gates prove client interoperability, fail-safe behavior, and
 recovery. Availability, backup, PKI, and lifecycle qualification of the chosen
 external products belong to the deployment operator's infrastructure gate.
 
+The completed single-host campaign is reconciled in
+[Phase 10 readiness reconciliation](prod_validation/evidence/2026-08-29-single-host/PHASE_10_RECONCILIATION.md).
+Its platform-source result is a pass for producing a signed candidate. This
+operator checklist decides whether a particular environment may receive traffic;
+it does not decide whether the platform release itself is legitimate.
+
 ## Release decision rules
 
 Classify every required gate as `PASS`, `FAIL`, or `EXCEPTION`. Each exception needs
