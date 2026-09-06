@@ -74,7 +74,8 @@ The Wasm Cloud Platform is a multi-tenant, Wasm-native application platform. Ins
 
 ### Required
 
-- **Rust** 1.80+ with `wasm32-wasip2` target
+- **Rust** 1.98.1 from the committed `rust-toolchain.toml`, including the
+  `wasm32-wasip2` target
 - **NATS Server** 2.10+ (with JetStream enabled)
 - **PostgreSQL** 14+ (for apps that need databases)
 - **Linux** with kernel 5.8+ (for eBPF monitoring; optional)
@@ -92,11 +93,18 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 source $HOME/.cargo/env
 
 # Add the WASI Preview 2 target
-rustup target add wasm32-wasip2
+rustup show
 
 # Verify
 rustc --version
 cargo --version
+```
+
+Run Rust builds and tests in Linux or WSL2. For a checkout under `/mnt/d`, keep
+build output on the Linux filesystem:
+
+```bash
+export CARGO_TARGET_DIR=/tmp/wasm-cloud-platform-target
 ```
 
 ### Install NATS Server
@@ -131,7 +139,7 @@ brew services start postgresql
 ### 1. Clone the repository
 
 ```bash
-git clone https://github.com/your-org/wasm-cloud-platform.git
+git clone https://github.com/Djudicael/Wasm-Cloud-Platform.git
 cd wasm-cloud-platform
 ```
 
@@ -142,16 +150,16 @@ cd wasm-cloud-platform
 cargo build --release
 
 # The release binaries will be at:
-# target/release/wasm-node   ← The platform node
-# target/release/wasm-ctl    ← The operator CLI
+# $CARGO_TARGET_DIR/release/wasm-node   ← The platform node
+# $CARGO_TARGET_DIR/release/wasm-ctl    ← The operator CLI
 ```
 
 ### 3. Install binaries to PATH
 
 ```bash
 # Option 1: Copy to a local bin directory
-cp target/release/wasm-node ~/.local/bin/
-cp target/release/wasm-ctl ~/.local/bin/
+cp "$CARGO_TARGET_DIR/release/wasm-node" ~/.local/bin/
+cp "$CARGO_TARGET_DIR/release/wasm-ctl" ~/.local/bin/
 
 # Option 2: Use cargo install
 cargo install --path crates/node

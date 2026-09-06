@@ -23,6 +23,7 @@ pub const CONTROL_STREAM_SUBJECTS: &[&str] = &[
     "instance.ready.>",
     "instance.dead.>",
     "secrets.update.>",
+    "secrets.delete.>",
     "config.update.>",
     "gateway.config.>",
 ];
@@ -106,7 +107,7 @@ impl NatsBus {
         let client = async_nats::connect(url)
             .await
             .map_err(|e| PlatformError::messaging(format!("NATS connect: {e}")))?;
-        tracing::info!(url, "connected to NATS");
+        tracing::info!("connected to NATS");
         Ok(NatsBus {
             client,
             node_id: "unknown".to_string(),
@@ -115,14 +116,47 @@ impl NatsBus {
 
     /// Connect to the NATS server securely using a credentials file.
     pub async fn connect_secure(url: &str, creds_path: &str) -> Result<Self, PlatformError> {
-        let options = async_nats::ConnectOptions::with_credentials_file(creds_path)
-            .await
-            .map_err(|e| PlatformError::messaging(format!("failed to load creds: {e}")))?;
+        Self::connect_with_tls(url, Some(creds_path), None, None, None).await
+    }
+
+    /// Connect with NATS credentials and optional private-CA or mutual-TLS material.
+    pub async fn connect_with_tls(
+        url: &str,
+        creds_path: Option<&str>,
+        ca_cert: Option<&str>,
+        client_cert: Option<&str>,
+        client_key: Option<&str>,
+    ) -> Result<Self, PlatformError> {
+        let mut options = match creds_path {
+            Some(path) => async_nats::ConnectOptions::with_credentials_file(path)
+                .await
+                .map_err(|e| PlatformError::messaging(format!("failed to load creds: {e}")))?,
+            None => async_nats::ConnectOptions::new(),
+        };
+        if let Some(path) = ca_cert {
+            options = options.add_root_certificates(std::path::PathBuf::from(path));
+        }
+        match (client_cert, client_key) {
+            (Some(cert), Some(key)) => {
+                options = options.add_client_certificate(cert.into(), key.into());
+            }
+            (None, None) => {}
+            _ => {
+                return Err(PlatformError::messaging(
+                    "NATS client certificate and key must be configured together",
+                ));
+            }
+        }
         let client = options
             .connect(url)
             .await
-            .map_err(|e| PlatformError::messaging(format!("NATS secure connect: {e}")))?;
-        tracing::info!(url, "connected to NATS securely");
+            .map_err(|e| PlatformError::messaging(format!("NATS TLS connect: {e}")))?;
+        tracing::info!(
+            private_ca = ca_cert.is_some(),
+            mutual_tls = client_cert.is_some(),
+            credentials = creds_path.is_some(),
+            "connected to NATS with explicit security options"
+        );
         Ok(NatsBus {
             client,
             node_id: "unknown".to_string(),
@@ -149,6 +183,14 @@ impl NatsBus {
             .publish(subject.clone(), payload.into())
             .await
             .map_err(|e| PlatformError::messaging(format!("publish to {subject}: {e}")))?;
+        // A successful async-nats publish only guarantees that the message was
+        // queued in the client. Short-lived control-plane clients (for example
+        // vm-testbed-cli undeploy) can otherwise drop the connection before
+        // the server receives it while still reporting success to the user.
+        self.client
+            .flush()
+            .await
+            .map_err(|e| PlatformError::messaging(format!("flush publish to {subject}: {e}")))?;
         Ok(())
     }
 

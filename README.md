@@ -4,9 +4,10 @@ A multi-tenant, HTTP-serving cloud platform built on WebAssembly and WASI. Repla
 
 ## What this project is
 
-- A production-ready runtime for stateless, HTTP-serving Wasm applications
+- A Linux-targeted runtime for stateless, HTTP-serving Wasm applications, with
+  production deployment controlled by environment-specific validation gates
 - A replacement architecture for container-based cloud platforms, optimized for low cold start latency, high density, and deterministic resource metering
-- A complete platform with built-in API Gateway, service mesh, observability stack, and eBPF kernel monitoring
+- A platform runtime with a built-in API Gateway, node-local service mesh, telemetry integrations, and eBPF kernel monitoring
 
 This project targets Linux production environments. Windows is not a production target because the platform depends on Linux kernel capabilities, including eBPF.
 
@@ -33,18 +34,20 @@ This project targets Linux production environments. Windows is not a production 
 ## Quick Start
 
 ```bash
+# Run Rust commands in Linux or WSL2. This checkout is under /mnt/d.
+export CARGO_TARGET_DIR=/tmp/wasm-cloud-platform-target
+
 # Build the platform
 cargo build --release
 
 # Start a single node
-./target/release/wasm-node --config config/dev.toml
+$CARGO_TARGET_DIR/release/wasm-node --config config/dev.toml
 
 # Deploy your first app
 wasm-ctl deploy \
   --app hello-world \
   --version v1 \
-  --wasm hello-world.wasm \
-  --port 8080
+  --wasm hello-world.wasm
 
 # Check node health
 wasm-ctl node health
@@ -55,15 +58,15 @@ curl http://localhost:9090/metrics
 
 ## Deployment Levels
 
-There is more than one valid way to be "production-ready" with this platform. The supported Linux deployment posture now scales from local development to a high-assurance production setup.
-
-For this codebase as it stands today, **Level 2** is the production baseline. Levels 3 and 4 add stronger operational and security posture for teams that need it.
+The deployment levels organize progressively stronger Linux operating controls.
+They do not certify a particular environment. Level 2 is the minimum production
+control profile; Levels 3 and 4 add multi-node and high-assurance gates.
 
 - local development: Level 0
 - internal single-node service: Level 1
-- first real Linux production rollout: Level 2
-- serious multi-node production: Level 3
-- strongest currently supported posture: Level 4
+- minimum production control profile: Level 2
+- hardened multi-node control profile: Level 3
+- high-assurance control profile: Level 4
 
 Start with:
 
@@ -78,6 +81,7 @@ The index routes to one operator guide per level, so each audience gets a concre
 
 ## Documentation
 
+- [`docs/README.md`](docs/README.md) is the complete user and operator manual index
 - [`docs/performance-benchmarks.md`](docs/performance-benchmarks.md) for the supported measurement paths, including the real platform cold-start benchmark
 
 ### Getting Started
@@ -144,7 +148,8 @@ Example configuration files are provided in the `config/` directory:
 
 - `config/dev.toml` — Minimal config for local development
 - `config/staging.toml` — Staging environment with moderate thresholds
-- `config/production.toml` — Production-ready config with security hardening
+- `config/production.toml` — Production-oriented starting config; replace its
+  placeholders and validate it against the target environment
 
 Suggested mapping:
 
@@ -156,10 +161,13 @@ Use [`docs/deployment-levels.md`](docs/deployment-levels.md) to choose the root-
 
 ### Environment variables
 
-All config values can be overridden with the `WASM_NODE_<SECTION>_<KEY>` convention (uppercase, underscores). For example:
+Supported config values can be overridden with the `WASM_NODE_<SECTION>_<KEY>` convention (uppercase, underscores). For example:
 
 - `WASM_NODE_NODE_ID=node-1`
-- `WASM_NODE_NATS_URL=nats://nats.prod:4222`
+- `WASM_NODE_NATS_URL=tls://nats.prod:4222`
+- `WASM_NODE_NATS_CA_CERT=/etc/wasm-node/nats/ca.crt`
+- `WASM_NODE_NATS_CLIENT_CERT=/run/credentials/wasm-node/nats-client.crt`
+- `WASM_NODE_NATS_CLIENT_KEY=/run/credentials/wasm-node/nats-client.key`
 - `WASM_NODE_LOGGING_LEVEL=debug`
 - `WASM_NODE_RATE_LIMIT_DEFAULT_REQUESTS_PER_SECOND=5000`
 
@@ -179,7 +187,7 @@ See `INFRA_IMPL/32_CONFIGURATION_MANAGEMENT.md` for the full specification.
 
 ## API Gateway
 
-The platform includes a built-in API Gateway that transforms the existing Pingora proxy into a full-featured gateway. Every Wasm application automatically gets authentication, authorization, distributed rate limiting, CORS, circuit breaking, and request transformation — without any external system.
+The platform includes a Pingora-based API Gateway. Operators can configure authentication, authorization, rate limiting, CORS, circuit breaking, and request transformation for application routes. Distributed rate limiting requires its external coordination service and explicit configuration.
 
 ### Gateway Features
 
@@ -346,7 +354,7 @@ See `INFRA_IMPL/39_API_GATEWAY.md` for the full specification.
 - The focus is on **stateless, HTTP-serving applications**.
 - The platform is optimized for **high-density multi-tenancy** and **fast startup**.
 - The NATS bus is the primary control plane; data plane traffic is handled by Pingora and the Supervisor.
-- On Linux 5.8+ with BTF, eBPF provides sub-millisecond failure detection. On other platforms, graceful fallback to userspace polling maintains full functionality.
+- On supported Linux hosts, eBPF supplies kernel-level process, network, and resource signals. The userspace fallback exposes reduced monitoring and does not satisfy the production kernel-identity contract; see [eBPF monitoring](docs/ebpf.md).
 
 ## License
 

@@ -28,6 +28,19 @@ pub struct DeployManifest {
 
     #[serde(default)]
     pub artifact: Option<ArtifactManifestSection>,
+
+    #[serde(default)]
+    pub placement: PlacementManifestSection,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct PlacementManifestSection {
+    #[serde(default)]
+    pub policy: common::types::PlacementPolicy,
+    /// Fully-qualified application IDs, for example
+    /// `production/postgres-client:v1`.
+    #[serde(default)]
+    pub local_dependencies: Vec<common::types::AppId>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

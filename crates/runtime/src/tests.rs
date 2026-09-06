@@ -347,6 +347,30 @@ fn test_prepare_detects_wasi_http_incoming_handler_components() {
     );
 }
 
+#[tokio::test]
+async fn test_dedicated_http_executor_stays_on_registered_thread() {
+    let (registered_thread_tx, registered_thread_rx) = tokio::sync::oneshot::channel();
+
+    let task = super::executor::spawn_dedicated_current_thread(
+        Some(Box::new(move || {
+            let _ = registered_thread_tx.send(thread::current().id());
+        })),
+        || async {
+            let before_yield = thread::current().id();
+            tokio::task::yield_now().await;
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            (before_yield, thread::current().id())
+        },
+        |err| panic!("failed to create dedicated runtime: {err}"),
+    );
+
+    let registered_thread = registered_thread_rx.await.unwrap();
+    let (before_yield, after_yield) = task.await.unwrap();
+    assert_eq!(registered_thread, before_yield);
+    assert_eq!(before_yield, after_yield);
+    assert_ne!(registered_thread, thread::current().id());
+}
+
 #[test]
 fn test_top_level_entry_point_candidates_include_start_fallback() {
     assert_eq!(top_level_entry_point_candidates(), &["run", "_start"]);
@@ -420,6 +444,40 @@ fn test_socket_policy_check_separates_bind_from_outbound_tcp() {
         ),
         Err("outbound tcp disabled")
     );
+}
+
+#[test]
+fn test_socket_policy_check_handles_wasmtime_48_socket_operations() {
+    let policy = base_instance_policy();
+    let check = SocketPolicyCheck::from_instance_policy(&policy);
+
+    assert!(check
+        .check("127.0.0.1:8080".parse().unwrap(), SocketAddrUse::TcpListen)
+        .is_ok());
+    assert!(check
+        .check("127.0.0.1:49152".parse().unwrap(), SocketAddrUse::TcpAccept)
+        .is_ok());
+
+    let mut denied = policy.clone();
+    denied.network.allow_inbound = false;
+    let denied_check = SocketPolicyCheck::from_instance_policy(&denied);
+    assert_eq!(
+        denied_check.check("127.0.0.1:49152".parse().unwrap(), SocketAddrUse::TcpAccept),
+        Err("inbound tcp accept disabled")
+    );
+
+    let mut udp = policy;
+    udp.network.allow_outbound_udp = true;
+    let udp_check = SocketPolicyCheck::from_instance_policy(&udp);
+    assert!(udp_check
+        .check("93.184.216.34:53".parse().unwrap(), SocketAddrUse::UdpSend)
+        .is_ok());
+    assert!(udp_check
+        .check(
+            "93.184.216.34:53".parse().unwrap(),
+            SocketAddrUse::UdpReceive
+        )
+        .is_ok());
 }
 
 #[test]
@@ -769,7 +827,7 @@ fn test_zero_fuel_immediate_trap() {
 
 #[test]
 #[cfg_attr(windows, ignore = "MSVC unwinding issue on traps")]
-fn test_epoch_interruption_traps_long_running_guest() {
+fn test_long_running_service_guest_is_still_bounded_by_fuel() {
     let runtime = WasmRuntime::new().expect("Failed to create WasmRuntime");
     let wasm_bytes = wat::parse_str(
         r#"
@@ -791,7 +849,7 @@ fn test_epoch_interruption_traps_long_running_guest() {
 
     let artifact = runtime.compile(&wasm_bytes).unwrap();
     let mut config = base_config();
-    config.fuel_quota = FuelQuota(50_000_000_000);
+    config.fuel_quota = FuelQuota(10_000);
 
     let prepared = runtime.prepare(&artifact, config).unwrap();
     let mut instance = prepared.spawn_instance(vec![], 8080, None).unwrap();
@@ -799,7 +857,7 @@ fn test_epoch_interruption_traps_long_running_guest() {
 
     assert!(
         stats.trap.is_some(),
-        "long-running guest should trap due to epoch interruption"
+        "long-running service guest should trap when its fuel is exhausted"
     );
 }
 

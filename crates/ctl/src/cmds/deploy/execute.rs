@@ -53,6 +53,7 @@ pub async fn run(
 
     let app_id = AppId::new_namespaced(&namespace, &app_name, &version);
     let node_api = args.node_api.as_deref().unwrap_or(default_node_api);
+    let artifact_api = args.artifact_api.as_deref().unwrap_or(node_api);
     let deploy_api = args
         .deploy_api
         .as_deref()
@@ -152,7 +153,11 @@ pub async fn run(
         size_bytes as f64 / 1_048_576.0
     );
 
-    let upload_url = format!("{}/artifacts/{}", node_api, sha256);
+    let upload_url = format!(
+        "{}/artifacts/{}",
+        artifact_api.trim_end_matches('/'),
+        sha256
+    );
     let artifact_url = upload_url.clone();
 
     println!("\n{}", "Uploading artifact...".bold());
@@ -191,7 +196,7 @@ pub async fn run(
     );
 
     let per_node_manifests =
-        match request_per_node_manifests(http, node_api, &sha256, &target_node_ids).await {
+        match request_per_node_manifests(http, artifact_api, &sha256, &target_node_ids).await {
             Ok(manifests) => manifests,
             Err(e) => {
                 eprintln!(

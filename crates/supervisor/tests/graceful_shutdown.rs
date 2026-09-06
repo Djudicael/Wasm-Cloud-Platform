@@ -30,6 +30,7 @@ async fn create_test_supervisor() -> Arc<supervisor::Supervisor> {
         host_router,
         service_registry,
         common::INTERNAL_GATEWAY_PORT,
+        4 * 1024 * 1024 * 1024,
         env_resolver,
         event_tx,
         None,
@@ -54,6 +55,8 @@ fn create_test_config(app_id: AppId) -> AppConfig {
         tenant_id: None,
         policy: None,
         namespace: "default".to_string(),
+        placement: common::types::PlacementPolicy::EveryNode,
+        local_dependencies: Vec::new(),
     }
 }
 

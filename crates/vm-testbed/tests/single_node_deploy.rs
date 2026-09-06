@@ -46,6 +46,7 @@ async fn test_single_node_deploy() {
         id: "test-node-0".to_string(),
         kernel_path: find_kernel(),
         rootfs_path: find_node_rootfs(),
+        rootfs_read_only: false,
         data_drive_path: None,
         memory_mb: 512,
         vcpus: 2,
@@ -53,6 +54,7 @@ async fn test_single_node_deploy() {
         gateway: "172.20.0.1".to_string(),
         bridge_name: "br-wasm".to_string(),
         tap_device: "tap-test-node-0".to_string(),
+        extra_kernel_args: Vec::new(),
         mmds_data: Some(serde_json::json!({
             "node_config": {
                 "node_id": "test-node-0",
@@ -135,7 +137,7 @@ fn find_kernel() -> std::path::PathBuf {
             return path;
         }
     }
-    let candidates = ["./assets/vmlinux-6.1", "/opt/vm-testbed/vmlinux-6.1"];
+    let candidates = ["./assets/vmlinux-6.18", "/opt/vm-testbed/vmlinux-6.18"];
     for c in &candidates {
         let p = std::path::PathBuf::from(c);
         if p.exists() {

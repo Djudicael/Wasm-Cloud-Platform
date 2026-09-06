@@ -1,8 +1,8 @@
 use anyhow::{anyhow, bail, Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use common::artifact_transfer::{ArtifactManifestBatchRequest, ArtifactManifestBatchResponse};
-use common::policy::{NetworkPolicyConfig, PolicyConfig};
-use common::types::{AppConfig, AppId, FuelQuota, MemoryPages, Route};
+use common::policy::{FilesystemPolicyConfig, NetworkPolicyConfig, PolicyConfig};
+use common::types::{AppConfig, AppId, AppRateLimitConfig, FuelQuota, MemoryPages, Route};
 use messaging::{events::Event, NatsBus};
 use serde::{Deserialize, Serialize};
 use sha2::Digest;
@@ -23,6 +23,9 @@ struct Cli {
 }
 
 #[derive(Subcommand)]
+// This human-facing CLI intentionally keeps deploy options explicit so clap
+// generates complete help text for policy-validation rehearsals.
+#[allow(clippy::large_enum_variant)]
 enum Commands {
     /// Bring up a named topology for manual validation.
     Up {
@@ -41,6 +44,18 @@ enum Commands {
         /// vCPUs per node.
         #[arg(long, default_value = "2")]
         node_vcpus: usize,
+        /// OTLP gRPC endpoint configured on every platform node.
+        #[arg(long)]
+        node_otlp_endpoint: Option<String>,
+        /// Public OIDC issuer used to validate token `iss` claims.
+        #[arg(long, requires_all = ["node_oidc_audience", "node_oidc_jwks_url"])]
+        node_oidc_issuer_url: Option<String>,
+        /// Expected OIDC token audience.
+        #[arg(long, requires_all = ["node_oidc_issuer_url", "node_oidc_jwks_url"])]
+        node_oidc_audience: Option<String>,
+        /// Private JWKS URL reachable from platform nodes.
+        #[arg(long, requires_all = ["node_oidc_issuer_url", "node_oidc_audience"])]
+        node_oidc_jwks_url: Option<String>,
         /// Memory for the NATS VM in MiB.
         #[arg(long, default_value = "256")]
         nats_memory: usize,
@@ -93,6 +108,42 @@ enum Commands {
         id: String,
         #[arg(long, default_value = ".vm-testbed-state.json")]
         state_file: PathBuf,
+        /// Inject one deterministic eBPF failure into this local test node.
+        #[arg(long, value_enum)]
+        ebpf_test_fault: Option<EbpfTestFault>,
+        /// Configure eBPF as mandatory for this restart.
+        #[arg(long)]
+        ebpf_required: bool,
+        /// Persist a running VM that is expected not to become healthy.
+        #[arg(long)]
+        expect_unhealthy: bool,
+        /// Use a one-restart kernel override without changing topology state.
+        #[arg(long)]
+        kernel: Option<PathBuf>,
+        /// Start the guest node with an empty Linux capability bounding set.
+        #[arg(long)]
+        drop_ebpf_capabilities: bool,
+        /// Use a one-restart memory size without changing the topology default.
+        #[arg(long)]
+        memory: Option<usize>,
+        /// Use a one-restart vCPU count without changing the topology default.
+        #[arg(long)]
+        vcpus: Option<usize>,
+        /// Attach the cloned root filesystem read-only for a local fault test.
+        #[arg(long)]
+        rootfs_read_only: bool,
+        /// Persist a new OTLP gRPC endpoint for this and later node restarts.
+        #[arg(long)]
+        otlp_endpoint: Option<String>,
+        /// Persist a public OIDC issuer for this and later node restarts.
+        #[arg(long, requires_all = ["oidc_audience", "oidc_jwks_url"])]
+        oidc_issuer_url: Option<String>,
+        /// Persist the expected OIDC audience for this and later node restarts.
+        #[arg(long, requires_all = ["oidc_issuer_url", "oidc_jwks_url"])]
+        oidc_audience: Option<String>,
+        /// Persist a private JWKS URL reachable from platform nodes.
+        #[arg(long, requires_all = ["oidc_issuer_url", "oidc_audience"])]
+        oidc_jwks_url: Option<String>,
     },
 
     /// Scale a detached topology to the requested node count.
@@ -168,8 +219,29 @@ enum Commands {
         memory_mb: u32,
         #[arg(long, default_value = "10")]
         max_instances: u32,
+        /// Sustained per-node request limit for this application.
+        #[arg(long)]
+        rate_limit_rps: Option<u32>,
+        /// Token-bucket burst capacity; requires --rate-limit-rps.
+        #[arg(long)]
+        rate_limit_burst: Option<u32>,
+        /// Per-client-IP request limit; requires --rate-limit-rps.
+        #[arg(long)]
+        rate_limit_per_ip: Option<u32>,
         #[arg(long, default_value = "100")]
         max_outbound_connections: u32,
+        /// Maximum concurrently open WASI file descriptors.
+        #[arg(long, default_value = "256")]
+        max_open_fds: u32,
+        /// Restrict outbound traffic to these CIDRs; repeat as needed.
+        #[arg(long = "allowed-cidr")]
+        allowed_cidrs: Vec<String>,
+        /// Explicitly deny outbound traffic to these CIDRs; repeat as needed.
+        #[arg(long = "denied-cidr")]
+        denied_cidrs: Vec<String>,
+        /// Writable host path exposed to the component; repeat as needed.
+        #[arg(long = "allowed-filesystem-path")]
+        allowed_filesystem_paths: Vec<String>,
         #[arg(long, default_value = "300")]
         idle_timeout: u64,
         #[arg(long, default_value = "8080")]
@@ -225,6 +297,29 @@ enum TopologyProfile {
     ChaosReady,
 }
 
+#[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
+enum EbpfTestFault {
+    MissingCapability,
+    PermissionDenied,
+    ProgramRejected,
+    ProbeUnavailable,
+    MissingBtf,
+    ConsumerExit,
+}
+
+impl EbpfTestFault {
+    fn as_kernel_value(self) -> &'static str {
+        match self {
+            Self::MissingCapability => "missing_capability",
+            Self::PermissionDenied => "permission_denied",
+            Self::ProgramRejected => "program_rejected",
+            Self::ProbeUnavailable => "probe_unavailable",
+            Self::MissingBtf => "missing_btf",
+            Self::ConsumerExit => "consumer_exit",
+        }
+    }
+}
+
 #[derive(Subcommand)]
 enum AssetCommands {
     InstallFirecracker,
@@ -269,6 +364,14 @@ struct PersistedClusterState {
     node_data_drive_path: Option<PathBuf>,
     node_memory_mb: usize,
     node_vcpus: usize,
+    #[serde(default)]
+    node_otlp_endpoint: Option<String>,
+    #[serde(default)]
+    node_oidc_issuer_url: Option<String>,
+    #[serde(default)]
+    node_oidc_audience: Option<String>,
+    #[serde(default)]
+    node_oidc_jwks_url: Option<String>,
     next_node_index: u8,
     nats: Option<PersistedVm>,
     nodes: Vec<PersistedVm>,
@@ -287,12 +390,34 @@ struct DeployRequest {
     fuel: u64,
     memory_mb: u32,
     max_instances: u32,
+    rate_limit_rps: Option<u32>,
+    rate_limit_burst: Option<u32>,
+    rate_limit_per_ip: Option<u32>,
     max_outbound_connections: u32,
+    max_open_fds: u32,
+    allowed_cidrs: Vec<String>,
+    denied_cidrs: Vec<String>,
+    allowed_filesystem_paths: Vec<String>,
     idle_timeout: u64,
     bind_port: u16,
     health_check_path: Option<String>,
     env_vars: Vec<(String, String)>,
     secret_keys: Vec<String>,
+}
+
+struct RestartNodeOptions {
+    ebpf_test_fault: Option<EbpfTestFault>,
+    ebpf_required: bool,
+    expect_unhealthy: bool,
+    kernel: Option<PathBuf>,
+    drop_ebpf_capabilities: bool,
+    memory: Option<usize>,
+    vcpus: Option<usize>,
+    rootfs_read_only: bool,
+    otlp_endpoint: Option<String>,
+    oidc_issuer_url: Option<String>,
+    oidc_audience: Option<String>,
+    oidc_jwks_url: Option<String>,
 }
 
 #[tokio::main]
@@ -306,6 +431,10 @@ async fn main() -> Result<()> {
             nodes,
             node_memory,
             node_vcpus,
+            node_otlp_endpoint,
+            node_oidc_issuer_url,
+            node_oidc_audience,
+            node_oidc_jwks_url,
             nats_memory,
             nats_vcpus,
             state_file,
@@ -318,6 +447,13 @@ async fn main() -> Result<()> {
             };
 
             let mut cluster = ClusterFixture::new(name.clone()).await?;
+            cluster.set_node_otlp_endpoint(node_otlp_endpoint);
+            validate_oidc_boot_config(
+                node_oidc_issuer_url.as_deref(),
+                node_oidc_audience.as_deref(),
+                node_oidc_jwks_url.as_deref(),
+            )?;
+            cluster.set_node_oidc(node_oidc_issuer_url, node_oidc_audience, node_oidc_jwks_url);
             cluster.start_nats(nats_memory, nats_vcpus).await?;
             for _ in 0..requested_nodes {
                 cluster.start_node(node_memory, node_vcpus).await?;
@@ -375,9 +511,42 @@ async fn main() -> Result<()> {
             println!("Removed {}", id);
         }
 
-        Commands::RestartNode { id, state_file } => {
+        Commands::RestartNode {
+            id,
+            state_file,
+            ebpf_test_fault,
+            ebpf_required,
+            expect_unhealthy,
+            kernel,
+            drop_ebpf_capabilities,
+            memory,
+            vcpus,
+            rootfs_read_only,
+            otlp_endpoint,
+            oidc_issuer_url,
+            oidc_audience,
+            oidc_jwks_url,
+        } => {
             let mut state = read_state(&state_file)?;
-            let vm = restart_node_from_state(&mut state, &id).await?;
+            let vm = restart_node_from_state(
+                &mut state,
+                &id,
+                RestartNodeOptions {
+                    ebpf_test_fault,
+                    ebpf_required,
+                    expect_unhealthy,
+                    kernel,
+                    drop_ebpf_capabilities,
+                    memory,
+                    vcpus,
+                    rootfs_read_only,
+                    otlp_endpoint,
+                    oidc_issuer_url,
+                    oidc_audience,
+                    oidc_jwks_url,
+                },
+            )
+            .await?;
             write_state(&state_file, &state)?;
             println!(
                 "Restarted {} admin={} proxy={} pid={}",
@@ -487,7 +656,14 @@ async fn main() -> Result<()> {
             fuel,
             memory_mb,
             max_instances,
+            rate_limit_rps,
+            rate_limit_burst,
+            rate_limit_per_ip,
             max_outbound_connections,
+            max_open_fds,
+            allowed_cidrs,
+            denied_cidrs,
+            allowed_filesystem_paths,
             idle_timeout,
             bind_port,
             health_check_path,
@@ -508,7 +684,14 @@ async fn main() -> Result<()> {
                     fuel,
                     memory_mb,
                     max_instances,
+                    rate_limit_rps,
+                    rate_limit_burst,
+                    rate_limit_per_ip,
                     max_outbound_connections,
+                    max_open_fds,
+                    allowed_cidrs,
+                    denied_cidrs,
+                    allowed_filesystem_paths,
                     idle_timeout,
                     bind_port,
                     health_check_path: match health_check_path.as_str() {
@@ -547,6 +730,7 @@ async fn main() -> Result<()> {
                 id: id.clone(),
                 kernel_path,
                 rootfs_path,
+                rootfs_read_only: false,
                 data_drive_path: None,
                 memory_mb: memory,
                 vcpus,
@@ -554,6 +738,7 @@ async fn main() -> Result<()> {
                 gateway: "172.20.0.1".to_string(),
                 bridge_name: bridge,
                 tap_device: tap,
+                extra_kernel_args: Vec::new(),
                 mmds_data: Some(serde_json::json!({
                     "node_config": {
                         "node_id": id,
@@ -599,6 +784,10 @@ fn detach_cluster_state(
         node_data_drive_path: cluster.node_data_drive.clone(),
         node_memory_mb,
         node_vcpus,
+        node_otlp_endpoint: cluster.node_otlp_endpoint.clone(),
+        node_oidc_issuer_url: cluster.node_oidc_issuer_url.clone(),
+        node_oidc_audience: cluster.node_oidc_audience.clone(),
+        node_oidc_jwks_url: cluster.node_oidc_jwks_url.clone(),
         next_node_index: cluster.node_count() as u8,
         nats,
         nodes: nodes.into_values().collect(),
@@ -630,10 +819,16 @@ async fn spawn_service_from_state(
     let rootfs = rootfs
         .canonicalize()
         .with_context(|| format!("service rootfs does not exist: {}", rootfs.display()))?;
+    let mut extra_kernel_args = Vec::new();
+    if let Some(endpoint) = &state.node_otlp_endpoint {
+        extra_kernel_args.push(format!("wcp.otlp_endpoint={endpoint}"));
+    }
+
     let config = VmConfig {
         id: id.clone(),
         kernel_path: state.kernel_path.clone(),
         rootfs_path: rootfs,
+        rootfs_read_only: false,
         data_drive_path: None,
         memory_mb,
         vcpus,
@@ -641,6 +836,7 @@ async fn spawn_service_from_state(
         gateway: state.gateway.clone(),
         bridge_name: state.bridge_name.clone(),
         tap_device: network::tap_name_for_id(&id),
+        extra_kernel_args,
         mmds_data: Some(serde_json::json!({
             "service_config": {
                 "id": id,
@@ -720,6 +916,7 @@ async fn spawn_node_from_state(
         id: node_id.clone(),
         kernel_path: state.kernel_path.clone(),
         rootfs_path: state.node_rootfs_path.clone(),
+        rootfs_read_only: false,
         data_drive_path: state.node_data_drive_path.clone(),
         memory_mb,
         vcpus,
@@ -727,6 +924,7 @@ async fn spawn_node_from_state(
         gateway: state.gateway.clone(),
         bridge_name: state.bridge_name.clone(),
         tap_device: tap,
+        extra_kernel_args: node_runtime_kernel_args(state),
         mmds_data: Some(serde_json::json!({
             "node_config": {
                 "node_id": node_id,
@@ -736,6 +934,10 @@ async fn spawn_node_from_state(
                 "proxy_port": 8080,
                 "admin_port": 9090,
                 "artifact_port": 9091,
+                "otlp_endpoint": state.node_otlp_endpoint,
+                "oidc_issuer_url": state.node_oidc_issuer_url,
+                "oidc_audience": state.node_oidc_audience,
+                "oidc_jwks_url": state.node_oidc_jwks_url,
             }
         })),
     };
@@ -768,6 +970,7 @@ async fn remove_node_from_state(state: &mut PersistedClusterState, id: &str) -> 
 async fn restart_node_from_state(
     state: &mut PersistedClusterState,
     id: &str,
+    options: RestartNodeOptions,
 ) -> Result<PersistedVm> {
     let index = state
         .nodes
@@ -786,17 +989,63 @@ async fn restart_node_from_state(
     network::remove_tap(&previous.tap_device)
         .map_err(|error| anyhow!("failed to remove TAP {}: {error}", previous.tap_device))?;
 
+    let mut extra_kernel_args = Vec::new();
+    if let Some(fault) = options.ebpf_test_fault {
+        extra_kernel_args.push(format!("wcp.ebpf_test_fault={}", fault.as_kernel_value()));
+    }
+    if options.ebpf_required {
+        extra_kernel_args.push("wcp.ebpf_required=1".to_string());
+    }
+    if options.drop_ebpf_capabilities {
+        extra_kernel_args.push("wcp.ebpf_drop_capabilities=1".to_string());
+    }
+    if let Some(endpoint) = options.otlp_endpoint {
+        state.node_otlp_endpoint = Some(endpoint);
+    }
+    validate_oidc_boot_config(
+        options.oidc_issuer_url.as_deref(),
+        options.oidc_audience.as_deref(),
+        options.oidc_jwks_url.as_deref(),
+    )?;
+    if let (Some(issuer), Some(audience), Some(jwks)) = (
+        options.oidc_issuer_url,
+        options.oidc_audience,
+        options.oidc_jwks_url,
+    ) {
+        state.node_oidc_issuer_url = Some(issuer);
+        state.node_oidc_audience = Some(audience);
+        state.node_oidc_jwks_url = Some(jwks);
+    }
+    extra_kernel_args.extend(node_runtime_kernel_args(state));
+
+    let kernel_path = match options.kernel {
+        Some(path) => path
+            .canonicalize()
+            .with_context(|| format!("kernel override does not exist: {}", path.display()))?,
+        None => state.kernel_path.clone(),
+    };
+    let memory_mb = options.memory.unwrap_or(state.node_memory_mb);
+    let vcpu_count = options.vcpus.unwrap_or(state.node_vcpus);
+    if memory_mb < 128 {
+        bail!("restart memory must be at least 128 MiB");
+    }
+    if !(1..=32).contains(&vcpu_count) {
+        bail!("restart vCPU count must be between 1 and 32");
+    }
+
     let config = VmConfig {
         id: previous.id.clone(),
-        kernel_path: state.kernel_path.clone(),
+        kernel_path,
         rootfs_path: state.node_rootfs_path.clone(),
+        rootfs_read_only: options.rootfs_read_only,
         data_drive_path: state.node_data_drive_path.clone(),
-        memory_mb: state.node_memory_mb,
-        vcpus: state.node_vcpus,
+        memory_mb,
+        vcpus: vcpu_count,
         ip: previous.ip.clone(),
         gateway: state.gateway.clone(),
         bridge_name: state.bridge_name.clone(),
         tap_device: previous.tap_device.clone(),
+        extra_kernel_args,
         mmds_data: Some(serde_json::json!({
             "node_config": {
                 "node_id": previous.id,
@@ -806,18 +1055,87 @@ async fn restart_node_from_state(
                 "proxy_port": 8080,
                 "admin_port": 9090,
                 "artifact_port": 9091,
+                "otlp_endpoint": state.node_otlp_endpoint,
+                "oidc_issuer_url": state.node_oidc_issuer_url,
+                "oidc_audience": state.node_oidc_audience,
+                "oidc_jwks_url": state.node_oidc_jwks_url,
             }
         })),
     };
 
     let mut vm = MicroVm::spawn(config).await?;
-    vm.wait_for_health(Duration::from_secs(120)).await?;
+    if options.expect_unhealthy {
+        if vm.wait_for_health(Duration::from_secs(12)).await.is_ok() {
+            bail!("node {id} became healthy but an unhealthy startup was expected");
+        }
+        if vm.vmm_process.try_wait()?.is_some() {
+            bail!("node {id} VMM exited during the expected-unhealthy test");
+        }
+    } else {
+        vm.wait_for_health(Duration::from_secs(120)).await?;
+    }
     let persisted = detach_vm_state(&mut vm);
     state.nodes[index] = persisted.clone();
     Ok(persisted)
 }
 
+fn node_runtime_kernel_args(state: &PersistedClusterState) -> Vec<String> {
+    let mut args = Vec::new();
+    if let Some(endpoint) = &state.node_otlp_endpoint {
+        args.push(format!("wcp.otlp_endpoint={endpoint}"));
+    }
+    if let (Some(issuer), Some(audience), Some(jwks)) = (
+        &state.node_oidc_issuer_url,
+        &state.node_oidc_audience,
+        &state.node_oidc_jwks_url,
+    ) {
+        args.push(format!("wcp.oidc_issuer_url={issuer}"));
+        args.push(format!("wcp.oidc_audience={audience}"));
+        args.push(format!("wcp.oidc_jwks_url={jwks}"));
+    }
+    args
+}
+
+fn validate_oidc_boot_config(
+    issuer_url: Option<&str>,
+    audience: Option<&str>,
+    jwks_url: Option<&str>,
+) -> Result<()> {
+    let supplied = [issuer_url.is_some(), audience.is_some(), jwks_url.is_some()];
+    if supplied.iter().any(|value| *value) && !supplied.iter().all(|value| *value) {
+        bail!("OIDC issuer, audience, and JWKS URL must be supplied together");
+    }
+    for (name, value) in [("issuer URL", issuer_url), ("JWKS URL", jwks_url)] {
+        if let Some(value) = value {
+            if !(value.starts_with("http://") || value.starts_with("https://")) {
+                bail!("OIDC {name} must use http:// or https://");
+            }
+            if value
+                .chars()
+                .any(|ch| ch.is_whitespace() || matches!(ch, '"' | '\\'))
+            {
+                bail!("OIDC {name} contains an unsafe character");
+            }
+        }
+    }
+    if let Some(audience) = audience {
+        if audience.is_empty()
+            || audience
+                .chars()
+                .any(|ch| ch.is_whitespace() || matches!(ch, '"' | '\\'))
+        {
+            bail!("OIDC audience is empty or contains an unsafe character");
+        }
+    }
+    Ok(())
+}
+
 async fn deploy_app_to_state(state: &PersistedClusterState, req: DeployRequest) -> Result<()> {
+    if req.rate_limit_rps.is_none()
+        && (req.rate_limit_burst.is_some() || req.rate_limit_per_ip.is_some())
+    {
+        bail!("--rate-limit-burst and --rate-limit-per-ip require --rate-limit-rps");
+    }
     let node = select_target_vm(state, req.target_node.as_deref())?;
     let mut bus = NatsBus::connect(&state.nats_url).await?;
     bus.set_node_id("vm-testbed-cli".to_string());
@@ -883,9 +1201,17 @@ async fn deploy_app_to_state(state: &PersistedClusterState, req: DeployRequest) 
     let policy = PolicyConfig {
         network: Some(NetworkPolicyConfig {
             max_outbound_connections: Some(req.max_outbound_connections),
+            allowed_cidrs: (!req.allowed_cidrs.is_empty()).then_some(req.allowed_cidrs),
+            denied_cidrs: (!req.denied_cidrs.is_empty()).then_some(req.denied_cidrs),
             ..NetworkPolicyConfig::default()
         }),
-        ..PolicyConfig::default()
+        filesystem: Some(FilesystemPolicyConfig {
+            allowed_paths: Some(req.allowed_filesystem_paths),
+            allow_file_create: Some(true),
+            allow_file_delete: Some(true),
+            max_open_fds: Some(req.max_open_fds),
+            ..FilesystemPolicyConfig::default()
+        }),
     };
     let config = AppConfig {
         id: app_id.clone(),
@@ -899,10 +1225,18 @@ async fn deploy_app_to_state(state: &PersistedClusterState, req: DeployRequest) 
         extended_limits: None,
         health_check_path: req.health_check_path,
         db_max_connections: None,
-        rate_limit: None,
+        rate_limit: req
+            .rate_limit_rps
+            .map(|requests_per_second| AppRateLimitConfig {
+                requests_per_second,
+                burst_capacity: req.rate_limit_burst.unwrap_or(requests_per_second),
+                per_ip_limit: req.rate_limit_per_ip.unwrap_or(requests_per_second),
+            }),
         tenant_id: None,
         policy: Some(policy),
         namespace: req.namespace.clone(),
+        placement: common::types::PlacementPolicy::EveryNode,
+        local_dependencies: Vec::new(),
     };
 
     bus.publish(&Event::DeployApp {
@@ -1055,25 +1389,43 @@ async fn down_from_state(state_file: &Path) -> Result<()> {
 }
 
 async fn print_runtime_status(state: &PersistedClusterState) -> Result<()> {
-    for vm in state.nats.iter().chain(state.nodes.iter()) {
+    if let Some(nats) = &state.nats {
+        let alive = process_alive(nats.pid);
+        let nats_addr = state
+            .nats_url
+            .strip_prefix("nats://")
+            .unwrap_or(&state.nats_url);
+        let tcp_status = match tokio::time::timeout(
+            Duration::from_secs(2),
+            tokio::net::TcpStream::connect(nats_addr),
+        )
+        .await
+        {
+            Ok(Ok(_)) => "connected",
+            Ok(Err(_)) => "unreachable",
+            Err(_) => "timeout",
+        };
+        println!(
+            "{} pid={} alive={} nats={} tcp={}",
+            nats.id, nats.pid, alive, state.nats_url, tcp_status
+        );
+    }
+
+    for vm in &state.nodes {
         let alive = process_alive(vm.pid);
-        if vm.admin_addr.ends_with(":9090") {
-            let health = reqwest::Client::builder()
-                .timeout(Duration::from_secs(2))
-                .build()?
-                .get(format!("http://{}/healthz", vm.admin_addr))
-                .send()
-                .await
-                .ok()
-                .map(|resp| resp.status().to_string())
-                .unwrap_or_else(|| "unreachable".to_string());
-            println!(
-                "{} pid={} alive={} admin={} proxy={} health={}",
-                vm.id, vm.pid, alive, vm.admin_addr, vm.proxy_addr, health
-            );
-        } else {
-            println!("{} pid={} alive={}", vm.id, vm.pid, alive);
-        }
+        let health = reqwest::Client::builder()
+            .timeout(Duration::from_secs(2))
+            .build()?
+            .get(format!("http://{}/healthz", vm.admin_addr))
+            .send()
+            .await
+            .ok()
+            .map(|resp| resp.status().to_string())
+            .unwrap_or_else(|| "unreachable".to_string());
+        println!(
+            "{} pid={} alive={} admin={} proxy={} health={}",
+            vm.id, vm.pid, alive, vm.admin_addr, vm.proxy_addr, health
+        );
     }
     for service in &state.services {
         println!(
@@ -1155,7 +1507,7 @@ fn parse_env_var(s: &str) -> Result<(String, String), String> {
 }
 
 fn find_kernel() -> PathBuf {
-    let candidates = ["./assets/vmlinux-6.1", "/opt/vm-testbed/vmlinux-6.1"];
+    let candidates = ["./assets/vmlinux-6.18", "/opt/vm-testbed/vmlinux-6.18"];
     for c in &candidates {
         let p = PathBuf::from(c);
         if p.exists() {

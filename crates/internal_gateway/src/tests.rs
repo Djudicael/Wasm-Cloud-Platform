@@ -1,15 +1,14 @@
 use super::*;
 use axum::body::Body;
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use http::HeaderValue;
 use hyper::service::service_fn;
 use jsonwebtoken::{DecodingKey, EncodingKey};
-use rsa::pkcs1::EncodeRsaPrivateKey;
-use rsa::rand_core::OsRng;
-use rsa::{traits::PublicKeyParts, RsaPrivateKey, RsaPublicKey};
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
 use tokio::net::TcpListener;
+
+#[path = "../../proxy/testdata/jwt_test_key.rs"]
+mod jwt_test_key;
 
 async fn setup_gateway() -> (Arc<InternalGateway>, common::types::AppId) {
     let registry = Arc::new(supervisor::network::NamespaceRegistry::default());
@@ -32,6 +31,38 @@ async fn setup_gateway() -> (Arc<InternalGateway>, common::types::AppId) {
     ));
 
     (gw, app_id)
+}
+
+#[tokio::test]
+async fn test_caller_identity_waits_for_asynchronous_ebpf_binding() {
+    let namespace_map = Arc::new(ebpf_monitor::NamespaceMap::new_fallback());
+    namespace_map
+        .register_tid(
+            4242,
+            ebpf_monitor::common::TidIdentity::new("default", "caller:v1"),
+        )
+        .unwrap();
+
+    let delayed_map = namespace_map.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        delayed_map.bind_port(54321, 4242);
+    });
+
+    let identity = resolve_caller_identity(&namespace_map, 54321)
+        .await
+        .expect("identity should resolve after the asynchronous binding arrives");
+    assert_eq!(identity.namespace, "default");
+    assert_eq!(identity.app_id, "caller:v1");
+    assert_eq!(identity.tid, 4242);
+}
+
+#[tokio::test]
+async fn test_caller_identity_wait_remains_fail_closed() {
+    let namespace_map = ebpf_monitor::NamespaceMap::new_fallback();
+    assert!(resolve_caller_identity(&namespace_map, 54321)
+        .await
+        .is_none());
 }
 
 async fn setup_gateway_with(
@@ -68,20 +99,17 @@ async fn setup_gateway_with(
 }
 
 async fn test_gateway_with_provider() -> (Arc<proxy::gateway::Gateway>, String, String) {
-    let mut rng = OsRng;
-    let private_key = RsaPrivateKey::new(&mut rng, 2048).unwrap();
-    let public_key = RsaPublicKey::from(&private_key);
-
-    let private_pkcs1 = private_key.to_pkcs1_der().unwrap();
-    let encoding_key = EncodingKey::from_rsa_der(private_pkcs1.as_bytes());
-
-    let n_b64 = URL_SAFE_NO_PAD.encode(public_key.n().to_bytes_be());
-    let e_b64 = URL_SAFE_NO_PAD.encode(public_key.e().to_bytes_be());
+    let jwt_test_key::GeneratedRsaKey {
+        encoding_key,
+        modulus,
+        exponent,
+    } = jwt_test_key::generate_rsa_key();
 
     let provider = Arc::new(proxy::gateway::oidc::OidcProvider::new(
         common::types::OidcConfig {
             issuer_url: "https://test-issuer.example.com".to_string(),
             audience: "test-audience".to_string(),
+            jwks_url: None,
             jwks_refresh_secs: 3600,
             clock_skew_secs: 30,
         },
@@ -90,7 +118,7 @@ async fn test_gateway_with_provider() -> (Arc<proxy::gateway::Gateway>, String, 
     provider
         .inject_jwks_key(
             "test-key-1".to_string(),
-            DecodingKey::from_rsa_components(&n_b64, &e_b64).unwrap(),
+            DecodingKey::from_rsa_components(&modulus, &exponent).unwrap(),
         )
         .await;
 

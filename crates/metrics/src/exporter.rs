@@ -1,5 +1,6 @@
 // crates/metrics/src/exporter.rs
 use axum::{response::IntoResponse, routing::get, Router};
+use prometheus::process_collector::ProcessCollector;
 use prometheus::{
     CounterVec, GaugeVec, HistogramOpts, HistogramVec, IntCounter, IntCounterVec, IntGauge, Opts,
     Registry,
@@ -23,6 +24,9 @@ impl Metrics {
     #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
         let registry = Registry::new();
+        registry
+            .register(Box::new(ProcessCollector::for_self()))
+            .expect("process metrics must register");
         let policy = PolicyMetrics::new(&registry);
 
         let requests_total = IntCounterVec::new(

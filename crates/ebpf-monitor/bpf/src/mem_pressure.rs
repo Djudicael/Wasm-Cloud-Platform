@@ -25,15 +25,15 @@
 //! ```text
 //! Pressure Level │ Action
 //! ───────────────┼──────────────────────────────────────────────────────────────
-//! Low            │ Log info. Emit wasm_memory_pressure_level = 1 metric.
+//! Low            │ Log info. Emit wasm_memory_pressure_level = 0 metric.
 //!                │ No instance action.
 //! ───────────────┼──────────────────────────────────────────────────────────────
-//! Medium         │ Log warning. Emit wasm_memory_pressure_level = 2 metric.
+//! Medium         │ Log warning. Emit wasm_memory_pressure_level = 1 metric.
 //!                │ Supervisor prunes all idle instances (idle_timeout = 0).
 //!                │ Backpressure signal set to "rejecting" for 30s.
 //!                │ No new cold starts until pressure drops.
 //! ───────────────┼──────────────────────────────────────────────────────────────
-//! Critical       │ Log error. Emit wasm_memory_pressure_level = 3 metric.
+//! Critical       │ Log error. Emit wasm_memory_pressure_level = 2 metric.
 //!                │ Supervisor kills the largest Wasm instance (most memory).
 //!                │ All non-essential instances killed.
 //!                │ Backpressure signal set to "rejecting" indefinitely.
@@ -47,12 +47,12 @@
 use aya_ebpf::{
     cty::c_long,
     macros::{kprobe, map, tracepoint},
-    maps::{Array, PerCpuHashMap, RingBuf},
-    programs::{KProbeContext, TracePointContext},
+    maps::{Array, HashMap, PerCpuArray, PerCpuHashMap, RingBuf},
+    programs::{ProbeContext, TracePointContext},
 };
-use aya_log_ebpf::{info, warn};
+use aya_log_ebpf::info;
 
-use ebpf_monitor_bpf_common::{EventHeader, EventType, MemPressureEvent, MonitorConfigMap};
+use ebpf_monitor_bpf::{EventHeader, EventType, MemPressureEvent, MonitorConfigMap};
 
 /// Configuration map (shared with all eBPF programs).
 #[map]
@@ -60,7 +60,19 @@ static CONFIG: Array<MonitorConfigMap> = Array::with_max_entries(1, 0);
 
 /// Ring buffer for sending events to userspace.
 #[map]
-static EVENTS: RingBuf = RingBuf::with_max_entries(512 * 1024, 0); // 512 KB
+static EVENTS: RingBuf = RingBuf::with_byte_size(512 * 1024, 0); // 512 KB
+
+#[map]
+static DROPPED_EVENTS: PerCpuArray<u64> = PerCpuArray::with_max_entries(1, 0);
+
+#[inline(always)]
+fn emit<T>(event: &T) {
+    if EVENTS.output(event, 0).is_err() {
+        if let Some(value) = DROPPED_EVENTS.get_ptr_mut(0) {
+            unsafe { *value = (*value).saturating_add(1) };
+        }
+    }
+}
 
 /// Last reported pressure level per cgroup (to avoid duplicate events).
 /// Key: cgroup ID, Value: last pressure level reported.
@@ -68,10 +80,17 @@ static EVENTS: RingBuf = RingBuf::with_max_entries(512 * 1024, 0); // 512 KB
 #[map]
 static LAST_PRESSURE: PerCpuHashMap<u64, u32> = PerCpuHashMap::with_max_entries(256, 0);
 
+/// Last direct-reclaim event per cgroup. Direct reclaim can execute once per
+/// page, so emit at most one event every ten seconds without suppressing every
+/// later pressure episode for the lifetime of the node.
+#[map]
+static LAST_RECLAIM_EVENT_NS: HashMap<u64, u64> = HashMap::with_max_entries(256, 0);
+
+const RECLAIM_EVENT_INTERVAL_NS: u64 = 10_000_000_000;
+
 /// Pressure level constants (matching userspace enum).
 const PRESSURE_LOW: u32 = 0;
 const PRESSURE_MEDIUM: u32 = 1;
-const PRESSURE_CRITICAL: u32 = 2;
 
 /// KProbe: try_to_free_pages
 ///
@@ -88,14 +107,14 @@ const PRESSURE_CRITICAL: u32 = 2;
 /// - order 3: 8 contiguous pages (32 KB) — higher-order allocation
 ///   failing suggests severe fragmentation or pressure
 #[kprobe]
-pub fn try_to_free_pages(ctx: KProbeContext) -> c_long {
+pub fn try_to_free_pages(ctx: ProbeContext) -> c_long {
     match try_try_to_free_pages(ctx) {
         Ok(ret) => ret,
         Err(ret) => ret,
     }
 }
 
-fn try_try_to_free_pages(ctx: KProbeContext) -> Result<c_long, c_long> {
+fn try_try_to_free_pages(ctx: ProbeContext) -> Result<c_long, c_long> {
     let config = CONFIG.get(0).ok_or(0)?;
 
     // Read function arguments: zonelist, order, gfp_mask
@@ -107,30 +126,82 @@ fn try_try_to_free_pages(ctx: KProbeContext) -> Result<c_long, c_long> {
     let _gfp_mask: u32 = ctx.arg(2).ok_or(0)?;
 
     let cgroup_id = unsafe { aya_ebpf::helpers::bpf_get_current_cgroup_id() };
-    let pid_tgid = unsafe { aya_ebpf::helpers::bpf_get_current_pid_tgid() };
-    let pid = pid_tgid as u32;
-
-    // Determine pressure level based on allocation order.
-    // High-order allocations failing (order >= 3) indicate severe
-    // fragmentation or memory pressure. Normal-order direct reclaim
-    // (order < 3) indicates moderate pressure.
-    let pressure_level = if order >= 3 {
-        PRESSURE_CRITICAL
-    } else {
-        PRESSURE_MEDIUM
-    };
-
-    // Deduplicate: only send event if the pressure level increased
-    // since the last report for this cgroup.
-    let last = unsafe { LAST_PRESSURE.get(&cgroup_id).copied().unwrap_or(PRESSURE_LOW) };
-    if last >= pressure_level {
-        // Pressure level hasn't increased — skip to avoid flooding
-        // the ring buffer with duplicate events.
+    if cgroup_id != config.node_cgroup_id {
         return Ok(0);
     }
-    unsafe {
-        let _ = LAST_PRESSURE.insert(&cgroup_id, &pressure_level, 0);
+    let pid_tgid = aya_ebpf::helpers::bpf_get_current_pid_tgid();
+    let pid = (pid_tgid >> 32) as u32;
+    let tid = pid_tgid as u32;
+
+    let now = unsafe { aya_ebpf::helpers::bpf_ktime_get_ns() };
+    if emit_direct_reclaim(cgroup_id, pid, tid, now) {
+        info!(
+            &ctx,
+            "Memory pressure MEDIUM: direct reclaim order={}, cgroup={}", order, cgroup_id
+        );
     }
+
+    Ok(0)
+}
+
+/// Tracepoint: vmscan/mm_vmscan_direct_reclaim_begin
+///
+/// This tracepoint covers both global and memory-cgroup direct reclaim and is
+/// more stable than relying on one internal reclaim function name. Keep the
+/// kprobe above as an additional compatibility signal; the shared rate limit
+/// prevents the two hooks from duplicating events.
+#[tracepoint]
+pub fn direct_reclaim_begin(ctx: TracePointContext) -> c_long {
+    match try_direct_reclaim_begin(ctx) {
+        Ok(ret) => ret,
+        Err(ret) => ret,
+    }
+}
+
+fn try_direct_reclaim_begin(ctx: TracePointContext) -> Result<c_long, c_long> {
+    let config = CONFIG.get(0).ok_or(0)?;
+    let order: u32 = unsafe { ctx.read_at(8)? };
+    let cgroup_id = unsafe { aya_ebpf::helpers::bpf_get_current_cgroup_id() };
+    if cgroup_id != config.node_cgroup_id {
+        return Ok(0);
+    }
+    let pid_tgid = aya_ebpf::helpers::bpf_get_current_pid_tgid();
+    let pid = (pid_tgid >> 32) as u32;
+    let tid = pid_tgid as u32;
+    let now = unsafe { aya_ebpf::helpers::bpf_ktime_get_ns() };
+
+    if emit_direct_reclaim(cgroup_id, pid, tid, now) {
+        info!(
+            &ctx,
+            "Memory pressure MEDIUM: direct reclaim tracepoint order={}, cgroup={}",
+            order,
+            cgroup_id
+        );
+    }
+
+    Ok(0)
+}
+
+#[inline(always)]
+fn emit_direct_reclaim(cgroup_id: u64, pid: u32, tid: u32, now: u64) -> bool {
+    // Direct reclaim proves pressure, but allocation order alone does not
+    // prove system-wide critical pressure. Reserve critical classification
+    // for vmpressure/OOM evidence.
+    let pressure_level = PRESSURE_MEDIUM;
+
+    // Rate-limit direct reclaim without permanently suppressing later
+    // pressure episodes for this cgroup.
+    let last_event_ns = unsafe {
+        LAST_RECLAIM_EVENT_NS
+            .get(&cgroup_id)
+            .copied()
+            .unwrap_or(0)
+    };
+    if now.saturating_sub(last_event_ns) < RECLAIM_EVENT_INTERVAL_NS {
+        // Skip closely spaced callbacks to avoid flooding the ring buffer.
+        return false;
+    }
+    let _ = LAST_RECLAIM_EVENT_NS.insert(&cgroup_id, &now, 0);
 
     // Emit the event. Userspace will read detailed memory stats
     // from /proc/meminfo and cgroup memory.stat since eBPF cannot
@@ -138,34 +209,20 @@ fn try_try_to_free_pages(ctx: KProbeContext) -> Result<c_long, c_long> {
     let event = MemPressureEvent {
         header: EventHeader {
             event_type: EventType::MemPressure as u32,
-            timestamp_ns: unsafe { aya_ebpf::helpers::bpf_ktime_get_ns() },
+            _padding: 0,
+            timestamp_ns: now,
             pid,
-            tid: (pid_tgid >> 32) as u32,
+            tid,
         },
-        free_pages: 0,        // Userspace reads from /proc/meminfo
-        reclaim_pages: 0,     // Userspace reads from /proc/meminfo
+        free_pages: 0,    // Userspace reads from /proc/meminfo
+        reclaim_pages: 0, // Userspace reads from /proc/meminfo
         pressure_level,
-        anon_pages: 0,        // Userspace reads from cgroup memory.stat
+        _padding: 0,
+        anon_pages: 0, // Userspace reads from cgroup memory.stat
     };
-    EVENTS.output(&event, 0);
+    emit(&event);
 
-    if pressure_level == PRESSURE_CRITICAL {
-        warn!(
-            &ctx,
-            "Memory pressure CRITICAL: direct reclaim order={}, cgroup={}",
-            order,
-            cgroup_id
-        );
-    } else {
-        info!(
-            &ctx,
-            "Memory pressure MEDIUM: direct reclaim order={}, cgroup={}",
-            order,
-            cgroup_id
-        );
-    }
-
-    Ok(0)
+    true
 }
 
 /// Tracepoint: vmpressure/vmpressure_level_change
@@ -192,11 +249,15 @@ pub fn vmpressure_level_change(ctx: TracePointContext) -> c_long {
 }
 
 fn try_vmpressure(ctx: TracePointContext) -> Result<c_long, c_long> {
-    let _config = CONFIG.get(0).ok_or(0)?;
+    let config = CONFIG.get(0).ok_or(0)?;
 
     let cgroup_id = unsafe { aya_ebpf::helpers::bpf_get_current_cgroup_id() };
-    let pid_tgid = unsafe { aya_ebpf::helpers::bpf_get_current_pid_tgid() };
-    let pid = pid_tgid as u32;
+    if cgroup_id != config.node_cgroup_id {
+        return Ok(0);
+    }
+    let pid_tgid = aya_ebpf::helpers::bpf_get_current_pid_tgid();
+    let pid = (pid_tgid >> 32) as u32;
+    let tid = pid_tgid as u32;
 
     // Read the pressure level from the tracepoint.
     // The vmpressure_level_change tracepoint has:
@@ -206,36 +267,39 @@ fn try_vmpressure(ctx: TracePointContext) -> Result<c_long, c_long> {
     // Note: The exact offset depends on the tracepoint format.
     // On most kernels, the level is at offset 8 (after the common header
     // and dev field). We read it as a u32 for simplicity.
-    let level: u32 = unsafe { ctx.read_at(8)? }.ok_or(0)?;
+    let level: u32 = unsafe { ctx.read_at(8)? };
 
     // Deduplicate: only send event if the pressure level increased.
-    let last = unsafe { LAST_PRESSURE.get(&cgroup_id).copied().unwrap_or(PRESSURE_LOW) };
+    let last = unsafe {
+        LAST_PRESSURE
+            .get(&cgroup_id)
+            .copied()
+            .unwrap_or(PRESSURE_LOW)
+    };
     if last >= level {
         return Ok(0);
     }
-    unsafe {
-        let _ = LAST_PRESSURE.insert(&cgroup_id, &level, 0);
-    }
+    let _ = LAST_PRESSURE.insert(&cgroup_id, &level, 0);
 
     let event = MemPressureEvent {
         header: EventHeader {
             event_type: EventType::MemPressure as u32,
+            _padding: 0,
             timestamp_ns: unsafe { aya_ebpf::helpers::bpf_ktime_get_ns() },
             pid,
-            tid: (pid_tgid >> 32) as u32,
+            tid,
         },
-        free_pages: 0,        // Userspace reads from /proc/meminfo
-        reclaim_pages: 0,     // Userspace reads from /proc/meminfo
+        free_pages: 0,    // Userspace reads from /proc/meminfo
+        reclaim_pages: 0, // Userspace reads from /proc/meminfo
         pressure_level: level,
-        anon_pages: 0,         // Userspace reads from cgroup memory.stat
+        _padding: 0,
+        anon_pages: 0, // Userspace reads from cgroup memory.stat
     };
-    EVENTS.output(&event, 0);
+    emit(&event);
 
     info!(
         &ctx,
-        "vmpressure level change: cgroup={}, level={}",
-        cgroup_id,
-        level
+        "vmpressure level change: cgroup={}, level={}", cgroup_id, level
     );
 
     Ok(0)

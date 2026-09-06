@@ -1,4 +1,4 @@
-use common::config::NodeConfig;
+use common::config::{DeploymentEnvironment, NodeConfig};
 use common::error::PlatformError;
 use std::net::IpAddr;
 use url::Url;
@@ -124,9 +124,179 @@ fn validate_admin_advertisement(config: &NodeConfig, errors: &mut Vec<String>) {
     }
 }
 
+fn validate_production_secret_policy(config: &NodeConfig, errors: &mut Vec<String>) {
+    if config.node.environment != DeploymentEnvironment::Production {
+        return;
+    }
+
+    if !config.auth.enabled {
+        errors.push("production requires auth.enabled = true".to_string());
+    }
+    if !config.auth.require_tls {
+        errors.push("production requires auth.require_tls = true".to_string());
+    }
+    if config.admin.auth_token.is_some() {
+        errors.push(
+            "production rejects legacy admin.auth_token; use separate read/write tokens"
+                .to_string(),
+        );
+    }
+    for (label, token) in [
+        ("auth.read_token", config.auth.read_token.as_deref()),
+        ("auth.write_token", config.auth.write_token.as_deref()),
+    ] {
+        if let Err(error) = common::auth::validate_production_bearer_token(label, token) {
+            errors.push(error);
+        }
+    }
+
+    if !matches!(
+        config.runtime.key_source.as_str(),
+        "vault-transit" | "aws-kms-hmac"
+    ) {
+        errors.push(
+            "production requires runtime.key_source = \"vault-transit\" or \"aws-kms-hmac\" so the root key remains non-exportable"
+                .to_string(),
+        );
+    }
+    if config.runtime.key_source == "vault-transit" {
+        if config
+            .runtime
+            .key_vault_ca_cert
+            .as_deref()
+            .is_some_and(|path| path.trim().is_empty())
+        {
+            errors.push("runtime.key_vault_ca_cert must not be empty when configured".to_string());
+        }
+        if !config
+            .runtime
+            .key_vault_transit_key_version
+            .is_some_and(|version| version > 0)
+        {
+            errors.push(
+                "production requires a pinned runtime.key_vault_transit_key_version greater than zero"
+                    .to_string(),
+            );
+        }
+        if config.runtime.key_vault_transit_previous_key_version
+            == config.runtime.key_vault_transit_key_version
+            && config
+                .runtime
+                .key_vault_transit_previous_key_version
+                .is_some()
+        {
+            errors.push(
+                "Vault Transit previous key version must differ from the active version"
+                    .to_string(),
+            );
+        }
+        if let Some(url) = config.runtime.key_vault_url.as_deref() {
+            if Url::parse(url.trim())
+                .map(|url| url.scheme() != "https")
+                .unwrap_or(true)
+            {
+                errors.push("production Vault Transit URL must use https".to_string());
+            }
+        }
+    }
+    if config.runtime.key_source == "aws-kms-hmac" {
+        if config.runtime.key_aws_kms_previous_key_id == config.runtime.key_aws_kms_key_id
+            && config.runtime.key_aws_kms_previous_key_id.is_some()
+        {
+            errors.push("AWS KMS previous key id must differ from the active key id".to_string());
+        }
+        if let Some(endpoint) = config.runtime.key_aws_kms_endpoint.as_deref() {
+            if Url::parse(endpoint.trim())
+                .map(|url| url.scheme() != "https")
+                .unwrap_or(true)
+            {
+                errors.push("production AWS KMS endpoint override must use https".to_string());
+            }
+        }
+    }
+
+    if config
+        .nats
+        .creds_file
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or_default()
+        .is_empty()
+    {
+        errors.push("production requires nats.creds_file".to_string());
+    }
+    if !config.nats.url.trim().starts_with("tls://") {
+        errors.push("production requires a tls:// NATS URL".to_string());
+    }
+    if config.runtime.isolation_mode.as_deref() != Some("single-trust-domain") {
+        errors.push(
+            "production requires runtime.isolation_mode = \"single-trust-domain\"; the in-process runtime does not claim hostile multi-tenant isolation"
+                .to_string(),
+        );
+    }
+    if !config.ebpf.enabled || !config.ebpf.required {
+        errors.push(
+            "production requires ebpf.enabled = true and ebpf.required = true for workload identity and persistent connection accounting"
+                .to_string(),
+        );
+    }
+    if config
+        .admin
+        .advertised_host
+        .as_deref()
+        .is_some_and(|host| !host.trim().is_empty())
+        && config.admin.advertised_artifact_url.is_none()
+    {
+        errors.push(
+            "production requires admin.advertised_artifact_url with an explicit https:// URL when advertising artifacts"
+                .to_string(),
+        );
+    }
+    if config
+        .admin
+        .advertised_artifact_url
+        .as_deref()
+        .is_some_and(|url| !url.trim().starts_with("https://"))
+    {
+        errors.push("production advertised artifact URLs must use https://".to_string());
+    }
+    if config.dns.webhook_token.is_some() {
+        errors.push(
+            "production rejects inline dns.webhook_token; inject this credential through the external secret manager"
+                .to_string(),
+        );
+    }
+}
+
 /// Validate the final merged configuration.
 pub(crate) fn validate_config(config: &NodeConfig) -> Result<(), PlatformError> {
     let mut errors = Vec::new();
+
+    if config
+        .runtime
+        .isolation_mode
+        .as_deref()
+        .is_some_and(|mode| mode.trim() != "single-trust-domain")
+    {
+        errors.push(
+            "runtime.isolation_mode supports only \"single-trust-domain\" in the current in-process runtime"
+                .to_string(),
+        );
+    }
+
+    if config.nats.client_cert.is_some() != config.nats.client_key.is_some() {
+        errors.push("nats.client_cert and nats.client_key must be configured together".to_string());
+    }
+    for (label, value) in [
+        ("nats.creds_file", config.nats.creds_file.as_deref()),
+        ("nats.ca_cert", config.nats.ca_cert.as_deref()),
+        ("nats.client_cert", config.nats.client_cert.as_deref()),
+        ("nats.client_key", config.nats.client_key.as_deref()),
+    ] {
+        if value.is_some_and(|path| path.trim().is_empty()) {
+            errors.push(format!("{label} must not be empty when configured"));
+        }
+    }
 
     if config.runtime.port_start >= config.runtime.port_end {
         errors.push("port_start must be less than port_end".to_string());
@@ -167,6 +337,27 @@ pub(crate) fn validate_config(config: &NodeConfig) -> Result<(), PlatformError> 
     }
     if config.health.default_memory_pages == 0 {
         errors.push("default_memory_pages must be > 0".to_string());
+    }
+    if config.health.default_max_instances == 0 {
+        errors.push("default_max_instances must be > 0".to_string());
+    }
+    if config.health.min_disk_free_bytes == 0 {
+        errors.push("min_disk_free_bytes must be > 0".to_string());
+    }
+    if config.health.min_disk_free_inodes == 0 {
+        errors.push("min_disk_free_inodes must be > 0".to_string());
+    }
+    if config.health.max_memory_bytes == 0 {
+        errors.push("max_memory_bytes must be > 0".to_string());
+    }
+    let default_pool_bytes = u64::from(config.health.default_memory_pages)
+        .checked_mul(65_536)
+        .and_then(|bytes| bytes.checked_mul(config.health.default_max_instances as u64));
+    if default_pool_bytes.is_none_or(|bytes| bytes > config.health.max_memory_bytes) {
+        errors.push(
+            "default_memory_pages * default_max_instances must fit within max_memory_bytes"
+                .to_string(),
+        );
     }
 
     if config.rate_limit.default_requests_per_second == 0 {
@@ -408,6 +599,7 @@ pub(crate) fn validate_config(config: &NodeConfig) -> Result<(), PlatformError> 
         )),
     }
     validate_admin_advertisement(config, &mut errors);
+    validate_production_secret_policy(config, &mut errors);
 
     if config.auth.enabled && config.auth.require_tls && !admin_tls_material_configured(config) {
         errors.push(
@@ -534,6 +726,27 @@ pub(crate) fn validate_hot_config(config: &crate::hot::HotConfig) -> Result<(), 
     }
     if config.health.default_memory_pages == 0 {
         errors.push("default_memory_pages must be > 0".to_string());
+    }
+    if config.health.default_max_instances == 0 {
+        errors.push("default_max_instances must be > 0".to_string());
+    }
+    if config.health.min_disk_free_bytes == 0 {
+        errors.push("min_disk_free_bytes must be > 0".to_string());
+    }
+    if config.health.min_disk_free_inodes == 0 {
+        errors.push("min_disk_free_inodes must be > 0".to_string());
+    }
+    if config.health.max_memory_bytes == 0 {
+        errors.push("max_memory_bytes must be > 0".to_string());
+    }
+    let default_pool_bytes = u64::from(config.health.default_memory_pages)
+        .checked_mul(65_536)
+        .and_then(|bytes| bytes.checked_mul(config.health.default_max_instances as u64));
+    if default_pool_bytes.is_none_or(|bytes| bytes > config.health.max_memory_bytes) {
+        errors.push(
+            "default_memory_pages * default_max_instances must fit within max_memory_bytes"
+                .to_string(),
+        );
     }
 
     if config.rate_limit.default_requests_per_second == 0 {

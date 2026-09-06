@@ -1,7 +1,10 @@
-use prometheus::{IntCounter, Opts, Registry};
+use prometheus::{IntCounter, IntGauge, Opts, Registry};
 
 /// Prometheus metrics for admin API authentication events.
 pub struct AuthMetrics {
+    /// Whether admin API authentication is enabled in the effective config.
+    pub auth_enabled: IntGauge,
+
     /// Total successful authentications.
     pub auth_successes_total: IntCounter,
 
@@ -15,6 +18,15 @@ pub struct AuthMetrics {
 impl AuthMetrics {
     /// Create and register auth metrics with the given Prometheus registry.
     pub fn new(registry: &Registry) -> Self {
+        let auth_enabled = IntGauge::with_opts(Opts::new(
+            "wasm_admin_auth_enabled",
+            "Whether admin API authentication is enabled (1) or disabled (0)",
+        ))
+        .expect("failed to create auth_enabled gauge");
+        registry
+            .register(Box::new(auth_enabled.clone()))
+            .expect("failed to register auth_enabled gauge");
+
         let auth_successes_total = IntCounter::with_opts(Opts::new(
             "wasm_admin_auth_successes_total",
             "Successful admin API authentications",
@@ -43,6 +55,7 @@ impl AuthMetrics {
             .expect("failed to register rate_limited_total counter");
 
         AuthMetrics {
+            auth_enabled,
             auth_successes_total,
             auth_failures_total,
             rate_limited_total,
@@ -51,6 +64,12 @@ impl AuthMetrics {
 
     /// Create auth metrics without registering with a registry (for testing).
     pub fn new_unregistered() -> Self {
+        let auth_enabled = IntGauge::with_opts(Opts::new(
+            "wasm_admin_auth_enabled",
+            "Whether admin API authentication is enabled (1) or disabled (0)",
+        ))
+        .unwrap();
+
         let auth_successes_total = IntCounter::with_opts(Opts::new(
             "wasm_admin_auth_successes_total",
             "Successful admin API authentications",
@@ -70,6 +89,7 @@ impl AuthMetrics {
         .unwrap();
 
         AuthMetrics {
+            auth_enabled,
             auth_successes_total,
             auth_failures_total,
             rate_limited_total,

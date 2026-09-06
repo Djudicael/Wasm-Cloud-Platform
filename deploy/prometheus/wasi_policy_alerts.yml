@@ -10,7 +10,7 @@ groups:
   - name: wasi_policy
     rules:
       - alert: WasiPolicyConnectionDenied
-        expr: rate(wasm_policy_connection_denied_total[5m]) > 10
+        expr: rate(wasm_policy_connection_denied_total[5m]) > (10 / 60)
         for: 2m
         labels:
           severity: warning
@@ -24,7 +24,7 @@ groups:
             unauthorized external services.
 
       - alert: WasiPolicyFdExhaustion
-        expr: rate(wasm_policy_fd_denied_total[5m]) > 5
+        expr: rate(wasm_policy_fd_denied_total[5m]) > (5 / 60)
         for: 2m
         labels:
           severity: warning
@@ -38,7 +38,7 @@ groups:
             limit in the app's policy configuration.
 
       - alert: WasiPolicyEgressDenied
-        expr: rate(wasm_policy_egress_denied_total[5m]) > 5
+        expr: rate(wasm_policy_egress_denied_total[5m]) > (5 / 60)
         for: 2m
         labels:
           severity: warning
@@ -52,7 +52,7 @@ groups:
             data exfiltration attempts.
 
       - alert: WasiPolicyDnsDenied
-        expr: rate(wasm_policy_dns_denied_total[5m]) > 5
+        expr: rate(wasm_policy_dns_denied_total[5m]) > (5 / 60)
         for: 2m
         labels:
           severity: info
@@ -66,7 +66,7 @@ groups:
             app's network behavior.
 
       - alert: WasiPolicyBindDenied
-        expr: rate(wasm_policy_bind_denied_total[5m]) > 3
+        expr: rate(wasm_policy_bind_denied_total[5m]) > (3 / 60)
         for: 2m
         labels:
           severity: info
@@ -79,7 +79,7 @@ groups:
             unauthorized ports.
 
       - alert: WasiPolicyFsWriteDenied
-        expr: rate(wasm_policy_fs_write_denied_total[5m]) > 5
+        expr: rate(wasm_policy_fs_write_denied_total[5m]) > (5 / 60)
         for: 2m
         labels:
           severity: info

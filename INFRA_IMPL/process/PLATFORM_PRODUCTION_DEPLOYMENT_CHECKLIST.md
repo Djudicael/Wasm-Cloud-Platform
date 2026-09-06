@@ -16,6 +16,21 @@ This checklist is an operator runbook, not a statement that every listed capabil
 is automated today. Items marked as requirements need deployment evidence from the
 chosen infrastructure, even when the platform code has unit or integration coverage.
 
+The boundary is the Wasm Cloud Platform. NATS is a required platform dependency,
+but PostgreSQL is only a dependency of applications such as the OIDC rehearsal.
+Vault Transit and AWS KMS HMAC are supported external seal-root integrations;
+the platform does not deploy Vault, KMS, or an HSM. Likewise, Prometheus, log,
+and trace backends consume platform telemetry but remain external services.
+Platform release gates prove client interoperability, fail-safe behavior, and
+recovery. Availability, backup, PKI, and lifecycle qualification of the chosen
+external products belong to the deployment operator's infrastructure gate.
+
+The completed single-host campaign is reconciled in
+[Phase 10 readiness reconciliation](prod_validation/evidence/2026-08-29-single-host/PHASE_10_RECONCILIATION.md).
+Its platform-source result is a pass for producing a signed candidate. This
+operator checklist decides whether a particular environment may receive traffic;
+it does not decide whether the platform release itself is legitimate.
+
 ## Release decision rules
 
 Classify every required gate as `PASS`, `FAIL`, or `EXCEPTION`. Each exception needs
@@ -90,8 +105,22 @@ than copying an illustrative unit from an implementation document.
 
 ## 3. Host and operating-system gates
 
-- [ ] CPU virtualization, kernel, KVM, cgroup, BTF, eBPF, filesystem, and clock
-      requirements are verified on the exact production image.
+The platform does not distribute a production kernel or require Firecracker.
+The operator owns the VPS/host image, kernel, firmware, microcode, patching, and
+virtualization policy. The repository's
+[`VM_TESTBED_KERNEL_VALIDATION.md`](VM_TESTBED_KERNEL_VALIDATION.md) applies only
+to the disposable Firecracker rehearsal environment.
+
+- [ ] The exact production host image satisfies the platform's architecture,
+      Linux, filesystem, networking, DNS, and clock requirements.
+- [ ] cgroup v2, BTF, tracefs/perf facilities, and required capabilities are
+      verified when the corresponding resource-control or eBPF features are
+      enabled. Disabled optional features have an explicit operating policy.
+- [ ] The VPS/host provider or operating-system owner supplies the required
+      kernel, firmware/microcode, vulnerability handling, and security updates.
+      This is host admission evidence, not a platform release artifact.
+- [ ] KVM/Firecracker checks are required only for deployments that deliberately
+      run the platform in Firecracker; native VPS deployments do not require KVM.
 - [ ] The node runs as a dedicated unprivileged service account.
 - [ ] Files and directories have explicit ownership and modes for configuration,
       TLS private keys, sealing keys, NATS credentials, redb, caches, artifacts, logs,
@@ -105,6 +134,15 @@ than copying an illustrative unit from an implementation document.
       in an unnecessarily privileged node process.
 - [ ] Time synchronization, entropy availability, DNS resolution, certificate trust,
       log rotation, disk trim/monitoring, and security patching are operational.
+- [ ] Every host, platform guest, and timestamp-sensitive application dependency
+      uses at least three independent operator-approved time sources (NTS or an
+      equivalently authenticated private service where available). Offset,
+      stratum/source loss, synchronization state, and missing telemetry alert
+      before the application clock exceeds its documented five-second maximum.
+- [ ] Host suspend/resume or a controlled clock fault is rehearsed. Services either
+      recover within the clock bound before accepting traffic or fail readiness;
+      backup markers, token/session validity, retention, and audit ordering remain
+      correct after recovery.
 - [ ] Core dumps and crash artifacts follow the security policy and cannot leak secrets.
 - [ ] OS and platform upgrades are rehearsed before production and respect the node disruption budget.
 
@@ -162,7 +200,18 @@ NATS/JetStream is a critical production dependency, not a disposable message bus
 The local testbed creates one NATS microVM. It is useful for protocol validation but
 provides no evidence for production NATS high availability.
 
+Apply the platform-owned TLS/NATS contract in
+[`PLATFORM_TLS_AND_NATS_PRODUCTION_VALIDATION.md`](./PLATFORM_TLS_AND_NATS_PRODUCTION_VALIDATION.md).
+The node, `wasm-ctl`, and standalone deploy ingress accept explicit CA,
+client-certificate, and client-key paths. Production node configuration requires
+a `tls://` URL and credentials; a client certificate and key must always be
+configured together. Preserve the external cluster's availability, authorization,
+rotation, and recovery evidence separately from this platform client contract.
+
 ## 6. Identity, authentication, and secrets gates
+
+Apply the detailed [production secret lifecycle](./PRODUCTION_SECRET_LIFECYCLE.md)
+and attach its external-manager and redaction evidence to the change record.
 
 - [ ] Replace every `CHANGE-ME` value in the production template through external
       secret delivery; fail deployment if placeholders remain.
@@ -172,17 +221,44 @@ provides no evidence for production NATS high availability.
 - [ ] Read and write identities are separate, least-privilege, rotated, revocable,
       audited, and not shared by humans and automation.
 - [ ] Admin and artifact access is identity-aware at the network and application layers.
-- [ ] The runtime sealing key uses a durable production source such as Vault Transit,
-      KMS, a protected command integration, or a tightly protected file provisioned
-      by the secret system. Do not use generated-ephemeral keys for persistent production state.
+- [ ] Gateway OIDC has an exact HTTPS issuer, expected audience, accepted algorithms,
+      claim mapping, token lifetime/skew policy, and fail-closed behaviour.
+- [ ] If JWKS uses a private split-horizon endpoint, it has independent DNS/TLS/egress
+      controls while token `iss` validation remains bound to the public issuer.
+- [ ] JWKS refresh, overlapping old/new signing keys, provider outage, malformed,
+      expired, wrong-issuer, wrong-audience, missing-scope, and wrong-role paths are tested.
+- [ ] Public, authenticated, role-protected, and scope-protected routes are verified
+      through every node and the production front door using a non-production test identity.
+- [ ] Set `node.environment = "production"`; prove admission rejects local defaults.
+- [ ] The node runtime sealing root uses pinned Vault Transit HMAC or AWS KMS HMAC
+      with a non-exportable key. Generated, file, command, KV-exported, environment,
+      and passphrase sources are not admitted for production nodes.
+- [ ] Private Vault PKI is supplied through `runtime.key_vault_ca_cert`; SAN
+      validation passes and no trust-all or plaintext fallback exists.
+- [ ] Vault Transit uses `type=hmac key_size=32` without `derived=true`; the
+      stable unique node context is HMAC input/domain separation.
+- [ ] Deploy ingress runs in its production mode and receives its derived envelope
+      key from a secret-agent read-only tmpfs projection with mode 0600 or stricter.
 - [ ] Bootstrap credentials are short-lived and cannot be reused as steady-state credentials.
 - [ ] Key/certificate/token rotation is tested without losing encrypted data or cluster availability.
+- [ ] Secret deletion reaches every authoritative registry node, including a stale
+      node after reconnect, and rotated/revoked application instances are evicted.
+- [ ] External seal-root rotation rewraps both the persisted KEK and node transport
+      key; every node restarts successfully after the previous key is removed.
 - [ ] Break-glass access is time-bounded, separately audited, and exercised before an incident.
 - [ ] Secret values never appear in CLI arguments, process listings, unit files,
       repository files, release bundles, state files, logs, metrics, or support archives.
 
 ## 7. TLS and certificate gates
 
+- [ ] The exact signed node passes `scripts/vm/validate-platform-tls-contract.sh`
+      or an equivalent staging contract using the real PKI and NATS identity.
+- [ ] Proxy TLS uses ALPN while cleartext h2c remains on its separate listener;
+      HTTP/1.1 and HTTP/2 both pass through the selected front door.
+- [ ] Admin TLS also protects the built-in deploy-ingress and artifact listeners,
+      or each is protected by an explicitly documented equivalent termination hop.
+- [ ] Multi-node artifact advertisement uses an explicit `https://` URL whose
+      hostname is covered by the serving certificate.
 - [ ] TLS is enabled for public ingress, admin access, remote artifact transfer,
       NATS, databases, secret managers, and observability endpoints as required by the threat model.
 - [ ] Certificate hostname/SAN verification is enabled; trust-all or plaintext fallback is forbidden.
@@ -195,6 +271,16 @@ provides no evidence for production NATS high availability.
 - [ ] Rotation and expired/revoked-certificate failure paths have been tested.
 
 ## 8. Artifact and release trust gates
+
+- [ ] Build platform artifacts only through `.github/workflows/release.yml` from
+      the approved semantic-version tag; manual candidate runs are not promotable.
+- [ ] Apply `INFRA_IMPL/process/RELEASE_ARTIFACT_PROMOTION.md` and run
+      `scripts/verify-release-attestations.sh` on the exact downloaded archive
+      before deployment.
+- [ ] Verify the expected source SHA/ref, exact signer workflow, SLSA provenance,
+      SPDX 2.3 attestation, closed artifact allowlist, manifest, and checksums.
+- [ ] Record the workflow run, archive digest, manifest, SBOM, and attestation
+      bundles in the production change record.
 
 - [ ] Rust is pinned through `rust-toolchain.toml`; `Cargo.lock` is committed.
 - [ ] Release builds use locked/frozen resolution in a controlled Linux builder.
@@ -239,23 +325,58 @@ hardening for environments with mutually untrusted nodes or stronger supply-chai
 
 - [ ] The production threat model states whether tenants and applications are trusted,
       semi-trusted, or hostile to one another.
+- [ ] The current release is admitted only with
+      `runtime.isolation_mode = "single-trust-domain"`. All applications sharing
+      a node are controlled by one mutually trusted operator/tenant domain.
+      Hostile or mutually untrusted multi-tenancy is a deployment rejection, not
+      an accepted risk toggle.
+- [ ] Every `wasm-node` process runs in its own cgroup-v2 cgroup, and the recorded
+      cgroup inode/ID matches the `node_cgroup_id` written into the eBPF maps.
+- [ ] Production sets `ebpf.enabled = true` and `ebpf.required = true`; inactive,
+      partially attached, or terminated monitoring fails readiness and pages the
+      platform operator.
 - [ ] WASI filesystem, outbound TCP, DNS, bind, environment, file descriptor, memory,
       table, fuel, epoch, and connection policies are tested on the live execution path.
 - [ ] Namespace boundaries and internal service discovery deny cross-namespace access by default.
+- [ ] Node-local internal-gateway callers are attributed from a non-spoofable
+      workload boundary; unresolved identity, inactive eBPF, unavailable maps,
+      and consumer failure remain fail-closed and alert distinctly.
+- [ ] Realm and client-specific role claims are tested positively and negatively,
+      and a valid user role cannot bypass workload namespace authorization.
+- [ ] The exact signed WASI/node image resolves `.internal` names through the
+      production resolver path; a loopback-plus-Host test override is not accepted
+      as DNS evidence.
+- [ ] Every internal-mesh dependency closure uses `placement.policy = "every_node"`;
+      each fully qualified `local_dependencies` entry is same-namespace and is
+      deployed before its dependants on every node.
+- [ ] Removing or failing a local dependency produces the documented bounded 502
+      behavior, cannot cold-start from a retained artifact, alerts operators, and
+      never searches or forwards to another platform node.
+- [ ] Architecture and network policy explicitly prohibit cross-host `.internal`
+      discovery, forwarding fallback, and workload identity. Cross-host mesh
+      identity is recorded as out of scope by design, not as a missing feature.
+- [ ] Applications that intentionally call a remote service use an explicit
+      external endpoint with independently validated TLS, identity, authorization,
+      revocation, audit, and failure semantics.
 - [ ] Administrative configuration cannot accidentally widen every application's policy.
 - [ ] Host-level network/cgroup/eBPF controls cover capabilities that are not fully
       authoritative inside Wasmtime host-call wrappers.
+- [ ] Block-I/O and memory-pressure observations exclude other host cgroups.
+      Buffered kernel writeback is not represented as exact per-application I/O;
+      it is accounted only within the documented node/single-trust-domain limit.
 - [ ] Resource accounting is released on normal completion, trap, cancellation,
       idle pruning, node drain, and dependency failure.
 - [ ] Noisy-neighbor tests prove that one application cannot exhaust node CPU, memory,
       ports, sockets, storage, or control-plane consumers for other applications.
 - [ ] Runtime defaults are treated as starting points; application-specific limits
       are derived from measured work and denial-of-service objectives.
-- [ ] eBPF-disabled or unavailable behavior is understood and has compensating host controls.
+- [ ] A request for mutually untrusted tenants is blocked until a separately
+      validated process-per-application/cgroup-per-application execution mode,
+      credentials boundary, non-observation suite, and escape tests exist.
 
-Optional deeper Wasmtime host/resource wrapping remains a hardening opportunity.
-Whether it is a blocker depends on the production tenant threat model; document that
-decision instead of assuming all policy surfaces are equally authoritative.
+Optional deeper Wasmtime host/resource wrapping remains a hardening opportunity
+inside the supported trust domain. It does not upgrade the current in-process
+runtime into a hostile multi-tenant isolation boundary.
 
 ## 11. Capacity and performance gates
 
@@ -267,8 +388,17 @@ decision instead of assuming all policy surfaces are equally authoritative.
       descriptors, ports, Wasm instances, fuel, traps, and all connection pools.
 - [ ] Node sizing leaves headroom above memory backpressure and disk thresholds after
       losing one node and while compiling/restarting applications.
+- [ ] `health.max_memory_bytes` is explicitly below the enforced VM/container/systemd
+      cgroup limit, and every application's declared instance pool fits that budget.
+- [ ] `health.min_disk_free_bytes` and `health.min_disk_free_inodes` are explicit;
+      steady state and rolling replacement stay above twice both reserves.
+- [ ] Volume growth and inode recovery are owned, timed, and rehearsed before the hard
+      readiness reserve is reached. Follow
+      `INFRA_IMPL/process/RESOURCE_POLICY_PRODUCTION_VALIDATION.md`.
 - [ ] Platform default fuel and epoch deadlines are benchmarked separately and do not
       reject legitimate p99 work or permit unbounded execution.
+- [ ] Long-lived CLI-style service stores survive beyond the request epoch window;
+      per-request WASI HTTP stores still enforce their finite wall-clock deadline.
 - [ ] Wasmtime code cache is on suitable storage and bounded; pooling allocator is
       enabled only when the exact workload benchmark demonstrates a benefit.
 - [ ] HAProxy/load-balancer health-check fan-out and database readiness checks are

@@ -76,6 +76,10 @@ impl OidcProvider {
     }
 
     async fn discover_jwks_uri(&self) -> Result<String, GatewayError> {
+        if let Some(jwks_url) = self.config.jwks_url.as_deref() {
+            return Ok(jwks_url.to_string());
+        }
+
         let discovery_url = format!(
             "{}/.well-known/openid-configuration",
             self.config.issuer_url.trim_end_matches('/')
@@ -294,6 +298,7 @@ mod tests {
         let config = OidcConfig {
             issuer_url: "https://keycloak.example.com/realms/test".to_string(),
             audience: "my-app".to_string(),
+            jwks_url: None,
             jwks_refresh_secs: 3600,
             clock_skew_secs: 30,
         };
@@ -306,16 +311,35 @@ mod tests {
         let config = OidcConfig {
             issuer_url: "https://keycloak.example.com/realms/test".to_string(),
             audience: "my-app".to_string(),
+            jwks_url: Some("https://keycloak.internal/jwks".to_string()),
             jwks_refresh_secs: 1800,
             clock_skew_secs: 60,
         };
         let json = serde_json::to_string(&config).unwrap();
         assert!(json.contains("https://keycloak.example.com/realms/test"));
         assert!(json.contains("my-app"));
+        assert!(json.contains("https://keycloak.internal/jwks"));
 
         let decoded: OidcConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded.jwks_refresh_secs, 1800);
         assert_eq!(decoded.clock_skew_secs, 60);
+        assert_eq!(
+            decoded.jwks_url.as_deref(),
+            Some("https://keycloak.internal/jwks")
+        );
+    }
+
+    #[test]
+    fn test_oidc_config_without_jwks_override_is_backward_compatible() {
+        let decoded: OidcConfig = serde_json::from_value(serde_json::json!({
+            "issuer_url": "https://issuer.example",
+            "audience": "my-app"
+        }))
+        .unwrap();
+
+        assert_eq!(decoded.jwks_url, None);
+        assert_eq!(decoded.jwks_refresh_secs, 3600);
+        assert_eq!(decoded.clock_skew_secs, 30);
     }
 
     #[tokio::test]
@@ -374,6 +398,7 @@ mod tests {
         let provider = OidcProvider::new(OidcConfig {
             issuer_url: format!("{}/issuer", base_url),
             audience: "my-app".to_string(),
+            jwks_url: None,
             jwks_refresh_secs: 3600,
             clock_skew_secs: 30,
         });
@@ -393,6 +418,56 @@ mod tests {
             jwks_url
         );
 
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn test_refresh_jwks_uses_private_override_without_discovery() {
+        #[derive(Clone)]
+        struct TestState {
+            discovery_hits: Arc<AtomicUsize>,
+            jwks_hits: Arc<AtomicUsize>,
+        }
+
+        let state = TestState {
+            discovery_hits: Arc::new(AtomicUsize::new(0)),
+            jwks_hits: Arc::new(AtomicUsize::new(0)),
+        };
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let base_url = format!("http://{addr}");
+
+        let app = Router::new()
+            .route(
+                "/issuer/.well-known/openid-configuration",
+                get(|State(state): State<TestState>| async move {
+                    state.discovery_hits.fetch_add(1, Ordering::SeqCst);
+                    Json(serde_json::json!({ "jwks_uri": "http://invalid.test/jwks" }))
+                }),
+            )
+            .route(
+                "/private/jwks",
+                get(|State(state): State<TestState>| async move {
+                    state.jwks_hits.fetch_add(1, Ordering::SeqCst);
+                    Json(serde_json::json!({ "keys": [] }))
+                }),
+            )
+            .with_state(state.clone());
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let provider = OidcProvider::new(OidcConfig {
+            issuer_url: format!("{base_url}/issuer"),
+            audience: "my-app".to_string(),
+            jwks_url: Some(format!("{base_url}/private/jwks")),
+            jwks_refresh_secs: 3600,
+            clock_skew_secs: 30,
+        });
+        provider.refresh_jwks().await.unwrap();
+
+        assert_eq!(state.discovery_hits.load(Ordering::SeqCst), 0);
+        assert_eq!(state.jwks_hits.load(Ordering::SeqCst), 1);
         server.abort();
     }
 }

@@ -27,6 +27,32 @@ idle_timeout_secs = 60
 }
 
 #[test]
+fn test_manifest_parses_node_local_dependency_placement() {
+    let toml = r#"
+[app]
+name = "orders"
+version = "v1"
+namespace = "production"
+
+[placement]
+policy = "every_node"
+local_dependencies = ["production/payments:v1"]
+"#;
+
+    let manifest: DeployManifest = toml::from_str(toml).unwrap();
+    let config = manifest.to_app_config();
+    assert_eq!(config.placement, common::types::PlacementPolicy::EveryNode);
+    assert_eq!(
+        config.local_dependencies,
+        vec![common::types::AppId::new_namespaced(
+            "production",
+            "payments",
+            "v1"
+        )]
+    );
+}
+
+#[test]
 fn test_manifest_parse_with_gateway() {
     let toml = r#"
 [app]
@@ -94,6 +120,7 @@ fn test_manifest_to_app_config() {
         secrets: HashMap::new(),
         api_keys: vec![],
         artifact: None,
+        placement: PlacementManifestSection::default(),
     };
 
     let config = manifest.to_app_config();
@@ -141,6 +168,7 @@ fn test_manifest_to_gateway_config() {
         secrets: HashMap::new(),
         api_keys: vec![],
         artifact: None,
+        placement: PlacementManifestSection::default(),
     };
 
     let gw = manifest.to_gateway_config().unwrap();

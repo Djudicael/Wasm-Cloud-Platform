@@ -4,17 +4,114 @@ use crate::loader::{apply_cli_overrides, apply_env_overrides, merge_config};
 use crate::validation::validate_config;
 use crate::validation::validate_hot_config;
 use common::config::NodeConfig;
-use common::config::{StorageIntegrityFailureMode, StorageOpenFailureMode};
+use common::config::{DeploymentEnvironment, StorageIntegrityFailureMode, StorageOpenFailureMode};
 use common::error::PlatformError;
 
 fn validate_hot(config: &HotConfig) -> Result<(), PlatformError> {
     validate_hot_config(config)
 }
 
+fn production_config_with_non_exportable_key() -> NodeConfig {
+    let mut config = NodeConfig::default();
+    config.node.environment = DeploymentEnvironment::Production;
+    config.auth.enabled = true;
+    config.auth.read_token =
+        Some("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string());
+    config.auth.write_token =
+        Some("fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210".to_string());
+    config.admin.tls_cert = Some("/run/secrets/admin.crt".to_string());
+    config.admin.tls_key = Some("/run/secrets/admin.key".to_string());
+    config.nats.url = "tls://nats.internal:4222".to_string();
+    config.nats.creds_file = Some("/run/secrets/nats.creds".to_string());
+    config.runtime.key_source = "vault-transit".to_string();
+    config.runtime.key_vault_url = Some("https://vault.internal".to_string());
+    config.runtime.key_vault_token_env = Some("VAULT_TOKEN".to_string());
+    config.runtime.key_vault_transit_key = Some("wasm-node-seal".to_string());
+    config.runtime.key_vault_transit_context = Some("node-0".to_string());
+    config.runtime.key_vault_transit_key_version = Some(1);
+    config.runtime.isolation_mode = Some("single-trust-domain".to_string());
+    config.ebpf.enabled = true;
+    config.ebpf.required = true;
+    config
+}
+
 #[test]
 fn test_default_config_valid() {
     let config = NodeConfig::default();
     assert!(validate_config(&config).is_ok());
+}
+
+#[test]
+fn resource_budget_rejects_zero_reserves_and_oversized_default_pool() {
+    let mut config = NodeConfig::default();
+    config.health.min_disk_free_bytes = 0;
+    config.health.min_disk_free_inodes = 0;
+    config.health.max_memory_bytes = 128 * 1024 * 1024;
+
+    let error = validate_config(&config).unwrap_err().to_string();
+    assert!(error.contains("min_disk_free_bytes must be > 0"));
+    assert!(error.contains("min_disk_free_inodes must be > 0"));
+    assert!(error
+        .contains("default_memory_pages * default_max_instances must fit within max_memory_bytes"));
+}
+
+#[test]
+fn production_rejects_local_secret_defaults() {
+    let mut config = NodeConfig::default();
+    config.node.environment = DeploymentEnvironment::Production;
+    let error = validate_config(&config).unwrap_err().to_string();
+    assert!(error.contains("auth.enabled"));
+    assert!(error.contains("runtime.key_source"));
+    assert!(error.contains("nats.creds_file"));
+    assert!(error.contains("tls:// NATS"));
+}
+
+#[test]
+fn production_accepts_non_exportable_external_key_policy() {
+    let config = production_config_with_non_exportable_key();
+    assert!(validate_config(&config).is_ok());
+}
+
+#[test]
+fn production_requires_explicit_single_trust_domain_and_ebpf() {
+    let mut config = production_config_with_non_exportable_key();
+    config.runtime.isolation_mode = None;
+    config.ebpf.required = false;
+
+    let error = validate_config(&config).unwrap_err().to_string();
+    assert!(error.contains("runtime.isolation_mode = \"single-trust-domain\""));
+    assert!(error.contains("ebpf.enabled = true and ebpf.required = true"));
+}
+
+#[test]
+fn unsupported_hostile_multi_tenant_claim_is_rejected() {
+    let mut config = NodeConfig::default();
+    config.runtime.isolation_mode = Some("hostile-multi-tenant".to_string());
+
+    let error = validate_config(&config).unwrap_err().to_string();
+    assert!(error.contains("supports only \"single-trust-domain\""));
+}
+
+#[test]
+fn production_rejects_exportable_or_insecure_secret_sources() {
+    let mut config = NodeConfig::default();
+    config.node.environment = DeploymentEnvironment::Production;
+    config.auth.enabled = true;
+    config.auth.read_token = Some("a".repeat(64));
+    config.auth.write_token = Some("not-a-production-token".to_string());
+    config.admin.tls_cert = Some("cert".to_string());
+    config.admin.tls_key = Some("key".to_string());
+    config.nats.url = "nats://nats.internal:4222".to_string();
+    config.nats.creds_file = Some("creds".to_string());
+    config.runtime.key_source = "file".to_string();
+    config.runtime.key_file = Some("/run/secrets/exported-key".to_string());
+    config.dns.webhook_token = Some("inline-secret".to_string());
+    let error = validate_config(&config).unwrap_err().to_string();
+    assert!(error.contains("non-exportable"));
+    assert!(error.contains("64 hexadecimal"));
+    assert!(error.contains("repeated-character"));
+    assert!(error.contains("tls:// NATS"));
+    assert!(error.contains("inline dns.webhook_token"));
 }
 
 #[test]
@@ -270,6 +367,7 @@ fn test_merge_priority_cli_over_env() {
         artifact_bind_address: Some("0.0.0.0".to_string()),
         admin_tls_key: Some("/tmp/admin.key".to_string()),
         runtime_cache_directory: Some("/tmp/cli-wasmtime-cache".to_string()),
+        runtime_isolation_mode: Some("single-trust-domain".to_string()),
         runtime_upgrade_signing_public_key: Some(
             "2222222222222222222222222222222222222222222222222222222222222222".to_string(),
         ),
@@ -288,6 +386,10 @@ fn test_merge_priority_cli_over_env() {
     assert_eq!(
         config.runtime.cache_directory.as_deref(),
         Some("/tmp/cli-wasmtime-cache")
+    );
+    assert_eq!(
+        config.runtime.isolation_mode.as_deref(),
+        Some("single-trust-domain")
     );
     assert_eq!(
         config.runtime.upgrade_signing_public_key.as_deref(),
@@ -459,6 +561,31 @@ fn test_validation_accepts_routable_advertised_artifact_config() {
     config.admin.advertised_artifact_url =
         Some("https://artifacts.node-1.internal/base".to_string());
     assert!(validate_config(&config).is_ok());
+}
+
+#[test]
+fn test_validation_rejects_incomplete_nats_mutual_tls_pair() {
+    let mut config = NodeConfig::default();
+    config.nats.client_cert = Some("/run/secrets/nats-client.crt".to_string());
+    let error = validate_config(&config).unwrap_err().to_string();
+    assert!(error.contains("nats.client_cert and nats.client_key"));
+}
+
+#[test]
+fn production_rejects_plaintext_advertised_artifact_endpoint() {
+    let mut config = production_config_with_non_exportable_key();
+    config.admin.advertised_artifact_url =
+        Some("http://artifacts.node-1.internal:9091".to_string());
+    let error = validate_config(&config).unwrap_err().to_string();
+    assert!(error.contains("advertised artifact URLs must use https://"));
+}
+
+#[test]
+fn production_rejects_implicit_plaintext_artifact_advertisement() {
+    let mut config = production_config_with_non_exportable_key();
+    config.admin.advertised_host = Some("node-1.internal".to_string());
+    let error = validate_config(&config).unwrap_err().to_string();
+    assert!(error.contains("explicit https:// URL"));
 }
 
 #[test]

@@ -41,7 +41,22 @@ pub fn write_audit_event(path: &str, event: &AuditEvent) {
             .and_then(|mut f| f.write_all(format!("{}\n", line).as_bytes()))
         {
             tracing::warn!(error = %e, path = path, "failed to write audit event");
+            return;
         }
+
+        // Emit the minimum correlation envelope to the dedicated collection
+        // target as well as the authoritative local audit file. Details stay
+        // in the protected file because callers may include sensitive values.
+        // The collector routes target="audit" away from operational logs.
+        tracing::warn!(
+            target: "audit",
+            log_type = "audit",
+            event_type = ?event.event_type,
+            actor = %event.actor,
+            app_id = %event.app_id,
+            audit_timestamp_ms = event.timestamp,
+            "security audit event"
+        );
     }
 }
 

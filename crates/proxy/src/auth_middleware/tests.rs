@@ -20,7 +20,6 @@ fn test_public_endpoints() {
     assert!(is_public_endpoint("/readyz"));
     assert!(is_public_endpoint("/livez"));
     assert!(is_public_endpoint("/_platform/health"));
-    assert!(is_public_endpoint("/status/metrics"));
     assert!(is_public_endpoint("/favicon.ico"));
 }
 
@@ -31,6 +30,8 @@ fn test_non_public_endpoints() {
     assert!(!is_public_endpoint("/admin/gc/force"));
     assert!(!is_public_endpoint("/admin/auth/rotate-token"));
     assert!(!is_public_endpoint("/status/pgbouncer"));
+    assert!(!is_public_endpoint("/metrics"));
+    assert!(!is_public_endpoint("/status/metrics"));
     assert!(!is_public_endpoint("/logs/my-app"));
     assert!(!is_public_endpoint("/upstreams"));
 }
@@ -39,10 +40,7 @@ fn test_non_public_endpoints() {
 fn test_required_permission_get() {
     let get = axum::http::Method::GET;
     assert_eq!(required_permission(&get, "/admin/config"), Permission::Read);
-    assert_eq!(
-        required_permission(&get, "/status/metrics"),
-        Permission::Read
-    );
+    assert_eq!(required_permission(&get, "/metrics"), Permission::Read);
 }
 
 #[test]
@@ -302,10 +300,12 @@ fn test_tls_check_required_and_configured() {
 #[test]
 fn test_auth_metrics_unregistered() {
     let metrics = AuthMetrics::new_unregistered();
+    metrics.auth_enabled.set(1);
     metrics.auth_successes_total.inc();
     metrics.auth_failures_total.inc();
     metrics.rate_limited_total.inc();
 
+    assert_eq!(metrics.auth_enabled.get(), 1);
     assert_eq!(metrics.auth_successes_total.get(), 1);
     assert_eq!(metrics.auth_failures_total.get(), 1);
     assert_eq!(metrics.rate_limited_total.get(), 1);
@@ -315,16 +315,19 @@ fn test_auth_metrics_unregistered() {
 fn test_auth_metrics_registered() {
     let registry = Registry::new();
     let metrics = AuthMetrics::new(&registry);
+    metrics.auth_enabled.set(1);
     metrics.auth_successes_total.inc();
     metrics.auth_failures_total.inc_by(5);
     metrics.rate_limited_total.inc_by(3);
 
+    assert_eq!(metrics.auth_enabled.get(), 1);
     assert_eq!(metrics.auth_successes_total.get(), 1);
     assert_eq!(metrics.auth_failures_total.get(), 5);
     assert_eq!(metrics.rate_limited_total.get(), 3);
 
     let families = registry.gather();
     let names: Vec<&str> = families.iter().map(|f| f.name()).collect();
+    assert!(names.contains(&"wasm_admin_auth_enabled"));
     assert!(names.contains(&"wasm_admin_auth_successes_total"));
     assert!(names.contains(&"wasm_admin_auth_failures_total"));
     assert!(names.contains(&"wasm_admin_rate_limited_total"));
@@ -345,7 +348,7 @@ fn test_auth_router(config: AuthConfig) -> axum::Router {
         .route("/healthz", get(|| async { "ok" }))
         .route("/readyz", get(|| async { "ok" }))
         .route("/livez", get(|| async { "ok" }))
-        .route("/status/metrics", get(|| async { "# metrics\n" }))
+        .route("/metrics", get(|| async { "# metrics\n" }))
         .route("/status/pgbouncer", get(|| async { "pgbouncer ok" }))
         .route("/admin/config", get(|| async { "config ok" }))
         .route("/admin/config", post(|| async { "config updated" }))
@@ -380,13 +383,7 @@ async fn test_integration_auth_disabled_allows_all() {
 
 #[tokio::test]
 async fn test_integration_public_endpoints_no_auth() {
-    for path in &[
-        "/health",
-        "/healthz",
-        "/readyz",
-        "/livez",
-        "/status/metrics",
-    ] {
+    for path in &["/health", "/healthz", "/readyz", "/livez"] {
         let app = test_auth_router(AuthConfig {
             enabled: true,
             write_token: Some("write_token_1234567890".to_string()),
@@ -405,6 +402,34 @@ async fn test_integration_public_endpoints_no_auth() {
             path
         );
     }
+}
+
+#[tokio::test]
+async fn test_integration_metrics_requires_read_auth() {
+    let config = AuthConfig {
+        enabled: true,
+        write_token: Some("write_token_1234567890".to_string()),
+        read_token: Some("read_token_1234567890".to_string()),
+        ..Default::default()
+    };
+
+    let request = axum::extract::Request::builder()
+        .uri("/metrics")
+        .body(Body::empty())
+        .unwrap();
+    let response = test_auth_router(config.clone())
+        .oneshot(request)
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+    let request = axum::extract::Request::builder()
+        .uri("/metrics")
+        .header("Authorization", "Bearer read_token_1234567890")
+        .body(Body::empty())
+        .unwrap();
+    let response = test_auth_router(config).oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
 }
 
 #[tokio::test]

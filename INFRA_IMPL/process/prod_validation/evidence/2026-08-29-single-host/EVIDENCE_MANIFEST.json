@@ -1,0 +1,119 @@
+{
+  "schema_version": 1,
+  "run_id": "single-host-2026-08-23--2026-08-29",
+  "captured_at": "2026-08-29T21:42:52Z",
+  "decision": "no-go-for-production-promotion",
+  "local_rehearsal_result": "core-platform-functional-pass-with-open-production-gates",
+  "source": {
+    "platform_commit": "90cf2b534039dc2d3c14bd7403a742257ebec4f7",
+    "clean_promotion_build": false,
+    "rust_toolchain": "rustc 1.97.1 (8bab26f4f 2026-07-14)",
+    "cargo_audit": {
+      "status": "pass",
+      "command": "cargo audit --deny warnings",
+      "advisories_loaded": 1226,
+      "lockfile_dependencies_scanned": 749
+    }
+  },
+  "host": {
+    "os": "WSL2 Linux 6.18.33.2-microsoft-standard-WSL2 x86_64",
+    "cpu": "AMD Ryzen 9 5900X",
+    "logical_cpus": 24,
+    "memory_gib": 15,
+    "swap_gib": 4,
+    "firecracker": "1.15.1"
+  },
+  "topology": {
+    "state_file": ".prod-validation-single-host-state.json",
+    "profile": "ChaosReady",
+    "subnet": "172.20.0.0/24",
+    "nats": "172.20.0.10:4222",
+    "platform_nodes": [
+      {"id": "local-test-node-0", "ip": "172.20.0.12", "admin_port": 9090, "proxy_port": 8080},
+      {"id": "local-test-node-1", "ip": "172.20.0.13", "admin_port": 9090, "proxy_port": 8080},
+      {"id": "local-test-node-2", "ip": "172.20.0.14", "admin_port": 9090, "proxy_port": 8080}
+    ],
+    "postgresql": "172.20.0.20:5432",
+    "front_door": "127.0.0.1:8088",
+    "prometheus": "127.0.0.1:9095"
+  },
+  "artifacts": [
+    {"role": "kernel", "schema": 7, "sha256": "7d6222139391f70bef3becb514916550c7b824e63a4e72ffa22485e6dab3e3d5", "path": "assets/vmlinux-6.1"},
+    {"role": "platform-node-rootfs", "schema": 6, "sha256": "347430e89c35af05d55a634542842c5e272201fda887991ec7973da3c133731b", "path": "assets/wasm-node-rootfs.ext4"},
+    {"role": "nats-rootfs", "schema": 2, "sha256": "76dace7063581ad890e2a4ae0fc247b8445baafed85ff968e75d36fe539d1dd5", "path": "assets/nats-rootfs.ext4"},
+    {"role": "live-postgresql-rootfs", "schema": 3, "sha256": "811cc23fe8bd963b3d60ad5102e04e6f28c332ab499a87ca55b4ba5238c03f89", "path": "assets/postgres-rootfs.ext4"},
+    {"role": "next-postgresql-rootfs", "schema": 4, "sha256": "9249f9507ce2abe3cc787e557e99b2e0099c0aa7ca0344382ededf1233272ad4", "path": "/tmp/phase9-postgres-schema4/postgres-rootfs.ext4", "ephemeral": true},
+    {"role": "oidc-frontend-wasm", "sha256": "d2d032b3c42da2c1fbfeb9c55810b6659e4888d74787e9ecafb5a93cfabdc3e8", "application_id": "oidc/oidc-admin-wasi:vd2d032b3c42d"},
+    {"role": "oidc-backend-wasm", "sha256": "c9fdafa74897137a826d2a1f1903557b05ed02772701106e738e6e6056c39628", "application_id": "oidc/openid-connect-wasi:vdc1902621308"}
+  ],
+  "final_live_state": {
+    "oidc_direct_node_readiness": {"172.20.0.12": 200, "172.20.0.13": 200, "172.20.0.14": 200},
+    "oidc_front_door_readiness": 200,
+    "oidc_database_check": "ok",
+    "routes": [
+      {"host": "oidc-frontend.internal", "path_prefix": "/", "app_id": "oidc/oidc-admin-wasi:vd2d032b3c42d"},
+      {"host": "oidc-backend.internal", "path_prefix": "/", "app_id": "oidc/openid-connect-wasi:vdc1902621308"}
+    ],
+    "prometheus_targets_up": 10,
+    "prometheus_targets_total": 10,
+    "active_alerts": 0,
+    "ebpf_active_nodes": 3,
+    "ebpf_monitoring_degraded_nodes": 0,
+    "recovery_containers_remaining": 0,
+    "phase9_marker_table_remaining": false,
+    "teardown_performed": false
+  },
+  "performance": {
+    "configured_local_envelope_requests_per_second": 5,
+    "accepted_soak_requests": 600,
+    "accepted_soak_failures": 0,
+    "n_minus_one_requests": 151,
+    "n_minus_one_failures": 0,
+    "ebpf_baseline_requests": 80000,
+    "ebpf_enabled_requests": 80000,
+    "ebpf_throughput_loss_percent": 0.12075233162138435,
+    "ebpf_p99_increase_ms": 1.1110889999999927,
+    "ebpf_request_failures": 0,
+    "ebpf_event_loss": 0
+  },
+  "upgrade_rollback": {
+    "status": "pass-with-same-artifact-release-limitation",
+    "requests": 450,
+    "http_200": 450,
+    "p99_ms": 68.47149800000001,
+    "failed_candidate_http_status": 500,
+    "migrations_before": "11|11",
+    "migrations_after": "11|11"
+  },
+  "disaster_recovery": {
+    "status": "pass-with-database-clock-and-local-encryption-retention-limitations",
+    "public_tables_verified": 26,
+    "migrations": "11|11",
+    "observed_snapshot_boundary_seconds": 0.002,
+    "backup_duration_seconds": 1.221,
+    "database_restore_rto_seconds": 6.338,
+    "application_ready_rto_seconds": 43.47,
+    "full_journey_rto_seconds": 52.053,
+    "source_database_clock_skew_seconds": 12398.867,
+    "playwright_tests_passed": 6,
+    "encrypted_backup_sha256": "e20b30f120e33183b3f6a6cc1670537b4133b8b77b18149f1c3a0b43bf904229"
+  },
+  "retained_external_evidence": [
+    {"path": "/tmp/phase6-part7-ebpf-overhead-final-v3.json", "sha256": "8656d4e9036cce15c4cda7ebc7ca0b602e88edbe470bff9f8741f7ec231c40b8", "ephemeral": true},
+    {"path": "/tmp/phase8-part1-oidc-soak-20260829/summary.json", "sha256": "5b98af1f379236a39f055279172055f5b74771097b75248b845cd66fecd03d70", "ephemeral": true},
+    {"path": "/tmp/phase8-part1-oidc-nminus1-20260829/summary.json", "sha256": "49f4c9c6a5c33f73c6add337b884d756065af052c1ea5ba7451d8671883afa39", "ephemeral": true},
+    {"path": "/tmp/phase8-part2-oidc-upgrade-20260829-final/result.json", "sha256": "a532ffed017ba8aff1b75f2c025c400192abb38848ff27c22dbdc0f70df87b16", "ephemeral": true},
+    {"path": "/tmp/phase9-oidc-recovery-20260829-final4/result.json", "sha256": "f943b5681ef0adda885fe5cd2574baad7a3e6b0b794d5370edb97ca0bba1ecb9", "ephemeral": true},
+    {"path": "/tmp/phase9-oidc-recovery-20260829-final4/recovery-manifest.json", "sha256": "2b0c263b5b3b31f3c22f97490a0004ff9823f69365f2f346a97dc3639a675526", "ephemeral": true},
+    {"path": "/tmp/phase9-oidc-recovery-20260829-final4/source-snapshot.txt", "sha256": "499ca269a8f9b3d93f53128e8c77c542d3e15cb9611b7853e9874f47854b4a3d", "ephemeral": true},
+    {"path": "/tmp/phase9-oidc-recovery-20260829-final4/restored-snapshot.txt", "sha256": "499ca269a8f9b3d93f53128e8c77c542d3e15cb9611b7853e9874f47854b4a3d", "ephemeral": true},
+    {"path": "/tmp/phase9-oidc-recovery-20260829-final4/playwright.log", "sha256": "7982bb0d565b15c8e1eafbf1d0164bbd6037daedb3f810e002e4e05eacdeaa35", "ephemeral": true}
+  ],
+  "not_preserved_by_design": [
+    "secret values and secret files",
+    "login/token HTTP response bodies",
+    "plaintext PostgreSQL dump",
+    "disposable encryption passphrase",
+    "raw state or logs that may contain credentials"
+  ]
+}

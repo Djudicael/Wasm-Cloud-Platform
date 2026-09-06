@@ -87,11 +87,20 @@ pub struct DeployIntentResponse {
     pub api_key_count: usize,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ArtifactCredentialSetRequest {
     pub key: String,
     pub value: String,
+}
+
+impl std::fmt::Debug for ArtifactCredentialSetRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ArtifactCredentialSetRequest")
+            .field("key", &self.key)
+            .field("value", &"[REDACTED]")
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -116,4 +125,21 @@ pub struct ArtifactVerificationRecord {
     #[serde(default)]
     pub public_key_sha256: Option<String>,
     pub verified_at_unix_secs: u64,
+}
+
+#[cfg(test)]
+mod redaction_tests {
+    use super::*;
+
+    #[test]
+    fn artifact_credential_debug_redacts_value() {
+        let sentinel = "p10-secret-sentinel-123456";
+        let request = ArtifactCredentialSetRequest {
+            key: "registry".to_string(),
+            value: sentinel.to_string(),
+        };
+        let output = format!("{request:?}");
+        assert!(!output.contains(sentinel));
+        assert!(output.contains("[REDACTED]"));
+    }
 }

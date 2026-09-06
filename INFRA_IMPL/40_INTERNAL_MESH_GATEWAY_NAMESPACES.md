@@ -1,5 +1,21 @@
 # Step 40 — Internal Mesh Gateway, Namespaces & Endpoint Security
 
+> **Implementation status (2026-08-30): superseded security model.** This step
+> records the original service-discovery-only design and its historical gap.
+> Step 41 now supplies eBPF source-port/TID attribution; the gateway strips
+> caller identity headers, fails closed when identity is unresolved, and denies
+> resolved cross-namespace calls unless explicitly allowed. Do not treat later
+> statements that port 9080 is "open to all namespaces" as current behavior.
+> See `docs/internal-mesh.md` and
+> `INFRA_IMPL/process/INTERNAL_MESH_OIDC_ROLE_VALIDATION.md` for the validated
+> current contract.
+>
+> The current production contract is deliberately node-local. Manifests use
+> `placement.policy = "every_node"` and declare fully qualified same-namespace
+> `local_dependencies`. Missing dependencies fail locally with 502 and never
+> trigger a remote-node lookup. Cross-host mesh identity is explicitly out of
+> scope by design, not an unimplemented part of this step.
+
 ## Goal
 
 Fix three gaps left by Steps 04, 33, and 39 **without requiring the Wasm application to know anything about namespaces, gateways, or platform topology.**

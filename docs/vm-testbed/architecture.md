@@ -24,7 +24,7 @@ This document provides a deep dive into the architecture of the microVM testbed,
 │  │  │ ┌─────────┐ │  │ ┌─────────┐ │  │ ┌─────────┐ │  │ ┌─────────┐ │  │  │
 │  │  │ │ Guest   │ │  │ │ Guest   │ │  │ │ Guest   │ │  │ │ Guest   │ │  │  │
 │  │  │ │ Kernel  │ │  │ │ Kernel  │ │  │ │ Kernel  │ │  │ │ Kernel  │ │  │  │
-│  │  │ │ 6.1+BTF │ │  │ │ 6.1+BTF │ │  │ │ 6.1+BTF │ │  │ │ 6.1     │ │  │  │
+│  │  │ │6.18+BTF │ │  │ │6.18+BTF │ │  │ │6.18+BTF │ │  │ │6.18+BTF │ │  │  │
 │  │  │ └────┬────┘ │  │ └────┬────┘ │  │ └────┬────┘ │  │ └────┬────┘ │  │  │
 │  │  │      │      │  │      │      │  │      │      │  │      │      │  │  │
 │  │  │ ┌────▼────┐ │  │ ┌────▼────┐ │  │ ┌────▼────┐ │  │ ┌────▼────┐ │  │  │
@@ -104,10 +104,19 @@ We chose the bridge approach because network partition testing (L5 chaos) requir
 ├── ...
 ├── 172.20.0.10   nats-0
 ├── 172.20.0.11   nats-1 (if clustered)
+├── 172.20.0.20   optional PostgreSQL application service
+├── 172.20.0.21   optional Vault Transit integration service
 └── 172.20.0.255  broadcast
 ```
 
 This is hardcoded in the testbed for simplicity. For multi-tenant scenarios, you'd use a larger subnet or VLANs.
+
+PostgreSQL and Vault are independent service microVMs and are not included in
+the platform-node count. The local PostgreSQL image validates an application's
+database path. The local Vault image validates the platform's external
+seal-root client and failure behavior. Neither service is deployed or managed
+by the Wasm Cloud Platform in production. See
+[Local service microVMs](./service-microvms.md) for their state and lifecycle.
 
 ### MAC Address Allocation
 
@@ -166,12 +175,14 @@ This allows the same rootfs image to be used for multiple nodes with different c
 
 ## Kernel Configuration
 
-### Why Linux 6.1?
+### Versioned guest kernel
 
-- **Long-term support**: 6.1 is an LTS kernel (supported until 2026)
-- **eBPF maturity**: BTF, BPF LSM, and cgroup BPF are stable
-- **Firecracker compatibility**: Well-tested with Firecracker
-- **Reasonable size**: Newer kernels (6.6+) are larger with minimal benefit for our use case
+The authoritative pins are in `scripts/vm/kernel-testbed.env`. The current
+testbed builds Linux 6.18.48 against Firecracker's checksum-pinned maintained
+6.18 guest configuration, applies the platform overlay, and records kernel image
+schema 8. `provision-testbed.sh` rejects an asset whose schema marker does not
+match. This is a test fixture; production operators select and validate their
+own host kernel.
 
 ### Critical Kernel Options
 
@@ -229,3 +240,12 @@ Expected TTR:  < 10 seconds
 
 ```
 Test:          rm rootfs.ext4 && recreate from
+What happens:  The node loses its local state and cached artifacts
+VM state:      A fresh node image boots with the recorded topology identity
+Recovery:      Bootstrap from the durable control plane and authorized artifact sources
+Expected TTR:  Measure and record it for the tested topology
+```
+
+Failure injection must target the exact VM, network resource, and state file
+created for the test. Use the canonical scripts and validators; never select
+processes, TAP devices, bridges, or rootfs files by broad pattern matching.

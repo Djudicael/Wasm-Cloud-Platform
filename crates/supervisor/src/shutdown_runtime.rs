@@ -96,7 +96,7 @@ impl Supervisor {
         self.port_alloc.release(instance.addr.port());
 
         if let Some(tid) = instance.tid {
-            if let Some(ref ns_map) = self.namespace_map {
+            if let Some(ns_map) = self.namespace_map() {
                 let _ = ns_map.deregister_tid(tid);
             }
         }
@@ -309,6 +309,23 @@ impl Supervisor {
                 );
             }
         }
+        Ok(())
+    }
+
+    /// Remove an undeployed application's now-empty pool from live state.
+    /// Persisted artifacts remain available to the storage GC grace period.
+    pub async fn forget_app(&self, app_id: &AppId) -> Result<(), PlatformError> {
+        let mut pools = self.pools.write().await;
+        if pools
+            .get(&app_id.0)
+            .is_some_and(|pool| pool.active_count() != 0)
+        {
+            return Err(PlatformError::runtime(format!(
+                "cannot forget app {} while instances are active",
+                app_id.0
+            )));
+        }
+        pools.remove(&app_id.0);
         Ok(())
     }
 

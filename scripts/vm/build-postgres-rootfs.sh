@@ -9,6 +9,8 @@ ALPINE_VERSION=${ALPINE_VERSION:-3.21}
 POSTGRES_DATABASE=${POSTGRES_DATABASE:-oidc}
 POSTGRES_USER=${POSTGRES_USER:-oidc}
 POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-oidc-local-test}
+repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
+image="$OUTPUT_DIR/postgres-rootfs.ext4"
 
 [[ "$POSTGRES_DATABASE" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || {
   echo "POSTGRES_DATABASE must be a simple SQL identifier." >&2
@@ -23,13 +25,42 @@ POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-oidc-local-test}
   exit 2
 }
 
+# The canonical service disk is writable and contains the live database. Do not
+# truncate it merely because a schema bump made the cached image look stale.
+# Firecracker's block backend is not reported reliably by fuser under every WSL
+# kernel, so recorded service PIDs are the authoritative additional guard.
+canonical_image=$(realpath -m "$image")
+canonical_repo_image=$(realpath -m "$repo_root/assets/postgres-rootfs.ext4")
+if [[ -e "$image" && "$canonical_image" == "$canonical_repo_image" ]]; then
+  command -v jq >/dev/null || {
+    echo "jq is required to prove the canonical PostgreSQL image is not live." >&2
+    exit 1
+  }
+  shopt -s nullglob
+  for candidate_state in "$repo_root"/.*state*.json "$repo_root"/*state*.json; do
+    [[ -f "$candidate_state" ]] || continue
+    while IFS= read -r service_pid; do
+      if [[ "$service_pid" =~ ^[0-9]+$ ]] && [[ -d "/proc/$service_pid" ]]; then
+        echo "Refusing to replace the canonical PostgreSQL image while recorded service PID $service_pid is alive." >&2
+        echo "State file: $candidate_state" >&2
+        echo "Stop the exact recorded service or build into a different OUTPUT_DIR." >&2
+        exit 1
+      fi
+    done < <(jq -r '.services[]? | select(.kind == "postgresql") | .pid' "$candidate_state" 2>/dev/null || true)
+  done
+  shopt -u nullglob
+fi
+
 echo "=== Building PostgreSQL rootfs ==="
 work_dir=$(mktemp -d)
 cleanup() {
   if mountpoint -q "$work_dir/mount" 2>/dev/null; then
     sudo umount "$work_dir/mount"
   fi
-  rm -rf -- "$work_dir"
+  # `postgres` owns files created inside the chroot. Use the same privilege
+  # boundary used for chroot and mount operations so the EXIT trap cannot turn
+  # an otherwise successful image build into a failure on WSL/Linux.
+  sudo rm -rf -- "$work_dir"
 }
 trap cleanup EXIT
 
@@ -49,8 +80,19 @@ printf '%s\n' \
 
 sudo cp -L /etc/resolv.conf "$rootfs_dir/etc/resolv.conf"
 sudo chroot "$rootfs_dir" /sbin/apk add --no-cache \
-  alpine-base openrc iproute2 postgresql postgresql-client postgresql17-contrib \
+  alpine-base busybox-extras chrony openrc iproute2 postgresql postgresql-client postgresql17-contrib \
   su-exec ca-certificates
+postgres_bin=/usr/libexec/postgresql17
+for executable in initdb postgres pg_isready psql createdb; do
+  sudo chroot "$rootfs_dir" test -x "$postgres_bin/$executable" || {
+    echo "PostgreSQL package is missing $postgres_bin/$executable." >&2
+    exit 1
+  }
+done
+sudo chroot "$rootfs_dir" sh -c 'command -v httpd >/dev/null' || {
+  echo "busybox-extras did not install the required httpd applet." >&2
+  exit 1
+}
 sudo chown -R "$(id -u):$(id -g)" "$rootfs_dir"
 
 mkdir -p \
@@ -63,12 +105,13 @@ mkdir -p \
   "$rootfs_dir/dev" \
   "$rootfs_dir/tmp"
 sudo chroot "$rootfs_dir" chown -R postgres:postgres /var/lib/postgresql /run/postgresql
+echo "5" > "$rootfs_dir/etc/postgresql-image-schema-version"
 
 cat > "$rootfs_dir/etc/init.d/postgresql-testbed" <<'EOF'
 #!/sbin/openrc-run
 
 description="PostgreSQL for the Wasm Cloud Platform local testbed"
-command="/usr/bin/postgres"
+command="/usr/libexec/postgresql17/postgres"
 command_args="-D /var/lib/postgresql/data"
 command_user="postgres:postgres"
 command_background=true
@@ -82,7 +125,7 @@ start_pre() {
   checkpath -d -m 0700 -o postgres:postgres /var/lib/postgresql/data
   checkpath -d -m 0755 -o postgres:postgres /run/postgresql
   if [ ! -s /var/lib/postgresql/data/PG_VERSION ]; then
-    su-exec postgres initdb --encoding=UTF8 --locale=C -D /var/lib/postgresql/data
+    su-exec postgres /usr/libexec/postgresql17/initdb --encoding=UTF8 --locale=C -D /var/lib/postgresql/data
     cat >> /var/lib/postgresql/data/postgresql.conf <<'CONFIG'
 listen_addresses = '*'
 port = 5432
@@ -100,7 +143,7 @@ HBA
 
 start_post() {
   for _ in $(seq 1 60); do
-    su-exec postgres pg_isready -q && break
+    su-exec postgres /usr/libexec/postgresql17/pg_isready -q && break
     sleep 0.25
   done
   /usr/local/bin/init-oidc-database
@@ -112,11 +155,11 @@ ln -s /etc/init.d/postgresql-testbed "$rootfs_dir/etc/runlevels/default/postgres
 cat > "$rootfs_dir/usr/local/bin/init-oidc-database" <<EOF
 #!/bin/sh
 set -eu
-if ! su-exec postgres psql -tAc "SELECT 1 FROM pg_roles WHERE rolname = '$POSTGRES_USER'" | grep -q 1; then
-  su-exec postgres psql -v ON_ERROR_STOP=1 -c "CREATE ROLE $POSTGRES_USER LOGIN PASSWORD '$POSTGRES_PASSWORD'"
+if ! su-exec postgres /usr/libexec/postgresql17/psql -tAc "SELECT 1 FROM pg_roles WHERE rolname = '$POSTGRES_USER'" | grep -q 1; then
+  su-exec postgres /usr/libexec/postgresql17/psql -v ON_ERROR_STOP=1 -c "CREATE ROLE $POSTGRES_USER LOGIN PASSWORD '$POSTGRES_PASSWORD'"
 fi
-if ! su-exec postgres psql -tAc "SELECT 1 FROM pg_database WHERE datname = '$POSTGRES_DATABASE'" | grep -q 1; then
-  su-exec postgres createdb --owner "$POSTGRES_USER" "$POSTGRES_DATABASE"
+if ! su-exec postgres /usr/libexec/postgresql17/psql -tAc "SELECT 1 FROM pg_database WHERE datname = '$POSTGRES_DATABASE'" | grep -q 1; then
+  su-exec postgres /usr/libexec/postgresql17/createdb --owner "$POSTGRES_USER" "$POSTGRES_DATABASE"
 fi
 EOF
 chmod +x "$rootfs_dir/usr/local/bin/init-oidc-database"
@@ -129,6 +172,146 @@ ttyS0::respawn:/sbin/getty -L ttyS0 115200 vt100
 ::ctrlaltdel:/sbin/reboot
 ::shutdown:/sbin/openrc shutdown
 EOF
+
+# Use a deterministic PID 1 for the disposable PostgreSQL service VM. It owns
+# network setup and first-boot initialization instead of depending on OpenRC
+# runlevel ordering.
+rm -f "$rootfs_dir/sbin/init"
+cat > "$rootfs_dir/sbin/init" <<'EOF'
+#!/bin/sh
+set -eu
+mount -t proc proc /proc
+mount -t sysfs sysfs /sys
+mount -t devtmpfs devtmpfs /dev 2>/dev/null || true
+mount -t tmpfs tmpfs /run
+mkdir -p /run/postgresql /var/lib/postgresql/data
+chown postgres:postgres /run/postgresql /var/lib/postgresql /var/lib/postgresql/data
+ip link set lo up
+ip link set eth0 up
+ip address add 172.20.0.20/24 dev eth0
+ip route replace default via 172.20.0.1 dev eth0
+
+# Database timestamps participate in backup recovery points, token/session
+# validity, retention, and audit ordering. Firecracker guest clocks can lag when
+# a laptop/WSL host resumes, so synchronize before PostgreSQL accepts traffic and
+# keep chronyd running. These public sources are only for the disposable local
+# image; production must use at least three independent, operator-controlled
+# sources reachable over the private management network.
+cat > /run/chrony-testbed.conf <<'CHRONY'
+server 162.159.200.1 iburst
+server 216.239.35.0 iburst
+driftfile /var/lib/chrony/drift
+makestep 0.1 -1
+rtcsync
+pidfile /run/chrony/chronyd.pid
+bindcmdaddress /run/chrony/chronyd.sock
+cmdport 0
+CHRONY
+mkdir -p /run/chrony /var/lib/chrony
+chown chrony:chrony /run/chrony
+chmod 0770 /run/chrony
+chown chrony:chrony /var/lib/chrony
+chronyd -q -t 15 -f /run/chrony-testbed.conf || {
+  echo "initial clock synchronization failed; refusing to start PostgreSQL" >&2
+  poweroff -f
+  exit 1
+}
+chronyd -f /run/chrony-testbed.conf || {
+  echo "failed to start continuous clock synchronization" >&2
+  poweroff -f
+  exit 1
+}
+echo "chrony: initial tracking state"
+chronyc -n tracking || true
+chronyc -n sources -v || true
+mkdir -p /var/www/chrony
+write_chrony_metrics() {
+  tracking=$(chronyc -n tracking 2>/dev/null || true)
+  sources=$(chronyc -n sources 2>/dev/null || true)
+  reachable_sources=$(printf '%s\n' "$sources" | awk '$1 ~ /^\^[*+]/ { count++ } END { print count + 0 }')
+  synchronized=0
+  if printf '%s\n' "$tracking" | grep -Eq 'Leap status[[:space:]]*:[[:space:]]*Normal' \
+    && [ "$reachable_sources" -gt 0 ]; then
+    synchronized=1
+  fi
+  sampled_at=$(date +%s)
+  temporary_metrics=/var/www/chrony/.metrics.$$
+  cat > "$temporary_metrics" <<METRICS
+# HELP wcp_postgres_chrony_synchronized Whether Chrony reports a synchronized PostgreSQL guest clock.
+# TYPE wcp_postgres_chrony_synchronized gauge
+wcp_postgres_chrony_synchronized $synchronized
+# HELP wcp_postgres_chrony_reachable_sources Number of currently selected or acceptable time sources.
+# TYPE wcp_postgres_chrony_reachable_sources gauge
+wcp_postgres_chrony_reachable_sources $reachable_sources
+# HELP wcp_postgres_chrony_last_sample_timestamp_seconds Unix time of the latest Chrony health sample.
+# TYPE wcp_postgres_chrony_last_sample_timestamp_seconds gauge
+wcp_postgres_chrony_last_sample_timestamp_seconds $sampled_at
+METRICS
+  mv "$temporary_metrics" /var/www/chrony/metrics
+}
+write_chrony_metrics
+httpd -f -p 9101 -h /var/www/chrony &
+chrony_http_pid=$!
+(
+  recovery_active=0
+  while sleep 30; do
+    echo "chrony: periodic tracking state"
+    chronyc -n tracking || echo "chrony: tracking query failed" >&2
+    chronyc -n sources -v || echo "chrony: source query failed" >&2
+    write_chrony_metrics
+    if [ "$synchronized" -ne 1 ]; then
+      if [ "$recovery_active" -eq 0 ]; then
+        echo "chrony: no usable synchronized source; resetting stale measurements once" >&2
+        chronyc -n reset sources || echo "chrony: source reset failed" >&2
+        recovery_active=1
+      fi
+      echo "chrony: forcing a recovery step and measurement burst" >&2
+      chronyc -n makestep 0.1 1 || echo "chrony: makestep recovery command failed" >&2
+      chronyc -n burst 4/8 || echo "chrony: recovery burst failed" >&2
+    else
+      recovery_active=0
+    fi
+  done
+) &
+chrony_observer_pid=$!
+
+if [ ! -s /var/lib/postgresql/data/PG_VERSION ]; then
+  su-exec postgres /usr/libexec/postgresql17/initdb --encoding=UTF8 --locale=C -D /var/lib/postgresql/data
+  cat >> /var/lib/postgresql/data/postgresql.conf <<'CONFIG'
+listen_addresses = '*'
+port = 5432
+password_encryption = 'scram-sha-256'
+max_connections = 200
+shared_buffers = '128MB'
+CONFIG
+  cat > /var/lib/postgresql/data/pg_hba.conf <<'HBA'
+local all all trust
+host all all 172.20.0.0/24 scram-sha-256
+HBA
+  chown postgres:postgres /var/lib/postgresql/data/postgresql.conf /var/lib/postgresql/data/pg_hba.conf
+fi
+
+su-exec postgres /usr/libexec/postgresql17/postgres -D /var/lib/postgresql/data &
+postgres_pid=$!
+trap 'kill -TERM "$postgres_pid" "$chrony_observer_pid" "$chrony_http_pid" 2>/dev/null || true' TERM INT
+for attempt in $(seq 1 120); do
+  su-exec postgres /usr/libexec/postgresql17/pg_isready -q && break
+  if ! kill -0 "$postgres_pid" 2>/dev/null; then
+    wait "$postgres_pid"
+    exit $?
+  fi
+  sleep 0.25
+done
+su-exec postgres /usr/libexec/postgresql17/pg_isready -q || {
+  echo "PostgreSQL did not become ready during first-boot initialization." >&2
+  kill -TERM "$postgres_pid" 2>/dev/null || true
+  wait "$postgres_pid" || true
+  exit 1
+}
+/usr/local/bin/init-oidc-database
+wait "$postgres_pid"
+EOF
+chmod +x "$rootfs_dir/sbin/init"
 
 printf '%s\n' postgres-vm > "$rootfs_dir/etc/hostname"
 cat > "$rootfs_dir/etc/network/interfaces" <<'EOF'
@@ -143,7 +326,23 @@ iface eth0 inet static
 EOF
 
 mkdir -p "$OUTPUT_DIR"
-image="$OUTPUT_DIR/postgres-rootfs.ext4"
+# Package installation and host-side assembly temporarily leave files owned by
+# the invoking host user. Restore the guest trust boundary before sealing the
+# image, then grant only the two service accounts their writable state paths.
+sudo chown -R root:root "$rootfs_dir"
+sudo chroot "$rootfs_dir" chown -R postgres:postgres /var/lib/postgresql /run/postgresql
+sudo chroot "$rootfs_dir" chown -R chrony:chrony /var/lib/chrony
+if [[ -e "$image" ]]; then
+  command -v fuser >/dev/null || {
+    echo "fuser is required before replacing an existing PostgreSQL image." >&2
+    exit 1
+  }
+  if sudo fuser "$image" >/dev/null 2>&1; then
+    echo "Refusing to replace PostgreSQL image while a microVM has it open: $image" >&2
+    echo "Stop the recorded PostgreSQL service or build into a different OUTPUT_DIR." >&2
+    exit 1
+  fi
+fi
 dd if=/dev/zero of="$image" bs=1M count="$ROOTFS_SIZE_MB" status=progress
 mkfs.ext4 -F "$image"
 mkdir -p "$work_dir/mount"

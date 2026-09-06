@@ -1,6 +1,8 @@
 # Level 3 - Hardened Production
 
-Use this guide when you are running a serious multi-node Linux deployment and want stronger operational trust and tighter controls than the baseline.
+Use this guide for a multi-node Linux deployment that needs stronger operational
+trust and tighter controls than Level 2. Each claimed failure domain must be
+validated on production-equivalent infrastructure.
 
 See also: [`deployment-levels.md`](deployment-levels.md)
 
@@ -9,7 +11,7 @@ See also: [`deployment-levels.md`](deployment-levels.md)
 - you run multiple nodes
 - the admin plane is fronted by infrastructure you control
 - you want stronger release discipline and monitoring
-- you want a hardened shared-nothing production posture
+- you need a hardened shared-nothing operating profile
 
 ## What To Install
 
@@ -44,10 +46,10 @@ Recommended additions:
 
 ## Release Discipline
 
-- signed upgrade provenance enabled
-- release manifest generation in CI
-- pinned release inputs
-- tested rollback path
+- promote only an approved semantic-version tag
+- independently verify the release manifest, checksums, SLSA provenance, and SPDX attestations
+- keep release inputs pinned and locked
+- test rollback with the exact admitted bundle
 
 ## Validation
 
@@ -56,10 +58,12 @@ Recommended additions:
 - verify secret rotation across more than one node
 - verify rolling upgrades across more than one node
 - verify operational alerts trigger on forced failure cases
+- if physical-host fault tolerance is claimed, validate it across at least two
+  physical hosts; a multi-VM run on one host does not prove that property
 
 ## Move To Level 4 When
 
-- you want the strongest currently supported Linux posture
+- you need the high-assurance control profile
 - you want formal rollout rehearsal and stricter operator discipline
 
 Next guide:

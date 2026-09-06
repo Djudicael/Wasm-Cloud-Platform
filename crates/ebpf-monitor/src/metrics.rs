@@ -5,15 +5,21 @@
 //! is already registered (e.g., during hot-reload or tests), the existing
 //! instance is reused instead of panicking.
 
-use prometheus::{histogram_opts, Gauge, Histogram, IntCounter, IntGauge, Opts, Registry};
+use prometheus::{
+    histogram_opts, Gauge, Histogram, IntCounter, IntCounterVec, IntGauge, Opts, Registry,
+};
 
 /// Error-resilient metric registration helper.
 /// If a metric is already registered, returns a new instance that shares
 /// the same underlying metric via the registry's internal deduplication.
 macro_rules! register_metric {
-    ($metric:expr, $registry:expr) => {
-        match $registry.register(Box::new($metric.clone())) {
-            Ok(_) => $metric,
+    ($metric:expr, $registry:expr) => {{
+        // Evaluate the constructor exactly once. Evaluating `$metric` again in
+        // the match arm creates a disconnected collector: the handle changes,
+        // while the registry keeps exporting its initial value.
+        let metric = $metric;
+        match $registry.register(Box::new(metric.clone())) {
+            Ok(_) => metric,
             Err(e) => {
                 // Metric already registered — retrieve the existing one.
                 // This happens in tests or if `EbpfMetrics::new` is called twice.
@@ -21,10 +27,10 @@ macro_rules! register_metric {
                     error = %e,
                     "metric already registered, creating new instance (registry will deduplicate)"
                 );
-                $metric
+                metric
             }
         }
-    };
+    }};
 }
 
 /// Prometheus metrics exported by the eBPF monitor.
@@ -52,11 +58,14 @@ pub struct EbpfMetrics {
     /// Value is 0.0–1.0 (fraction) for precise alerting thresholds.
     pub fd_usage_ratio: Gauge,
 
-    /// Memory pressure level (0=none, 1=low, 2=medium, 3=critical).
+    /// Memory pressure level (0=none/low, 1=medium, 2=critical).
     pub memory_pressure_level: IntGauge,
 
     /// Disk I/O latency histogram (seconds).
     pub disk_io_latency_seconds: Histogram,
+
+    /// Bytes completed by slow block-I/O events, labeled by fixed operation.
+    pub disk_io_bytes: IntCounterVec,
 
     /// Security violations (privileged syscalls from Wasm instances).
     pub security_violations: IntCounter,
@@ -64,11 +73,39 @@ pub struct EbpfMetrics {
     /// Whether eBPF is loaded and active (1=active, 0=fallback).
     pub ebpf_active: IntGauge,
 
+    /// Whether eBPF monitoring is required for node readiness.
+    pub monitoring_required: IntGauge,
+
+    /// Whether monitoring is incomplete or using userspace fallback.
+    pub monitoring_degraded: IntGauge,
+
+    /// Transitions into a degraded monitoring state, labeled by bounded reason.
+    pub monitoring_failures: IntCounterVec,
+
     /// Total events processed from the ring buffer (all types).
     pub events_processed: IntCounter,
 
+    /// Events processed by stable event type. Application identity remains in
+    /// structured logs to avoid an unbounded Prometheus label cardinality.
+    pub events_by_type: IntCounterVec,
+
     /// Total events that failed to parse (malformed or unknown type).
     pub events_parse_errors: IntCounter,
+
+    /// Events rejected by a kernel ring buffer because it was full.
+    pub ring_buffer_dropped_events: IntCounterVec,
+
+    /// Failures while reading the kernel-side drop counters.
+    pub ring_buffer_drop_counter_read_errors: IntCounterVec,
+
+    /// Current number of events waiting in the bounded dispatcher queue.
+    pub dispatch_queue_depth: IntGauge,
+
+    /// Configured capacity of the bounded dispatcher queue.
+    pub dispatch_queue_capacity: IntGauge,
+
+    /// Number of transitions into a full dispatcher queue.
+    pub dispatch_queue_saturations: IntCounter,
 
     /// Current TCP connection count for the monitored node PID.
     pub tcp_connection_count: IntGauge,
@@ -140,7 +177,7 @@ impl EbpfMetrics {
         let memory_pressure_level = register_metric!(
             IntGauge::with_opts(Opts::new(
                 "wasm_ebpf_memory_pressure_level",
-                "Memory pressure level (0=none, 1=low, 2=medium, 3=critical)"
+                "Memory pressure level (0=none/low, 1=medium, 2=critical)"
             ))
             .unwrap(),
             registry
@@ -152,6 +189,18 @@ impl EbpfMetrics {
                 "Disk I/O latency from eBPF block tracepoints",
                 vec![0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0]
             ))
+            .unwrap(),
+            registry
+        );
+
+        let disk_io_bytes = register_metric!(
+            IntCounterVec::new(
+                Opts::new(
+                    "wasm_ebpf_disk_io_bytes_total",
+                    "Bytes completed by eBPF slow block-I/O events"
+                ),
+                &["io_type"]
+            )
             .unwrap(),
             registry
         );
@@ -174,6 +223,36 @@ impl EbpfMetrics {
             registry
         );
 
+        let monitoring_required = register_metric!(
+            IntGauge::with_opts(Opts::new(
+                "wasm_ebpf_monitoring_required",
+                "Whether eBPF monitoring is required for node readiness"
+            ))
+            .unwrap(),
+            registry
+        );
+
+        let monitoring_degraded = register_metric!(
+            IntGauge::with_opts(Opts::new(
+                "wasm_ebpf_monitoring_degraded",
+                "Whether kernel monitoring is incomplete or using userspace fallback"
+            ))
+            .unwrap(),
+            registry
+        );
+
+        let monitoring_failures = register_metric!(
+            IntCounterVec::new(
+                Opts::new(
+                    "wasm_ebpf_monitoring_failures_total",
+                    "Transitions into degraded eBPF monitoring by bounded reason"
+                ),
+                &["reason"]
+            )
+            .unwrap(),
+            registry
+        );
+
         let events_processed = register_metric!(
             IntCounter::with_opts(Opts::new(
                 "wasm_ebpf_events_processed_total",
@@ -183,10 +262,73 @@ impl EbpfMetrics {
             registry
         );
 
+        let events_by_type = register_metric!(
+            IntCounterVec::new(
+                Opts::new(
+                    "wasm_ebpf_events_by_type_total",
+                    "eBPF events processed by stable event type"
+                ),
+                &["event_type"]
+            )
+            .unwrap(),
+            registry
+        );
+
         let events_parse_errors = register_metric!(
             IntCounter::with_opts(Opts::new(
                 "wasm_ebpf_events_parse_errors_total",
                 "Total events that failed to parse from the eBPF ring buffer"
+            ))
+            .unwrap(),
+            registry
+        );
+
+        let ring_buffer_dropped_events = register_metric!(
+            IntCounterVec::new(
+                Opts::new(
+                    "wasm_ebpf_ring_buffer_dropped_events_total",
+                    "Events rejected by a full kernel eBPF ring buffer"
+                ),
+                &["monitor"]
+            )
+            .unwrap(),
+            registry
+        );
+
+        let ring_buffer_drop_counter_read_errors = register_metric!(
+            IntCounterVec::new(
+                Opts::new(
+                    "wasm_ebpf_ring_buffer_drop_counter_read_errors_total",
+                    "Failures reading kernel eBPF ring-buffer drop counters"
+                ),
+                &["monitor"]
+            )
+            .unwrap(),
+            registry
+        );
+
+        let dispatch_queue_depth = register_metric!(
+            IntGauge::with_opts(Opts::new(
+                "wasm_ebpf_dispatch_queue_depth",
+                "Events waiting in the bounded eBPF action-dispatch queue"
+            ))
+            .unwrap(),
+            registry
+        );
+
+        let dispatch_queue_capacity = register_metric!(
+            IntGauge::with_opts(Opts::new(
+                "wasm_ebpf_dispatch_queue_capacity",
+                "Configured capacity of the bounded eBPF action-dispatch queue"
+            ))
+            .unwrap(),
+            registry
+        );
+
+        let dispatch_queue_saturations = register_metric!(
+            IntCounter::with_opts(Opts::new(
+                "wasm_ebpf_dispatch_queue_saturations_total",
+                "Transitions into a full eBPF action-dispatch queue"
             ))
             .unwrap(),
             registry
@@ -212,6 +354,8 @@ impl EbpfMetrics {
 
         // Initialize: eBPF is not active yet (will be set to 1 if programs load)
         ebpf_active.set(0);
+        monitoring_required.set(0);
+        monitoring_degraded.set(0);
 
         EbpfMetrics {
             oom_kills,
@@ -222,10 +366,20 @@ impl EbpfMetrics {
             fd_usage_ratio,
             memory_pressure_level,
             disk_io_latency_seconds,
+            disk_io_bytes,
             security_violations,
             ebpf_active,
+            monitoring_required,
+            monitoring_degraded,
+            monitoring_failures,
             events_processed,
+            events_by_type,
             events_parse_errors,
+            ring_buffer_dropped_events,
+            ring_buffer_drop_counter_read_errors,
+            dispatch_queue_depth,
+            dispatch_queue_capacity,
+            dispatch_queue_saturations,
             tcp_connection_count,
             fd_count,
         }
@@ -234,6 +388,7 @@ impl EbpfMetrics {
     /// Mark eBPF as active (programs loaded and attached).
     pub fn mark_ebpf_active(&self) {
         self.ebpf_active.set(1);
+        self.monitoring_degraded.set(0);
     }
 
     /// Mark eBPF as inactive (fallback mode).
@@ -241,10 +396,28 @@ impl EbpfMetrics {
         self.ebpf_active.set(0);
     }
 
+    /// Record whether eBPF is a hard readiness requirement.
+    pub fn set_monitoring_required(&self, required: bool) {
+        self.monitoring_required.set(i64::from(required));
+    }
+
+    /// Record an incomplete or unavailable kernel-monitoring state.
+    pub fn mark_monitoring_degraded(&self, reason: &'static str) {
+        self.monitoring_degraded.set(1);
+        self.monitoring_failures.with_label_values(&[reason]).inc();
+    }
+
     /// Record a disk I/O latency observation (converting nanoseconds to seconds).
     pub fn observe_disk_latency_ns(&self, latency_ns: u64) {
         let latency_secs = latency_ns as f64 / 1_000_000_000.0;
         self.disk_io_latency_seconds.observe(latency_secs);
+    }
+
+    /// Record bytes from a block-I/O event using a bounded operation label.
+    pub fn add_disk_io_bytes(&self, io_type: &str, bytes: u32) {
+        self.disk_io_bytes
+            .with_label_values(&[io_type])
+            .inc_by(u64::from(bytes));
     }
 
     /// Record FD usage as a ratio (0.0–1.0).
@@ -288,12 +461,51 @@ mod tests {
         assert_eq!(metrics.security_violations.get(), 0);
         assert_eq!(metrics.events_processed.get(), 0);
         assert_eq!(metrics.events_parse_errors.get(), 0);
+        assert_eq!(metrics.dispatch_queue_saturations.get(), 0);
 
         // Gauges should start at 0
         assert_eq!(metrics.fd_usage_ratio.get(), 0.0);
         assert_eq!(metrics.memory_pressure_level.get(), 0);
         assert_eq!(metrics.tcp_connection_count.get(), 0);
         assert_eq!(metrics.fd_count.get(), 0);
+        assert_eq!(metrics.dispatch_queue_depth.get(), 0);
+        assert_eq!(metrics.dispatch_queue_capacity.get(), 0);
+    }
+
+    #[test]
+    fn test_ring_buffer_pressure_metrics() {
+        let registry = Registry::new();
+        let metrics = EbpfMetrics::new(&registry);
+
+        metrics
+            .ring_buffer_dropped_events
+            .with_label_values(&["fd_watcher"])
+            .inc_by(42);
+        metrics
+            .ring_buffer_drop_counter_read_errors
+            .with_label_values(&["fd_watcher"])
+            .inc();
+        metrics.dispatch_queue_capacity.set(4096);
+        metrics.dispatch_queue_depth.set(4096);
+        metrics.dispatch_queue_saturations.inc();
+
+        assert_eq!(
+            metrics
+                .ring_buffer_dropped_events
+                .with_label_values(&["fd_watcher"])
+                .get(),
+            42
+        );
+        assert_eq!(
+            metrics
+                .ring_buffer_drop_counter_read_errors
+                .with_label_values(&["fd_watcher"])
+                .get(),
+            1
+        );
+        assert_eq!(metrics.dispatch_queue_capacity.get(), 4096);
+        assert_eq!(metrics.dispatch_queue_depth.get(), 4096);
+        assert_eq!(metrics.dispatch_queue_saturations.get(), 1);
     }
 
     #[test]
@@ -304,6 +516,12 @@ mod tests {
         assert_eq!(metrics.ebpf_active.get(), 0);
         metrics.mark_ebpf_active();
         assert_eq!(metrics.ebpf_active.get(), 1);
+        let exported = registry
+            .gather()
+            .into_iter()
+            .find(|family| family.name() == "wasm_ebpf_active")
+            .expect("active gauge must be registered");
+        assert_eq!(exported.get_metric()[0].get_gauge().value(), 1.0);
         metrics.mark_ebpf_fallback();
         assert_eq!(metrics.ebpf_active.get(), 0);
     }

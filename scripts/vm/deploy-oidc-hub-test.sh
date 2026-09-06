@@ -40,7 +40,11 @@ for command_name in cargo npm openssl curl python3; do
 done
 
 state_file=$(python3 -c 'import os, sys; print(os.path.abspath(sys.argv[1]))' "$state_file")
-secret_dir="${state_file}.oidc-secrets"
+secret_root="${XDG_RUNTIME_DIR:-/tmp}/wasm-cloud-platform-oidc-secrets-$(id -u)"
+state_key=$(printf '%s' "$state_file" | sha256sum | cut -d' ' -f1)
+secret_dir="$secret_root/$state_key"
+mkdir -p "$secret_root"
+chmod 700 "$secret_root"
 mkdir -p "$secret_dir"
 chmod 700 "$secret_dir"
 if [[ ! -s "$secret_dir/rsa.pem" ]]; then
@@ -71,21 +75,46 @@ echo "Building both WASI components in WSL..."
   -p oidc-admin-wasi -p openid-connect-wasi --target wasm32-wasip2 --release)
 
 echo "Applying migrations and creating repeatable local test data..."
-(cd "$app_dir" && \
+seed_log=$(mktemp)
+chmod 600 "$seed_log"
+trap 'rm -f -- "${seed_log:-}"' EXIT
+if ! (cd "$app_dir" && \
   OIDC_DATABASE_URL="$database_url" \
   OIDC_PROXY_PORT=8088 \
   DEFAULT_EMAIL="$admin_email" \
   DEFAULT_PASSWORD="$admin_password" \
   CARGO_TARGET_DIR="$app_target_dir" \
-  cargo run -p oidc-wasm-dev --release -- seed)
+  cargo run -p oidc-wasm-dev --release -- seed) >"$seed_log" 2>&1; then
+  sed -E '/(password|token|database|postgres|api[[:space:]_-]*key|client[[:space:]_-]*secret|credential)/I{s/.*/[REDACTED credential-bearing seeder output]/;}' "$seed_log" >&2
+  rm -f -- "$seed_log"
+  seed_log=
+  exit 1
+fi
+sed -E '/(password|token|database|postgres|api[[:space:]_-]*key|client[[:space:]_-]*secret|credential)/I{s/.*/[REDACTED credential-bearing seeder output]/;}' "$seed_log"
+rm -f -- "$seed_log"
+seed_log=
+trap - EXIT
 
 frontend_wasm="$app_target_dir/wasm32-wasip2/release/oidc_admin_wasi.wasm"
 backend_wasm="$app_target_dir/wasm32-wasip2/release/openid_connect_wasi.wasm"
 frontend_version="v$(sha256sum "$frontend_wasm" | cut -c1-12)"
 backend_fuel=10000000000
+database_connect_timeout_secs=2
+database_statement_timeout_ms=5000
+database_lock_timeout_ms=2000
+database_idle_transaction_timeout_ms=30000
+database_url_separator='?'
+[[ "$database_url" == *'?'* ]] && database_url_separator='&'
+runtime_database_url="${database_url}${database_url_separator}connect_timeout=${database_connect_timeout_secs}&statement_timeout=${database_statement_timeout_ms}&lock_timeout=${database_lock_timeout_ms}&idle_in_transaction_session_timeout=${database_idle_transaction_timeout_ms}"
 # Runtime configuration is part of deployment identity. Otherwise a same-artifact
 # redeploy can leave an already-running instance on its previous resource limits.
-backend_version="v$(printf '%s\nfuel=%s\n' "$(sha256sum "$backend_wasm" | cut -d' ' -f1)" "$backend_fuel" | sha256sum | cut -c1-12)"
+backend_version="v$(printf '%s\nfuel=%s\nconnect_timeout_secs=%s\nstatement_timeout_ms=%s\nlock_timeout_ms=%s\nidle_transaction_timeout_ms=%s\n' \
+  "$(sha256sum "$backend_wasm" | cut -d' ' -f1)" "$backend_fuel" \
+  "$database_connect_timeout_secs" "$database_statement_timeout_ms" \
+  "$database_lock_timeout_ms" "$database_idle_transaction_timeout_ms" |
+  sha256sum | cut -c1-12)"
+frontend_app_id="oidc/oidc-admin-wasi:$frontend_version"
+backend_app_id="oidc/openid-connect-wasi:$backend_version"
 
 scripts/vm/deploy-test-application.sh \
   --state-file "$state_file" \
@@ -105,7 +134,7 @@ scripts/vm/deploy-test-application.sh \
   --route-host oidc-backend.internal \
   --fuel "$backend_fuel" \
   --verify-path /health/ready \
-  --env "OIDC_DATABASE_URL=$database_url" \
+  --env "OIDC_DATABASE_URL=$runtime_database_url" \
   --env "OIDC_ISSUER=$public_url" \
   --env "OIDC_ENCRYPTION_KEY=$encryption_key" \
   --env "OIDC_PAIRWISE_SALT=$pairwise_salt" \
@@ -117,11 +146,81 @@ scripts/vm/deploy-test-application.sh \
   --env "OIDC_TRUST_PROXY_HEADERS=true" \
   --env "OIDC_CORS_ORIGINS="
 
+# This rehearsal uses one active version of each OIDC component. A new
+# content-addressed deployment supersedes the previous version after the new
+# artifact has passed its application health check. Explicitly remove those old
+# desired-state entries so their zero-instance Prometheus series cannot fire an
+# ApplicationNotReady alert indefinitely. Other applications and namespaces are
+# deliberately left untouched.
+node_admin_addr=$(python3 - "$state_file" <<'PY'
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as stream:
+    state = json.load(stream)
+print(state["nodes"][0]["admin_addr"])
+PY
+)
+deployed_apps=$(curl -fsS --max-time 5 \
+  -H "Authorization: Bearer $WASM_CTL_AUTH_TOKEN" \
+  "http://$node_admin_addr/admin/apps?namespace=oidc")
+mapfile -t superseded_app_ids < <(
+  python3 - "$frontend_app_id" "$backend_app_id" "$deployed_apps" <<'PY'
+import json, sys
+
+current = set(sys.argv[1:3])
+apps = json.loads(sys.argv[3])
+prefixes = ("oidc/oidc-admin-wasi:", "oidc/openid-connect-wasi:")
+for app in apps:
+    app_id = app.get("id", "")
+    if app_id.startswith(prefixes) and app_id not in current:
+        print(app_id)
+PY
+)
+platform_target_dir=${PLATFORM_CARGO_TARGET_DIR:-/tmp/wasm-cloud-platform-target}
+for superseded_app_id in "${superseded_app_ids[@]}"; do
+  CARGO_TARGET_DIR="$platform_target_dir" cargo run -q -p vm-testbed \
+    --bin vm-testbed-cli -- undeploy-app \
+    --state-file "$state_file" --app-id "$superseded_app_id"
+done
+
+if ((${#superseded_app_ids[@]})); then
+  mapfile -t node_admin_addrs < <(python3 - "$state_file" <<'PY'
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as stream:
+    state = json.load(stream)
+for node in state["nodes"]:
+    print(node["admin_addr"])
+PY
+  )
+  deadline=$((SECONDS + 45))
+  while :; do
+    stale_series=false
+    for admin_addr in "${node_admin_addrs[@]}"; do
+      metrics=$(curl -fsS --max-time 5 \
+        -H "Authorization: Bearer $WASM_CTL_AUTH_TOKEN" \
+        "http://$admin_addr/metrics")
+      for superseded_app_id in "${superseded_app_ids[@]}"; do
+        if grep -Fq "wasm_node_app_healthy_instances{app=\"$superseded_app_id\"}" <<<"$metrics"; then
+          stale_series=true
+        fi
+      done
+    done
+    [[ "$stale_series" == false ]] && break
+    ((SECONDS < deadline)) || {
+      echo "Superseded OIDC metrics were not removed within 45 seconds." >&2
+      exit 1
+    }
+    sleep 1
+  done
+fi
+
 scripts/vm/configure-oidc-test-gateway.sh --state-file "$state_file"
 
 front_door=${public_url#http://}
-login_payload=$(mktemp)
-trap 'rm -f "$login_payload"' EXIT
+response_dir=$(mktemp -d)
+chmod 700 "$response_dir"
+login_payload="$response_dir/login-payload"
+trap 'rm -rf -- "$response_dir"' EXIT
+: > "$login_payload"
 chmod 600 "$login_payload"
 python3 - "$admin_email" "$admin_password" > "$login_payload" <<'PY'
 import json, sys
@@ -129,15 +228,15 @@ print(json.dumps({"email": sys.argv[1], "password": sys.argv[2], "client_id": "a
 PY
 deadline=$((SECONDS + 120))
 while ((SECONDS < deadline)); do
-  frontend_status=$(curl -sS -o /tmp/oidc-frontend-response -w '%{http_code}' --max-time 5 "$public_url/" || true)
-  ready_status=$(curl -sS -o /tmp/oidc-ready-response -w '%{http_code}' --max-time 5 "$public_url/health/ready" || true)
-  discovery_status=$(curl -sS -o /tmp/oidc-discovery-response -w '%{http_code}' --max-time 5 "$public_url/.well-known/openid-configuration" || true)
-  spa_status=$(curl -sS -o /tmp/oidc-spa-response -w '%{http_code}' --max-time 5 "$public_url/realms/master" || true)
-  login_status=$(curl -sS -o /tmp/oidc-login-response -w '%{http_code}' --max-time 5 "$public_url/realms/master/login" || true)
-  login_api_status=$(curl -sS -o /tmp/oidc-login-api-response -w '%{http_code}' --max-time 30 \
+  frontend_status=$(curl -sS -o "$response_dir/frontend-response" -w '%{http_code}' --max-time 5 "$public_url/" || true)
+  ready_status=$(curl -sS -o "$response_dir/ready-response" -w '%{http_code}' --max-time 5 "$public_url/health/ready" || true)
+  discovery_status=$(curl -sS -o "$response_dir/discovery-response" -w '%{http_code}' --max-time 5 "$public_url/.well-known/openid-configuration" || true)
+  spa_status=$(curl -sS -o "$response_dir/spa-response" -w '%{http_code}' --max-time 5 "$public_url/realms/master" || true)
+  login_status=$(curl -sS -o "$response_dir/login-response" -w '%{http_code}' --max-time 5 "$public_url/realms/master/login" || true)
+  login_api_status=$(curl -sS -o "$response_dir/login-api-response" -w '%{http_code}' --max-time 30 \
     -H 'Content-Type: application/json' --data-binary "@$login_payload" "$public_url/oidc/login" || true)
   ready_ok=false
-  if [[ "$ready_status" == 200 ]] && python3 - /tmp/oidc-ready-response <<'PY'
+  if [[ "$ready_status" == 200 ]] && python3 - "$response_dir/ready-response" <<'PY'
 import json, sys
 with open(sys.argv[1], encoding="utf-8") as stream:
     readiness = json.load(stream)
@@ -148,7 +247,7 @@ PY
     ready_ok=true
   fi
   login_api_ok=false
-  if [[ "$login_api_status" == 200 ]] && python3 - /tmp/oidc-login-api-response <<'PY'
+  if [[ "$login_api_status" == 200 ]] && python3 - "$response_dir/login-api-response" <<'PY'
 import json, sys
 with open(sys.argv[1], encoding="utf-8") as stream:
     response = json.load(stream)
@@ -159,7 +258,7 @@ PY
     login_api_ok=true
   fi
   if [[ "$frontend_status" == 200 && "$ready_ok" == true && "$discovery_status" == 200 && "$spa_status" == 200 && "$login_status" == 200 && "$login_api_ok" == true ]]; then
-    python3 - "$public_url" /tmp/oidc-discovery-response <<'PY'
+    python3 - "$public_url" "$response_dir/discovery-response" <<'PY'
 import json, sys
 expected, path = sys.argv[1:]
 with open(path, encoding="utf-8") as stream:
@@ -185,5 +284,6 @@ EOF
 chmod 600 "$secret_dir/credentials.txt"
 
 echo "OIDC Hub is ready for browser testing: $public_url"
-echo "Admin login: $admin_email / $admin_password"
+echo "Admin email: $admin_email"
+echo "Admin password is stored only in the mode-0600 test credential file: $secret_dir/credentials.txt"
 echo "HAProxy stats: http://${front_door%:*}:8404/stats"

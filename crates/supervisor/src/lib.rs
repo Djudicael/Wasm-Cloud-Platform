@@ -89,6 +89,16 @@ pub enum SupervisorCommand {
         instance_id: InstanceId,
         reason: String,
     },
+
+    /// Kill the application instance assigned to an eBPF-monitored OS thread.
+    KillInstanceByTid { tid: u32, reason: String },
+
+    /// Release one eBPF-observed outbound TCP reservation for an instance.
+    TcpConnectionClosed {
+        tid: u32,
+        src_port: u16,
+        dst_port: u16,
+    },
 }
 
 #[allow(clippy::type_complexity, clippy::too_many_arguments)]
@@ -102,6 +112,9 @@ pub struct Supervisor {
     pub(crate) host_router: Arc<HostRouter>,
     service_registry: Arc<LocalServiceRegistry>,
     internal_gateway_port: u16,
+    /// Node-local memory budget used for application admission. An app's
+    /// declared maximum instance pool must fit inside this boundary.
+    node_memory_budget_bytes: u64,
     env_resolver: Arc<EnvResolver>,
 
     /// Map of `app_id` to instance pool.
@@ -135,7 +148,7 @@ pub struct Supervisor {
 
     /// eBPF namespace map for TID registration and identity resolution.
     /// Shared with the internal gateway.
-    namespace_map: Option<Arc<ebpf_monitor::NamespaceMap>>,
+    namespace_map: std::sync::RwLock<Option<Arc<ebpf_monitor::NamespaceMap>>>,
 }
 
 impl Supervisor {
@@ -149,6 +162,7 @@ impl Supervisor {
         host_router: Arc<HostRouter>,
         service_registry: Arc<LocalServiceRegistry>,
         internal_gateway_port: u16,
+        node_memory_budget_bytes: u64,
         env_resolver: Arc<EnvResolver>,
         event_tx: mpsc::Sender<Event>,
         billing_tx: Option<mpsc::Sender<billing::BillingInput>>,
@@ -163,6 +177,7 @@ impl Supervisor {
             host_router,
             service_registry,
             internal_gateway_port,
+            node_memory_budget_bytes,
             env_resolver,
             pools: Arc::new(RwLock::new(HashMap::new())),
             event_tx,
@@ -172,14 +187,23 @@ impl Supervisor {
             command_rx: std::sync::Mutex::new(Some(command_rx)),
             command_tx,
             health_interval_rx: None,
-            namespace_map: None,
+            namespace_map: std::sync::RwLock::new(None),
         })
     }
 
     /// Set the eBPF namespace map for TID registration and identity resolution.
     /// Called by the node after initializing the eBPF monitor.
-    pub fn set_namespace_map(&mut self, namespace_map: Arc<ebpf_monitor::NamespaceMap>) {
-        self.namespace_map = Some(namespace_map);
+    pub fn set_namespace_map(&self, namespace_map: Arc<ebpf_monitor::NamespaceMap>) {
+        if let Ok(mut slot) = self.namespace_map.write() {
+            *slot = Some(namespace_map);
+        }
+    }
+
+    pub(crate) fn namespace_map(&self) -> Option<Arc<ebpf_monitor::NamespaceMap>> {
+        self.namespace_map
+            .read()
+            .ok()
+            .and_then(|slot| slot.as_ref().cloned())
     }
 
     /// Set the watch receiver for the health-check interval.

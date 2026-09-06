@@ -6,18 +6,25 @@ This guide covers integrating the microVM testbed into your CI/CD pipeline for a
 
 The microVM testbed is designed to run as a **nightly or pre-release** validation step, complementing the fast native-process E2E tests that run on every PR.
 
+CI automation that provisions through the shell workflow must assign a unique
+state file per job and pass that exact path to provision, deploy, validation,
+and teardown scripts. Never clean Firecracker processes, TAP devices, bridges,
+or `/tmp` directories by broad name patterns. The Rust `vm-testbed` integration
+tests manage their own fixtures; do not mix their lifecycle with an unrelated
+shell-script state file.
+
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │                        CI Pipeline                               │
 ├─────────────────────────────────────────────────────────────────┤
 │  On Every PR:                                                    │
-│    1. cargo test --workspace --exclude e2e                       │
-│    2. cargo test -p e2e -- --ignored --test-threads=1            │
+│    1. required workspace checks with the pinned Rust toolchain   │
+│    2. targeted native and WASI application tests                 │
 │    [Fast: ~5 minutes]                                            │
 ├─────────────────────────────────────────────────────────────────┤
 │  Nightly / Pre-Release:                                          │
 │    1. Build VM images                                            │
-│    2. cargo test -p vm-testbed -- --nocapture                    │
+│    2. provision/deploy tests or vm-testbed integration tests     │
 │    3. Run chaos test suite                                       │
 │    4. Generate report                                            │
 │    [Slow: ~30 minutes]                                           │
@@ -51,11 +58,8 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 source $HOME/.cargo/env
 rustup target add wasm32-wasip2
 
-# 5. Install Firecracker
-curl -fsSL -o firecracker.tgz \
-    https://github.com/firecracker-microvm/firecracker/releases/download/v1.7.0/firecracker-v1.7.0-x86_64.tgz
-tar xzf firecracker.tgz
-sudo cp release-v1.7.0-x86_64/firecracker /usr/local/bin/
+# 5. Install the checksum-pinned Firecracker version from kernel-testbed.env
+sudo ./scripts/vm/install-firecracker.sh
 
 # 6. Configure runner
 cd ~/actions-runner
@@ -102,7 +106,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: |
-            ./assets/vmlinux-6.1
+            ./assets/vmlinux-6.18
             ./assets/nats-rootfs.ext4
             ./assets/wasm-node-rootfs.ext4
           key: vm-images-${{ hashFiles('scripts/vm/**') }}
@@ -118,7 +122,7 @@ jobs:
 
       - name: Build VM images (if not cached)
         run: |
-          if [[ ! -f ./assets/vmlinux-6.1 ]]; then
+          if [[ ! -f ./assets/vmlinux-6.18 ]]; then
             ./scripts/vm/build-all-images.sh
           fi
 
@@ -150,9 +154,10 @@ jobs:
       - name: Cleanup
         if: always()
         run: |
-          sudo pkill -f firecracker || true
-          sudo ip link del br-wasm 2>/dev/null || true
-          sudo rm -rf /tmp/vm-testbed-*
+          # The Rust integration harness owns and tears down its exact fixtures.
+          # A shell-provisioned job must call destroy-testbed.sh with its own
+          # recorded state file instead of using broad process/network cleanup.
+          true
 ```
 
 ### GitHub Actions with Nested Virtualization (Alternative)
@@ -196,17 +201,18 @@ cache:
 
 unit-tests:
   stage: test
-  image: rust:1.80
+  image: rust:1.98.1
   script:
-    - cargo test --workspace --exclude e2e
+    - cargo check --workspace --all-targets --exclude http-hello-component --exclude wasi-grpc-echo
 
 vm-testbed:
   stage: vm-testbed
-  image: rust:1.80
+  image: rust:1.98.1
   tags:
     - kvm  # Requires GitLab runner with KVM
   script:
-    - apt-get update && apt-get install -y qemu-kvm firecracker iproute2 iptables
+    - apt-get update && apt-get install -y qemu-kvm iproute2 iptables
+    - ./scripts/vm/install-firecracker.sh
     - cargo build --release --bin wasm-node
     - ./scripts/vm/build-all-images.sh
     - sudo cargo test -p vm-testbed -- --nocapture
@@ -223,7 +229,7 @@ version: 0.2
 
 env:
   variables:
-    FIRECRACKER_VERSION: "v1.7.0"
+    FIRECRACKER_VERSION: "v1.16.1"
 
 phases:
   install:
@@ -288,8 +294,9 @@ pipeline {
     post {
         always {
             sh '''
-                sudo pkill -f firecracker || true
-                sudo ip link del br-wasm 2>/dev/null || true
+                # The Rust integration harness owns its exact fixtures.
+                # Shell-provisioned stages must retain and destroy by state file.
+                true
             '''
         }
         failure {
@@ -323,7 +330,7 @@ cargo test -p vm-testbed -- --nocapture 2>&1 | tee test-output.log
       "status": "passed",
       "duration_ms": 45000,
       "vm_count": 2,
-      "kernel_version": "6.1.80"
+      "kernel_version": "6.18.48"
     },
     {
       "test": "test_vm_kill_and_restart",
@@ -429,7 +436,7 @@ Track test metrics over time:
 | `firecracker: command not found` | Not in PATH | Set `FIRECRACKER_PATH` env var |
 | `TAP device creation failed` | Missing CAP_NET_ADMIN | Run with sudo or set capabilities |
 | `VM did not become healthy` | Slow boot on overloaded CI | Increase timeout |
-| `Port already in use` | Stale Firecracker process | Add cleanup step: `pkill -f firecracker` |
+| `Port already in use` | A recorded testbed was not torn down | Run `scripts/vm/destroy-testbed.sh --state-file PATH` with the same state file used for provisioning |
 
 ### Debug Mode
 

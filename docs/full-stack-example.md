@@ -47,7 +47,7 @@ This guide walks through deploying a complete full-stack application on the Wasm
 │  │  │  (public API)    │        │  (internal)      │                     │   │
 │  │  │                  │        │                  │                     │   │
 │  │  │  /health  → none │        │  /process →      │                     │   │
-│  │  │  /api/orders      │        │    api_key       │                     │   │
+│  │  │  /api/orders      │        │    namespace     │                     │   │
 │  │  │    → roles[user] │        │                  │                     │   │
 │  │  └──────────────────┘        └──────────────────┘                     │   │
 │  │          │                            │                               │   │
@@ -396,15 +396,18 @@ memory_pages = 1024
 max_instances = 5
 idle_timeout_secs = 300
 
-[policy]
-profile = "http_api"
+[placement]
+policy = "every_node"
+
+[policy.network]
+allow_inbound = true
 
 # No external host — internal-only service
 # Gateway config only for endpoint-level policies
 [[gateway.endpoints]]
 path = "/process"
 methods = ["POST"]
-auth = "api_key"
+auth = "none"
 rate_limit = { requests_per_second = 100, burst_capacity = 20 }
 
 [env]
@@ -432,7 +435,6 @@ use std::net::SocketAddr;
 struct AppState {
     http: reqwest::Client,
     db_url: String,
-    payment_api_key: String,
 }
 
 #[derive(Deserialize)]
@@ -460,8 +462,7 @@ async fn create_order(
 ) -> Result<Json<OrderResponse>, StatusCode> {
     // 1. Call payment service internally
     let payment_resp = state.http
-        .post("http://payment-service.internal/process")
-        .header("X-Api-Key", &state.payment_api_key)
+        .post("http://payment-service.production.internal/process")
         .json(&json!({
             "order_id": 0,  // Will be updated after DB insert
             "amount": req.amount,
@@ -505,7 +506,6 @@ async fn main() {
     let state = AppState {
         http: reqwest::Client::new(),
         db_url: std::env::var("DATABASE_URL").unwrap(),
-        payment_api_key: std::env::var("PAYMENT_API_KEY").unwrap_or_else(|_| "dev-key".to_string()),
     };
 
     let app = Router::new()
@@ -565,8 +565,14 @@ memory_pages = 2048
 max_instances = 10
 idle_timeout_secs = 300
 
-[policy]
-profile = "http_api"
+[placement]
+policy = "every_node"
+local_dependencies = ["production/payment-service:v1"]
+
+[policy.network]
+allow_inbound = true
+allow_outbound_tcp = true
+allow_dns = true
 
 [gateway]
 host = "shop.example.com"
@@ -645,22 +651,17 @@ wasm-ctl app list --namespace production
 # Route for order-service (public)
 wasm-ctl routes add \
   --host shop.example.com \
-  --app order-service:v1 \
-  --path-prefix /
+  --app production/order-service:v1
 
 # No route needed for payment-service — it's internal-only
 ```
 
-### 4.5 Store the payment API key
+### 4.5 Verify the local dependency contract
 
-```bash
-# The payment service needs an API key to accept internal requests
-wasm-ctl gateway api-key add payment-service:v1 \
-  --namespace production \
-  --name "order-service" \
-  --scopes "/process" \
-  --key "ak_payment_internal_123"
-```
+The manifests place both applications on every node and declare the payment
+service as a same-namespace local dependency of the order service. The internal
+gateway authorizes the caller's workload namespace. The current CLI has no API
+key lifecycle command; do not copy older `gateway api-key` examples.
 
 ---
 
@@ -744,7 +745,11 @@ curl -v -X OPTIONS http://127.0.0.1:8081/api/orders \
 
 ### 6.1 Check that order-service calls payment-service internally
 
-The `order-service` makes an internal call to `http://payment-service.internal/process`. This should happen transparently.
+The `order-service` makes an internal call to
+`http://payment-service.production.internal/process`. Both applications must
+use `placement.policy = "every_node"`, and the order service must declare
+`production/payment-service:v1` in `placement.local_dependencies`, so the
+node-local dependency closure exists on every target node.
 
 ### 6.2 Verify namespace isolation
 
@@ -758,34 +763,29 @@ wasm-ctl deploy \
   --namespace staging \
   --wasm ./some-app.wasm
 
-# The hacker app will NOT receive PAYMENT_SERVICE_SERVICE_URL
-# because the Supervisor only injects service URLs for same-namespace apps.
-# This is the primary namespace boundary (service discovery isolation).
-#
-# Note: Direct cross-namespace connections to known app ports are also
-# blocked by socket_addr_check, but the internal gateway port (9080)
-# is currently open to all namespaces. Namespace isolation relies on
-# service discovery filtering.
+# The staging app does not receive PAYMENT_SERVICE_SERVICE_URL because
+# local_dependencies are same-namespace. If it guesses the internal name,
+# the gateway resolves its eBPF-backed caller identity and denies the
+# cross-namespace request unless an explicit namespace allowlist permits it.
 ```
 
-### 6.3 Verify API key enforcement on payment-service
+### 6.3 Verify the internal endpoint boundary
 
-```bash
-# Call payment-service without API key (should fail)
-curl -v -X POST http://127.0.0.1:8081/process \
-  -H "Host: payment-service.internal"
-
-# Expected: 401 Unauthorized
-```
+Trigger the staging test application to call
+`http://payment-service.production.internal/process`. The expected result is
+`403 Forbidden` from the internal gateway. The production order service is in
+the same namespace and may call this endpoint without a user bearer token; its
+identity comes from the runtime TID/source-port map rather than a forgeable
+request header.
 
 ### 6.4 Check platform logs
 
 ```bash
 # Node logs show the internal routing
 # Look for:
-# "Virtual DNS resolved payment-service.internal → 127.0.0.1"
-# "socket_addr_check: same namespace, allowing connection"
-# "internal proxy: API key validated for /process"
+# "caller identity resolved"
+# target_namespace="production"
+# an allowed same-namespace audit result for order-service
 ```
 
 ---
@@ -796,22 +796,22 @@ curl -v -X POST http://127.0.0.1:8081/process \
 
 ```bash
 # Check the route exists
-wasm-ctl routes list
+wasm-ctl status
 
 # Re-add if missing
-wasm-ctl routes add --host shop.example.com --app order-service:v1
+wasm-ctl routes add --host shop.example.com --app production/order-service:v1
 ```
 
 ### "401 Unauthorized" on /health
 
 ```bash
 # Check gateway config
-wasm-ctl gateway show order-service:v1
+wasm-ctl gateway show production/order-service:v1
 
 # The /health endpoint should have auth = "none"
 # If not, reset and reconfigure:
-wasm-ctl gateway reset order-service:v1
-wasm-ctl gateway set-auth order-service:v1 --policy none
+wasm-ctl gateway reset production/order-service:v1
+wasm-ctl gateway set-auth production/order-service:v1 --policy none
 ```
 
 ### "502 Bad Gateway" on /api/orders
@@ -833,10 +833,8 @@ tail -f /var/log/wasm-node/node.log | grep order-service
 # Check if both apps are in the same namespace
 wasm-ctl app list --namespace production
 
-# Check DNS resolution for *.internal names
-# The embedded DNS stub requires root to modify /etc/resolv.conf.
-# If the node is not running as root, add the entry manually:
-echo '127.0.0.1 payment-service.internal' | sudo tee -a /etc/hosts
+# Check the exact namespace-qualified name through the configured resolver.
+getent hosts payment-service.production.internal
 
 # Check if payment-service is registered in the namespace registry
 # (This is automatic, but verify the app is deployed)
@@ -861,10 +859,10 @@ wasm-ctl node config --json | jq '.gateway.oidc'
 
 ```bash
 # Check current rate limit config
-wasm-ctl gateway show order-service:v1
+wasm-ctl gateway show production/order-service:v1
 
 # Update if needed
-wasm-ctl gateway set-rate-limit order-service:v1 \
+wasm-ctl gateway set-rate-limit production/order-service:v1 \
   --rps 1000 \
   --burst 200 \
   --distributed
@@ -876,14 +874,11 @@ wasm-ctl gateway set-rate-limit order-service:v1 \
 
 ```bash
 # Remove apps
-wasm-ctl remove order-service:v1
-wasm-ctl remove payment-service:v1
+wasm-ctl remove production/order-service:v1
+wasm-ctl remove production/payment-service:v1
 
-# Stop node
-pkill wasm-node
-
-# Stop NATS
-pkill nats-server
+# Stop the foreground node and NATS processes in the terminals or service
+# manager that started these exact processes.
 
 # Stop PostgreSQL
 sudo systemctl stop postgresql
@@ -907,4 +902,8 @@ rm -rf /tmp/nats-jetstream-prod
 | **Auth** | Keycloak OIDC | JWT issuance and validation |
 | **Internal Mesh** | Embedded DNS Stub + Internal Gateway | Transparent East-West communication |
 
-This is a production-ready pattern that scales horizontally by adding more platform nodes behind a load balancer, all sharing the same NATS cluster and database.
+This is an integration example. Before production use, validate the exact
+release, infrastructure, identity providers, database, NATS topology, capacity,
+and failure behavior with the production deployment checklist. The `.internal`
+mesh remains node-local; adding nodes requires `every_node` placement for each
+declared local dependency closure and does not create cross-host mesh routing.

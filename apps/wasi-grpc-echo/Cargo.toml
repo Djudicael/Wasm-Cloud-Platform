@@ -10,7 +10,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 prost = "0.14.4"
-wit-bindgen = "0.60.0"
+wit-bindgen = "0.61.1"
 
 [build-dependencies]
 prost-build = "0.14.4"

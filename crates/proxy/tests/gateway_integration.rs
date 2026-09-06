@@ -2,6 +2,9 @@ use sha2::Digest;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+#[path = "../testdata/jwt_test_key.rs"]
+mod jwt_test_key;
+
 /// Test: public route allows all requests without authentication.
 #[tokio::test]
 async fn test_full_gateway_pipeline_public_route() {
@@ -32,30 +35,17 @@ async fn test_full_gateway_pipeline_public_route() {
 /// Test: authenticated route requires a valid JWT.
 #[tokio::test]
 async fn test_full_gateway_pipeline_authenticated_route() {
-    // Generate a test RSA key pair
-    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
-    use rsa::pkcs1::EncodeRsaPrivateKey;
-    use rsa::rand_core::OsRng;
-    use rsa::{traits::PublicKeyParts, RsaPrivateKey, RsaPublicKey};
-
-    let mut rng = OsRng;
-    let private_key = RsaPrivateKey::new(&mut rng, 2048).unwrap();
-    let public_key = RsaPublicKey::from(&private_key);
-
-    // Encode private key for jsonwebtoken
-    let private_pkcs1 = private_key.to_pkcs1_der().unwrap();
-    let encoding_key = jsonwebtoken::EncodingKey::from_rsa_der(private_pkcs1.as_bytes());
-
-    // Encode public key components for JWKS
-    let n_bytes = public_key.n().to_bytes_be();
-    let e_bytes = public_key.e().to_bytes_be();
-    let n_b64 = URL_SAFE_NO_PAD.encode(&n_bytes);
-    let e_b64 = URL_SAFE_NO_PAD.encode(&e_bytes);
+    let jwt_test_key::GeneratedRsaKey {
+        encoding_key,
+        modulus,
+        exponent,
+    } = jwt_test_key::generate_rsa_key();
 
     let kid = "test-key-1";
     let oidc_config = proxy::gateway::oidc::OidcConfig {
         issuer_url: "https://test-issuer.example.com".to_string(),
         audience: "test-audience".to_string(),
+        jwks_url: None,
         jwks_refresh_secs: 3600,
         clock_skew_secs: 30,
     };
@@ -63,7 +53,7 @@ async fn test_full_gateway_pipeline_authenticated_route() {
     let provider = Arc::new(proxy::gateway::oidc::OidcProvider::new(oidc_config));
 
     // Inject the public key into the JWKS cache via test helper
-    let decoding_key = jsonwebtoken::DecodingKey::from_rsa_components(&n_b64, &e_b64).unwrap();
+    let decoding_key = jsonwebtoken::DecodingKey::from_rsa_components(&modulus, &exponent).unwrap();
     provider
         .inject_jwks_key(kid.to_string(), decoding_key)
         .await;
@@ -336,6 +326,7 @@ async fn test_jwks_cache_refresh_on_stale() {
     let oidc_config = proxy::gateway::oidc::OidcConfig {
         issuer_url: "https://test-issuer.example.com".to_string(),
         audience: "test-audience".to_string(),
+        jwks_url: None,
         jwks_refresh_secs: 1, // 1 second for testing
         clock_skew_secs: 30,
     };

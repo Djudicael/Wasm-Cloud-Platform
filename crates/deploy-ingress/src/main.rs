@@ -35,6 +35,7 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let args = Args::parse();
+    args.validate_security_policy()?;
     let store = Store::open(&args.db_path)?;
     let kek = load_kek(&args)?;
     let credential_kek_bytes = *kek.as_bytes();
@@ -45,8 +46,19 @@ async fn main() -> anyhow::Result<()> {
         SymmetricKey::from_bytes(credential_kek_bytes),
     ));
 
-    let mut bus = if let Some(creds) = args.nats_creds.as_deref() {
-        NatsBus::connect_secure(&args.nats_url, creds).await?
+    let nats_has_explicit_security = args.nats_creds.is_some()
+        || args.nats_ca_cert.is_some()
+        || args.nats_client_cert.is_some()
+        || args.nats_client_key.is_some();
+    let mut bus = if nats_has_explicit_security {
+        NatsBus::connect_with_tls(
+            &args.nats_url,
+            args.nats_creds.as_deref(),
+            args.nats_ca_cert.as_deref(),
+            args.nats_client_cert.as_deref(),
+            args.nats_client_key.as_deref(),
+        )
+        .await?
     } else {
         NatsBus::connect(&args.nats_url).await?
     };

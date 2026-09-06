@@ -245,8 +245,8 @@ failure_threshold = 10
 
 **Fix**:
 ```bash
-# Check app health
-wasm-ctl admin instances my-app:v1
+# Check running instances, then correlate with node logs and metrics
+wasm-ctl instances
 
 # Fix the app (redeploy, check logs)
 wasm-ctl deploy --app my-app --version v2 --wasm fixed.wasm
@@ -264,7 +264,7 @@ wasm-ctl gateway set-circuit-breaker my-app:v1 --reset-timeout 10
 **Fix**:
 - Ensure health checks pass before marking instances ready
 - Increase `failure_threshold` temporarily during deploys
-- Use the `wasm-ctl deploy --wait` flag
+- wait for the new version to become healthy before switching its route
 
 ## Best Practices
 

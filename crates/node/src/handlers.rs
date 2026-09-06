@@ -98,6 +98,11 @@ pub struct EventDispatcher {
     pub bus: messaging::NatsBus,
     pub dns_webhook: Option<DnsWebhookManager>,
     pub node_table: Arc<NodeLoadTable>,
+    /// Node-local application limiter, updated from each persisted AppConfig.
+    pub rate_limiter: Arc<proxy::rate_limiter::RateLimiter>,
+    /// Shared request gate. A terminal node drain fences new traffic before
+    /// application instances begin their graceful shutdown window.
+    pub backpressure: proxy::backpressure::BackpressureSignal,
     pub cluster_node_stale_after_secs: u64,
     /// In-memory gateway cache (also updated when persistent storage changes).
     pub gateway: Option<Arc<proxy::gateway::Gateway>>,
@@ -159,6 +164,11 @@ impl EventDispatcher {
                 self.handle_secret_update(app_id, key, target_node_id, secret)
                     .await
             }
+            Event::SecretDelete {
+                app_id,
+                key,
+                target_node_id,
+            } => self.handle_secret_delete(app_id, key, target_node_id).await,
             Event::ConfigUpdate { app_id, config } => self.handle_config_update(app_id, config),
             Event::NodeLoad {
                 node_id,
@@ -336,6 +346,9 @@ impl EventDispatcher {
     ) -> Result<(), PlatformError> {
         tracing::info!(app = %app_id.0, "handle_deploy invoked");
 
+        self.supervisor.check_resource_limits(&config)?;
+        self.validate_local_placement(&config)?;
+
         let sha256 = expected_hash
             .clone()
             .ok_or_else(|| PlatformError::messaging("deploy event missing expected_hash"))?;
@@ -401,7 +414,9 @@ impl EventDispatcher {
         // 6. Store compiled artifact, config, and hash
         self.store.store_artifact(&app_id, &artifact_bytes)?;
         self.store.save_config(&config)?;
+        self.apply_rate_limit(&app_id, &config);
         self.store.save_artifact_hash(&app_id, &sha256)?;
+        self.store.mark_deployed(&app_id.0)?;
         info!(
             app = %app_id.0,
             "deploy complete, waiting for first request"
@@ -412,12 +427,26 @@ impl EventDispatcher {
     async fn handle_remove(&self, app_id: AppId) -> Result<(), PlatformError> {
         info!(app = %app_id.0, "removing app");
 
+        // Remove routes before stopping instances so new requests cannot race
+        // the undeploy and cold-start an application being removed.
+        let route_hosts: std::collections::BTreeSet<_> = self
+            .store
+            .list_routes_for_app(&app_id.0)?
+            .into_iter()
+            .map(|route| route.host)
+            .collect();
+        for host in route_hosts {
+            self.handle_route_remove(host).await?;
+        }
+
         // Kill all running instances first (this creates billing records)
         self.supervisor.kill_all_instances(&app_id).await?;
 
         // Mark app as undeployed - starts grace period
         // Actual deletion happens after grace period expires in GC loop
         self.store.mark_undeployed(&app_id.0)?;
+        self.supervisor.forget_app(&app_id).await?;
+        self.rate_limiter.remove_app_config(&app_id.0);
 
         // Note: We don't immediately delete artifacts/configs anymore
         // The GC loop will purge them after the grace period
@@ -695,7 +724,28 @@ impl EventDispatcher {
             &key,
             &secret,
         )
-        .await
+        .await?;
+        // WASI environment values are resolved at instance creation. Evict
+        // warm instances so subsequent requests cannot continue using the old
+        // value after a completed rotation.
+        self.supervisor.kill_all_instances(&app_id).await?;
+        info!(app = %app_id.0, key, "secret rotation applied; warm instances invalidated");
+        Ok(())
+    }
+
+    async fn handle_secret_delete(
+        &self,
+        app_id: AppId,
+        key: String,
+        target_node_id: String,
+    ) -> Result<(), PlatformError> {
+        if target_node_id != self.our_node_id() {
+            return Ok(());
+        }
+        self.secret_provider.delete(&app_id, &key).await?;
+        self.supervisor.kill_all_instances(&app_id).await?;
+        info!(app = %app_id.0, key, "secret revoked; warm instances invalidated");
+        Ok(())
     }
 
     fn handle_config_update(
@@ -703,9 +753,46 @@ impl EventDispatcher {
         app_id: AppId,
         config: common::types::AppConfig,
     ) -> Result<(), PlatformError> {
+        self.supervisor.check_resource_limits(&config)?;
+        self.validate_local_placement(&config)?;
         self.store.save_config(&config)?;
+        self.apply_rate_limit(&app_id, &config);
         info!(app = %app_id.0, "config updated");
         Ok(())
+    }
+
+    fn validate_local_placement(
+        &self,
+        config: &common::types::AppConfig,
+    ) -> Result<(), PlatformError> {
+        supervisor::config_validator::validate_placement_contract(config)?;
+        for dependency in &config.local_dependencies {
+            let dependency_is_available = !self.store.is_undeployed(&dependency.0)?
+                && self.store.load_config(dependency)?.is_some()
+                && self.store.load_artifact(dependency)?.is_some();
+            if !dependency_is_available {
+                return Err(PlatformError::ConfigValidation(format!(
+                    "required node-local dependency {} for {} is not deployed on node {}; deploy the dependency first with the same every_node placement",
+                    dependency.0, config.id.0, self.node_id
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    fn apply_rate_limit(&self, app_id: &AppId, config: &common::types::AppConfig) {
+        if let Some(limit) = &config.rate_limit {
+            self.rate_limiter.set_app_config(
+                &app_id.0,
+                proxy::rate_limiter::RateLimitConfig {
+                    requests_per_second: limit.requests_per_second,
+                    burst_capacity: limit.burst_capacity,
+                    per_ip_limit: limit.per_ip_limit,
+                },
+            );
+        } else {
+            self.rate_limiter.remove_app_config(&app_id.0);
+        }
     }
 
     fn handle_node_upgrade_complete(
@@ -733,6 +820,7 @@ impl EventDispatcher {
                 timeout_secs = drain_timeout_secs,
                 "beginning graceful shutdown"
             );
+            self.backpressure.set_rejecting();
             self.begin_graceful_shutdown(drain_timeout_secs).await;
         } else {
             info!(node = %node_id, "peer node draining");

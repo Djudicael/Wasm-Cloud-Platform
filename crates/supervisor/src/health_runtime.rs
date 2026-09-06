@@ -59,7 +59,7 @@ impl Supervisor {
             Self::export_policy_metrics_from_pools(&policy_metrics, &mut pools);
         }
 
-        if let Some(ref ns_map) = self.namespace_map {
+        if let Some(ns_map) = self.namespace_map() {
             let removed = ns_map.cleanup_stale_tids();
             if removed > 0 {
                 tracing::info!(removed, "Cleaned up stale TIDs from namespace map");
@@ -142,7 +142,7 @@ impl Supervisor {
     /// Rehydrate app pools from persisted config and prepared artifacts so
     /// apps can cold-start again on first request after a node restart.
     pub async fn restore_from_storage(&self) -> Result<(), PlatformError> {
-        let app_ids = self.store.list_apps()?;
+        let app_ids = self.store.list_deployed_apps()?;
         let mut pools = self.pools.write().await;
 
         for app_id in app_ids {
@@ -150,6 +150,7 @@ impl Supervisor {
                 .store
                 .load_config(&app_id)?
                 .ok_or_else(|| PlatformError::AppNotFound(app_id.0.clone()))?;
+            self.check_resource_limits(&config)?;
 
             if self.store.artifact_exists(&app_id)? {
                 info!(app = %app_id.0, "restored app from storage (waiting for first request)");

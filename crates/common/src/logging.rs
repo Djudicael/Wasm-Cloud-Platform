@@ -26,14 +26,12 @@ mod sampling;
 pub use audit::{AuditLogRecord, AuditLogger, AuditOutput};
 pub use format::{LogFormat, LogOutput, LoggingConfig, NodeJsonFormatter, NodeLogRecord};
 pub use forwarder::{ForwarderSinkConfig, LogForwarderConfig};
-pub use init::{init_logging, LogReloadHandle};
+pub use init::{build_log_writer, init_logging, LogReloadHandle, LogWriter};
 pub use rotation::{LogRotationConfig, RotatingFileWriter};
 pub use sampling::SamplingLayer;
 
 #[cfg(test)]
 pub(crate) use format::FieldCollector;
-#[cfg(test)]
-pub(crate) use init::build_log_writer;
 
 #[cfg(test)]
 #[path = "logging_tests.rs"]

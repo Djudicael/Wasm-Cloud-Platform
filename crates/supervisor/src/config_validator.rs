@@ -33,6 +33,44 @@ impl std::fmt::Display for ConfigValidationError {
 /// Apps must not set these in env_vars or secret_keys.
 const RESERVED_VARS: &[&str] = &["PORT", "HOST_PORT", "APP_ID", "INSTANCE_ID", "NODE_ID"];
 
+/// Validate the architecture-level placement contract without consulting an
+/// external secret provider. Event consumers call this too, so a direct NATS
+/// deployment cannot bypass the node-local mesh invariants enforced by ctl.
+pub fn validate_placement_contract(config: &AppConfig) -> Result<(), PlatformError> {
+    let mut invalid_fields = Vec::new();
+    let mut dependencies = std::collections::HashSet::new();
+    for dependency in &config.local_dependencies {
+        if dependency == &config.id {
+            invalid_fields
+                .push("local dependency cannot refer to the application itself".to_string());
+        }
+        if dependency.namespace() != config.namespace {
+            invalid_fields.push(format!(
+                "local dependency {} must be in namespace {}",
+                dependency.0, config.namespace
+            ));
+        }
+        if !dependencies.insert(dependency.0.clone()) {
+            invalid_fields.push(format!(
+                "local dependency {} is declared more than once",
+                dependency.0
+            ));
+        }
+    }
+
+    if invalid_fields.is_empty() {
+        Ok(())
+    } else {
+        Err(PlatformError::ConfigValidation(
+            invalid_fields
+                .into_iter()
+                .map(|message| format!("invalid config: {message}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        ))
+    }
+}
+
 /// Validate an AppConfig before accepting a deployment.
 /// Returns Ok(()) if the config is valid; Err with a detailed breakdown otherwise.
 pub async fn validate_config<S: SecretProvider>(
@@ -91,6 +129,15 @@ pub async fn validate_config<S: SecretProvider>(
         error
             .invalid_fields
             .push("memory_limit must be > 0".to_string());
+    }
+
+    if let Err(PlatformError::ConfigValidation(messages)) = validate_placement_contract(config) {
+        error.invalid_fields.extend(messages.lines().map(|message| {
+            message
+                .strip_prefix("invalid config: ")
+                .unwrap_or(message)
+                .to_string()
+        }));
     }
 
     // 4. Fail if any issues were found.
@@ -182,5 +229,26 @@ mod tests {
 
         let result = validate_config(&config, &MockSecretProvider).await;
         assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_validate_config_rejects_invalid_local_dependency_placement() {
+        let app_id = AppId::new_namespaced("production", "caller", "v1");
+        let mut config = AppConfig::default_for(app_id.clone());
+        config.namespace = "production".to_string();
+        config.local_dependencies = vec![
+            app_id,
+            AppId::new_namespaced("other", "database", "v1"),
+            AppId::new_namespaced("production", "cache", "v1"),
+            AppId::new_namespaced("production", "cache", "v1"),
+        ];
+
+        let error = validate_config(&config, &MockSecretProvider)
+            .await
+            .expect_err("invalid dependency placement must be rejected")
+            .to_string();
+        assert!(error.contains("cannot refer to the application itself"));
+        assert!(error.contains("must be in namespace production"));
+        assert!(error.contains("declared more than once"));
     }
 }

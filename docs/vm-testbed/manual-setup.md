@@ -7,6 +7,14 @@ This guide walks you through setting up the microVM testbed **manually**, step b
 - Debug issues with the automated scripts
 - Run on a non-standard environment (e.g., custom Linux distro, ARM64)
 
+The canonical, state-tracked workflow is `scripts/vm/provision-testbed.sh`,
+`scripts/vm/deploy-test-application.sh`, and
+`scripts/vm/destroy-testbed.sh`. The manual commands below explain the
+components and support debugging, but they do not replace the scripts'
+checksum verification, image-schema checks, exact process identities, or safe
+teardown. Read current version and checksum pins from
+`scripts/vm/kernel-testbed.env` rather than substituting newer downloads.
+
 ---
 
 ## Table of Contents
@@ -34,9 +42,16 @@ The testbed consists of three artifacts:
 
 | Artifact | Purpose | Size |
 |----------|---------|------|
-| `vmlinux-6.1` | Linux kernel with eBPF/BTF support | ~15 MB |
+| `vmlinux-6.18` | Checksum-pinned Linux 6.18.48 test kernel with eBPF/BTF support | ~15 MB |
 | `nats-rootfs.ext4` | Alpine Linux + NATS Server | ~50 MB |
 | `wasm-node-rootfs.ext4` | Alpine Linux + wasm-node binary | ~100 MB |
+
+The core topology uses those artifacts. The aggregate image builder also
+creates optional PostgreSQL and Vault service fixtures for application and
+external seal-root integration tests. They are not platform components and the
+initialized Vault image contains sensitive local fixture state. Follow
+[Local service microVMs](./service-microvms.md) rather than manually extracting
+credentials or starting those services with ad-hoc Firecracker commands.
 
 And a network setup:
 
@@ -71,8 +86,14 @@ sudo apt-get install -y \
     libssl-dev \
     libelf-dev \
     curl \
+    e2fsprogs \
     iproute2 \
     iptables \
+    jq \
+    openssl \
+    python3 \
+    unzip \
+    util-linux \
     qemu-utils
 
 # Fedora/RHEL
@@ -99,7 +120,7 @@ source $HOME/.cargo/env
 rustup target add wasm32-wasip2
 
 # Verify
-rustc --version  # Should be 1.80+
+rustc --version  # Must match the repository's rust-toolchain.toml
 ```
 
 ---
@@ -167,7 +188,7 @@ Firecracker is a microVMM (micro Virtual Machine Monitor) written in Rust by AWS
 
 ```bash
 # Set version
-FIRECRACKER_VERSION="v1.7.0"
+FIRECRACKER_VERSION="v1.16.1"
 ARCH="$(uname -m)"
 
 # Create directory
@@ -189,7 +210,7 @@ sudo chmod 755 /usr/local/bin/firecracker
 
 # Verify
 firecracker --version
-# Expected: Firecracker v1.7.0
+# Expected: Firecracker v1.16.1
 ```
 
 ### Build from Source (Optional)
@@ -217,7 +238,7 @@ Firecracker uses a **vmlinux** ELF binary (not a bzImage). We need to build a mi
 ### Download Source
 
 ```bash
-KERNEL_VERSION="6.1.80"
+KERNEL_VERSION="6.18.48"
 cd /tmp
 
 # Download
@@ -357,7 +378,7 @@ strip vmlinux
 
 # Copy to assets directory
 mkdir -p ~/wasm-cloud-platform/assets
-cp vmlinux ~/wasm-cloud-platform/assets/vmlinux-6.1
+cp vmlinux ~/wasm-cloud-platform/assets/vmlinux-6.18
 
 echo "Kernel built: $(du -h vmlinux | cut -f1)"
 ```
@@ -549,13 +570,14 @@ This rootfs contains the wasm-node binary, wasm-ctl, and all dependencies.
 
 ```bash
 cd ~/wasm-cloud-platform
+export CARGO_TARGET_DIR=/tmp/wasm-cloud-platform-target
 
 # Build release binaries
 cargo build --release --bin wasm-node
 cargo build --release --bin wasm-ctl
 
 # Verify
-ls -la target/release/wasm-node target/release/wasm-ctl
+ls -la "$CARGO_TARGET_DIR/release/wasm-node" "$CARGO_TARGET_DIR/release/wasm-ctl"
 ```
 
 ### Create Rootfs Directory
@@ -604,8 +626,8 @@ apk add --root "$ROOTFS_DIR" --initdb --no-cache \
 
 ```bash
 mkdir -p "$ROOTFS_DIR/usr/local/bin"
-cp ~/wasm-cloud-platform/target/release/wasm-node "$ROOTFS_DIR/usr/local/bin/"
-cp ~/wasm-cloud-platform/target/release/wasm-ctl "$ROOTFS_DIR/usr/local/bin/"
+cp "$CARGO_TARGET_DIR/release/wasm-node" "$ROOTFS_DIR/usr/local/bin/"
+cp "$CARGO_TARGET_DIR/release/wasm-ctl" "$ROOTFS_DIR/usr/local/bin/"
 chmod +x "$ROOTFS_DIR/usr/local/bin/"{wasm-node,wasm-ctl}
 ```
 
@@ -839,7 +861,7 @@ curl --unix-socket "$SOCKET" -X PUT \
     "http://localhost/boot-source" \
     -H "Content-Type: application/json" \
     -d '{
-        "kernel_image_path": "'"$HOME"'/wasm-cloud-platform/assets/vmlinux-6.1",
+        "kernel_image_path": "'"$HOME"'/wasm-cloud-platform/assets/vmlinux-6.18",
         "boot_args": "console=ttyS0 reboot=k panic=1 pci=off"
     }'
 
@@ -928,7 +950,7 @@ curl --unix-socket "$SOCKET" -X PUT "http://localhost/machine-config" \
 # Boot source
 curl --unix-socket "$SOCKET" -X PUT "http://localhost/boot-source" \
     -d '{
-        "kernel_image_path": "'"$HOME"'/wasm-cloud-platform/assets/vmlinux-6.1",
+        "kernel_image_path": "'"$HOME"'/wasm-cloud-platform/assets/vmlinux-6.18",
         "boot_args": "console=ttyS0 reboot=k panic=1 pci=off"
     }'
 
@@ -1001,7 +1023,7 @@ cd ~/wasm-cloud-platform
 
 # Set environment variables
 export FIRECRACKER_PATH="/usr/local/bin/firecracker"
-export VM_KERNEL_PATH="./assets/vmlinux-6.1"
+export VM_KERNEL_PATH="./assets/vmlinux-6.18"
 export VM_NATS_ROOTFS="./assets/nats-rootfs.ext4"
 export VM_NODE_ROOTFS="./assets/wasm-node-rootfs.ext4"
 

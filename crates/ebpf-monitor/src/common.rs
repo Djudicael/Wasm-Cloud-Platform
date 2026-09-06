@@ -45,9 +45,43 @@ pub enum EventType {
     NamespaceAudit = 13,
     /// A forged namespace header was detected in send buffer.
     NamespaceForgedHeader = 14,
+    /// File descriptor closed by a monitored workload.
+    FdClose = 15,
+    /// TCP connection accepted by a monitored workload.
+    TcpAccept = 16,
+    /// TCP payload sent by a monitored workload.
+    TcpSend = 17,
+    /// TCP payload received by a monitored workload.
+    TcpReceive = 18,
+    /// First known syscall observed after a workload TID registration.
+    SyscallActivity = 19,
 }
 
 impl EventType {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            EventType::ProcessExec => "process_start",
+            EventType::ProcessExit => "process_exit",
+            EventType::TcpConnect => "tcp_connect",
+            EventType::TcpClose => "tcp_close",
+            EventType::TcpRetransmit => "tcp_retransmit",
+            EventType::FdOpen => "fd_open",
+            EventType::MemPressure => "memory_pressure",
+            EventType::DiskSlowIo => "block_io",
+            EventType::SyscallAnomaly => "syscall_anomaly",
+            EventType::FdLimitApproaching => "fd_limit",
+            EventType::TidConnection => "namespace_connection",
+            EventType::TidDisconnection => "namespace_disconnection",
+            EventType::NamespaceAudit => "namespace_audit",
+            EventType::NamespaceForgedHeader => "namespace_forged_header",
+            EventType::FdClose => "fd_close",
+            EventType::TcpAccept => "tcp_accept",
+            EventType::TcpSend => "tcp_send",
+            EventType::TcpReceive => "tcp_receive",
+            EventType::SyscallActivity => "syscall_activity",
+        }
+    }
+
     /// Convert from raw u32 value, returns None if unknown.
     pub fn from_u32(val: u32) -> Option<Self> {
         match val {
@@ -65,6 +99,11 @@ impl EventType {
             12 => Some(EventType::TidDisconnection),
             13 => Some(EventType::NamespaceAudit),
             14 => Some(EventType::NamespaceForgedHeader),
+            15 => Some(EventType::FdClose),
+            16 => Some(EventType::TcpAccept),
+            17 => Some(EventType::TcpSend),
+            18 => Some(EventType::TcpReceive),
+            19 => Some(EventType::SyscallActivity),
             _ => None,
         }
     }
@@ -75,6 +114,7 @@ impl EventType {
 #[derive(Debug, Copy, Clone)]
 pub struct EventHeader {
     pub event_type: u32,
+    pub _padding: u32,
     pub timestamp_ns: u64, // ktime (CLOCK_MONOTONIC)
     pub pid: u32,
     pub tid: u32,
@@ -89,6 +129,7 @@ pub struct ProcessEvent {
     pub exit_code: u32, // 0 for exec events
     pub signal: u32,    // 0 for exec events; signal number for exit
     pub ppid: u32,      // Parent PID (to identify wasm-node children)
+    pub _padding: u32,
     pub cgroup_id: u64, // cgroup v2 ID for tenant attribution
 }
 
@@ -105,6 +146,7 @@ pub struct TcpEvent {
     pub new_state: u32,   // TCP FSM new state
     pub retransmits: u32, // Cumulative retransmit count at event time
     pub rtt_us: u64,      // Smoothed RTT in microseconds
+    pub bytes: u64,       // Payload bytes for send/receive events
 }
 
 /// File descriptor event.
@@ -126,7 +168,8 @@ pub struct MemPressureEvent {
     pub free_pages: u64,
     pub reclaim_pages: u64,
     pub pressure_level: u32, // 0=low, 1=medium, 2=critical
-    pub anon_pages: u64,     // Anonymous (Wasm linear memory) pages
+    pub _padding: u32,
+    pub anon_pages: u64, // Anonymous (Wasm linear memory) pages
 }
 
 /// Disk I/O event.
@@ -138,8 +181,11 @@ pub struct DiskIoEvent {
     pub dev_minor: u32,
     pub sector: u64,
     pub nr_sector: u32,
+    pub bytes: u32,
     pub latency_ns: u64, // Time from submit to complete
-    pub io_type: u32,    // 0=read, 1=write, 2=sync
+    pub cgroup_id: u64,
+    pub io_type: u32, // 0=read, 1=write, 2=sync
+    pub _padding2: u32,
 }
 
 /// Syscall anomaly event.
@@ -149,7 +195,8 @@ pub struct SyscallEvent {
     pub header: EventHeader,
     pub syscall_nr: u64,
     pub syscall_category: u32, // Enum: SyscallCategory
-    pub count_in_window: u64,  // Count in the last sampling window
+    pub _padding: u32,
+    pub count_in_window: u64, // Count in the last sampling window
 }
 
 /// Syscall categories for policy enforcement.
@@ -184,6 +231,10 @@ impl SyscallCategory {
 pub struct MonitorConfigMap {
     /// PID of the wasm-node process (to filter relevant events).
     pub node_pid: u32,
+    pub _padding: u32,
+    /// cgroup v2 ID containing the wasm-node process. System-wide probes must
+    /// ignore events outside this boundary.
+    pub node_cgroup_id: u64,
     /// FD soft limit per Wasm instance PID.
     pub fd_soft_limit: u32,
     /// FD hard limit per Wasm instance PID (trigger kill).
@@ -321,6 +372,8 @@ pub struct NamespaceAuditEvent {
     pub source_port: u16,
     /// Padding.
     pub _padding: u32,
+    /// Tail padding required by the header's 8-byte alignment.
+    pub _tail_padding: u32,
 }
 
 /// Types of namespace audit events.
@@ -415,7 +468,7 @@ mod tests {
 
     #[test]
     fn test_event_type_roundtrip() {
-        for i in 1..=14u32 {
+        for i in 1..=19u32 {
             let et = EventType::from_u32(i);
             assert!(et.is_some(), "EventType {} should be valid", i);
             assert_eq!(et.unwrap() as u32, i);
@@ -446,6 +499,7 @@ mod tests {
     fn test_read_struct_valid() {
         let header = EventHeader {
             event_type: EventType::ProcessExit as u32,
+            _padding: 0,
             timestamp_ns: 1234567890,
             pid: 42,
             tid: 43,
@@ -474,6 +528,7 @@ mod tests {
     fn test_read_struct_at_valid() {
         let header = EventHeader {
             event_type: EventType::MemPressure as u32,
+            _padding: 0,
             timestamp_ns: 999,
             pid: 1,
             tid: 2,
@@ -527,6 +582,8 @@ mod tests {
     fn test_monitor_config_map_default_values() {
         let config = MonitorConfigMap {
             node_pid: 1,
+            _padding: 0,
+            node_cgroup_id: 2,
             fd_soft_limit: 8192,
             fd_hard_limit: 9728,
             mem_low_threshold_pages: 65536,
@@ -537,6 +594,7 @@ mod tests {
             sampling_period_ns: 10_000_000_000,
         };
         assert_eq!(config.node_pid, 1);
+        assert_eq!(config.node_cgroup_id, 2);
         assert_eq!(config.fd_soft_limit, 8192);
         assert_eq!(config.sampling_period_ns, 10_000_000_000);
     }
@@ -581,6 +639,7 @@ mod tests {
         let event = NamespaceAuditEvent {
             header: EventHeader {
                 event_type: EventType::NamespaceAudit as u32,
+                _padding: 0,
                 timestamp_ns: 1234,
                 pid: 1,
                 tid: 2,
@@ -591,6 +650,7 @@ mod tests {
             dest_port: 9080,
             source_port: 54321,
             _padding: 0,
+            _tail_padding: 0,
         };
         assert_eq!(event.header.event_type, EventType::NamespaceAudit as u32);
         assert_eq!(event.dest_port, 9080);

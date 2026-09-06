@@ -86,31 +86,29 @@ The `metrics` crate provides a unified observability layer combining Prometheus 
 
 ### Correctness
 
-- **nats.rs: reconnect_count increments on first connection** — The counter treats the initial connection as a reconnection, inflating metrics
-- **Per-app health metrics only record last app's values** — Should use `IntGaugeVec` to track multiple apps simultaneously
 - **Fragile string parsing for disk/memory metrics** — Parsing `DependencyHealth` messages via string splitting is brittle and error-prone
+- **NATS monitor is not started by the node** — `NatsMetrics` and `nats_monitor_loop` are implemented, but the current node startup path does not register or spawn them
 
 ### Reliability
 
-- **HTTP sink doesn't check response status code** — Failed deliveries go undetected
-- **No graceful shutdown** — No shutdown signaling for collector, log dispatcher, or NATS monitor; in-flight data may be lost
+- **No graceful shutdown** — No shutdown signaling or join handle is exposed for the collector, log dispatcher, or NATS monitor; in-flight data may be lost
 - **No rate limiting on log dispatch** — Uncontrolled log volume can overwhelm sinks
+- **Failed sink deliveries are not retried** — HTTP failures and non-success statuses are warned about, while NATS publish errors are discarded; the batch is cleared after one attempt
 
 ### Performance
 
 - **Unbounded `latency_samples` Vec in `MetricBucket`** — Should use an HDR histogram for bounded, statistically meaningful latency tracking
-- **println! in production code** — `log_dispatcher` stdout sink uses `println!` instead of structured logging
 - **Hardcoded 7-day retention** — Collector retention period is not configurable
 
 ### Design
 
 - **RecoveryMetrics owns its own Registry** — Invisible to the Prometheus scraper; metrics are never exported
-- **Metrics::new() creates throwaway Registry** — Inconsistent with other metric types that accept a registry
-- **No backpressure or retry on log dispatch** — Sinks can silently drop data under load
+- **Registries are constructed inconsistently** — `Metrics` owns the main registry, health and eBPF metrics accept it, while `RecoveryMetrics` creates a separate registry
+- **Delivery outcomes are not returned to producers** — the bounded dispatcher sender provides queue backpressure, but producers cannot observe the later per-sink result
 
 ## Security Considerations
 
-- **Log data exfiltration** — HTTP and NATS sinks transmit log data over the network. Ensure endpoints are authenticated and use TLS. The HTTP sink does not validate response codes, so delivery failures are silent
+- **Log data exfiltration** — HTTP and NATS sinks transmit log data over the network. Ensure endpoints are authenticated and use TLS. HTTP failures are logged but the batch is not retried
 - **No rate limiting** — A compromised or misbehaving component could flood log sinks, causing denial of service or masking malicious activity in the noise
 - **Metric labels from untrusted input** — If application identifiers or tenant IDs are used as Prometheus labels without sanitization, cardinality explosions or injection attacks are possible
 - **OTLP endpoint credentials** — Ensure OTLP export endpoints are properly authenticated and use TLS to prevent trace data leakage

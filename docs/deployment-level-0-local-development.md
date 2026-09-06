@@ -37,16 +37,17 @@ Recommended choices:
 
 1. build the platform:
    ```bash
+   export CARGO_TARGET_DIR=/tmp/wasm-cloud-platform-target
    cargo build --release
    ```
 2. start local NATS with JetStream
 3. start the node:
    ```bash
-   ./target/release/wasm-node --config config/dev.toml
+   "$CARGO_TARGET_DIR/release/wasm-node" --config config/dev.toml
    ```
 4. deploy a test app:
    ```bash
-   wasm-ctl deploy --app hello-world --version v1 --wasm hello-world.wasm --port 8080
+   wasm-ctl deploy --app hello-world --version v1 --wasm hello-world.wasm
    ```
 
 ## Settings To Keep

@@ -2,13 +2,22 @@ use common::auth::AuthConfig;
 use serde::Deserialize;
 
 /// Request body for token rotation endpoint.
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub struct RotateTokenRequest {
     /// Which token to rotate: "read" or "write".
     pub token_type: String,
 
     /// The new token value. If not provided, a random token is generated.
     pub new_token: Option<String>,
+}
+
+impl std::fmt::Debug for RotateTokenRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RotateTokenRequest")
+            .field("token_type", &self.token_type)
+            .field("new_token", &self.new_token.as_ref().map(|_| "[REDACTED]"))
+            .finish()
+    }
 }
 
 /// Validate a token rotation request and return the new token value.
@@ -95,4 +104,21 @@ pub fn check_admin_tls_requirement(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod redaction_tests {
+    use super::*;
+
+    #[test]
+    fn rotation_request_debug_redacts_supplied_token() {
+        let sentinel = "p10-secret-sentinel-123456";
+        let request = RotateTokenRequest {
+            token_type: "write".to_string(),
+            new_token: Some(sentinel.to_string()),
+        };
+        let output = format!("{request:?}");
+        assert!(!output.contains(sentinel));
+        assert!(output.contains("[REDACTED]"));
+    }
 }

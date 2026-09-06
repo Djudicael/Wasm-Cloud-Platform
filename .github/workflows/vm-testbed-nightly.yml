@@ -1,5 +1,8 @@
 name: VM Testbed Nightly
 
+# Test infrastructure only. Firecracker and its guest kernel model a VPS-like
+# environment; they are not Wasm Cloud Platform release artifacts.
+
 on:
   schedule:
     - cron: "0 3 * * *"
@@ -24,7 +27,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9
         with:
-          toolchain: 1.97.1
+          toolchain: 1.98.1
           targets: wasm32-wasip2
 
       - name: Cache dependencies

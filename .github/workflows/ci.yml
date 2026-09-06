@@ -33,7 +33,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9
         with:
-          toolchain: 1.97.1
+          toolchain: 1.98.1
           targets: wasm32-wasip2
 
       - name: Cache cargo registry
@@ -70,7 +70,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9
         with:
-          toolchain: 1.97.1
+          toolchain: 1.98.1
           targets: wasm32-wasip2
 
       - name: Cache dependencies
@@ -102,7 +102,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9
         with:
-          toolchain: 1.97.1
+          toolchain: 1.98.1
           targets: wasm32-wasip2
 
       - name: Cache dependencies
@@ -134,7 +134,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9
         with:
-          toolchain: 1.97.1
+          toolchain: 1.98.1
           targets: wasm32-wasip2
 
       - name: Cache dependencies
@@ -186,7 +186,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9
         with:
-          toolchain: 1.97.1
+          toolchain: 1.98.1
           targets: wasm32-wasip2
 
       - name: Cache dependencies
@@ -286,7 +286,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9
         with:
-          toolchain: 1.97.1
+          toolchain: 1.98.1
           components: clippy
           targets: wasm32-wasip2
 
@@ -315,7 +315,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9
         with:
-          toolchain: 1.97.1
+          toolchain: 1.98.1
           components: rustfmt
 
       - name: Check formatting
@@ -334,7 +334,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9
         with:
-          toolchain: 1.97.1
+          toolchain: 1.98.1
           targets: wasm32-wasip2
 
       - name: Cache dependencies
@@ -377,7 +377,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9
         with:
-          toolchain: 1.97.1
+          toolchain: 1.98.1
 
       - name: Cache cargo registry
         uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
@@ -391,9 +391,7 @@ jobs:
         run: cargo install cargo-audit --version 0.22.1 --locked
 
       - name: Run security audit
-        # Pingora 0.8.1 still pulls the unmaintained proc-macro-error2 through
-        # cf-rustracing-jaeger. Keep this explicit and remove it when Pingora does.
-        run: cargo audit --deny warnings --ignore RUSTSEC-2026-0173
+        run: cargo audit --deny warnings
         timeout-minutes: 5
 
   # Job 10: Dependency policy checks
@@ -408,7 +406,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9
         with:
-          toolchain: 1.97.1
+          toolchain: 1.98.1
 
       - name: Cache cargo registry
         uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5

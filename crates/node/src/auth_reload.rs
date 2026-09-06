@@ -28,36 +28,27 @@ pub(crate) fn setup_sighup_handler(
                 if let Some(ref path) = config_path {
                     tracing::info!("SIGHUP received - reloading auth config from file");
 
-                    match std::fs::read_to_string(path) {
-                        Ok(content) => {
-                            match toml::from_str::<common::config::NodeConfig>(&content) {
-                                Ok(new_config) => {
-                                    let new_auth: common::auth::AuthConfig =
-                                        new_config.auth.clone().into();
-                                    if let Err(e) = new_auth.validate() {
-                                        tracing::error!(
-                                            error = %e,
-                                            "auth config in file is invalid - keeping current config"
-                                        );
-                                    } else {
-                                        let mut auth = auth_config.write().await;
-                                        *auth = new_auth;
-                                        tracing::info!("auth config reloaded from file");
-                                    }
-                                }
-                                Err(e) => {
-                                    tracing::error!(
-                                        error = %e,
-                                        "failed to parse config file on SIGHUP reload"
-                                    );
-                                }
+                    match config::load_config(
+                        Some(std::path::Path::new(path)),
+                        &config::CliOverrides::default(),
+                    ) {
+                        Ok(new_config) => {
+                            let new_auth: common::auth::AuthConfig = new_config.auth.clone().into();
+                            if let Err(e) = new_auth.validate() {
+                                tracing::error!(
+                                    error = %e,
+                                    "auth config in file is invalid - keeping current config"
+                                );
+                            } else {
+                                let mut auth = auth_config.write().await;
+                                *auth = new_auth;
+                                tracing::info!("auth config reloaded from file");
                             }
                         }
                         Err(e) => {
                             tracing::error!(
                                 error = %e,
-                                path = %path,
-                                "failed to read config file on SIGHUP reload"
+                                "auth config reload failed admission - keeping current config"
                             );
                         }
                     }

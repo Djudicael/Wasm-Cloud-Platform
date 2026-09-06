@@ -27,11 +27,36 @@ repo_root=$(git rev-parse --show-toplevel 2>/dev/null) || { echo "Run inside the
 cd "$repo_root"
 [[ -f "$state_file" ]] || { echo "Missing topology state: $state_file" >&2; exit 1; }
 [[ -f "$rootfs" ]] || { echo "Missing PostgreSQL rootfs: $rootfs" >&2; exit 1; }
+source scripts/vm/kernel-testbed.env
+kernel_asset="assets/vmlinux-$KERNEL_SERIES"
+[[ -f "$kernel_asset.schema" && $(<"$kernel_asset.schema") == "$KERNEL_SCHEMA" ]] || {
+  echo "$kernel_asset is stale or incompatible (expected kernel schema $KERNEL_SCHEMA)." >&2
+  echo "Rebuild it with: scripts/vm/build-kernel.sh" >&2
+  exit 1
+}
+bash scripts/vm/audit-kernel-security.sh --kernel "$kernel_asset" --config "$kernel_asset.config" >/dev/null
+command -v debugfs >/dev/null || {
+  echo "debugfs is required to validate the PostgreSQL image." >&2
+  exit 1
+}
+postgres_image_schema=$(debugfs -R 'cat /etc/postgresql-image-schema-version' "$rootfs" 2>/dev/null || true)
+[[ "$postgres_image_schema" == 5 ]] || {
+  echo "$rootfs is stale or incompatible (expected PostgreSQL image schema 5)." >&2
+  echo "Rebuild it with: scripts/vm/build-postgres-rootfs.sh" >&2
+  exit 1
+}
 
 target_dir=${CARGO_TARGET_DIR:-/tmp/wasm-cloud-platform-target}
 CARGO_TARGET_DIR="$target_dir" cargo build -p vm-testbed --bin vm-testbed-cli
 cli="$target_dir/debug/vm-testbed-cli"
-sudo -E "$cli" add-service \
+if [[ -n ${WSL_DISTRO_NAME:-} ]] && command -v wsl.exe >/dev/null; then
+  run_privileged() { wsl.exe -u root -- "$@"; }
+else
+  sudo -v
+  run_privileged() { sudo -E "$@"; }
+fi
+
+run_privileged "$cli" add-service \
   --state-file "$state_file" \
   --id oidc-postgres \
   --kind postgresql \

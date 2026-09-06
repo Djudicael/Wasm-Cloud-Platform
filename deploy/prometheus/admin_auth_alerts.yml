@@ -5,7 +5,7 @@
 #
 # Prerequisites:
 #   - wasm-node must be running with auth.enabled = true
-#   - Prometheus must be scraping the admin API /status/metrics endpoint
+#   - Prometheus must scrape the admin API /metrics endpoint with a read token
 #   - The wasm_admin_auth_successes_total, wasm_admin_auth_failures_total,
 #     and wasm_admin_rate_limited_total counters must be exposed
 
@@ -68,14 +68,10 @@ groups:
             too aggressively.
 
       # ── Auth Disabled in Production ────────────────────────────────────
-      # If the admin API has no auth metrics at all, authentication may be
-      # disabled. This alert fires when the node has been up for at least
-      # 10 minutes but no auth metrics have been recorded.
+      # The node exports its effective authentication state explicitly. Request
+      # counters cannot distinguish an unused protected API from disabled auth.
       - alert: AdminAuthDisabled
-        expr: >
-          (time() - process_start_time_seconds) > 600 and
-          wasm_admin_auth_successes_total == 0 and
-          wasm_admin_auth_failures_total == 0
+        expr: wasm_admin_auth_enabled == 0
         for: 5m
         labels:
           severity: info
@@ -83,11 +79,10 @@ groups:
         annotations:
           summary: "Admin API authentication may be disabled on {{ $labels.node }}"
           description: >-
-            No admin API authentication metrics have been recorded for over 10
-            minutes after node startup. This likely means authentication is
-            disabled (auth.enabled = false). In production, the admin API should
-            have authentication enabled to prevent unauthorized access to
-            configuration, rebuild, and garbage collection endpoints.
+            The node reports that its effective admin API authentication is
+            disabled. Production must require authentication to prevent
+            unauthorized access to configuration, rebuild, and garbage
+            collection endpoints.
 
       # ── Sustained Auth Failures ────────────────────────────────────────
       # A low but sustained rate of auth failures over a long period may

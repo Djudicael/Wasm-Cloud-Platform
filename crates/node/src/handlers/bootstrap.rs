@@ -214,7 +214,7 @@ pub(crate) async fn handle_node_joined(
         "sending state snapshot to new node"
     );
 
-    let app_ids = ctx.store.list_apps()?;
+    let app_ids = ctx.store.list_deployed_apps()?;
     let mut configs = Vec::with_capacity(app_ids.len());
     for id in &app_ids {
         if let Some(config) = ctx.store.load_config(id)? {
@@ -222,7 +222,14 @@ pub(crate) async fn handle_node_joined(
         }
     }
 
-    let routes = ctx.store.list_routes()?;
+    let active_app_ids: std::collections::HashSet<_> =
+        app_ids.iter().map(|app_id| app_id.0.as_str()).collect();
+    let routes = ctx
+        .store
+        .list_routes()?
+        .into_iter()
+        .filter(|route| active_app_ids.contains(route.app_id.0.as_str()))
+        .collect();
 
     let mut encrypted_secrets: Vec<SecretTransportEntry> = Vec::new();
     for config in &configs {

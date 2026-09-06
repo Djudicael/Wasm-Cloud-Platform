@@ -80,6 +80,7 @@ pub fn parse_event(bytes: &[u8]) -> Result<MonitorEvent, ParseError> {
             if event_type == EventType::ProcessExec {
                 Ok(MonitorEvent::ProcessExec {
                     pid: event.header.pid,
+                    tid: event.header.tid,
                     ppid: event.ppid,
                     comm: event.comm,
                     cgroup_id: event.cgroup_id,
@@ -87,6 +88,7 @@ pub fn parse_event(bytes: &[u8]) -> Result<MonitorEvent, ParseError> {
             } else {
                 Ok(MonitorEvent::ProcessExit {
                     pid: event.header.pid,
+                    tid: event.header.tid,
                     ppid: event.ppid,
                     exit_code: event.exit_code,
                     signal: event.signal,
@@ -96,7 +98,12 @@ pub fn parse_event(bytes: &[u8]) -> Result<MonitorEvent, ParseError> {
             }
         }
 
-        EventType::TcpConnect | EventType::TcpClose | EventType::TcpRetransmit => {
+        EventType::TcpConnect
+        | EventType::TcpClose
+        | EventType::TcpRetransmit
+        | EventType::TcpAccept
+        | EventType::TcpSend
+        | EventType::TcpReceive => {
             let expected = std::mem::size_of::<TcpEvent>();
             if bytes.len() < expected {
                 return Err(ParseError::SizeMismatch {
@@ -109,6 +116,7 @@ pub fn parse_event(bytes: &[u8]) -> Result<MonitorEvent, ParseError> {
             match event_type {
                 EventType::TcpConnect => Ok(MonitorEvent::TcpConnect {
                     pid: event.header.pid,
+                    tid: event.header.tid,
                     src_port: event.src_port,
                     dst_port: event.dst_port,
                     old_state: event.old_state,
@@ -116,21 +124,40 @@ pub fn parse_event(bytes: &[u8]) -> Result<MonitorEvent, ParseError> {
                 }),
                 EventType::TcpClose => Ok(MonitorEvent::TcpClose {
                     pid: event.header.pid,
+                    tid: event.header.tid,
                     src_port: event.src_port,
                     dst_port: event.dst_port,
                 }),
                 EventType::TcpRetransmit => Ok(MonitorEvent::TcpRetransmit {
                     pid: event.header.pid,
+                    tid: event.header.tid,
                     src_port: event.src_port,
                     dst_port: event.dst_port,
                     retransmits: event.retransmits,
                     rtt_us: event.rtt_us,
                 }),
+                EventType::TcpAccept => Ok(MonitorEvent::TcpAccept {
+                    pid: event.header.pid,
+                    tid: event.header.tid,
+                    fd: event.src_port as u32,
+                }),
+                EventType::TcpSend => Ok(MonitorEvent::TcpSend {
+                    pid: event.header.pid,
+                    tid: event.header.tid,
+                    fd: event.src_port as u32,
+                    bytes: event.bytes,
+                }),
+                EventType::TcpReceive => Ok(MonitorEvent::TcpReceive {
+                    pid: event.header.pid,
+                    tid: event.header.tid,
+                    fd: event.src_port as u32,
+                    bytes: event.bytes,
+                }),
                 _ => unreachable!(),
             }
         }
 
-        EventType::FdOpen | EventType::FdLimitApproaching => {
+        EventType::FdOpen | EventType::FdLimitApproaching | EventType::FdClose => {
             let expected = std::mem::size_of::<FdEvent>();
             if bytes.len() < expected {
                 return Err(ParseError::SizeMismatch {
@@ -143,16 +170,25 @@ pub fn parse_event(bytes: &[u8]) -> Result<MonitorEvent, ParseError> {
             if event_type == EventType::FdOpen {
                 Ok(MonitorEvent::FdOpen {
                     pid: event.header.pid,
+                    tid: event.header.tid,
+                    fd: event.fd,
+                    current_fd_count: event.current_fd_count,
+                    fd_soft_limit: event.fd_soft_limit,
+                })
+            } else if event_type == EventType::FdLimitApproaching {
+                Ok(MonitorEvent::FdLimitApproaching {
+                    pid: event.header.pid,
+                    tid: event.header.tid,
                     fd: event.fd,
                     current_fd_count: event.current_fd_count,
                     fd_soft_limit: event.fd_soft_limit,
                 })
             } else {
-                Ok(MonitorEvent::FdLimitApproaching {
+                Ok(MonitorEvent::FdClose {
                     pid: event.header.pid,
+                    tid: event.header.tid,
                     fd: event.fd,
                     current_fd_count: event.current_fd_count,
-                    fd_soft_limit: event.fd_soft_limit,
                 })
             }
         }
@@ -170,6 +206,7 @@ pub fn parse_event(bytes: &[u8]) -> Result<MonitorEvent, ParseError> {
                 unsafe { std::ptr::read_unaligned(bytes.as_ptr() as *const MemPressureEvent) };
             Ok(MonitorEvent::MemPressure {
                 pid: event.header.pid,
+                tid: event.header.tid,
                 free_pages: event.free_pages,
                 reclaim_pages: event.reclaim_pages,
                 pressure_level: event.pressure_level,
@@ -188,14 +225,20 @@ pub fn parse_event(bytes: &[u8]) -> Result<MonitorEvent, ParseError> {
             }
             let event = unsafe { std::ptr::read_unaligned(bytes.as_ptr() as *const DiskIoEvent) };
             Ok(MonitorEvent::DiskSlowIo {
+                pid: event.header.pid,
+                tid: event.header.tid,
                 dev_major: event.dev_major,
                 dev_minor: event.dev_minor,
+                sector: event.sector,
+                nr_sector: event.nr_sector,
+                bytes: event.bytes,
                 latency_ns: event.latency_ns,
+                cgroup_id: event.cgroup_id,
                 io_type: event.io_type,
             })
         }
 
-        EventType::SyscallAnomaly => {
+        EventType::SyscallAnomaly | EventType::SyscallActivity => {
             let expected = std::mem::size_of::<SyscallEvent>();
             if bytes.len() < expected {
                 return Err(ParseError::SizeMismatch {
@@ -205,12 +248,22 @@ pub fn parse_event(bytes: &[u8]) -> Result<MonitorEvent, ParseError> {
                 });
             }
             let event = unsafe { std::ptr::read_unaligned(bytes.as_ptr() as *const SyscallEvent) };
-            Ok(MonitorEvent::SyscallAnomaly {
-                pid: event.header.pid,
-                syscall_nr: event.syscall_nr,
-                syscall_category: SyscallCategory::from_u32(event.syscall_category),
-                count_in_window: event.count_in_window,
-            })
+            if event_type == EventType::SyscallActivity {
+                Ok(MonitorEvent::SyscallActivity {
+                    pid: event.header.pid,
+                    tid: event.header.tid,
+                    syscall_nr: event.syscall_nr,
+                    count_in_window: event.count_in_window,
+                })
+            } else {
+                Ok(MonitorEvent::SyscallAnomaly {
+                    pid: event.header.pid,
+                    tid: event.header.tid,
+                    syscall_nr: event.syscall_nr,
+                    syscall_category: SyscallCategory::from_u32(event.syscall_category),
+                    count_in_window: event.count_in_window,
+                })
+            }
         }
 
         EventType::TidConnection | EventType::TidDisconnection => {
@@ -289,7 +342,31 @@ fn read_cstr(bytes: &[u8]) -> String {
 #[cfg(feature = "ebpf")]
 mod ebpf_consumer {
     use super::*;
-    use aya::maps::RingBuf as AyaRingBuf;
+    use crate::metrics::EbpfMetrics;
+    use aya::maps::{MapData, PerCpuArray, RingBuf as AyaRingBuf};
+    use tracing::{debug, error, warn};
+
+    pub struct RingBufferSource {
+        pub monitor: &'static str,
+        pub ring_buf: AyaRingBuf<MapData>,
+        pub dropped_events: Option<PerCpuArray<MapData, u64>>,
+        observed_drops: u64,
+    }
+
+    impl RingBufferSource {
+        pub fn new(
+            monitor: &'static str,
+            ring_buf: AyaRingBuf<MapData>,
+            dropped_events: Option<PerCpuArray<MapData, u64>>,
+        ) -> Self {
+            Self {
+                monitor,
+                ring_buf,
+                dropped_events,
+                observed_drops: 0,
+            }
+        }
+    }
 
     /// Read events from the eBPF ring buffer and send them to the action dispatcher.
     ///
@@ -299,8 +376,8 @@ mod ebpf_consumer {
     ///
     /// The function returns when the `action_tx` channel is closed (i.e., the receiver
     /// was dropped), which signals a clean shutdown.
-    pub async fn consume_ring_buffer(
-        mut ring_buf: AyaRingBuf<AyaRingBuf>,
+    pub async fn consume_ring_buffers(
+        mut ring_buffers: Vec<RingBufferSource>,
         action_tx: tokio::sync::mpsc::Sender<MonitorEvent>,
         metrics: Arc<EbpfMetrics>,
         poll_interval: Duration,
@@ -312,45 +389,100 @@ mod ebpf_consumer {
 
         let mut interval = tokio::time::interval(poll_interval);
         let mut consecutive_errors = 0u32;
+        let queue_capacity = action_tx.max_capacity();
+        let mut queue_was_full = false;
+        metrics.dispatch_queue_capacity.set(queue_capacity as i64);
 
         loop {
             interval.tick().await;
 
             let mut events_this_tick = 0u32;
 
-            // Drain all available events from the ring buffer
-            while let Some(item) = ring_buf.next() {
-                let raw_bytes = item.as_ref();
-
-                match parse_event(raw_bytes) {
-                    Ok(event) => {
-                        events_this_tick += 1;
-                        if action_tx.send(event).await.is_err() {
-                            info!("action channel closed — eBPF consumer shutting down");
-                            return;
+            // Drain all available events from every independently loaded object.
+            for source in &mut ring_buffers {
+                if let Some(dropped_events) = &source.dropped_events {
+                    match dropped_events.get(&0, 0) {
+                        Ok(values) => {
+                            let total = values.iter().copied().fold(0u64, u64::saturating_add);
+                            let delta = total.saturating_sub(source.observed_drops);
+                            if delta > 0 {
+                                metrics
+                                    .ring_buffer_dropped_events
+                                    .with_label_values(&[source.monitor])
+                                    .inc_by(delta);
+                                warn!(
+                                    monitor = source.monitor,
+                                    dropped_events = delta,
+                                    total_dropped_events = total,
+                                    "kernel eBPF ring buffer dropped events"
+                                );
+                            }
+                            source.observed_drops = total;
+                        }
+                        Err(error) => {
+                            metrics
+                                .ring_buffer_drop_counter_read_errors
+                                .with_label_values(&[source.monitor])
+                                .inc();
+                            warn!(
+                                monitor = source.monitor,
+                                error = %error,
+                                "failed to read eBPF ring-buffer drop counter"
+                            );
                         }
                     }
-                    Err(ParseError::UnknownEventType(t)) => {
-                        // Unknown event types are expected if the eBPF program is newer
-                        // than the userspace code. Log at debug level.
-                        debug!(event_type = t, "skipping unknown eBPF event type");
-                        metrics.events_parse_errors.inc();
-                    }
-                    Err(e) => {
-                        warn!(error = %e, "failed to parse eBPF event");
-                        metrics.events_parse_errors.inc();
-                        consecutive_errors += 1;
+                }
 
-                        // If we get too many consecutive parse errors, something is
-                        // fundamentally wrong with the ring buffer data. Slow down.
-                        if consecutive_errors > 100 {
-                            error!(
-                                consecutive_errors,
-                                "too many consecutive parse errors — possible data corruption"
+                while let Some(item) = source.ring_buf.next() {
+                    let raw_bytes = item.as_ref();
+
+                    match parse_event(raw_bytes) {
+                        Ok(event) => {
+                            events_this_tick += 1;
+                            let queue_depth = queue_capacity.saturating_sub(action_tx.capacity());
+                            metrics.dispatch_queue_depth.set(queue_depth as i64);
+                            if action_tx.capacity() == 0 {
+                                if !queue_was_full {
+                                    metrics.dispatch_queue_saturations.inc();
+                                    warn!(queue_capacity, "eBPF action-dispatch queue saturated");
+                                    queue_was_full = true;
+                                }
+                            } else {
+                                queue_was_full = false;
+                            }
+                            if action_tx.send(event).await.is_err() {
+                                info!("action channel closed — eBPF consumer shutting down");
+                                return;
+                            }
+                            metrics
+                                .dispatch_queue_depth
+                                .set(queue_capacity.saturating_sub(action_tx.capacity()) as i64);
+                        }
+                        Err(ParseError::UnknownEventType(t)) => {
+                            debug!(
+                                monitor = source.monitor,
+                                event_type = t,
+                                "skipping unknown eBPF event type"
                             );
-                            // Back off for a second before continuing
-                            tokio::time::sleep(Duration::from_secs(1)).await;
-                            consecutive_errors = 0;
+                            metrics.events_parse_errors.inc();
+                        }
+                        Err(e) => {
+                            warn!(
+                                monitor = source.monitor,
+                                error = %e,
+                                "failed to parse eBPF event"
+                            );
+                            metrics.events_parse_errors.inc();
+                            consecutive_errors += 1;
+
+                            if consecutive_errors > 100 {
+                                error!(
+                                    consecutive_errors,
+                                    "too many consecutive parse errors — possible data corruption"
+                                );
+                                tokio::time::sleep(Duration::from_secs(1)).await;
+                                consecutive_errors = 0;
+                            }
                         }
                     }
                 }
@@ -369,7 +501,7 @@ mod ebpf_consumer {
 }
 
 #[cfg(feature = "ebpf")]
-pub use ebpf_consumer::consume_ring_buffer;
+pub use ebpf_consumer::{consume_ring_buffers, RingBufferSource};
 
 // ── Action Dispatcher Loop ────────────────────────────────────────────────────
 
@@ -449,6 +581,7 @@ mod tests {
         let event = ProcessEvent {
             header: EventHeader {
                 event_type: EventType::ProcessExec as u32,
+                _padding: 0,
                 timestamp_ns: 1000000,
                 pid: 42,
                 tid: 43,
@@ -457,6 +590,7 @@ mod tests {
             exit_code: 0,
             signal: 0,
             ppid: 1,
+            _padding: 0,
             cgroup_id: 12345,
         };
 
@@ -469,6 +603,7 @@ mod tests {
                 ppid,
                 comm,
                 cgroup_id,
+                ..
             } => {
                 assert_eq!(pid, 42);
                 assert_eq!(ppid, 1);
@@ -484,6 +619,7 @@ mod tests {
         let event = ProcessEvent {
             header: EventHeader {
                 event_type: EventType::ProcessExit as u32,
+                _padding: 0,
                 timestamp_ns: 2000000,
                 pid: 99,
                 tid: 99,
@@ -492,6 +628,7 @@ mod tests {
             exit_code: 1,
             signal: 9, // OOM kill
             ppid: 1,
+            _padding: 0,
             cgroup_id: 0,
         };
 
@@ -518,6 +655,7 @@ mod tests {
         let event = TcpEvent {
             header: EventHeader {
                 event_type: EventType::TcpConnect as u32,
+                _padding: 0,
                 timestamp_ns: 3000000,
                 pid: 100,
                 tid: 100,
@@ -530,6 +668,7 @@ mod tests {
             new_state: 1,
             retransmits: 0,
             rtt_us: 500,
+            bytes: 0,
         };
 
         let bytes = struct_to_bytes(&event);
@@ -555,6 +694,7 @@ mod tests {
         let event = TcpEvent {
             header: EventHeader {
                 event_type: EventType::TcpRetransmit as u32,
+                _padding: 0,
                 timestamp_ns: 4000000,
                 pid: 200,
                 tid: 200,
@@ -567,6 +707,7 @@ mod tests {
             new_state: 5,
             retransmits: 10,
             rtt_us: 2000,
+            bytes: 0,
         };
 
         let bytes = struct_to_bytes(&event);
@@ -594,6 +735,7 @@ mod tests {
         let event = FdEvent {
             header: EventHeader {
                 event_type: EventType::FdLimitApproaching as u32,
+                _padding: 0,
                 timestamp_ns: 5000000,
                 pid: 300,
                 tid: 300,
@@ -627,13 +769,15 @@ mod tests {
         let event = MemPressureEvent {
             header: EventHeader {
                 event_type: EventType::MemPressure as u32,
+                _padding: 0,
                 timestamp_ns: 6000000,
                 pid: 400,
                 tid: 400,
             },
             free_pages: 50000,
             reclaim_pages: 1000,
-            pressure_level: 2, // critical
+            pressure_level: 2,
+            _padding: 0,
             anon_pages: 30000,
         };
 
@@ -658,6 +802,7 @@ mod tests {
         let event = DiskIoEvent {
             header: EventHeader {
                 event_type: EventType::DiskSlowIo as u32,
+                _padding: 0,
                 timestamp_ns: 7000000,
                 pid: 0,
                 tid: 0,
@@ -666,8 +811,11 @@ mod tests {
             dev_minor: 0,
             sector: 123456,
             nr_sector: 8,
+            bytes: 4096,
             latency_ns: 100_000_000, // 100ms
-            io_type: 1,              // write
+            cgroup_id: 42,
+            io_type: 1, // write
+            _padding2: 0,
         };
 
         let bytes = struct_to_bytes(&event);
@@ -677,12 +825,17 @@ mod tests {
             MonitorEvent::DiskSlowIo {
                 dev_major,
                 dev_minor,
+                bytes,
                 latency_ns,
+                cgroup_id,
                 io_type,
+                ..
             } => {
                 assert_eq!(dev_major, 8);
                 assert_eq!(dev_minor, 0);
+                assert_eq!(bytes, 4096);
                 assert_eq!(latency_ns, 100_000_000);
+                assert_eq!(cgroup_id, 42);
                 assert_eq!(io_type, 1);
             }
             _ => panic!("expected DiskSlowIo, got {:?}", parsed),
@@ -694,12 +847,14 @@ mod tests {
         let event = SyscallEvent {
             header: EventHeader {
                 event_type: EventType::SyscallAnomaly as u32,
+                _padding: 0,
                 timestamp_ns: 8000000,
                 pid: 500,
                 tid: 500,
             },
             syscall_nr: 101, // SYS_PTRACE
             syscall_category: SyscallCategory::PrivilegeEscalation as u32,
+            _padding: 0,
             count_in_window: 1,
         };
 
@@ -709,11 +864,13 @@ mod tests {
         match parsed {
             MonitorEvent::SyscallAnomaly {
                 pid,
+                tid,
                 syscall_nr,
                 syscall_category,
                 count_in_window,
             } => {
                 assert_eq!(pid, 500);
+                assert_eq!(tid, 500);
                 assert_eq!(syscall_nr, 101);
                 assert_eq!(syscall_category, SyscallCategory::PrivilegeEscalation);
                 assert_eq!(count_in_window, 1);
@@ -733,7 +890,8 @@ mod tests {
     fn test_parse_unknown_event_type() {
         // Create a valid header with an unknown event type
         let header = EventHeader {
-            event_type: 255, // Unknown
+            event_type: 255,
+            _padding: 0,
             timestamp_ns: 0,
             pid: 0,
             tid: 0,
@@ -748,6 +906,7 @@ mod tests {
         // Create a header for ProcessExec but with insufficient bytes for the full struct
         let header = EventHeader {
             event_type: EventType::ProcessExec as u32,
+            _padding: 0,
             timestamp_ns: 0,
             pid: 0,
             tid: 0,
@@ -788,6 +947,7 @@ mod tests {
         // Send some events
         tx.send(MonitorEvent::ProcessExec {
             pid: 1,
+            tid: 1,
             ppid: 0,
             comm: [0; 16],
             cgroup_id: 0,
@@ -797,6 +957,7 @@ mod tests {
 
         tx.send(MonitorEvent::MemPressure {
             pid: 0,
+            tid: 0,
             free_pages: 50000,
             reclaim_pages: 0,
             pressure_level: 1,
@@ -833,10 +994,16 @@ mod tests {
 
         // Send an event through the channel
         tx.send(MonitorEvent::DiskSlowIo {
+            pid: 0,
+            tid: 0,
             dev_major: 8,
             dev_minor: 0,
+            sector: 0,
+            nr_sector: 0,
+            bytes: 4096,
             latency_ns: 50_000_000,
-            io_type: 0,
+            cgroup_id: 42,
+            io_type: 1,
         })
         .await
         .unwrap();
@@ -864,6 +1031,7 @@ mod tests {
                 struct_to_bytes(&ProcessEvent {
                     header: EventHeader {
                         event_type: EventType::ProcessExec as u32,
+                        _padding: 0,
                         timestamp_ns: 1,
                         pid: 1,
                         tid: 1,
@@ -872,6 +1040,7 @@ mod tests {
                     exit_code: 0,
                     signal: 0,
                     ppid: 0,
+                    _padding: 0,
                     cgroup_id: 0,
                 }),
             ),
@@ -880,6 +1049,7 @@ mod tests {
                 struct_to_bytes(&ProcessEvent {
                     header: EventHeader {
                         event_type: EventType::ProcessExit as u32,
+                        _padding: 0,
                         timestamp_ns: 2,
                         pid: 2,
                         tid: 2,
@@ -887,7 +1057,8 @@ mod tests {
                     comm: [0; TASK_COMM_LEN],
                     exit_code: 0,
                     signal: 9,
-                    ppid: 1,
+                    ppid: 0,
+                    _padding: 0,
                     cgroup_id: 0,
                 }),
             ),
@@ -896,6 +1067,7 @@ mod tests {
                 struct_to_bytes(&TcpEvent {
                     header: EventHeader {
                         event_type: EventType::TcpConnect as u32,
+                        _padding: 0,
                         timestamp_ns: 3,
                         pid: 3,
                         tid: 3,
@@ -908,6 +1080,7 @@ mod tests {
                     new_state: 1,
                     retransmits: 0,
                     rtt_us: 0,
+                    bytes: 0,
                 }),
             ),
             (
@@ -915,6 +1088,7 @@ mod tests {
                 struct_to_bytes(&TcpEvent {
                     header: EventHeader {
                         event_type: EventType::TcpClose as u32,
+                        _padding: 0,
                         timestamp_ns: 4,
                         pid: 4,
                         tid: 4,
@@ -927,6 +1101,7 @@ mod tests {
                     new_state: 7,
                     retransmits: 0,
                     rtt_us: 0,
+                    bytes: 0,
                 }),
             ),
             (
@@ -934,6 +1109,7 @@ mod tests {
                 struct_to_bytes(&TcpEvent {
                     header: EventHeader {
                         event_type: EventType::TcpRetransmit as u32,
+                        _padding: 0,
                         timestamp_ns: 5,
                         pid: 5,
                         tid: 5,
@@ -946,6 +1122,7 @@ mod tests {
                     new_state: 5,
                     retransmits: 3,
                     rtt_us: 1000,
+                    bytes: 0,
                 }),
             ),
             (
@@ -953,6 +1130,7 @@ mod tests {
                 struct_to_bytes(&FdEvent {
                     header: EventHeader {
                         event_type: EventType::FdOpen as u32,
+                        _padding: 0,
                         timestamp_ns: 6,
                         pid: 6,
                         tid: 6,
@@ -968,6 +1146,7 @@ mod tests {
                 struct_to_bytes(&FdEvent {
                     header: EventHeader {
                         event_type: EventType::FdLimitApproaching as u32,
+                        _padding: 0,
                         timestamp_ns: 7,
                         pid: 7,
                         tid: 7,
@@ -983,6 +1162,7 @@ mod tests {
                 struct_to_bytes(&MemPressureEvent {
                     header: EventHeader {
                         event_type: EventType::MemPressure as u32,
+                        _padding: 0,
                         timestamp_ns: 8,
                         pid: 8,
                         tid: 8,
@@ -990,6 +1170,7 @@ mod tests {
                     free_pages: 50000,
                     reclaim_pages: 1000,
                     pressure_level: 2,
+                    _padding: 0,
                     anon_pages: 30000,
                 }),
             ),
@@ -998,6 +1179,7 @@ mod tests {
                 struct_to_bytes(&DiskIoEvent {
                     header: EventHeader {
                         event_type: EventType::DiskSlowIo as u32,
+                        _padding: 0,
                         timestamp_ns: 9,
                         pid: 0,
                         tid: 0,
@@ -1006,8 +1188,11 @@ mod tests {
                     dev_minor: 0,
                     sector: 1234,
                     nr_sector: 8,
+                    bytes: 4096,
                     latency_ns: 50_000_000,
+                    cgroup_id: 42,
                     io_type: 1,
+                    _padding2: 0,
                 }),
             ),
             (
@@ -1015,12 +1200,14 @@ mod tests {
                 struct_to_bytes(&SyscallEvent {
                     header: EventHeader {
                         event_type: EventType::SyscallAnomaly as u32,
+                        _padding: 0,
                         timestamp_ns: 10,
                         pid: 10,
                         tid: 10,
                     },
                     syscall_nr: 101,
                     syscall_category: SyscallCategory::PrivilegeEscalation as u32,
+                    _padding: 0,
                     count_in_window: 1,
                 }),
             ),

@@ -55,6 +55,10 @@ pub struct ClusterFixture {
     pub nats_rootfs: PathBuf,
     pub node_rootfs: PathBuf,
     pub node_data_drive: Option<PathBuf>,
+    pub node_otlp_endpoint: Option<String>,
+    pub node_oidc_issuer_url: Option<String>,
+    pub node_oidc_audience: Option<String>,
+    pub node_oidc_jwks_url: Option<String>,
     next_node_index: u8,
 }
 
@@ -112,8 +116,30 @@ impl ClusterFixture {
             nats_rootfs,
             node_rootfs,
             node_data_drive,
+            node_otlp_endpoint: None,
+            node_oidc_issuer_url: None,
+            node_oidc_audience: None,
+            node_oidc_jwks_url: None,
             next_node_index: 0,
         })
+    }
+
+    /// Configure the OTLP endpoint embedded in subsequently started nodes.
+    pub fn set_node_otlp_endpoint(&mut self, endpoint: Option<String>) {
+        self.node_otlp_endpoint = endpoint;
+    }
+
+    /// Configure the OIDC issuer, audience, and private JWKS endpoint embedded
+    /// in subsequently started platform nodes.
+    pub fn set_node_oidc(
+        &mut self,
+        issuer_url: Option<String>,
+        audience: Option<String>,
+        jwks_url: Option<String>,
+    ) {
+        self.node_oidc_issuer_url = issuer_url;
+        self.node_oidc_audience = audience;
+        self.node_oidc_jwks_url = jwks_url;
     }
 
     /// Start the NATS microVM.
@@ -141,6 +167,7 @@ impl ClusterFixture {
                 id: vm_id,
                 kernel_path: self.kernel_path.clone(),
                 rootfs_path: self.nats_rootfs.clone(),
+                rootfs_read_only: false,
                 data_drive_path: None,
                 memory_mb,
                 vcpus,
@@ -148,6 +175,7 @@ impl ClusterFixture {
                 gateway: self.gateway.clone(),
                 bridge_name: self.bridge_name.clone(),
                 tap_device: tap,
+                extra_kernel_args: Vec::new(),
                 mmds_data: Some(json!({
                     "nats_config": {
                         "jetstream": true,
@@ -194,10 +222,22 @@ impl ClusterFixture {
 
         let nats_url = format!("nats://{}:4222", self.nats_ip()?);
 
+        let mut extra_kernel_args = Vec::new();
+        if let Some(endpoint) = &self.node_otlp_endpoint {
+            extra_kernel_args.push(format!("wcp.otlp_endpoint={endpoint}"));
+        }
+        append_oidc_kernel_args(
+            &mut extra_kernel_args,
+            self.node_oidc_issuer_url.as_deref(),
+            self.node_oidc_audience.as_deref(),
+            self.node_oidc_jwks_url.as_deref(),
+        );
+
         let config = VmConfig {
             id: node_id.clone(),
             kernel_path: self.kernel_path.clone(),
             rootfs_path: self.node_rootfs.clone(),
+            rootfs_read_only: false,
             data_drive_path: self.node_data_drive.clone(),
             memory_mb,
             vcpus,
@@ -205,6 +245,7 @@ impl ClusterFixture {
             gateway: self.gateway.clone(),
             bridge_name: self.bridge_name.clone(),
             tap_device: tap,
+            extra_kernel_args,
             mmds_data: Some(json!({
                 "node_config": {
                     "node_id": node_id,
@@ -214,6 +255,10 @@ impl ClusterFixture {
                     "proxy_port": 8080,
                     "admin_port": 9090,
                     "artifact_port": 9091,
+                    "otlp_endpoint": self.node_otlp_endpoint,
+                    "oidc_issuer_url": self.node_oidc_issuer_url,
+                    "oidc_audience": self.node_oidc_audience,
+                    "oidc_jwks_url": self.node_oidc_jwks_url,
                 }
             })),
         };
@@ -339,6 +384,19 @@ impl ClusterFixture {
     }
 }
 
+pub(crate) fn append_oidc_kernel_args(
+    args: &mut Vec<String>,
+    issuer_url: Option<&str>,
+    audience: Option<&str>,
+    jwks_url: Option<&str>,
+) {
+    if let (Some(issuer_url), Some(audience), Some(jwks_url)) = (issuer_url, audience, jwks_url) {
+        args.push(format!("wcp.oidc_issuer_url={issuer_url}"));
+        args.push(format!("wcp.oidc_audience={audience}"));
+        args.push(format!("wcp.oidc_jwks_url={jwks_url}"));
+    }
+}
+
 // ── Asset Discovery ──────────────────────────────────────────────────
 
 /// Find the kernel image in common locations.
@@ -351,9 +409,9 @@ fn find_kernel() -> PathBuf {
     }
 
     let candidates = [
-        "./assets/vmlinux-6.1",
+        "./assets/vmlinux-6.18",
         "./assets/vmlinux",
-        "/opt/vm-testbed/vmlinux-6.1",
+        "/opt/vm-testbed/vmlinux-6.18",
         "/opt/vm-testbed/vmlinux",
         "/var/lib/vm-testbed/vmlinux",
     ];

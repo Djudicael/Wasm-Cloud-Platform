@@ -25,8 +25,8 @@
 //!     let client = FirecrackerClient::new("/tmp/firecracker-node1.sock");
 //!
 //!     client.configure_machine(2, 512).await?;
-//!     client.set_boot_source("/opt/kernels/vmlinux-6.1", "console=ttyS0 reboot=k panic=1 pci=off").await?;
-//!     client.attach_drive("rootfs", "/opt/images/rootfs.ext4", true).await?;
+//!     client.set_boot_source("/opt/kernels/vmlinux-6.18", "console=ttyS0 reboot=k panic=1 pci=off").await?;
+//!     client.attach_drive("rootfs", "/opt/images/rootfs.ext4", true, false).await?;
 //!     client.add_network_interface("eth0", "AA:FC:00:00:00:01", "tap-node1").await?;
 //!     client.start_instance().await?;
 //!
@@ -208,6 +208,7 @@ impl FirecrackerClient {
         drive_id: &str,
         path_on_host: impl AsRef<Path>,
         is_root_device: bool,
+        is_read_only: bool,
     ) -> Result<(), FirecrackerError> {
         let path = path_on_host.as_ref().to_string_lossy().to_string();
         info!(%drive_id, %path, is_root_device, "Attaching drive");
@@ -216,7 +217,7 @@ impl FirecrackerClient {
             "drive_id": drive_id,
             "path_on_host": path,
             "is_root_device": is_root_device,
-            "is_read_only": false,
+            "is_read_only": is_read_only,
         });
 
         let resp = self
@@ -438,6 +439,26 @@ impl FirecrackerClient {
 
         let resp = self
             .request(reqwest::Method::PUT, "/metrics")
+            .json(&body)
+            .send()
+            .await?;
+
+        Self::check_status(resp).await
+    }
+
+    /// Configure a file for guest 8250 serial-console output.
+    ///
+    /// Configure this before starting the instance so guest kernel and PID 1
+    /// failures are available independently from Firecracker's own logs.
+    pub async fn configure_serial_output(
+        &self,
+        serial_out_path: impl AsRef<Path>,
+    ) -> Result<(), FirecrackerError> {
+        let path = serial_out_path.as_ref().to_string_lossy().to_string();
+        let body = json!({ "serial_out_path": path });
+
+        let resp = self
+            .request(reqwest::Method::PUT, "/serial")
             .json(&body)
             .send()
             .await?;

@@ -15,7 +15,7 @@ The supervisor operates as a long-running service that coordinates multiple subs
 - **Billing**: Records fuel and resource consumption for running instances.
 - **Audit Logging**: Records significant events (spawns, kills, deployments) to a structured JSON log.
 - **Connection Proxying**: Proxies database connections from Wasm instances to backend databases.
-- **Deployment**: Supports hot-swap deployments and rollback policies for zero-downtime updates.
+- **Deployment**: Supports hot-swap and manual rollback mechanics. `RollbackPolicy` is a model for automatic rollback thresholds but is not wired to an automatic controller.
 - **Admission Control**: Uses fuel-based and concurrency-based controllers to limit resource usage per application.
 
 ### Key Dependencies
@@ -38,7 +38,7 @@ The supervisor operates as a long-running service that coordinates multiple subs
 | `NetworkInterceptor` | Intercepts and filters network connections based on namespace policies. |
 | `InstancePool` | Pool of managed instances for a given application, supporting scaling operations. |
 | `ConnectionProxy` | Proxies database connections from Wasm instances to backend databases. |
-| `RollbackPolicy` | Defines conditions and behavior for automatic rollback of deployments. |
+| `RollbackPolicy` | Defines proposed automatic rollback thresholds; currently used as a data model and in tests, not by a monitoring loop. |
 | `EnvResolver` | Resolves environment variable templates for instance configuration. |
 | `FuelAdmissionController` | Limits total fuel consumption per application to prevent resource exhaustion. |
 | `ConcurrencyController` | Limits concurrent instance count per application using a semaphore. |
@@ -46,61 +46,42 @@ The supervisor operates as a long-running service that coordinates multiple subs
 
 ## Known Issues & Improvements
 
-### Panic & Reliability
+### Spawn and scaling
 
-- **`spawn()` uses `expect()` which panics on instance spawn failure** — If the runtime fails to spawn an instance, the supervisor panics instead of returning an error. This also leaks the previously allocated port.
-- **`kill_instance_internal()` doesn't await `JoinHandle`** — The Wasm task continues running after the supervisor considers it killed, leading to zombie instances consuming resources.
-- **`kill_instance_internal()` doesn't record billing** — Instances killed due to health check failure or idle timeout are never billed, resulting in lost revenue tracking.
-- **`health_tick()` holds write lock during TCP connects** — The health check acquires a write lock on the instance map before performing blocking TCP connections, preventing all other operations (spawns, kills, lookups) from proceeding.
+- `ensure_instance()` checks for a ready instance and then calls `spawn()` without a per-application single-flight guard. Concurrent cold requests can therefore initiate more than one spawn, bounded by the application's instance limits.
+- Spawn error paths release the allocated port. If the process starts but fails the 500 ms readiness check, the current path releases the port without first signalling and joining the spawned task.
+- `ConcurrencyController` adds semaphore permits after a successful scale-up. Those permits are not reduced when instances later stop, so its concurrency model can drift from the live pool size.
 
-### Race Conditions
+### Shutdown and accounting
 
-- **`ensure_instance()` TOCTOU between read lock and spawn** — The check-then-spawn pattern has a time-of-check-to-time-of-use gap. Under concurrent load, multiple callers can observe "no instance" and each spawn one, leading to over-provisioning.
-- **`drain_app()` + `kill_all_instances()` race condition in `shutdown_all()`** — These two operations can interfere with each other, potentially causing double-kills or missed instances during shutdown.
+Instance shutdown now fences the upstream, signals the runtime, waits for its join handle, records billing, deregisters service state, and releases the port. A timed-out task is reinserted in a fenced state and reaped after it exits.
 
-### Resource Leaks
+`shutdown_all(timeout)` applies the supplied duration to each application and instance sequence rather than enforcing one global deadline. Total shutdown time can therefore exceed `timeout` when many applications are running.
 
-- **`ConcurrencyController::acquire()` semaphore grows unboundedly** — Permits are added but never removed, so the semaphore grows without bound over the lifetime of the supervisor.
-- **`virtual_dns` built but never used** — A `VirtualDns` instance is constructed and immediately dropped, wasting initialization cost.
+### Deployment and identity
 
-### Configuration & Hardcoding
+- `RollbackPolicy` describes automatic rollback thresholds but is not connected to a monitoring loop.
+- `rollback()` verifies that the previous artifact exists but constructs `AppConfig::default_for()` instead of restoring that version's persisted configuration.
+- `NamespaceRegistry::resolve_app_by_port()` reconstructs the discovered application with version `v1`. Namespace enforcement uses the namespace correctly, but callers must not treat that reconstructed value as the exact deployed version.
 
-- **`resolve_app_by_port()` hardcodes version "v1"** — The version string should be configurable or derived from the application configuration.
-- **Audit log path hardcoded to `/var/log/wasm-node/audit.jsonl`** — Should be configurable via environment variable or config file.
-- **`node_id()` reads env var on every call** — The `NODE_ID` environment variable is read on every invocation instead of being cached at startup.
-- **`rollback()` uses `AppConfig::default_for()` instead of loading from storage** — Rollback restores a default configuration rather than the previously deployed configuration, which may not match the intended rollback state.
-- **`shutdown_all()` ignores its timeout parameter** — The timeout is accepted as a parameter but never enforced, so shutdown can hang indefinitely.
+### Audit path
 
-### Dead Code
-
-- **`RollbackPolicy` defined but never used** — Auto-rollback based on policy conditions is not implemented.
-- **`EnvResolver` is dead code** — The supervisor uses a closure-based approach instead of the `EnvResolver` type.
-- **`shutdown_rx` created but never read** — The graceful shutdown signal channel is created but never consumed, so graceful shutdown has no effect.
-
-### Networking
-
-- **`NetworkInterceptor` allows all non-loopback connections** — There is no egress filtering for external connections, allowing Wasm instances to reach any external host.
-- **Unknown loopback connections allowed** — Connections to loopback addresses that don't match known services are permitted, potentially allowing access to other local services on the host.
+The general platform logging system is configurable. The supervisor's standalone `log_policy_violation()` helper still appends synchronously to `/var/log/wasm-node/audit.jsonl`; callers should avoid placing that blocking file operation on a latency-sensitive executor thread.
 
 ## Security Considerations
 
-### Network Isolation
+### Network isolation
 
-The `NetworkInterceptor` does not filter egress traffic to non-loopback addresses. Wasm instances can initiate outbound connections to any external host, which may violate security policies in multi-tenant deployments. Additionally, allowing unknown loopback connections enables instances to access other services running on the host.
+The runtime socket policy restricts loopback destinations to the assigned application port, the internal gateway, and registered same-namespace services. External destinations are evaluated by the application's WASI network policy. Keep `allowed_cidrs`, `denied_cidrs`, DNS, and outbound protocol settings explicit for untrusted workloads.
 
-### Audit Logging
+### Instance cleanup
 
-Audit logging uses synchronous file I/O (`std::fs::write`), which blocks the async Tokio runtime. This not only impacts performance but also creates a denial-of-service vector: if the audit log filesystem is slow or unresponsive, the entire supervisor will stall. Consider using `tokio::fs` or a dedicated logging thread.
+Shutdown waits for the task and retains timed-out instances as fenced state until a later reap. The readiness-failure path described above remains a cleanup gap and should be treated as a resource-leak risk until it explicitly stops the task.
 
-### Instance Cleanup
+### Billing integrity
 
-`kill_instance_internal()` does not await the task `JoinHandle`, meaning Wasm instances may continue executing after the supervisor considers them terminated. This can lead to resource leaks and potential security issues if the instance retains access to network or filesystem resources.
+Normal, health-triggered, idle, and operator-triggered shutdown paths converge on `finalize_instance_exit()`, which records billing before releasing resources. The billing channel is bounded; a full or closed channel produces a warning and drops that record.
 
-### Billing Integrity
+### Audit durability
 
-Instances killed via health checks or idle timeouts are not billed. This creates an incentive for malicious users to trigger kills before billing records are written, effectively receiving free compute time.
-
-### Port Leaks
-
-When `spawn()` fails after port allocation, the port is leaked and never returned to the `PortAllocator`. Over time, repeated spawn failures can exhaust the available port range, causing a denial-of-service condition.
-````
+The supervisor emits structured audit events, but local file durability still depends on filesystem health and rotation. Production validation must exercise the configured collector and the documented collector-outage boundary.

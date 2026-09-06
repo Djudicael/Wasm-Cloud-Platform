@@ -100,7 +100,7 @@ Safe rotation procedure:
 3. shut down ingress instances
 4. replace the KEK on all ingress instances
 5. start ingress instances
-6. re-store artifact credentials with `wasm-ctl secrets set-artifact-credential`
+6. re-store artifact credentials with `wasm-ctl secrets set-artifact-credential --key KEY`
 7. verify remote deploy success
 
 If you rotate the KEK without re-seeding credentials, replicated credential entries will no longer decrypt.
@@ -144,7 +144,11 @@ Artifact fetch credentials are separate from runtime app secrets.
 Store them with:
 
 ```bash
-wasm-ctl secrets set-artifact-credential --key ghcr-reader
+wasm-ctl --deploy-api https://deploy.example.com \
+  --auth-token "$WASM_CTL_AUTH_TOKEN" \
+  secrets set-artifact-credential \
+  --key ghcr-reader \
+  --value-file /run/secrets/ghcr-reader
 ```
 
 Use cases:

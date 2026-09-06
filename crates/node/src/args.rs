@@ -1,7 +1,7 @@
 use clap::Parser;
 
 /// CLI surface for node startup and one-shot maintenance commands.
-#[derive(Parser, Debug)]
+#[derive(Parser)]
 #[command(name = "wasm-node", about = "Wasm Cloud Platform Node")]
 pub(crate) struct Args {
     /// Path to a TOML configuration file. Values in the file are used as
@@ -17,6 +17,18 @@ pub(crate) struct Args {
 
     #[arg(long)]
     pub(crate) nats_creds: Option<String>,
+
+    /// PEM CA bundle used to authenticate a private NATS server certificate.
+    #[arg(long, env = "WASM_NODE_NATS_CA_CERT")]
+    pub(crate) nats_ca_cert: Option<String>,
+
+    /// PEM client certificate used for NATS mutual TLS.
+    #[arg(long, env = "WASM_NODE_NATS_CLIENT_CERT")]
+    pub(crate) nats_client_cert: Option<String>,
+
+    /// PEM client private key used for NATS mutual TLS.
+    #[arg(long, env = "WASM_NODE_NATS_CLIENT_KEY")]
+    pub(crate) nats_client_key: Option<String>,
 
     #[arg(long, default_value = "8080")]
     pub(crate) proxy_port: u16,
@@ -87,6 +99,10 @@ pub(crate) struct Args {
     #[arg(long)]
     pub(crate) key_vault_token_env: Option<String>,
 
+    /// PEM CA bundle used to authenticate a private Vault TLS endpoint.
+    #[arg(long)]
+    pub(crate) key_vault_ca_cert: Option<String>,
+
     #[arg(long)]
     pub(crate) key_vault_mount: Option<String>,
 
@@ -119,6 +135,10 @@ pub(crate) struct Args {
 
     #[arg(long, env = "WASM_NODE_RUNTIME_CACHE_DIRECTORY")]
     pub(crate) runtime_cache_directory: Option<String>,
+
+    /// Runtime trust boundary. Currently only `single-trust-domain` is supported.
+    #[arg(long, env = "WASM_NODE_RUNTIME_ISOLATION_MODE")]
+    pub(crate) runtime_isolation_mode: Option<String>,
 
     #[arg(long, env = "WASM_NODE_RUNTIME_UPGRADE_SIGNING_PUBLIC_KEY")]
     pub(crate) runtime_upgrade_signing_public_key: Option<String>,
@@ -219,6 +239,11 @@ pub(crate) struct Args {
     /// Validate a config file without starting the node, then exit.
     #[arg(long)]
     pub(crate) validate_config: Option<String>,
+
+    /// Remove the legacy plaintext auth override from redb and exit. Rotate
+    /// both affected tokens in the external manager before using this command.
+    #[arg(long)]
+    pub(crate) clear_persisted_auth_override: bool,
 
     /// Log output format: "json" or "text"
     #[arg(long, default_value = "json", env = "WASM_NODE_LOG_FORMAT")]

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Install Firecracker microVMM on Linux.
 #
-# This script downloads the latest stable Firecracker release binary,
-# verifies its checksum, and installs it to /usr/local/bin.
+# This script installs the checksum-pinned Firecracker version paired with the
+# VM-testbed guest kernel and installs it to /usr/local/bin.
 #
 # Usage:
 #   ./scripts/vm/install-firecracker.sh
@@ -14,7 +14,10 @@
 
 set -euo pipefail
 
-FIRECRACKER_VERSION="${FIRECRACKER_VERSION:-v1.15.1}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=kernel-testbed.env
+source "$SCRIPT_DIR/kernel-testbed.env"
+FIRECRACKER_VERSION="${FIRECRACKER_VERSION_OVERRIDE:-$FIRECRACKER_VERSION}"
 INSTALL_DIR="${INSTALL_DIR:-/usr/local/bin}"
 ARCH="$(uname -m)"
 
@@ -36,6 +39,14 @@ cd "$TMPDIR"
 RELEASE_URL="https://github.com/firecracker-microvm/firecracker/releases/download/${FIRECRACKER_VERSION}/firecracker-${FIRECRACKER_VERSION}-${ARCH}.tgz"
 echo "Downloading from $RELEASE_URL..."
 curl -fsSL -o firecracker.tgz "$RELEASE_URL"
+case "$ARCH" in
+    x86_64) expected_sha256="$FIRECRACKER_X86_64_SHA256" ;;
+    aarch64) expected_sha256="$FIRECRACKER_AARCH64_SHA256" ;;
+esac
+echo "$expected_sha256  firecracker.tgz" | sha256sum --check --status || {
+    echo "ERROR: Firecracker release checksum mismatch" >&2
+    exit 1
+}
 
 # Extract
 tar xzf firecracker.tgz

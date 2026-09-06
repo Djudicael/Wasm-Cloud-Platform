@@ -43,35 +43,32 @@ Key storage concepts:
 
 ### Data Integrity
 
-- **Hash chain breaks on restart** — `flush_batch` does NOT persist `seq` or `prev_hash`. After a restart, the chain cannot be continued correctly, breaking tamper-evidence guarantees.
-- **Wrong sequence semantics** — `get_billing_sequence` in storage returns the max node number instead of the max sequence, leading to incorrect sequence assignment.
-- **Cross-node hash lookup** — `get_last_billing_hash` finds the global max sequence, but sequences are per-node. This returns the wrong hash when multiple nodes exist.
-- **Non-transactional writes** — `flush_batch` writes records individually rather than in a single redb transaction. A partial failure leaves the store in an inconsistent state.
+- **Record and cursor writes are not atomic** — the writer recovers a per-node `(seq, prev_hash)` cursor after restart, but each record and the cursor use separate redb transactions. A write failure or crash between these operations can leave gaps or a cursor that does not describe the durable tail.
+- **A batch is not one storage transaction** — `flush_batch` writes records individually. Its batching reduces channel and logging overhead, but not redb commits, and a partial failure can persist only part of the batch.
+- **Global helpers are ambiguous for multi-node data** — the collector correctly uses `get_billing_sequence_for_node` and `get_last_billing_hash_for_node`. The older global helpers should not be used to resume a node-local chain.
 
 ### S3 Export
 
 - **Placeholder SigV4 signature** — `S3Exporter` uses a placeholder AWS SigV4 signature implementation. Requests to real S3 endpoints will be rejected with authentication errors.
-- **HTTP 307 treated as success** — The exporter treats a 307 redirect as a successful upload. Data is silently lost because the redirect is not followed.
-- **New HTTP client per call** — `S3Exporter` creates a new `reqwest::Client` on every export call, incurring unnecessary overhead and connection setup cost.
-- **No HTTPS validation** — There is no validation that the S3 endpoint URL uses HTTPS, allowing credentials and data to be sent over plaintext connections.
+- **No HTTPS requirement** — endpoint construction accepts HTTP as well as HTTPS, so deployment configuration must prevent plaintext credential and report transport.
+- **No export-loop shutdown handle** — `start_export_loop` detaches its task and does not return a cancellation or join handle.
 
 ### Runtime & Reliability
 
 - **Blocking async runtime** — Blocking store methods are called from async contexts, which blocks the Tokio runtime and can cause stalls across the system.
-- **Silent record drops** — `BillingCollector::record` silently drops records when the async channel is full, leading to unreported usage and billing gaps.
+- **Lossy overload behavior** — `BillingCollector::record` drops records when its bounded channel is full. It increments an internal counter and warns on the first and every thousandth drop, but the counter is not exposed through its public API.
 - **Unbounded memory usage** — `generate_tenant_billing_report` and `get_tenant_list` load ALL records into memory. For large deployments, this can cause out-of-memory conditions.
-- **No retry logic** — Failed exports have no retry, backoff, or dead-letter mechanism. Transient failures cause permanent data loss.
-- **No graceful shutdown** — There is no graceful shutdown for the export loop or billing writer. In-flight records may be lost on termination.
+- **Fixed-interval export retry** — a failed export leaves the watermark unchanged and is retried on the next interval, without backoff, jitter, or a dead-letter path.
+- **Shutdown completion cannot be awaited** — `BillingCollector::shutdown` asks the writer to flush buffered records, but it does not return the writer's join handle. The detached export loop has no shutdown API.
 
 ### Error Handling
 
-- **ChainError incomplete** — `ChainError` doesn't implement `std::error::Error` or `Display`, making it incompatible with the broader Rust error ecosystem.
-- **Inconsistent error types** — The crate uses `ChainError`, `String`, and `PlatformError` inconsistently across different functions, making error handling unpredictable.
+- **Inconsistent error types** — `ChainError` implements `Display` and `std::error::Error`, while collector report helpers still return `String` and exporters return `PlatformError`.
 
 ## Security Considerations
 
 - **S3 credentials in plaintext** — S3 credentials are stored as plain `Option<String>` with no `Zeroize` or `Secret` wrapper. Credentials may remain in memory indefinitely and could be exposed through memory dumps or debug logs.
 - **No HTTPS enforcement** — The S3 exporter does not validate that the endpoint URL uses HTTPS, allowing credentials and billing data to be transmitted over unencrypted connections.
-- **Tamper-evidence is incomplete** — The hash chain is broken on restart (see above), which means the tamper-evidence guarantee does not survive process restarts. An attacker with write access to redb could modify records after a restart without detection.
+- **Tamper evidence depends on cursor consistency** — per-node cursors let chains continue across ordinary restarts, but record writes and cursor persistence are not one transaction. Verification detects modified links; it does not prevent an actor with database write access from replacing a complete chain and its cursor.
 - **No access control** — There is no authorization layer controlling who can read billing records, generate reports, or modify the chain. Any code with access to the store can alter billing data.
 - **No audit logging** — Secret access and billing record modifications are not logged, making it difficult to detect unauthorized access or investigate incidents.

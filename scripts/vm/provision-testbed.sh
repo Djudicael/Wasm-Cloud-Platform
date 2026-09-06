@@ -11,6 +11,10 @@ Usage: provision-testbed.sh [options]
   --state-file PATH       persistent state path (default: .vm-testbed-state.json)
   --node-memory MIB       memory per platform node (default: 512)
   --node-vcpus COUNT      vCPUs per platform node (default: 2)
+  --node-otlp-endpoint URL  OTLP gRPC endpoint configured in every node
+  --node-oidc-issuer-url URL  Public issuer used for token validation
+  --node-oidc-audience VALUE Expected token audience
+  --node-oidc-jwks-url URL    Private JWKS endpoint reachable by every node
   --front-door TYPE       none or haproxy (production-like default: haproxy)
   --front-door-bind ADDR  HAProxy listen address (default: 127.0.0.1:8088)
   --prepare-assets        install/build missing Firecracker assets
@@ -24,6 +28,10 @@ name=local-test
 state_file=.vm-testbed-state.json
 node_memory=
 node_vcpus=
+node_otlp_endpoint=
+node_oidc_issuer_url=
+node_oidc_audience=
+node_oidc_jwks_url=
 front_door=
 front_door_bind=127.0.0.1:8088
 prepare_assets=false
@@ -37,6 +45,10 @@ while (($#)); do
     --state-file) state_file=${2:?missing state path}; shift 2 ;;
     --node-memory) node_memory=${2:?missing memory}; shift 2 ;;
     --node-vcpus) node_vcpus=${2:?missing vCPU count}; shift 2 ;;
+    --node-otlp-endpoint) node_otlp_endpoint=${2:?missing OTLP endpoint}; shift 2 ;;
+    --node-oidc-issuer-url) node_oidc_issuer_url=${2:?missing OIDC issuer URL}; shift 2 ;;
+    --node-oidc-audience) node_oidc_audience=${2:?missing OIDC audience}; shift 2 ;;
+    --node-oidc-jwks-url) node_oidc_jwks_url=${2:?missing OIDC JWKS URL}; shift 2 ;;
     --front-door) front_door=${2:?missing front-door type}; shift 2 ;;
     --front-door-bind) front_door_bind=${2:?missing front-door bind address}; shift 2 ;;
     --prepare-assets) prepare_assets=true; shift ;;
@@ -47,6 +59,14 @@ done
 
 if [[ -n "$preset" && -n "$profile" ]]; then
   echo "Use either --preset or --profile, not both." >&2
+  exit 2
+fi
+oidc_option_count=0
+[[ -n "$node_oidc_issuer_url" ]] && ((oidc_option_count += 1))
+[[ -n "$node_oidc_audience" ]] && ((oidc_option_count += 1))
+[[ -n "$node_oidc_jwks_url" ]] && ((oidc_option_count += 1))
+if ((oidc_option_count != 0 && oidc_option_count != 3)); then
+  echo "OIDC issuer, audience, and JWKS URL must be supplied together." >&2
   exit 2
 fi
 if [[ -z "$preset" && -z "$profile" ]]; then
@@ -134,8 +154,6 @@ if [[ "$front_door" == haproxy ]]; then
     exit 1
   }
 fi
-sudo -v
-
 if [[ -e "$state_file" ]]; then
   echo "State file already exists: $state_file" >&2
   echo "Inspect or destroy the existing testbed before provisioning another one." >&2
@@ -154,13 +172,48 @@ if $prepare_assets; then
   scripts/vm/build-all-images.sh
 fi
 
-for required in assets/vmlinux-6.1 assets/wasm-node-rootfs.ext4 assets/nats-rootfs.ext4; do
+source scripts/vm/kernel-testbed.env
+kernel_asset="assets/vmlinux-$KERNEL_SERIES"
+for required in "$kernel_asset" assets/wasm-node-rootfs.ext4 assets/nats-rootfs.ext4; do
   [[ -f "$required" ]] || {
     echo "Missing $required. Re-run with --prepare-assets." >&2
     exit 1
   }
 done
+kernel_image_schema=
+if [[ -f "$kernel_asset.schema" ]]; then
+  kernel_image_schema=$(<"$kernel_asset.schema")
+fi
+if [[ "$kernel_image_schema" != "$KERNEL_SCHEMA" ]]; then
+  echo "$kernel_asset is stale or incompatible (expected kernel schema $KERNEL_SCHEMA)." >&2
+  echo "Rebuild it with: scripts/vm/build-kernel.sh" >&2
+  exit 1
+fi
+bash scripts/vm/audit-kernel-security.sh --kernel "$kernel_asset" --config "$kernel_asset.config" >/dev/null
+command -v debugfs >/dev/null || {
+  echo "debugfs is required to validate VM images (Ubuntu/WSL: sudo apt-get install e2fsprogs)." >&2
+  exit 1
+}
+nats_image_schema=$(debugfs -R 'cat /etc/nats/image-schema-version' assets/nats-rootfs.ext4 2>/dev/null || true)
+if [[ "$nats_image_schema" != 2 ]]; then
+  echo "assets/nats-rootfs.ext4 is stale or incompatible (expected image schema 2)." >&2
+  echo "Rebuild it with: scripts/vm/build-nats-rootfs.sh" >&2
+  exit 1
+fi
+node_image_schema=$(debugfs -R 'cat /etc/wasm-node/image-schema-version' assets/wasm-node-rootfs.ext4 2>/dev/null || true)
+if [[ "$node_image_schema" != 15 ]]; then
+  echo "assets/wasm-node-rootfs.ext4 is stale or incompatible (expected image schema 15)." >&2
+  echo "Rebuild it with: scripts/vm/build-node-rootfs.sh" >&2
+  exit 1
+fi
 command -v firecracker >/dev/null || { echo "firecracker is missing; re-run with --prepare-assets." >&2; exit 1; }
+
+if [[ -n ${WSL_DISTRO_NAME:-} ]] && command -v wsl.exe >/dev/null; then
+  run_privileged() { wsl.exe -u root -- "$@"; }
+else
+  sudo -v
+  run_privileged() { sudo -E "$@"; }
+fi
 
 target_dir=${CARGO_TARGET_DIR:-/tmp/wasm-cloud-platform-target}
 CARGO_TARGET_DIR="$target_dir" cargo build -p vm-testbed --bin vm-testbed-cli
@@ -168,14 +221,20 @@ cli="$target_dir/debug/vm-testbed-cli"
 
 args=(up --profile "$profile" --name "$name" --state-file "$state_file" --node-memory "$node_memory" --node-vcpus "$node_vcpus")
 [[ -n "$nodes" ]] && args+=(--nodes "$nodes")
-sudo -E "$cli" "${args[@]}"
-sudo -E "$cli" status --state-file "$state_file"
+[[ -n "$node_otlp_endpoint" ]] && args+=(--node-otlp-endpoint "$node_otlp_endpoint")
+if ((oidc_option_count == 3)); then
+  args+=(--node-oidc-issuer-url "$node_oidc_issuer_url")
+  args+=(--node-oidc-audience "$node_oidc_audience")
+  args+=(--node-oidc-jwks-url "$node_oidc_jwks_url")
+fi
+run_privileged "$cli" "${args[@]}"
+run_privileged "$cli" status --state-file "$state_file"
 
 if [[ "$front_door" == haproxy ]]; then
   haproxy_config=$(python3 -c 'import os, sys; print(os.path.abspath(sys.argv[1]))' "$haproxy_config")
   haproxy_log=$(python3 -c 'import os, sys; print(os.path.abspath(sys.argv[1]))' "$haproxy_log")
 
-  mapfile -t proxy_addrs < <(sudo python3 - "$state_file" <<'PY'
+  mapfile -t proxy_addrs < <(run_privileged python3 - "$state_file" <<'PY'
 import json, sys
 with open(sys.argv[1], encoding="utf-8") as stream:
     state = json.load(stream)
@@ -205,6 +264,10 @@ PY
     for index in "${!proxy_addrs[@]}"; do
       echo "  server node$((index + 1)) ${proxy_addrs[$index]} check"
     done
+    echo "listen local_prometheus"
+    echo "  bind 127.0.0.1:8405"
+    echo "  mode http"
+    echo "  http-request use-service prometheus-exporter if { path /metrics }"
   } > "$haproxy_config"
 
   "$haproxy_bin" -c -f "$haproxy_config"
@@ -231,6 +294,7 @@ payload = {
         "pid": int(pid),
         "config": os.path.abspath(config),
         "log": os.path.abspath(log),
+        "metrics": "http://127.0.0.1:8405/metrics",
     },
 }
 temporary = f"{path}.tmp"

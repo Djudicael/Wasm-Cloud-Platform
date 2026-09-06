@@ -36,6 +36,8 @@ impl DeployManifest {
             tenant_id: None,
             policy: self.policy.clone(),
             namespace: self.app.namespace.clone(),
+            placement: self.placement.policy,
+            local_dependencies: self.placement.local_dependencies.clone(),
         }
     }
 
@@ -238,5 +240,9 @@ pub fn manifest_from_config(
         secrets: HashMap::new(),
         api_keys: api_keys.to_vec(),
         artifact: None,
+        placement: PlacementManifestSection {
+            policy: app_config.placement,
+            local_dependencies: app_config.local_dependencies.clone(),
+        },
     }
 }

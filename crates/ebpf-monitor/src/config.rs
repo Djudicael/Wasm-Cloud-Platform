@@ -12,6 +12,9 @@ pub struct MonitorConfig {
     /// Enable eBPF monitoring (requires Linux kernel >= 5.8).
     pub enabled: bool,
 
+    /// Treat unavailable eBPF monitoring as a node-readiness failure.
+    pub required: bool,
+
     /// FD soft limit per Wasm instance (warning at 80%).
     pub fd_soft_limit: u32,
 
@@ -56,6 +59,7 @@ impl Default for MonitorConfig {
     fn default() -> Self {
         MonitorConfig {
             enabled: true,
+            required: false,
             fd_soft_limit: 8192,                 // 80% of default 1024 soft limit
             fd_hard_limit: 9728,                 // 95% of 10240
             mem_low_threshold_pages: 65536,      // ~256 MB free
@@ -86,6 +90,7 @@ impl MonitorConfig {
     pub fn from_ebpf_section(section: &common::config::EbpfSection) -> Self {
         MonitorConfig {
             enabled: section.enabled,
+            required: section.required,
             fd_soft_limit: section.fd_soft_limit,
             fd_hard_limit: section.fd_hard_limit,
             mem_low_threshold_pages: section.mem_low_threshold_pages,
@@ -286,6 +291,7 @@ mod tests {
     fn test_validate_valid_config() {
         let config = MonitorConfig {
             enabled: true,
+            required: false,
             fd_soft_limit: 8192,
             fd_hard_limit: 9728,
             mem_low_threshold_pages: 65536,
@@ -312,6 +318,7 @@ mod tests {
         let section = common::config::EbpfSection::default();
         let config = MonitorConfig::from_ebpf_section(&section);
         assert_eq!(config.enabled, section.enabled);
+        assert_eq!(config.required, section.required);
         assert_eq!(config.fd_soft_limit, section.fd_soft_limit);
         assert_eq!(config.fd_hard_limit, section.fd_hard_limit);
         assert_eq!(

@@ -8,7 +8,7 @@ use common::{
         ArtifactTransferAuthority, ARTIFACT_TRANSFER_MANIFEST_HEADER,
         ARTIFACT_TRANSFER_REQUESTER_NODE_HEADER,
     },
-    types::AppId,
+    types::{AppConfig, AppId, AppRateLimitConfig},
 };
 use e2e::NatsContainer;
 use messaging::{events::Event, NatsBus};
@@ -31,6 +31,50 @@ static NATS_PORT_COUNTER: AtomicU16 = AtomicU16::new(0);
 fn allocate_nats_port() -> u16 {
     let base = 25000 + ((std::process::id() as u16) % 1000);
     base + NATS_PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
+}
+
+#[tokio::test]
+async fn test_app_rate_limit_override_is_applied_and_removed() {
+    let temp = NamedTempFile::new().unwrap();
+    let store = Store::open(temp.path()).unwrap();
+    let dispatcher = build_test_dispatcher(store, None, None).await;
+    let app_id = AppId("default/limited:v1".to_string());
+    let mut config = AppConfig::default_for(app_id.clone());
+    config.rate_limit = Some(AppRateLimitConfig {
+        requests_per_second: 5_000,
+        burst_capacity: 10_000,
+        per_ip_limit: 4_000,
+    });
+
+    dispatcher.apply_rate_limit(&app_id, &config);
+    let applied = dispatcher.rate_limiter.get_app_config(&app_id.0);
+    assert_eq!(applied.requests_per_second, 5_000);
+    assert_eq!(applied.burst_capacity, 10_000);
+    assert_eq!(applied.per_ip_limit, 4_000);
+
+    config.rate_limit = None;
+    dispatcher.apply_rate_limit(&app_id, &config);
+    let restored = dispatcher.rate_limiter.get_app_config(&app_id.0);
+    assert_eq!(restored.requests_per_second, 1_000);
+    assert_eq!(restored.burst_capacity, 50);
+    assert_eq!(restored.per_ip_limit, 100);
+}
+
+#[tokio::test]
+async fn config_update_rejects_an_application_pool_above_the_node_budget() {
+    let temp = NamedTempFile::new().unwrap();
+    let store = Store::open(temp.path()).unwrap();
+    let dispatcher = build_test_dispatcher(store.clone(), None, None).await;
+    let app_id = AppId("default/oversized:v1".to_string());
+    let mut config = AppConfig::default_for(app_id.clone());
+    config.memory_limit = common::types::MemoryPages(8192);
+    config.max_instances = 9;
+
+    let error = dispatcher
+        .handle_config_update(app_id.clone(), config)
+        .expect_err("oversized application pool must be rejected before persistence");
+    assert!(error.to_string().contains("exceeds node budget"));
+    assert!(store.load_config(&app_id).unwrap().is_none());
 }
 
 async fn start_test_nats() -> Result<NatsContainer, String> {
@@ -61,6 +105,7 @@ async fn build_test_dispatcher(
         host_router.clone(),
         service_registry,
         0,
+        4 * 1024 * 1024 * 1024,
         Arc::new(|_, _| Vec::new()),
         event_tx,
         None,
@@ -88,9 +133,31 @@ async fn build_test_dispatcher(
         bus,
         dns_webhook,
         node_table: Arc::new(proxy::node_table::NodeLoadTable::default()),
+        rate_limiter: Arc::new(proxy::rate_limiter::RateLimiter::new(
+            proxy::rate_limiter::RateLimitConfig::default(),
+        )),
+        backpressure: proxy::backpressure::BackpressureSignal::new(),
         cluster_node_stale_after_secs: 120,
         gateway: None,
     }
+}
+
+#[tokio::test]
+async fn targeted_node_drain_fences_new_requests() {
+    let temp = NamedTempFile::new().unwrap();
+    let store = Store::open(temp.path()).unwrap();
+    let dispatcher = build_test_dispatcher(store, None, None).await;
+    assert!(dispatcher.backpressure.is_accepting());
+
+    dispatcher
+        .handle(Event::NodeDraining {
+            node_id: "node-under-test".to_string(),
+            drain_timeout_secs: 0,
+        })
+        .await
+        .unwrap();
+
+    assert!(!dispatcher.backpressure.is_accepting());
 }
 
 #[test]
@@ -133,6 +200,66 @@ async fn test_apply_secret_update_uses_secret_provider_bundle_format() {
 
     let raw = store.load_secrets(&app_id).unwrap().unwrap();
     assert_ne!(raw, b"super-secret-value");
+}
+
+#[tokio::test]
+async fn targeted_secret_delete_revokes_local_value() {
+    let temp = NamedTempFile::new().unwrap();
+    let store = Store::open(temp.path()).unwrap();
+    let dispatcher = build_test_dispatcher(store, None, None).await;
+    let app_id = AppId("secret-app:v1".to_string());
+    dispatcher
+        .secret_provider
+        .set(&app_id, "API_KEY", "old-value")
+        .await
+        .unwrap();
+
+    dispatcher
+        .handle(Event::SecretDelete {
+            app_id: app_id.clone(),
+            key: "API_KEY".to_string(),
+            target_node_id: "node-under-test".to_string(),
+        })
+        .await
+        .unwrap();
+
+    assert!(dispatcher
+        .secret_provider
+        .list_keys(&app_id)
+        .await
+        .unwrap()
+        .is_empty());
+}
+
+#[tokio::test]
+async fn secret_delete_for_another_node_is_ignored() {
+    let temp = NamedTempFile::new().unwrap();
+    let store = Store::open(temp.path()).unwrap();
+    let dispatcher = build_test_dispatcher(store, None, None).await;
+    let app_id = AppId("secret-app:v1".to_string());
+    dispatcher
+        .secret_provider
+        .set(&app_id, "API_KEY", "old-value")
+        .await
+        .unwrap();
+
+    dispatcher
+        .handle(Event::SecretDelete {
+            app_id: app_id.clone(),
+            key: "API_KEY".to_string(),
+            target_node_id: "node-other".to_string(),
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(
+        dispatcher
+            .secret_provider
+            .get(&app_id, "API_KEY")
+            .await
+            .unwrap(),
+        "old-value"
+    );
 }
 
 #[tokio::test]
@@ -879,6 +1006,8 @@ async fn test_handle_state_snapshot_accepts_first_matching_session_only() {
         tenant_id: None,
         policy: None,
         namespace: "default".to_string(),
+        placement: common::types::PlacementPolicy::EveryNode,
+        local_dependencies: Vec::new(),
     };
     let accepted_config = common::types::AppConfig {
         id: AppId("accepted-app:v1".to_string()),

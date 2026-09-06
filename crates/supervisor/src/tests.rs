@@ -4,7 +4,7 @@ use crate::is_instance_bind_allowed;
 use crate::network::LocalServiceRegistry;
 use crate::pool::InstancePool;
 use crate::port_alloc::PortAllocator;
-use common::types::AppId;
+use common::types::{AppConfig, AppId};
 use proxy::{router::HostRouter, upstream::UpstreamRegistry};
 use runtime::executor::{ExecutionStats, PreparedModule};
 use runtime::policy_tracker::PolicyCounters;
@@ -19,6 +19,7 @@ use tempfile::NamedTempFile;
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, oneshot};
 
+use crate::command_runtime::release_outbound_connection;
 use crate::deployment::RollbackPolicy;
 use crate::Supervisor;
 
@@ -272,6 +273,24 @@ async fn test_supervisor_command_channel_kill_instance() {
 }
 
 #[tokio::test]
+async fn test_supervisor_command_channel_kill_instance_by_tid() {
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<SupervisorCommand>(1);
+    tx.try_send(SupervisorCommand::KillInstanceByTid {
+        tid: 4242,
+        reason: "attributed security violation".to_string(),
+    })
+    .unwrap();
+
+    match rx.recv().await.unwrap() {
+        SupervisorCommand::KillInstanceByTid { tid, reason } => {
+            assert_eq!(tid, 4242);
+            assert_eq!(reason, "attributed security violation");
+        }
+        command => panic!("expected KillInstanceByTid, got {command:?}"),
+    }
+}
+
+#[tokio::test]
 async fn test_supervisor_command_channel_multiple_commands() {
     let (tx, mut rx) = tokio::sync::mpsc::channel::<SupervisorCommand>(256);
 
@@ -361,6 +380,44 @@ fn dummy_managed_instance_with_counters(counters: Arc<PolicyCounters>) -> Manage
     }
 }
 
+#[tokio::test]
+async fn ebpf_tcp_close_releases_only_outbound_connection_reservations() {
+    let (supervisor, _, _, _) =
+        make_test_supervisor(IpAddr::V4(Ipv4Addr::LOCALHOST), 18101, 18110).await;
+    let app_id = AppId::new_namespaced("production", "caller", "v1");
+    let counters = Arc::new(PolicyCounters::new());
+    counters
+        .outbound_connections_active
+        .store(2, Ordering::Relaxed);
+    let mut instance = dummy_managed_instance_with_counters(counters.clone());
+    instance.app_id = app_id.clone();
+    instance.addr = "127.0.0.1:18105".parse().unwrap();
+    instance.tid = Some(77);
+    let runtime = runtime::WasmRuntime::new().unwrap();
+    let prepared = minimal_prepared_module(&runtime, &app_id);
+    supervisor.pools.write().await.insert(
+        app_id.0.clone(),
+        InstancePool {
+            config: common::types::AppConfig::default_for(app_id),
+            prepared,
+            instances: vec![instance],
+        },
+    );
+
+    release_outbound_connection(&supervisor, 77, 40_000, 9_080).await;
+    assert_eq!(
+        counters.outbound_connections_active.load(Ordering::Relaxed),
+        1
+    );
+
+    release_outbound_connection(&supervisor, 77, 18_105, 40_000).await;
+    assert_eq!(
+        counters.outbound_connections_active.load(Ordering::Relaxed),
+        1,
+        "closing an accepted inbound socket must not release an outbound slot"
+    );
+}
+
 fn dummy_stats() -> ExecutionStats {
     ExecutionStats {
         instance_id: common::types::InstanceId::new(),
@@ -443,12 +500,59 @@ async fn make_test_supervisor(
         host_router,
         service_registry.clone(),
         9080,
+        4 * 1024 * 1024 * 1024,
         Arc::new(|_, _| Vec::new()),
         event_tx,
         None,
     );
 
     (supervisor, port_alloc, upstream_registry, service_registry)
+}
+
+#[tokio::test]
+async fn test_namespace_map_can_be_wired_after_supervisor_is_shared() {
+    let (supervisor, _, _, _) =
+        make_test_supervisor(IpAddr::V4(Ipv4Addr::LOCALHOST), 18080, 18090).await;
+    let shared_supervisor = supervisor.clone();
+    let namespace_map = Arc::new(ebpf_monitor::NamespaceMap::new_fallback());
+
+    supervisor.set_namespace_map(namespace_map.clone());
+
+    let installed = shared_supervisor
+        .namespace_map()
+        .expect("shared supervisor should observe the installed namespace map");
+    assert!(Arc::ptr_eq(&installed, &namespace_map));
+}
+
+#[tokio::test]
+async fn application_pool_must_fit_node_memory_budget() {
+    let (supervisor, _, _, _) =
+        make_test_supervisor(IpAddr::V4(Ipv4Addr::LOCALHOST), 18101, 18110).await;
+    let mut config = AppConfig::default_for(AppId("default/oversized:v1".to_string()));
+    config.memory_limit = common::types::MemoryPages(8192);
+    config.max_instances = 9;
+
+    let error = supervisor
+        .check_resource_limits(&config)
+        .expect_err("4.5 GiB declared pool must not fit a 4 GiB node budget");
+    assert!(error.to_string().contains("exceeds node budget"));
+}
+
+#[tokio::test]
+async fn undeployed_application_cannot_be_cold_started_from_retained_artifacts() {
+    let (supervisor, _, _, _) =
+        make_test_supervisor(IpAddr::V4(Ipv4Addr::LOCALHOST), 18091, 18100).await;
+    let app_id = AppId::new_namespaced("production", "removed", "v1");
+    supervisor
+        .store()
+        .mark_undeployed(&app_id.0)
+        .expect("undeploy marker should be persisted");
+
+    let error = supervisor
+        .ensure_instance(&app_id)
+        .await
+        .expect_err("undeployed app must not be cold-started");
+    assert!(error.to_string().contains("is undeployed"));
 }
 
 #[test]

@@ -22,6 +22,64 @@ fn symm_key_from_exact_32(
     Ok(secrets::crypto::SymmetricKey::from_bytes(key))
 }
 
+fn build_vault_agent(runtime: &common::config::RuntimeSection) -> anyhow::Result<ureq::Agent> {
+    let mut builder =
+        ureq::Agent::config_builder().timeout_global(Some(std::time::Duration::from_secs(5)));
+    if let Some(ca_path) = runtime
+        .key_vault_ca_cert
+        .as_deref()
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+    {
+        let pem = std::fs::read(ca_path)
+            .map_err(|e| anyhow::anyhow!("failed to read Vault CA bundle {ca_path}: {e}"))?;
+        let mut certificates = Vec::new();
+        for item in ureq::tls::parse_pem(&pem) {
+            match item
+                .map_err(|e| anyhow::anyhow!("failed to parse Vault CA bundle {ca_path}: {e}"))?
+            {
+                ureq::tls::PemItem::Certificate(certificate) => certificates.push(certificate),
+                ureq::tls::PemItem::PrivateKey(_) => {}
+                _ => {}
+            }
+        }
+        if certificates.is_empty() {
+            anyhow::bail!("Vault CA bundle {ca_path} contains no certificates");
+        }
+        builder = builder.tls_config(
+            ureq::tls::TlsConfig::builder()
+                .root_certs(ureq::tls::RootCerts::new_with_certs(&certificates))
+                .build(),
+        );
+    }
+    Ok(builder.build().into())
+}
+
+fn decode_vault_transit_hmac(hmac: &str) -> anyhow::Result<Vec<u8>> {
+    use base64::Engine as _;
+
+    let encoded = hmac
+        .rsplit(':')
+        .next()
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("Vault transit hmac response is empty"))?;
+    let decoded = if encoded.len() == 64 && encoded.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        hex::decode(encoded)
+            .map_err(|e| anyhow::anyhow!("failed to decode legacy hex Vault transit hmac: {e}"))?
+    } else {
+        base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .map_err(|e| anyhow::anyhow!("failed to decode Vault transit hmac base64: {e}"))?
+    };
+    if decoded.len() != 32 {
+        anyhow::bail!(
+            "Vault transit hmac must decode to exactly 32 bytes, found {} bytes",
+            decoded.len()
+        );
+    }
+    Ok(decoded)
+}
+
 fn load_kek_from_env_spec(spec: &str) -> anyhow::Result<secrets::crypto::SymmetricKey> {
     let var_name = spec
         .strip_prefix("env:")
@@ -65,16 +123,14 @@ fn load_kek_from_command(command: &[String]) -> anyhow::Result<secrets::crypto::
         .output()
         .map_err(|e| anyhow::anyhow!("failed to run key command {}: {e}", command[0]))?;
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
         anyhow::bail!(
-            "key command {} failed with status {}: {}",
+            "key command {} failed with status {}; stderr suppressed because secret-manager helpers may emit sensitive material",
             command[0],
             output
                 .status
                 .code()
                 .map(|code| code.to_string())
-                .unwrap_or_else(|| "terminated by signal".to_string()),
-            stderr.trim()
+                .unwrap_or_else(|| "terminated by signal".to_string())
         );
     }
 
@@ -138,10 +194,7 @@ fn load_kek_from_vault_kv(
         mount,
         secret_path.trim_start_matches('/')
     );
-    let agent: ureq::Agent = ureq::Agent::config_builder()
-        .timeout_global(Some(std::time::Duration::from_secs(5)))
-        .build()
-        .into();
+    let agent = build_vault_agent(runtime)?;
     let mut response = agent
         .get(&request_url)
         .header("X-Vault-Token", token.trim())
@@ -237,14 +290,15 @@ fn load_kek_from_vault_transit(
         use base64::Engine as _;
         base64::engine::general_purpose::STANDARD.encode(context.as_bytes())
     };
-    let agent: ureq::Agent = ureq::Agent::config_builder()
-        .timeout_global(Some(std::time::Duration::from_secs(5)))
-        .build()
-        .into();
+    let agent = build_vault_agent(runtime)?;
+    let mut request = serde_json::json!({ "input": input });
+    if let Some(version) = runtime.key_vault_transit_key_version {
+        request["key_version"] = serde_json::json!(version);
+    }
     let mut response = agent
         .post(&request_url)
         .header("X-Vault-Token", token.trim())
-        .send_json(serde_json::json!({ "input": input }))
+        .send_json(request)
         .map_err(|e| anyhow::anyhow!("failed to derive seal key from Vault transit: {e}"))?;
     let body = response
         .body_mut()
@@ -257,16 +311,11 @@ fn load_kek_from_vault_transit(
         .and_then(|value| value.get("hmac"))
         .and_then(|value| value.as_str())
         .ok_or_else(|| anyhow::anyhow!("Vault transit response did not contain data.hmac"))?;
-    let hex_hmac = hmac
-        .rsplit(':')
-        .next()
-        .filter(|value| value.len() == 64)
-        .ok_or_else(|| anyhow::anyhow!("Vault transit hmac must end with a 64-char hex digest"))?;
-    let derived = hex::decode(hex_hmac)
-        .map_err(|e| anyhow::anyhow!("failed to decode Vault transit hmac hex: {e}"))?;
+    let derived = decode_vault_transit_hmac(hmac)?;
     tracing::info!(
         mount = mount,
         key = transit_key,
+        key_version = runtime.key_vault_transit_key_version,
         "derived KEK seal key from Vault transit"
     );
     symm_key_from_exact_32(&derived, "Vault transit hmac")
@@ -415,9 +464,40 @@ fn resolve_persisted_seal_key(
     }
 }
 
+fn resolve_previous_persisted_seal_key(
+    store: &storage::Store,
+    runtime: &common::config::RuntimeSection,
+) -> anyhow::Result<Option<secrets::crypto::SymmetricKey>> {
+    match runtime.key_source.as_str() {
+        "vault-transit" => {
+            let Some(previous_version) = runtime.key_vault_transit_previous_key_version else {
+                return Ok(None);
+            };
+            let mut previous = runtime.clone();
+            previous.key_vault_transit_key_version = Some(previous_version);
+            previous.key_vault_transit_previous_key_version = None;
+            Ok(Some(load_kek_from_vault_transit(&previous)?))
+        }
+        "aws-kms-hmac" => {
+            let Some(previous_key_id) = runtime.key_aws_kms_previous_key_id.as_ref() else {
+                return Ok(None);
+            };
+            let mut previous = runtime.clone();
+            previous.key_aws_kms_key_id = Some(previous_key_id.clone());
+            previous.key_aws_kms_previous_key_id = None;
+            Ok(Some(load_kek_from_aws_kms_hmac(&previous)?))
+        }
+        _ => {
+            let _ = store;
+            Ok(None)
+        }
+    }
+}
+
 fn load_or_create_persisted_kek(
     store: &storage::Store,
     seal_key: &secrets::crypto::SymmetricKey,
+    previous_seal_key: Option<&secrets::crypto::SymmetricKey>,
 ) -> anyhow::Result<secrets::crypto::SymmetricKey> {
     match store.load_kek()? {
         Some(bytes) if bytes.len() == 32 => {
@@ -430,9 +510,20 @@ fn load_or_create_persisted_kek(
             Ok(legacy)
         }
         Some(sealed_blob) => {
-            let plaintext =
-                secrets::crypto::decrypt(seal_key, &secrets::crypto::EncryptedBlob(sealed_blob))?;
-            tracing::info!("loaded sealed KEK from redb using configured key source");
+            let encrypted = secrets::crypto::EncryptedBlob(sealed_blob);
+            let (plaintext, rewrap) = match secrets::crypto::decrypt(seal_key, &encrypted) {
+                Ok(plaintext) => (plaintext, false),
+                Err(current_error) => {
+                    let previous = previous_seal_key.ok_or(current_error)?;
+                    (secrets::crypto::decrypt(previous, &encrypted)?, true)
+                }
+            };
+            if rewrap {
+                store.save_kek(&seal_kek_blob(seal_key, &plaintext)?)?;
+                tracing::warn!("rewrapped persisted KEK with the active external seal-key version");
+            } else {
+                tracing::info!("loaded sealed KEK from redb using configured key source");
+            }
             symm_key_from_exact_32(&plaintext, "persisted sealed KEK")
         }
         None => {
@@ -451,14 +542,21 @@ fn load_or_create_persisted_kek(
 fn load_or_create_persisted_secret_transport_keypair(
     store: &storage::Store,
     seal_key: &secrets::crypto::SymmetricKey,
+    previous_seal_key: Option<&secrets::crypto::SymmetricKey>,
 ) -> anyhow::Result<secrets::BootstrapKeyPair> {
     match store.load_meta(SECRET_TRANSPORT_KEY_META_KEY)? {
         Some(sealed_hex) => {
             let sealed_blob = hex::decode(sealed_hex.trim()).map_err(|e| {
                 anyhow::anyhow!("failed to decode sealed secret transport key from redb: {e}")
             })?;
-            let plaintext =
-                secrets::crypto::decrypt(seal_key, &secrets::crypto::EncryptedBlob(sealed_blob))?;
+            let encrypted = secrets::crypto::EncryptedBlob(sealed_blob);
+            let (plaintext, rewrap) = match secrets::crypto::decrypt(seal_key, &encrypted) {
+                Ok(plaintext) => (plaintext, false),
+                Err(current_error) => {
+                    let previous = previous_seal_key.ok_or(current_error)?;
+                    (secrets::crypto::decrypt(previous, &encrypted)?, true)
+                }
+            };
             if plaintext.len() != 32 {
                 anyhow::bail!(
                     "persisted sealed secret transport key must contain exactly 32 bytes, found {} bytes",
@@ -467,7 +565,15 @@ fn load_or_create_persisted_secret_transport_keypair(
             }
             let mut secret_bytes = [0u8; 32];
             secret_bytes.copy_from_slice(&plaintext);
-            tracing::info!("loaded sealed node secret transport key from redb");
+            if rewrap {
+                let resealed = secrets::crypto::encrypt(seal_key, &plaintext)?;
+                store.save_meta(SECRET_TRANSPORT_KEY_META_KEY, &hex::encode(resealed.0))?;
+                tracing::warn!(
+                    "rewrapped node secret transport key with the active external seal-key version"
+                );
+            } else {
+                tracing::info!("loaded sealed node secret transport key from redb");
+            }
             Ok(secrets::BootstrapKeyPair::from_secret_bytes(secret_bytes))
         }
         None => {
@@ -513,6 +619,7 @@ const NODE_SUBSCRIPTION_SPECS: &[(&str, &str)] = &[
     ("CONTROL", "instance.ready.>"),
     ("CONTROL", "instance.dead.>"),
     ("CONTROL", "secrets.update.>"),
+    ("CONTROL", "secrets.delete.>"),
     ("CONTROL", "config.update.>"),
     ("CONTROL", "gateway.config.>"),
     ("NODE", "node.load.>"),
@@ -638,27 +745,35 @@ fn bind_socket_address(host: &str, port: u16) -> anyhow::Result<String> {
     Ok(format!("{}:{}", host_for_socket_address(trimmed), port))
 }
 
-fn advertised_host_base_url(host: &str, port: u16) -> anyhow::Result<String> {
+fn advertised_host_base_url(host: &str, port: u16, tls_enabled: bool) -> anyhow::Result<String> {
     let trimmed = host.trim();
     if trimmed.is_empty() {
         anyhow::bail!("admin.advertised_host must not be empty");
     }
 
     normalize_artifact_base_url(&format!(
-        "http://{}:{}",
+        "{}://{}:{}",
+        if tls_enabled { "https" } else { "http" },
         host_for_socket_address(trimmed),
         port
     ))
 }
 
-fn build_artifact_server_url(admin: &common::config::AdminSection) -> anyhow::Result<String> {
+fn build_artifact_server_url(
+    admin: &common::config::AdminSection,
+    tls_enabled: bool,
+) -> anyhow::Result<String> {
     if let Some(url) = admin.advertised_artifact_url.as_deref() {
         return normalize_artifact_base_url(url);
     }
     if let Some(host) = admin.advertised_host.as_deref() {
-        return advertised_host_base_url(host, admin.artifact_port);
+        return advertised_host_base_url(host, admin.artifact_port, tls_enabled);
     }
-    Ok(format!("http://127.0.0.1:{}", admin.artifact_port))
+    Ok(format!(
+        "{}://127.0.0.1:{}",
+        if tls_enabled { "https" } else { "http" },
+        admin.artifact_port
+    ))
 }
 
 fn build_proxy_advertised_address(config: &common::config::NodeConfig) -> anyhow::Result<String> {
@@ -697,32 +812,49 @@ fn admin_tls_is_configured(config: &common::config::NodeConfig) -> bool {
     admin_tls_material(config).is_some()
 }
 
-async fn serve_admin_app(
-    admin_addr: String,
-    admin_app: axum::Router,
+async fn validate_tls_material(
+    service: &str,
+    cert: Option<&str>,
+    key: Option<&str>,
+) -> anyhow::Result<()> {
+    if let (Some(cert), Some(key)) = (cert, key) {
+        axum_server::tls_rustls::RustlsConfig::from_pem_file(cert, key)
+            .await
+            .map_err(|e| anyhow::anyhow!("{service} TLS config error: {e}"))?;
+    }
+    Ok(())
+}
+
+async fn serve_axum_app(
+    addr: String,
+    app: axum::Router,
     tls_cert: Option<String>,
     tls_key: Option<String>,
+    service: &'static str,
 ) -> anyhow::Result<()> {
     if let (Some(cert), Some(key)) = (tls_cert, tls_key) {
         let rustls_config = axum_server::tls_rustls::RustlsConfig::from_pem_file(cert, key)
             .await
-            .map_err(|e| anyhow::anyhow!("admin TLS config error: {e}"))?;
-        let bind_addr: std::net::SocketAddr = admin_addr
+            .map_err(|e| anyhow::anyhow!("{service} TLS config error: {e}"))?;
+        let bind_addr: std::net::SocketAddr = addr
             .parse()
-            .map_err(|e| anyhow::anyhow!("invalid admin bind address: {e}"))?;
-        info!(addr = %admin_addr, "admin API listening with TLS");
+            .map_err(|e| anyhow::anyhow!("invalid {service} bind address: {e}"))?;
+        info!(addr = %addr, service, "service listening with TLS");
         axum_server::bind_rustls(bind_addr, rustls_config)
-            .serve(admin_app.into_make_service())
+            .serve(app.into_make_service_with_connect_info::<std::net::SocketAddr>())
             .await
-            .map_err(|e| anyhow::anyhow!("admin HTTPS server error: {e}"))?;
+            .map_err(|e| anyhow::anyhow!("{service} HTTPS server error: {e}"))?;
     } else {
-        let listener = tokio::net::TcpListener::bind(&admin_addr)
+        let listener = tokio::net::TcpListener::bind(&addr)
             .await
-            .map_err(|e| anyhow::anyhow!("admin API bind failed: {e}"))?;
-        info!(addr = %admin_addr, "admin API listening");
-        axum::serve(listener, admin_app.into_make_service())
-            .await
-            .map_err(|e| anyhow::anyhow!("admin HTTP server error: {e}"))?;
+            .map_err(|e| anyhow::anyhow!("{service} bind failed: {e}"))?;
+        info!(addr = %addr, service, "service listening");
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("{service} HTTP server error: {e}"))?;
     }
     Ok(())
 }
@@ -732,7 +864,10 @@ fn load_kek_from_config(
     runtime: &common::config::RuntimeSection,
 ) -> anyhow::Result<secrets::crypto::SymmetricKey> {
     match resolve_persisted_seal_key(store, runtime)? {
-        Some(seal_key) => load_or_create_persisted_kek(store, &seal_key),
+        Some(seal_key) => {
+            let previous = resolve_previous_persisted_seal_key(store, runtime)?;
+            load_or_create_persisted_kek(store, &seal_key, previous.as_ref())
+        }
         None => {
             if let Ok(Some(_persisted_kek)) = store.load_kek() {
                 anyhow::bail!(
@@ -752,7 +887,10 @@ fn load_secret_transport_keypair_from_config(
     runtime: &common::config::RuntimeSection,
 ) -> anyhow::Result<secrets::BootstrapKeyPair> {
     match resolve_persisted_seal_key(store, runtime)? {
-        Some(seal_key) => load_or_create_persisted_secret_transport_keypair(store, &seal_key),
+        Some(seal_key) => {
+            let previous = resolve_previous_persisted_seal_key(store, runtime)?;
+            load_or_create_persisted_secret_transport_keypair(store, &seal_key, previous.as_ref())
+        }
         None => {
             if let Ok(Some(_persisted_transport_key)) =
                 store.load_meta(SECRET_TRANSPORT_KEY_META_KEY)
@@ -773,6 +911,66 @@ use ebpf_monitor::{ActionDispatcher, EbpfMetrics, EventCallbacks, MonitorConfig}
 use supervisor::SupervisorCommand;
 
 mod dns_stub;
+
+struct EbpfDependencyChecker {
+    runtime: ebpf_monitor::MonitorRuntimeState,
+}
+
+impl EbpfDependencyChecker {
+    fn new(runtime: ebpf_monitor::MonitorRuntimeState) -> Self {
+        Self { runtime }
+    }
+}
+
+impl proxy::health::DependencyChecker for EbpfDependencyChecker {
+    fn name(&self) -> &str {
+        "ebpf_monitoring"
+    }
+
+    fn check(&self) -> common::health::DependencyHealth {
+        let availability = self.runtime.snapshot();
+        let (status, message) = if !availability.enabled {
+            (
+                common::health::DependencyStatus::Healthy,
+                "disabled by configuration".to_string(),
+            )
+        } else if !availability.monitoring_degraded {
+            (
+                common::health::DependencyStatus::Healthy,
+                "kernel monitoring active".to_string(),
+            )
+        } else if availability.required {
+            (
+                common::health::DependencyStatus::Unhealthy,
+                format!(
+                    "required kernel monitoring unavailable: {}",
+                    availability.reason.as_deref().unwrap_or("unknown")
+                ),
+            )
+        } else {
+            let mode = if availability.ebpf_active {
+                "kernel monitoring incomplete"
+            } else {
+                "userspace fallback active"
+            };
+            (
+                common::health::DependencyStatus::Degraded,
+                format!(
+                    "kernel monitoring degraded; {mode}: {}",
+                    availability.reason.as_deref().unwrap_or("unknown")
+                ),
+            )
+        };
+
+        common::health::DependencyHealth {
+            name: self.name().to_string(),
+            status,
+            message,
+            latency_ms: None,
+            last_check: chrono::Utc::now().to_rfc3339(),
+        }
+    }
+}
 
 /// Platform callbacks for the eBPF monitor's recovery actions.
 ///
@@ -896,26 +1094,34 @@ impl EventCallbacks for NodeEbpfCallbacks {
     }
 
     fn kill_instance_by_tid(&self, tid: u32, reason: &str) {
-        // eBPF namespace enforcement detected a forged header or other
-        // security incident from a specific TID. Request the supervisor
-        // to kill the largest instance as the best recovery action.
-        // (The supervisor doesn't have a per-TID kill command yet, so
-        // we fall back to KillLargestInstance as the most aggressive
-        // recovery action available.)
         warn!(
             tid,
             reason, "eBPF: namespace security incident - kill instance by TID requested"
         );
         if let Err(e) = self
             .supervisor_tx
-            .try_send(SupervisorCommand::KillLargestInstance {
-                reason: format!("{} (tid={})", reason, tid),
+            .try_send(SupervisorCommand::KillInstanceByTid {
+                tid,
+                reason: reason.to_string(),
             })
         {
             warn!(
                 error = %e,
-                "Failed to send KillLargestInstance command for TID security incident"
+                "Failed to send KillInstanceByTid command for security incident"
             );
+        }
+    }
+
+    fn tcp_connection_closed(&self, tid: u32, src_port: u16, dst_port: u16) {
+        if let Err(error) = self
+            .supervisor_tx
+            .try_send(SupervisorCommand::TcpConnectionClosed {
+                tid,
+                src_port,
+                dst_port,
+            })
+        {
+            warn!(tid, src_port, dst_port, %error, "failed to release outbound TCP reservation");
         }
     }
 }
@@ -935,8 +1141,25 @@ use args::Args;
 use auth_reload::setup_sighup_handler;
 use config::{load_config, CliOverrides};
 
+fn clear_persisted_auth_override(db_path: &str) -> anyhow::Result<()> {
+    if !std::path::Path::new(db_path).is_file() {
+        anyhow::bail!(
+            "refusing auth-override cleanup because redb file does not exist: {}",
+            db_path
+        );
+    }
+    let store = storage::Store::open(std::path::Path::new(db_path))?;
+    store.delete_auth_config()?;
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    if rustls::crypto::CryptoProvider::get_default().is_none() {
+        rustls::crypto::aws_lc_rs::default_provider()
+            .install_default()
+            .map_err(|_| anyhow::anyhow!("failed to install the rustls AWS-LC crypto provider"))?;
+    }
     let args = Args::parse();
 
     // --generate-config: print a default TOML config to stdout and exit
@@ -985,12 +1208,25 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
+    if args.clear_persisted_auth_override {
+        clear_persisted_auth_override(&args.db_path)?;
+        println!("Persisted auth override removed. Rotate external admin tokens before startup.");
+        return Ok(());
+    }
+
     // Convert CLI args to overrides for the config system
+    let has_config_file = args.config.is_some();
     let cli_overrides = CliOverrides {
-        node_id: Some(args.node_id.clone()),
-        db_path: Some(args.db_path.clone()),
-        nats_url: Some(args.nats_url.clone()),
+        node_id: (!has_config_file || args.node_id != "node-0").then(|| args.node_id.clone()),
+        environment: None,
+        db_path: (!has_config_file || args.db_path != "/tmp/wasm-node/state.redb")
+            .then(|| args.db_path.clone()),
+        nats_url: (!has_config_file || args.nats_url != "nats://127.0.0.1:4222")
+            .then(|| args.nats_url.clone()),
         nats_creds: args.nats_creds.clone(),
+        nats_ca_cert: args.nats_ca_cert.clone(),
+        nats_client_cert: args.nats_client_cert.clone(),
+        nats_client_key: args.nats_client_key.clone(),
         http_port: Some(args.proxy_port),
         https_port: Some(args.proxy_https_port),
         tls_cert: args.tls_cert.clone(),
@@ -1007,7 +1243,8 @@ async fn main() -> anyhow::Result<()> {
         admin_advertised_artifact_url: args.admin_advertised_artifact_url.clone(),
         port_start: Some(args.port_start),
         port_end: Some(args.port_end),
-        key_source: Some(args.key_source.clone()),
+        key_source: (!has_config_file || args.key_source != "generate")
+            .then(|| args.key_source.clone()),
         key_file: args.key_file.clone(),
         key_command: if args.key_command.is_empty() {
             None
@@ -1016,6 +1253,7 @@ async fn main() -> anyhow::Result<()> {
         },
         key_vault_url: args.key_vault_url.clone(),
         key_vault_token_env: args.key_vault_token_env.clone(),
+        key_vault_ca_cert: args.key_vault_ca_cert.clone(),
         key_vault_mount: args.key_vault_mount.clone(),
         key_vault_path: args.key_vault_path.clone(),
         key_vault_field: args.key_vault_field.clone(),
@@ -1027,6 +1265,7 @@ async fn main() -> anyhow::Result<()> {
         key_aws_kms_key_id: args.key_aws_kms_key_id.clone(),
         key_aws_kms_context: args.key_aws_kms_context.clone(),
         runtime_cache_directory: args.runtime_cache_directory.clone(),
+        runtime_isolation_mode: args.runtime_isolation_mode.clone(),
         runtime_upgrade_signing_public_key: args.runtime_upgrade_signing_public_key.clone(),
         runtime_pooling_allocator: args.runtime_pooling_allocator,
         runtime_pooling_total_component_instances: args.runtime_pooling_total_component_instances,
@@ -1059,6 +1298,22 @@ async fn main() -> anyhow::Result<()> {
     // Load configuration with merge priority: defaults < TOML < env < CLI
     let config_path = args.config.as_deref().map(std::path::Path::new);
     let config = load_config(config_path, &cli_overrides)?;
+
+    // Listener tasks run independently after startup. Parse all configured
+    // certificates now so unreadable or malformed production TLS material
+    // fails the node before it can advertise readiness.
+    validate_tls_material(
+        "proxy",
+        config.proxy.tls_cert.as_deref(),
+        config.proxy.tls_key.as_deref(),
+    )
+    .await?;
+    validate_tls_material(
+        "admin, deploy-ingress, and artifact",
+        config.admin.tls_cert.as_deref(),
+        config.admin.tls_key.as_deref(),
+    )
+    .await?;
 
     // Set up structured logging with reload handle (allows runtime log-level changes)
     let format = match config.logging.format.as_str() {
@@ -1103,7 +1358,19 @@ async fn main() -> anyhow::Result<()> {
         include_source: cfg!(debug_assertions),
     };
 
-    let log_reload_handle = common::logging::init_logging(&logging_config);
+    let (log_reload_handle, _tracing_guard) =
+        if let Some(endpoint) = config.logging.otlp_endpoint.as_deref() {
+            let (reload, guard) = metrics::tracing_setup::init_tracing(
+                "wasm-node",
+                &config.node.node_id,
+                endpoint,
+                &logging_config,
+            )
+            .map_err(anyhow::Error::msg)?;
+            (reload, Some(guard))
+        } else {
+            (common::logging::init_logging(&logging_config), None)
+        };
 
     info!(node_id = %config.node.node_id, "wasm-node starting");
     info!(
@@ -1250,12 +1517,24 @@ async fn main() -> anyhow::Result<()> {
     let service_registry = Arc::new(supervisor::network::LocalServiceRegistry::default());
     let host_router = Arc::new(proxy::router::HostRouter::default());
 
-    let mut bus = match &config.nats.creds_file {
-        Some(creds) => messaging::NatsBus::connect_secure(&config.nats.url, creds).await?,
-        None => messaging::NatsBus::connect(&config.nats.url).await?,
+    let nats_has_explicit_security = config.nats.creds_file.is_some()
+        || config.nats.ca_cert.is_some()
+        || config.nats.client_cert.is_some()
+        || config.nats.client_key.is_some();
+    let mut bus = if nats_has_explicit_security {
+        messaging::NatsBus::connect_with_tls(
+            &config.nats.url,
+            config.nats.creds_file.as_deref(),
+            config.nats.ca_cert.as_deref(),
+            config.nats.client_cert.as_deref(),
+            config.nats.client_key.as_deref(),
+        )
+        .await?
+    } else {
+        messaging::NatsBus::connect(&config.nats.url).await?
     };
     bus.set_node_id(config.node.node_id.clone());
-    info!(url = %config.nats.url, "NATS connected");
+    info!("NATS connected");
 
     bus.setup_jetstream().await?;
 
@@ -1263,9 +1542,13 @@ async fn main() -> anyhow::Result<()> {
     let nats_health = Arc::new(NatsHealth::new());
     nats_health.mark_connected();
 
-    // Start NATS health watcher (updates last message timestamp periodically)
-    let _nats_watcher_handle =
-        NatsHealthWatcher::new((*nats_health).clone(), Duration::from_secs(5)).start();
+    // Actively probe NATS so health reflects server stalls as well as socket disconnect events.
+    let _nats_watcher_handle = NatsHealthWatcher::new(
+        (*nats_health).clone(),
+        bus.client().clone(),
+        Duration::from_secs(5),
+    )
+    .start();
 
     recovery::startup_integrity_check(&store, bus.client(), &config.storage).await;
 
@@ -1346,6 +1629,7 @@ async fn main() -> anyhow::Result<()> {
         host_router.clone(),
         service_registry.clone(),
         config.ebpf.gateway_port,
+        config.health.max_memory_bytes,
         env_resolver,
         event_tx.clone(),
         Some(billing_collector.tx()),
@@ -1428,7 +1712,8 @@ async fn main() -> anyhow::Result<()> {
         None
     };
 
-    let artifact_server_url = build_artifact_server_url(&config.admin)?;
+    let artifact_server_url =
+        build_artifact_server_url(&config.admin, admin_tls_is_configured(&config))?;
     let proxy_address = build_proxy_advertised_address(&config)?;
     let node_load_table = Arc::new(proxy::node_table::NodeLoadTable::default());
     store.save_cluster_node(&common::types::ClusterNodeRecord {
@@ -1459,6 +1744,18 @@ async fn main() -> anyhow::Result<()> {
         provider
     });
     let gateway = Arc::new(proxy::gateway::Gateway::new(oidc_provider));
+
+    // Construct the application limiter before the event dispatcher so
+    // DeployApp and ConfigUpdate can apply per-application overrides.
+    let initial_hot = hot_config_handle.read().await;
+    let default_rate_config = proxy::rate_limiter::RateLimitConfig {
+        requests_per_second: initial_hot.rate_limit.default_requests_per_second,
+        burst_capacity: initial_hot.rate_limit.default_burst_capacity,
+        per_ip_limit: initial_hot.rate_limit.default_per_ip_limit,
+    };
+    drop(initial_hot);
+    let rate_limiter = Arc::new(proxy::rate_limiter::RateLimiter::new(default_rate_config));
+    let backpressure = proxy::backpressure::BackpressureSignal::new();
 
     // -- Embedded DNS Stub (resolves *.internal without external DNS) --
     let _dns_stub_addr = if config.dns.stub_enabled {
@@ -1501,6 +1798,8 @@ async fn main() -> anyhow::Result<()> {
             config.dns.webhook_token.clone(),
         ),
         node_table: node_load_table.clone(),
+        rate_limiter: rate_limiter.clone(),
+        backpressure: backpressure.clone(),
         cluster_node_stale_after_secs: config.health.cluster_node_stale_after_secs,
         gateway: Some(gateway.clone()),
     });
@@ -1599,9 +1898,11 @@ async fn main() -> anyhow::Result<()> {
     let health_metrics = Arc::new(metrics::health_metrics::HealthMetrics::new(
         &prom_metrics.registry,
     ));
+    health_metrics.set_disk_capacity_limits(
+        config.health.min_disk_free_bytes,
+        config.health.min_disk_free_inodes,
+    );
     info!("health check metrics registered with Prometheus");
-
-    let backpressure = proxy::backpressure::BackpressureSignal::new();
 
     // -- Initialize eBPF monitor (kernel-level observability) ------------
     // The eBPF monitor provides kernel-level monitoring for memory pressure,
@@ -1628,34 +1929,32 @@ async fn main() -> anyhow::Result<()> {
     let ebpf_metrics_admin = ebpf_metrics.clone();
     let ebpf_dispatcher_admin = ebpf_dispatcher.clone();
     let ebpf_dispatcher_sync = ebpf_dispatcher.clone();
-    let _ebpf_handle =
+    let ebpf_handle =
         ebpf_monitor::init(ebpf_config, ebpf_metrics, ebpf_dispatcher, node_pid).await;
-    if _ebpf_handle.is_ebpf_active() {
+    let ebpf_runtime_state = ebpf_handle.runtime_state();
+    let ebpf_runtime_state_admin = ebpf_runtime_state.clone();
+    let ebpf_namespace_map_admin = ebpf_handle.namespace_map.clone();
+    let ebpf_startup = ebpf_runtime_state.snapshot();
+    if config.ebpf.required && (!ebpf_startup.ebpf_active || ebpf_startup.monitoring_degraded) {
+        let reason = ebpf_startup.reason.unwrap_or_else(|| "unknown".to_string());
+        anyhow::bail!("required eBPF monitoring failed to initialize: {reason}");
+    }
+    if ebpf_handle.is_ebpf_active() {
         info!("eBPF monitor initialized with kernel-level monitoring");
     } else {
         info!("eBPF monitor running in userspace fallback mode (5s polling interval)");
     }
 
-    // Wire namespace_map from eBPF monitor to supervisor for TID registration
-    if let Some(sup) = Arc::get_mut(&mut supervisor) {
-        sup.set_namespace_map(_ebpf_handle.namespace_map.clone());
-    }
-
-    // Read initial rate-limit defaults from hot config (may have persisted overrides)
-    let initial_hot = hot_config_handle.read().await;
-    let default_rate_config = proxy::rate_limiter::RateLimitConfig {
-        requests_per_second: initial_hot.rate_limit.default_requests_per_second,
-        burst_capacity: initial_hot.rate_limit.default_burst_capacity,
-        per_ip_limit: initial_hot.rate_limit.default_per_ip_limit,
-    };
-    drop(initial_hot);
+    // Wire namespace_map from eBPF monitor to supervisor for TID registration.
+    // The supervisor has already been cloned by startup tasks, so this setter
+    // uses interior mutability rather than relying on Arc::get_mut().
+    supervisor.set_namespace_map(ebpf_handle.namespace_map.clone());
 
     // Initialize rate limit metrics (register with the same registry)
     let rate_limit_metrics = Arc::new(proxy::metrics::RateLimitMetrics::new(
         &prom_metrics.registry,
     ));
 
-    let rate_limiter = Arc::new(proxy::rate_limiter::RateLimiter::new(default_rate_config));
     let rate_limiter_sync = rate_limiter.clone();
 
     // -- Gateway Config Load -------------------------------------------
@@ -1751,9 +2050,9 @@ async fn main() -> anyhow::Result<()> {
 
     // -- Internal Mesh Gateway -----------------------------------------
     // Starts a local Axum proxy for East-West traffic between apps.
-    // Listens on a configured loopback port. Namespace isolation relies on
-    // service discovery: the Supervisor only injects service URLs for
-    // same-namespace apps. The gateway port is open to all namespaces.
+    // Listens on a configured loopback port and derives caller identity from
+    // the eBPF source-port/TID map. Unresolved callers fail closed; resolved
+    // cross-namespace callers require an explicit gateway allow rule.
     let internal_gw = internal_gateway::InternalGateway::new(
         service_registry.clone(),
         rate_limiter.clone(),
@@ -1761,9 +2060,10 @@ async fn main() -> anyhow::Result<()> {
         gateway.clone(),
     )
     .with_bind_port(config.ebpf.gateway_port)
-    .with_namespace_map(_ebpf_handle.namespace_map.clone())
-    .with_ebpf_active(_ebpf_handle.is_ebpf_active())
+    .with_namespace_map(ebpf_handle.namespace_map.clone())
+    .with_ebpf_active(ebpf_handle.is_ebpf_active())
     .with_cold_start(cold_start.clone());
+    let ebpf_handle = Arc::new(tokio::sync::Mutex::new(ebpf_handle));
     tokio::spawn(async move {
         if let Err(e) = internal_gw.run().await {
             tracing::error!(error = %e, "internal gateway exited");
@@ -1838,14 +2138,17 @@ async fn main() -> anyhow::Result<()> {
             Box::new(proxy::health::DiskDependencyChecker::new(
                 config.storage.db_path.clone(),
                 config.health.min_disk_free_bytes,
+                config.health.min_disk_free_inodes,
             )),
             Box::new(proxy::health::MemoryDependencyChecker::new(
                 config.health.max_memory_bytes,
             )),
+            Box::new(EbpfDependencyChecker::new(ebpf_runtime_state.clone())),
         ]),
         app_health_registry: app_health_registry.clone(),
         config: proxy::health::HealthCheckConfig {
             min_disk_free_bytes: config.health.min_disk_free_bytes,
+            min_disk_free_inodes: config.health.min_disk_free_inodes,
             max_memory_bytes: config.health.max_memory_bytes,
             failure_threshold: config.health.failure_threshold,
             success_threshold: config.health.success_threshold,
@@ -1953,20 +2256,34 @@ async fn main() -> anyhow::Result<()> {
         common::auth::AuthConfig::default()
     };
 
-    // Load persisted auth config overrides from redb (survives restarts)
+    let production_environment =
+        config.node.environment == common::config::DeploymentEnvironment::Production;
+
+    // Production credentials must remain under the external secret manager's
+    // lifecycle. A legacy plaintext redb override is therefore a startup error.
     match store.load_auth_config() {
         Ok(Some(persisted)) => {
-            tracing::info!("loaded persisted auth config from database (overrides TOML values)");
-            effective_auth_config = persisted;
+            if production_environment {
+                anyhow::bail!(
+                    "production startup rejected plaintext persisted auth override; remove it with the documented migration procedure and rotate the affected tokens in the external secret manager"
+                );
+            } else {
+                tracing::info!(
+                    "loaded persisted auth config from database (overrides TOML values)"
+                );
+                effective_auth_config = persisted;
+            }
         }
         Ok(None) => {
             tracing::debug!("no persisted auth config found - using TOML/CLI values");
         }
         Err(e) => {
-            tracing::warn!(
-                error = %e,
-                "failed to load persisted auth config - falling back to TOML file values"
-            );
+            if production_environment {
+                return Err(anyhow::anyhow!(
+                    "failed to verify absence of persisted auth override in production: {e}"
+                ));
+            }
+            tracing::warn!(error = %e, "failed to load persisted auth config - falling back to TOML file values");
         }
     }
 
@@ -1989,6 +2306,9 @@ async fn main() -> anyhow::Result<()> {
     let auth_metrics = Arc::new(proxy::auth_middleware::AuthMetrics::new(
         &prom_metrics.registry,
     ));
+    auth_metrics
+        .auth_enabled
+        .set(i64::from(effective_auth_config.enabled));
     let admin_rate_limiter = Arc::new(proxy::auth_middleware::AdminRateLimiter::new(
         effective_auth_config.rate_limit_per_second,
         effective_auth_config.rate_limit_burst,
@@ -2046,6 +2366,7 @@ async fn main() -> anyhow::Result<()> {
     let rotate_auth_config = auth_config_shared.clone();
     let rotate_store = store.clone();
     let rotate_node_id = config.node.node_id.clone();
+    let rotate_disabled = production_environment;
 
     let admin_app = axum::Router::new()
         .merge(health_router)
@@ -2253,9 +2574,15 @@ async fn main() -> anyhow::Result<()> {
             axum::routing::get(move || {
                 let metrics = ebpf_metrics_admin.clone();
                 let dispatcher = ebpf_dispatcher_admin.clone();
+                let runtime = ebpf_runtime_state_admin.clone();
                 async move {
+                    let availability = runtime.snapshot();
                     let status = ebpf_monitor::MonitorStatus {
-                        ebpf_active: metrics.ebpf_active.get() == 1,
+                        ebpf_active: availability.ebpf_active,
+                        attached_programs: availability.attached_programs,
+                        monitoring_required: availability.required,
+                        monitoring_degraded: availability.monitoring_degraded,
+                        monitoring_degraded_reason: availability.reason,
                         backpressure_active: dispatcher.is_backpressure_active(),
                         degraded_mode: dispatcher.is_degraded(),
                         pressure_level: dispatcher.last_pressure_level(),
@@ -2272,6 +2599,13 @@ async fn main() -> anyhow::Result<()> {
                     };
                     axum::Json(status)
                 }
+            }),
+        )
+        .route(
+            "/admin/ebpf/identities",
+            axum::routing::get(move || {
+                let namespace_map = ebpf_namespace_map_admin.clone();
+                async move { axum::Json(namespace_map.status()) }
             }),
         )
         .route(
@@ -2598,7 +2932,7 @@ async fn main() -> anyhow::Result<()> {
                     let supervisor = supervisor.clone();
                     async move {
                         let namespace = params.get("namespace").cloned().unwrap_or_else(|| "default".to_string());
-                        match store.list_apps() {
+                        match store.list_deployed_apps() {
                             Ok(app_ids) => {
                                 let mut apps = Vec::new();
                                 for app_id in app_ids {
@@ -3150,6 +3484,15 @@ async fn main() -> anyhow::Result<()> {
                 let store = rotate_store.clone();
                 let node_id = rotate_node_id.clone();
                 async move {
+                    if rotate_disabled {
+                        return (
+                            axum::http::StatusCode::CONFLICT,
+                            axum::Json(serde_json::json!({
+                                "error": "external_secret_lifecycle_required",
+                                "message": "production token rotation must be performed in the external secret manager and applied through a controlled node reload"
+                            })),
+                        );
+                    }
                     // Parse the request body
                     let req: proxy::auth_middleware::RotateTokenRequest = match serde_json::from_value(body.0) {
                         Ok(r) => r,
@@ -3182,22 +3525,12 @@ async fn main() -> anyhow::Result<()> {
                     let mut config = auth_config.write().await;
                     match req.token_type.as_str() {
                         "read" => {
-                            let old = config.read_token.clone();
                             config.read_token = Some(new_token.clone());
-                            tracing::warn!(
-                                old_prefix = old.map(|t| t[..8.min(t.len())].to_string()).unwrap_or_else(|| "none".to_string()),
-                                new_prefix = &new_token[..8.min(new_token.len())],
-                                "read token rotated via admin API"
-                            );
+                            tracing::warn!(token_type = "read", "admin token rotated via admin API");
                         }
                         "write" => {
-                            let old = config.write_token.clone();
                             config.write_token = Some(new_token.clone());
-                            tracing::warn!(
-                                old_prefix = old.map(|t| t[..8.min(t.len())].to_string()).unwrap_or_else(|| "none".to_string()),
-                                new_prefix = &new_token[..8.min(new_token.len())],
-                                "write token rotated via admin API"
-                            );
+                            tracing::warn!(token_type = "write", "admin token rotated via admin API");
                         }
                         _ => unreachable!("validate_rotation_request should have caught this"),
                     }
@@ -3327,6 +3660,7 @@ async fn main() -> anyhow::Result<()> {
         let sync_hot = hot_config_handle.clone();
         let sync_rate_limiter = rate_limiter_sync.clone();
         let sync_ebpf_dispatcher = ebpf_dispatcher_sync.clone();
+        let sync_ebpf_handle = ebpf_handle.clone();
         let sync_gc_tx = gc_config_tx;
         let sync_health_tx = health_interval_tx;
         let sync_log_handle = log_reload_handle.clone();
@@ -3348,6 +3682,7 @@ async fn main() -> anyhow::Result<()> {
                 let new_ebpf_config =
                     ebpf_monitor::MonitorConfig::from_ebpf_section(&common::config::EbpfSection {
                         enabled: hot.ebpf.enabled,
+                        required: hot.ebpf.required,
                         fd_soft_limit: hot.ebpf.fd_soft_limit,
                         fd_hard_limit: hot.ebpf.fd_hard_limit,
                         mem_low_threshold_pages: hot.ebpf.mem_low_threshold_pages,
@@ -3360,7 +3695,14 @@ async fn main() -> anyhow::Result<()> {
                         gateway_port: hot.ebpf.gateway_port,
                         enable_forged_header_detect: hot.ebpf.enable_forged_header_detect,
                     });
-                sync_ebpf_dispatcher.update_thresholds(new_ebpf_config);
+                sync_ebpf_dispatcher.update_thresholds(new_ebpf_config.clone());
+                if let Err(error) = sync_ebpf_handle
+                    .lock()
+                    .await
+                    .update_kernel_thresholds(&new_ebpf_config)
+                {
+                    tracing::warn!(%error, "failed to hot-reload eBPF kernel thresholds");
+                }
 
                 // 3. GC config (interval + disk threshold)
                 let new_gc_config = common::gc::GcConfig {
@@ -3412,7 +3754,14 @@ async fn main() -> anyhow::Result<()> {
         None => (None, None),
     };
     tokio::spawn(async move {
-        if let Err(e) = serve_admin_app(admin_addr, admin_app, admin_tls_cert, admin_tls_key).await
+        if let Err(e) = serve_axum_app(
+            admin_addr,
+            admin_app,
+            admin_tls_cert,
+            admin_tls_key,
+            "admin API",
+        )
+        .await
         {
             tracing::error!(error = %e, "admin API server failed");
         }
@@ -3428,11 +3777,12 @@ async fn main() -> anyhow::Result<()> {
         None => (None, None),
     };
     tokio::spawn(async move {
-        if let Err(e) = serve_admin_app(
+        if let Err(e) = serve_axum_app(
             deploy_ingress_addr,
             deploy_ingress_app,
             deploy_ingress_tls_cert,
             deploy_ingress_tls_key,
+            "deploy ingress",
         )
         .await
         {
@@ -3461,17 +3811,23 @@ async fn main() -> anyhow::Result<()> {
         &config.admin.artifact_bind_address,
         config.admin.artifact_port,
     )?;
+    let artifact_tls = admin_tls_material(&config);
+    let (artifact_tls_cert, artifact_tls_key) = match artifact_tls {
+        Some((cert, key)) => (Some(cert), Some(key)),
+        None => (None, None),
+    };
     tokio::spawn(async move {
-        let listener = tokio::net::TcpListener::bind(&artifact_addr)
-            .await
-            .expect("artifact server bind failed");
-        info!(addr = %artifact_addr, "artifact server listening");
-        axum::serve(
-            listener,
-            artifact_app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        if let Err(e) = serve_axum_app(
+            artifact_addr,
+            artifact_app,
+            artifact_tls_cert,
+            artifact_tls_key,
+            "artifact server",
         )
         .await
-        .unwrap();
+        {
+            tracing::error!(error = %e, "artifact server failed");
+        }
     });
 
     // Signal that startup is complete - all probes are now active

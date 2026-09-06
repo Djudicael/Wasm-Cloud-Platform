@@ -21,7 +21,7 @@ use std::net::IpAddr;
 pub use ipnet::IpNet as TrustedProxyNet;
 
 /// Authentication configuration for the admin API.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct AuthConfig {
     /// Enable authentication on admin API endpoints.
     /// When disabled, all endpoints are accessible without a token.
@@ -30,7 +30,7 @@ pub struct AuthConfig {
     pub enabled: bool,
 
     /// Read-only bearer token. Grants access to GET endpoints:
-    /// /status/*, /admin/config (GET), /health, /metrics
+    /// /status/*, /admin/config (GET), and /metrics
     #[serde(default)]
     pub read_token: Option<String>,
 
@@ -59,6 +59,47 @@ pub struct AuthConfig {
     /// `X-Real-IP` are ignored and the direct peer socket address is used.
     #[serde(default)]
     pub trusted_proxies: Vec<String>,
+}
+
+impl std::fmt::Debug for AuthConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AuthConfig")
+            .field("enabled", &self.enabled)
+            .field(
+                "read_token",
+                &self.read_token.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field(
+                "write_token",
+                &self.write_token.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("require_tls", &self.require_tls)
+            .field("rate_limit_per_second", &self.rate_limit_per_second)
+            .field("rate_limit_burst", &self.rate_limit_burst)
+            .field("trusted_proxies", &self.trusted_proxies)
+            .finish()
+    }
+}
+
+/// Production bearer tokens are fixed-size random values, not human passwords
+/// or repository-local placeholders.
+pub fn validate_production_bearer_token(label: &str, token: Option<&str>) -> Result<(), String> {
+    let token = token.ok_or_else(|| format!("{label} is required in production"))?;
+    if token.len() != 64 || !token.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(format!(
+            "{label} must be a 32-byte random value encoded as exactly 64 hexadecimal characters"
+        ));
+    }
+    let normalized = token.to_ascii_lowercase();
+    if normalized
+        .chars()
+        .all(|character| character == normalized.chars().next().unwrap_or('0'))
+    {
+        return Err(format!(
+            "{label} must not be a repeated-character placeholder"
+        ));
+    }
+    Ok(())
 }
 
 fn default_require_tls() -> bool {
@@ -567,6 +608,35 @@ mod tests {
         let a = AuthConfig::generate_token();
         let b = AuthConfig::generate_token();
         assert_ne!(a, b);
+    }
+
+    #[test]
+    fn debug_output_redacts_tokens() {
+        let secret = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let config = AuthConfig {
+            enabled: true,
+            read_token: Some(secret.to_string()),
+            write_token: Some(secret.chars().rev().collect()),
+            ..Default::default()
+        };
+        let output = format!("{config:?}");
+        assert!(!output.contains(secret));
+        assert!(output.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn production_tokens_require_random_sized_hex() {
+        assert!(validate_production_bearer_token(
+            "token",
+            Some("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+        )
+        .is_ok());
+        assert!(validate_production_bearer_token("token", Some("change-me")).is_err());
+        assert!(validate_production_bearer_token(
+            "token",
+            Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+        )
+        .is_err());
     }
 
     #[test]

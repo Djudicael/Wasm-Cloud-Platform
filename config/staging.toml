@@ -71,6 +71,7 @@ port_end = 19999
 # Bind app instances to loopback so staging traffic still goes through the
 # platform proxy/gateway by default.
 instance_bind_address = "127.0.0.1"
+isolation_mode = "single-trust-domain"
 # Key source: "generate" (ephemeral), "file" (from key_file), "command"
 # (from key_command argv), "vault-kv", "vault-transit", "aws-kms-hmac",
 # "env:VAR_NAME", or "passphrase-env:VAR_NAME"
@@ -147,6 +148,7 @@ default_per_ip_limit = 200
 [ebpf]
 # Enable eBPF monitoring (requires Linux kernel >= 5.8).
 enabled = true
+required = true
 # FD soft limit per Wasm instance (warning at 80%).
 fd_soft_limit = 8192
 # FD hard limit per Wasm instance (kill at 95%).
@@ -175,6 +177,13 @@ sampling_period_secs = 10
 [health]
 # Health check loop interval (seconds).
 check_interval_secs = 5
+# Explicit readiness reserves; staging volumes must remain above twice these
+# values during representative load and upgrade rehearsals.
+min_disk_free_bytes = 1073741824
+min_disk_free_inodes = 10000
+# Keep this below the staging host/cgroup hard limit. Application manifests are
+# rejected when their declared maximum instance pool exceeds this budget.
+max_memory_bytes = 4294967296
 # Treat cluster-node registry entries as stale after this many seconds without
 # a fresh event. Used by deploy peer selection and rolling upgrades.
 cluster_node_stale_after_secs = 120

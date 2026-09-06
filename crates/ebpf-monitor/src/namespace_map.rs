@@ -7,9 +7,195 @@
 
 use crate::common::{TidFlags, TidIdentity};
 use std::collections::HashMap;
+#[cfg(feature = "ebpf")]
+use std::sync::Mutex;
 use std::sync::RwLock;
 use std::time::{Duration, Instant};
 use tracing::{info, warn};
+
+/// One active application identity registered for eBPF filtering.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct MonitoredTidStatus {
+    pub tid: u32,
+    pub namespace: String,
+    pub app_id: String,
+    pub registered_at_ns: u64,
+    /// Linux scheduler counters for the dedicated application executor thread.
+    pub performance: Option<TaskPerformanceStatus>,
+}
+
+/// Cumulative Linux scheduler counters for one thread.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct TaskPerformanceStatus {
+    pub user_cpu_ticks: u64,
+    pub system_cpu_ticks: u64,
+    pub voluntary_context_switches: u64,
+    pub nonvoluntary_context_switches: u64,
+}
+
+/// Cumulative Linux resource counters for the node process.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ProcessPerformanceStatus {
+    pub pid: u32,
+    pub user_cpu_ticks: u64,
+    pub system_cpu_ticks: u64,
+    pub resident_memory_bytes: u64,
+    pub voluntary_context_switches: u64,
+    pub nonvoluntary_context_switches: u64,
+}
+
+/// Bounded lifecycle snapshot for the authenticated admin API.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct NamespaceMapStatus {
+    pub active_tids: Vec<MonitoredTidStatus>,
+    /// Number of scheduler ticks per second used by the CPU tick fields.
+    pub clock_ticks_per_second: u64,
+    /// Resource counters for the complete `wasm-node` process.
+    pub process_performance: Option<ProcessPerformanceStatus>,
+    pub recent_tombstones: usize,
+    pub port_bindings: usize,
+    pub kernel_map_entry_counts: Vec<usize>,
+    pub bpffs_mounted: bool,
+    pub pinned_entries: usize,
+}
+
+fn parse_proc_stat(stat: &str) -> Option<(u64, u64, i64)> {
+    // The command name is parenthesized and may contain spaces or parentheses.
+    // Fields after its final ')' start at Linux procfs field 3 (`state`).
+    let fields: Vec<_> = stat
+        .get(stat.rfind(')')? + 1..)?
+        .split_whitespace()
+        .collect();
+    Some((
+        fields.get(11)?.parse().ok()?,
+        fields.get(12)?.parse().ok()?,
+        fields.get(21)?.parse().ok()?,
+    ))
+}
+
+fn parse_context_switches(status: &str) -> Option<(u64, u64)> {
+    let value = |prefix: &str| {
+        status
+            .lines()
+            .find_map(|line| line.strip_prefix(prefix))?
+            .trim()
+            .parse()
+            .ok()
+    };
+    Some((
+        value("voluntary_ctxt_switches:")?,
+        value("nonvoluntary_ctxt_switches:")?,
+    ))
+}
+
+#[cfg(target_os = "linux")]
+fn process_context_switches() -> Option<(u64, u64)> {
+    let mut voluntary = 0_u64;
+    let mut nonvoluntary = 0_u64;
+    let mut observed = false;
+    for entry in std::fs::read_dir("/proc/self/task")
+        .ok()?
+        .filter_map(Result::ok)
+    {
+        let Ok(status) = std::fs::read_to_string(entry.path().join("status")) else {
+            continue;
+        };
+        let Some((task_voluntary, task_nonvoluntary)) = parse_context_switches(&status) else {
+            continue;
+        };
+        voluntary = voluntary.saturating_add(task_voluntary);
+        nonvoluntary = nonvoluntary.saturating_add(task_nonvoluntary);
+        observed = true;
+    }
+    observed.then_some((voluntary, nonvoluntary))
+}
+
+#[cfg(target_os = "linux")]
+fn task_performance(tid: u32) -> Option<TaskPerformanceStatus> {
+    let root = format!("/proc/self/task/{tid}");
+    let stat = std::fs::read_to_string(format!("{root}/stat")).ok()?;
+    let status = std::fs::read_to_string(format!("{root}/status")).ok()?;
+    let (user_cpu_ticks, system_cpu_ticks, _) = parse_proc_stat(&stat)?;
+    let (voluntary_context_switches, nonvoluntary_context_switches) =
+        parse_context_switches(&status)?;
+    Some(TaskPerformanceStatus {
+        user_cpu_ticks,
+        system_cpu_ticks,
+        voluntary_context_switches,
+        nonvoluntary_context_switches,
+    })
+}
+
+#[cfg(not(target_os = "linux"))]
+fn task_performance(_tid: u32) -> Option<TaskPerformanceStatus> {
+    None
+}
+
+#[cfg(target_os = "linux")]
+fn process_performance() -> Option<ProcessPerformanceStatus> {
+    let stat = std::fs::read_to_string("/proc/self/stat").ok()?;
+    let (user_cpu_ticks, system_cpu_ticks, resident_pages) = parse_proc_stat(&stat)?;
+    let resident_pages = u64::try_from(resident_pages).ok()?;
+    let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+    let page_size = u64::try_from(page_size).ok()?;
+    let (voluntary_context_switches, nonvoluntary_context_switches) = process_context_switches()?;
+    Some(ProcessPerformanceStatus {
+        pid: std::process::id(),
+        user_cpu_ticks,
+        system_cpu_ticks,
+        resident_memory_bytes: resident_pages.saturating_mul(page_size),
+        voluntary_context_switches,
+        nonvoluntary_context_switches,
+    })
+}
+
+#[cfg(not(target_os = "linux"))]
+fn process_performance() -> Option<ProcessPerformanceStatus> {
+    None
+}
+
+#[cfg(target_os = "linux")]
+fn clock_ticks_per_second() -> u64 {
+    let ticks = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
+    u64::try_from(ticks).unwrap_or(0)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn clock_ticks_per_second() -> u64 {
+    0
+}
+
+fn count_directory_entries(path: &std::path::Path) -> usize {
+    let Ok(entries) = std::fs::read_dir(path) else {
+        return 0;
+    };
+    entries
+        .filter_map(Result::ok)
+        .map(|entry| {
+            let nested = entry
+                .file_type()
+                .ok()
+                .filter(|kind| kind.is_dir())
+                .map(|_| count_directory_entries(&entry.path()))
+                .unwrap_or(0);
+            1 + nested
+        })
+        .sum()
+}
+
+fn bpffs_mounted() -> bool {
+    std::fs::read_to_string("/proc/mounts")
+        .ok()
+        .is_some_and(|mounts| {
+            mounts.lines().any(|line| {
+                let mut fields = line.split_whitespace();
+                matches!(
+                    (fields.next(), fields.next(), fields.next()),
+                    (Some(_), Some("/sys/fs/bpf"), Some("bpf"))
+                )
+            })
+        })
+}
 
 /// Identity of a caller, returned by `resolve_identity()`.
 #[derive(Debug, Clone)]
@@ -38,9 +224,12 @@ struct PortBinding {
 /// fallback maps. The gateway reads from the same maps for identity resolution.
 pub struct NamespaceMap {
     #[cfg(feature = "ebpf")]
-    inner: Option<aya::maps::HashMap<aya::maps::MapData, u32, TidIdentity>>,
+    inner: Mutex<Vec<aya::maps::HashMap<aya::maps::MapData, u32, TidIdentity>>>,
     /// TID → TidIdentity. Always maintained. Primary identity store.
     tid_to_identity: RwLock<HashMap<u32, TidIdentity>>,
+    /// Recently removed identities retained only for asynchronous event labeling.
+    /// Security decisions never consult this table.
+    recent_tid_identities: RwLock<HashMap<u32, (TidIdentity, Instant)>>,
     /// Source port → PortBinding. Populated by the consumer when eBPF events arrive.
     port_to_tid: RwLock<HashMap<u16, PortBinding>>,
     /// TTL for port→TID bindings. Bindings older than this are considered stale.
@@ -51,62 +240,50 @@ impl NamespaceMap {
     /// Create from a loaded eBPF object.
     ///
     /// The `MONITORED_TIDS` map is expected in the namespace enforcer eBPF
-    /// object (`ns_ebpf`). If not available, falls back to the main eBPF
-    /// object or in-process maps.
+    /// object (`ns_ebpf`). If not available, falls back to in-process maps.
     // TODO: When aya supports BPF_F_RDONLY_PROG, load the MONITORED_TIDS map
     // with read-only program access to prevent eBPF programs from mutating
     // the identity table. This is defense-in-depth — the eBPF programs
     // should never need to write to this map.
     #[cfg(feature = "ebpf")]
-    pub fn from_ebpf(ebpf: &mut aya::Bpf, ns_ebpf: Option<&mut aya::Bpf>) -> Self {
-        // Try the namespace enforcer object first (where MONITORED_TIDS lives)
-        let inner = if let Some(ns) = ns_ebpf {
-            match ns.map_mut("MONITORED_TIDS") {
-                Some(map) => {
-                    match aya::maps::HashMap::<aya::maps::MapData, u32, TidIdentity>::try_from(map)
-                    {
-                        Ok(hash_map) => {
-                            info!("MONITORED_TIDS eBPF map opened from namespace enforcer");
-                            Some(hash_map)
-                        }
-                        Err(e) => {
-                            warn!(error = %e, "MONITORED_TIDS map wrong type — trying main eBPF object");
-                            None
-                        }
-                    }
-                }
-                None => {
-                    warn!("MONITORED_TIDS map not found in namespace enforcer — trying main eBPF object");
-                    None
-                }
-            }
-        } else {
-            None
-        };
+    pub fn from_ebpf(
+        ns_ebpf: Option<&mut aya::Ebpf>,
+        monitors: &mut [crate::loader::LoadedMonitor],
+    ) -> Self {
+        let mut inner = Vec::new();
 
-        // Fall back to the main eBPF object
-        let inner = inner.or_else(|| match ebpf.map_mut("MONITORED_TIDS") {
-            Some(map) => {
-                match aya::maps::HashMap::<aya::maps::MapData, u32, TidIdentity>::try_from(map) {
-                    Ok(hash_map) => {
-                        info!("MONITORED_TIDS eBPF map opened from main object");
-                        Some(hash_map)
-                    }
-                    Err(e) => {
-                        warn!(error = %e, "MONITORED_TIDS map wrong type — using fallback");
-                        None
-                    }
+        for (owner, ebpf) in monitors
+            .iter_mut()
+            .filter(|monitor| {
+                matches!(
+                    monitor.name,
+                    "process_tracker" | "tcp_monitor" | "fd_watcher" | "syscall_counter"
+                )
+            })
+            .map(|monitor| (monitor.name, &mut monitor.ebpf))
+            .chain(ns_ebpf.into_iter().map(|ebpf| ("namespace_enforcer", ebpf)))
+        {
+            let Some(map) = ebpf.take_map("MONITORED_TIDS") else {
+                warn!(owner, "MONITORED_TIDS map not found");
+                continue;
+            };
+            match aya::maps::HashMap::<aya::maps::MapData, u32, TidIdentity>::try_from(map) {
+                Ok(hash_map) => {
+                    info!(owner, "MONITORED_TIDS eBPF map opened");
+                    inner.push(hash_map);
                 }
+                Err(e) => warn!(owner, error = %e, "MONITORED_TIDS map has the wrong type"),
             }
-            None => {
-                warn!("MONITORED_TIDS map not found — using fallback");
-                None
-            }
-        });
+        }
+
+        if inner.is_empty() {
+            warn!("No MONITORED_TIDS eBPF maps opened — using in-process identity only");
+        }
 
         NamespaceMap {
-            inner,
+            inner: Mutex::new(inner),
             tid_to_identity: RwLock::new(HashMap::new()),
+            recent_tid_identities: RwLock::new(HashMap::new()),
             port_to_tid: RwLock::new(HashMap::new()),
             port_ttl: Duration::from_secs(300),
         }
@@ -116,8 +293,9 @@ impl NamespaceMap {
     pub fn new_fallback() -> Self {
         NamespaceMap {
             #[cfg(feature = "ebpf")]
-            inner: None,
+            inner: Mutex::new(Vec::new()),
             tid_to_identity: RwLock::new(HashMap::new()),
+            recent_tid_identities: RwLock::new(HashMap::new()),
             port_to_tid: RwLock::new(HashMap::new()),
             port_ttl: Duration::from_secs(300),
         }
@@ -132,24 +310,31 @@ impl NamespaceMap {
         identity.registered_at_ns = Self::now_ns();
 
         #[cfg(feature = "ebpf")]
-        if let Some(ref map) = self.inner {
-            match map.insert(tid, identity, 0) {
-                Ok(()) => {
-                    info!(
-                        tid,
-                        ns = identity.namespace_str(),
-                        app = identity.app_id_str(),
-                        "TID registered in eBPF map"
-                    );
-                    self.tid_to_identity.write().unwrap().insert(tid, identity);
-                    return Ok(());
+        {
+            let mut maps = self.inner.lock().unwrap();
+            for map in maps.iter_mut() {
+                if let Err(e) = map.insert(tid, identity, 0) {
+                    for inserted in maps.iter_mut() {
+                        let _ = inserted.remove(&tid);
+                    }
+                    return Err(format!(
+                        "failed to register TID {tid} in every eBPF map: {e}"
+                    ));
                 }
-                Err(e) => {
-                    warn!(tid, error = %e, "eBPF map insert failed — using fallback");
-                }
+            }
+
+            if !maps.is_empty() {
+                info!(
+                    tid,
+                    map_count = maps.len(),
+                    ns = identity.namespace_str(),
+                    app = identity.app_id_str(),
+                    "TID registered in eBPF maps"
+                );
             }
         }
 
+        self.recent_tid_identities.write().unwrap().remove(&tid);
         self.tid_to_identity.write().unwrap().insert(tid, identity);
         info!(
             tid,
@@ -166,11 +351,16 @@ impl NamespaceMap {
     /// Also removes any port_to_tid entries for this TID.
     pub fn deregister_tid(&self, tid: u32) -> Result<(), String> {
         #[cfg(feature = "ebpf")]
-        if let Some(ref map) = self.inner {
+        for map in self.inner.lock().unwrap().iter_mut() {
             let _ = map.remove(&tid);
         }
 
-        self.tid_to_identity.write().unwrap().remove(&tid);
+        if let Some(identity) = self.tid_to_identity.write().unwrap().remove(&tid) {
+            self.recent_tid_identities
+                .write()
+                .unwrap()
+                .insert(tid, (identity, Instant::now()));
+        }
 
         // Remove any port→TID mappings for this TID
         let mut port_map = self.port_to_tid.write().unwrap();
@@ -242,6 +432,63 @@ impl NamespaceMap {
         self.tid_to_identity.read().unwrap().get(&tid).copied()
     }
 
+    /// Return a consistent, read-only lifecycle snapshot for operators/tests.
+    pub fn status(&self) -> NamespaceMapStatus {
+        let mut active_tids: Vec<_> = self
+            .tid_to_identity
+            .read()
+            .unwrap()
+            .iter()
+            .map(|(tid, identity)| MonitoredTidStatus {
+                tid: *tid,
+                namespace: identity.namespace_str().to_string(),
+                app_id: identity.app_id_str().to_string(),
+                registered_at_ns: identity.registered_at_ns,
+                performance: task_performance(*tid),
+            })
+            .collect();
+        active_tids.sort_by_key(|identity| identity.tid);
+
+        let recent_tombstones = {
+            let mut recent = self.recent_tid_identities.write().unwrap();
+            recent.retain(|_, (_, removed_at)| removed_at.elapsed() <= Duration::from_secs(30));
+            recent.len()
+        };
+
+        #[cfg(feature = "ebpf")]
+        let kernel_map_entry_counts = self
+            .inner
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|map| map.keys().filter(Result::is_ok).count())
+            .collect();
+        #[cfg(not(feature = "ebpf"))]
+        let kernel_map_entry_counts = Vec::new();
+
+        NamespaceMapStatus {
+            active_tids,
+            clock_ticks_per_second: clock_ticks_per_second(),
+            process_performance: process_performance(),
+            recent_tombstones,
+            port_bindings: self.port_to_tid.read().unwrap().len(),
+            kernel_map_entry_counts,
+            bpffs_mounted: bpffs_mounted(),
+            pinned_entries: count_directory_entries(std::path::Path::new("/sys/fs/bpf")),
+        }
+    }
+
+    /// Label an asynchronously consumed event, including a short-lived identity
+    /// tombstone for events emitted immediately before thread teardown.
+    pub fn lookup_event_identity(&self, tid: u32) -> Option<TidIdentity> {
+        if let Some(identity) = self.lookup_tid(tid) {
+            return Some(identity);
+        }
+        let mut recent = self.recent_tid_identities.write().unwrap();
+        recent.retain(|_, (_, removed_at)| removed_at.elapsed() <= Duration::from_secs(30));
+        recent.get(&tid).map(|(identity, _)| *identity)
+    }
+
     /// Remove port bindings that have exceeded their TTL.
     /// Returns the number of bindings removed.
     pub fn cleanup_expired_bindings(&self) -> usize {
@@ -270,6 +517,10 @@ impl NamespaceMap {
     ///
     /// Called periodically by the Supervisor's health loop.
     pub fn cleanup_stale_tids(&self) -> usize {
+        self.recent_tid_identities
+            .write()
+            .unwrap()
+            .retain(|_, (_, removed_at)| removed_at.elapsed() <= Duration::from_secs(30));
         let tids: Vec<u32> = self
             .tid_to_identity
             .read()
@@ -399,6 +650,40 @@ mod tests {
         let found = map.lookup_tid(12349).unwrap();
         assert_eq!(found.namespace_str(), "prod");
         assert_eq!(found.app_id_str(), "svc:v2");
+    }
+
+    #[test]
+    fn test_status_tracks_registration_and_cleanup() {
+        let map = NamespaceMap::new_fallback();
+        map.register_tid(12351, TidIdentity::new("prod", "lifecycle:v1"))
+            .unwrap();
+        map.bind_port(54327, 12351);
+
+        let active = map.status();
+        assert_eq!(active.active_tids.len(), 1);
+        assert_eq!(active.active_tids[0].tid, 12351);
+        assert_eq!(active.active_tids[0].namespace, "prod");
+        assert_eq!(active.active_tids[0].app_id, "lifecycle:v1");
+        assert_eq!(active.port_bindings, 1);
+
+        map.deregister_tid(12351).unwrap();
+        let removed = map.status();
+        assert!(removed.active_tids.is_empty());
+        assert_eq!(removed.recent_tombstones, 1);
+        assert_eq!(removed.port_bindings, 0);
+    }
+
+    #[test]
+    fn test_parse_proc_stat_with_parenthesized_command() {
+        let stat = "42 (worker (one)) R 1 2 3 4 5 6 7 8 9 10 120 30 14 15 16 17 18 19 20 21 64";
+        assert_eq!(parse_proc_stat(stat), Some((120, 30, 64)));
+    }
+
+    #[test]
+    fn test_parse_context_switches() {
+        let status =
+            "Name:\tworker\nvoluntary_ctxt_switches:\t123\nnonvoluntary_ctxt_switches:\t45\n";
+        assert_eq!(parse_context_switches(status), Some((123, 45)));
     }
 
     #[test]

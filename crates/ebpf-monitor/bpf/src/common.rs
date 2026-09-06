@@ -41,6 +41,16 @@ pub enum EventType {
     NamespaceAudit = 13,
     /// A forged namespace header was detected in send buffer.
     NamespaceForgedHeader = 14,
+    /// File descriptor closed by a monitored workload.
+    FdClose = 15,
+    /// TCP connection accepted by a monitored workload.
+    TcpAccept = 16,
+    /// TCP payload sent by a monitored workload.
+    TcpSend = 17,
+    /// TCP payload received by a monitored workload.
+    TcpReceive = 18,
+    /// First known syscall observed after a workload TID registration.
+    SyscallActivity = 19,
 }
 
 /// Header for every event sent through the ring buffer.
@@ -48,6 +58,7 @@ pub enum EventType {
 #[derive(Copy, Clone)]
 pub struct EventHeader {
     pub event_type: u32,
+    pub _padding: u32,
     pub timestamp_ns: u64, // ktime (CLOCK_MONOTONIC)
     pub pid: u32,
     pub tid: u32,
@@ -62,6 +73,7 @@ pub struct ProcessEvent {
     pub exit_code: u32, // 0 for exec events
     pub signal: u32,    // 0 for exec events; signal number for exit
     pub ppid: u32,      // Parent PID (to identify wasm-node children)
+    pub _padding: u32,
     pub cgroup_id: u64, // cgroup v2 ID for tenant attribution
 }
 
@@ -78,6 +90,7 @@ pub struct TcpEvent {
     pub new_state: u32,   // TCP FSM new state
     pub retransmits: u32, // Cumulative retransmit count at event time
     pub rtt_us: u64,      // Smoothed RTT in microseconds
+    pub bytes: u64,       // Payload bytes for send/receive events
 }
 
 /// File descriptor event.
@@ -99,6 +112,7 @@ pub struct MemPressureEvent {
     pub free_pages: u64,
     pub reclaim_pages: u64,
     pub pressure_level: u32, // 0=low, 1=medium, 2=critical
+    pub _padding: u32,
     pub anon_pages: u64,     // Anonymous (Wasm linear memory) pages
 }
 
@@ -111,8 +125,11 @@ pub struct DiskIoEvent {
     pub dev_minor: u32,
     pub sector: u64,
     pub nr_sector: u32,
+    pub bytes: u32,
     pub latency_ns: u64, // Time from submit to complete
+    pub cgroup_id: u64,
     pub io_type: u32,    // 0=read, 1=write, 2=sync
+    pub _padding2: u32,
 }
 
 /// Syscall anomaly event.
@@ -122,6 +139,7 @@ pub struct SyscallEvent {
     pub header: EventHeader,
     pub syscall_nr: u64,
     pub syscall_category: u32, // Enum: SyscallCategory
+    pub _padding: u32,
     pub count_in_window: u64,  // Count in the last sampling window
 }
 
@@ -145,6 +163,10 @@ pub enum SyscallCategory {
 pub struct MonitorConfigMap {
     /// PID of the wasm-node process (to filter relevant events).
     pub node_pid: u32,
+    pub _padding: u32,
+    /// cgroup v2 ID containing the wasm-node process. System-wide probes must
+    /// ignore events outside this boundary.
+    pub node_cgroup_id: u64,
     /// FD soft limit per Wasm instance PID.
     pub fd_soft_limit: u32,
     /// FD hard limit per Wasm instance PID (trigger kill).
@@ -237,6 +259,8 @@ pub struct NamespaceAuditEvent {
     pub source_port: u16,
     /// Padding.
     pub _padding: u32,
+    /// Tail padding required by the header's 8-byte alignment.
+    pub _tail_padding: u32,
 }
 
 /// Types of namespace audit events.

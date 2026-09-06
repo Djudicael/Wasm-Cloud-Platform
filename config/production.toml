@@ -27,11 +27,17 @@ db_path = "/var/lib/wasm-node/state.redb"
 # integrity_failure_mode = "quarantine_and_exit"
 
 [nats]
-# NATS server URL (production cluster).
-url = "nats://nats.prod:4222"
+# NATS server URL (production cluster). Production validation rejects plaintext.
+url = "tls://nats.prod:4222"
 # Credentials file for authenticated NATS connections.
-# Required in production if the NATS cluster requires authentication.
+# Required by the platform's production admission policy.
 creds_file = "/etc/wasm-node/nats.creds"
+# Private CA and mutual-TLS identity are optional when the NATS certificate uses
+# the host trust store and credentials are sufficient. Configure them explicitly
+# for a private NATS PKI or an mTLS policy.
+# ca_cert = "/etc/wasm-node/nats/ca.crt"
+# client_cert = "/etc/wasm-node/nats/client.crt"
+# client_key = "/etc/wasm-node/nats/client.key"
 
 [proxy]
 # HTTP proxy port (North-South traffic).
@@ -52,13 +58,16 @@ bind_address = "127.0.0.1"
 artifact_port = 9091
 # Bind the artifact server locally by default.
 artifact_bind_address = "127.0.0.1"
-# Dedicated TLS certificate/key for the admin HTTPS listener. If unset, the
-# node falls back to the shared [proxy] TLS material.
+# Dedicated TLS certificate/key shared by the admin, deploy-ingress, and
+# artifact HTTPS listeners. If unset, these listeners fall back to the shared
+# [proxy] TLS material. Certificate SANs must cover every advertised hostname.
 tls_cert = "/etc/wasm-node/admin/server.crt"
 tls_key = "/etc/wasm-node/admin/server.key"
 # Optional routable artifact advertisement for peer nodes. Leave unset for
 # local-only mode. In multi-node deployments, set one of these to a routable
 # hostname or URL instead of relying on loopback defaults.
+# Production should use advertised_artifact_url so the HTTPS scheme and port
+# are explicit. advertised_host alone is rejected in production.
 # advertised_host = "node-1.internal"
 # advertised_artifact_url = "https://artifacts.node-1.internal"
 
@@ -86,23 +95,29 @@ port_end = 19999
 # Bind app instances to loopback so north-south traffic must flow through the
 # platform proxy/gateway rather than reaching instance ports directly.
 instance_bind_address = "127.0.0.1"
+# Applications share the wasm-node process. One node therefore admits only one
+# mutually trusted application/tenant domain until process-per-application
+# isolation exists and is validated.
+isolation_mode = "single-trust-domain"
 # Key source: "generate" (ephemeral), "file" (from key_file), "command"
 # (from key_command argv), "vault-kv", "vault-transit", "aws-kms-hmac",
 # "env:VAR_NAME", or "passphrase-env:VAR_NAME".
-# Use "file", "command", "vault-kv", "vault-transit", "aws-kms-hmac",
-# "env:...", or "passphrase-env:..." in production so secrets
-# survive restarts without plaintext KEK persistence.
-key_source = "file"
-key_file = "/etc/wasm-node/master.key"
+# Production admission requires a non-exportable Vault Transit or AWS KMS HMAC
+# root. This example selects Vault Transit; replace every placeholder through
+# your deployment configuration and secret-injection system.
+key_source = "vault-transit"
+# key_file is intentionally not accepted in production mode.
+# key_file = "/etc/wasm-node/master.key"
 # key_command = ["/usr/local/bin/fetch-node-seal-key", "--node", "prod-node-0"]
-# key_vault_url = "https://vault.service:8200"
-# key_vault_token_env = "VAULT_TOKEN"
+key_vault_url = "https://vault.service:8200"
+key_vault_token_env = "VAULT_TOKEN"
 # key_vault_mount = "secret"
 # key_vault_path = "wasm-node/seal-key"
 # key_vault_field = "key"
-# key_vault_transit_mount = "transit"
-# key_vault_transit_key = "wasm-node-seal"
-# key_vault_transit_context = "prod-node-0"
+key_vault_transit_mount = "transit"
+key_vault_transit_key = "wasm-node-seal"
+key_vault_transit_context = "prod-node-0"
+key_vault_transit_key_version = 1
 # key_aws_kms_region = "eu-west-3"
 # key_aws_kms_endpoint = "http://127.0.0.1:4566" # optional local/mock override
 # key_aws_kms_key_id = "arn:aws:kms:eu-west-3:123456789012:key/..."
@@ -168,6 +183,9 @@ default_per_ip_limit = 200
 [ebpf]
 # Enable eBPF monitoring (requires Linux kernel >= 5.8 with BTF).
 enabled = true
+# Fail startup instead of falling back: node-local workload identity and
+# persistent connection cleanup rely on active kernel probes in production.
+required = true
 # FD soft limit per Wasm instance (warning at 80%).
 fd_soft_limit = 8192
 # FD hard limit per Wasm instance (kill at 95%).
@@ -198,6 +216,16 @@ platform_domain = "myplatform.com"
 [health]
 # Health check loop interval (seconds).
 check_interval_secs = 5
+# Hard filesystem reserves used by readiness and exported to Prometheus. The
+# node becomes degraded below twice either value and unready below the value.
+# Size the production state volume so normal peaks, upgrades, and rollback
+# artifacts remain comfortably above the warning envelope.
+min_disk_free_bytes = 1073741824
+min_disk_free_inodes = 10000
+# Admission budget for each application's declared maximum instance pool and
+# the configured process-memory health ceiling. Set this below the host/cgroup
+# hard limit so the kernel and platform overhead retain explicit headroom.
+max_memory_bytes = 4294967296
 # Treat cluster-node registry entries as stale after this many seconds without
 # a fresh event. Used by deploy peer selection and rolling upgrades.
 cluster_node_stale_after_secs = 120

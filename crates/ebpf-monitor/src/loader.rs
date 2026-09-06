@@ -25,9 +25,9 @@
 
 use anyhow::{anyhow, Context, Result};
 use aya::{
-    maps::Array,
+    maps::{Array, MapData},
     programs::{KProbe, TracePoint},
-    Bpf,
+    Ebpf,
 };
 use std::path::Path;
 use tracing::{info, warn};
@@ -35,19 +35,61 @@ use tracing::{info, warn};
 use crate::common::{MonitorConfigMap, NsEnforceConfig, NsEnforceFlags};
 use crate::config::MonitorConfig;
 
+type AttachFn = fn(&mut Ebpf) -> Result<()>;
+type MonitorRequest = (&'static str, bool, AttachFn);
+
 /// Loaded eBPF programs, maps, and attachment links.
 ///
 /// The `Bpf` object owns the loaded eBPF object (programs + maps).
 /// The `links` vector holds the attachment links, which can be detached
 /// at runtime to stop monitoring.
 pub struct LoadedEbpf {
-    /// The loaded main eBPF object (programs + maps).
-    pub ebpf: Bpf,
+    /// Independently compiled monitor objects. They must remain owned for as
+    /// long as their programs are attached.
+    pub monitors: Vec<LoadedMonitor>,
+    /// Owned CONFIG map handles used to apply hot-reloaded thresholds.
+    config_maps: Vec<Array<MapData, MonitorConfigMap>>,
     /// Optional namespace enforcer eBPF object (separate ELF).
-    pub ns_ebpf: Option<Bpf>,
+    pub ns_ebpf: Option<Ebpf>,
     /// Attachment links for each loaded program.
     /// Links can be detached to stop a specific monitor.
     pub links: Vec<String>,
+    /// Requested monitors that could not be loaded, configured, or attached.
+    pub failures: Vec<MonitorLoadFailure>,
+}
+
+/// Bounded diagnostic for one unavailable requested monitor.
+#[derive(Debug, Clone)]
+pub struct MonitorLoadFailure {
+    pub monitor: &'static str,
+    pub stage: &'static str,
+}
+
+fn failure_stage(default_stage: &'static str, error: &str) -> &'static str {
+    if error.to_ascii_lowercase().contains("btf") {
+        "missing_btf"
+    } else {
+        default_stage
+    }
+}
+
+/// One independently compiled monitor object.
+pub struct LoadedMonitor {
+    pub name: &'static str,
+    pub ebpf: Ebpf,
+}
+
+impl LoadedEbpf {
+    /// Update every independently loaded monitor's kernel CONFIG map.
+    pub fn update_config(&mut self, config: &MonitorConfig, node_pid: u32) -> Result<()> {
+        let kernel_config = kernel_config(config, node_pid)?;
+        for config_map in &mut self.config_maps {
+            config_map
+                .set(0, kernel_config, 0)
+                .context("failed to hot-reload eBPF CONFIG map")?;
+        }
+        Ok(())
+    }
 }
 
 /// Load and attach all eBPF programs.
@@ -70,108 +112,110 @@ pub async fn load_and_attach(config: &MonitorConfig, node_pid: u32) -> Result<Op
         return Ok(None);
     }
 
-    info!("Loading eBPF programs...");
+    info!("Loading independently compiled eBPF monitor objects...");
 
-    // Try to load the eBPF object.
-    // In production, the BPF bytecode is embedded via include_bytes_aligned!.
-    // For development, we try loading from a file at a well-known path.
-    let mut ebpf = match load_ebpf_object() {
-        Ok(bpf) => bpf,
-        Err(e) => {
-            warn!(
-                error = %e,
-                "Failed to load eBPF object — this is expected if BPF programs \
-                 haven't been compiled yet. Falling back to userspace monitoring."
-            );
-            return Ok(None);
-        }
-    };
-
-    // Write the configuration map before attaching any programs.
-    // The eBPF programs read this map at runtime to get thresholds.
-    if let Err(e) = write_config_map(&mut ebpf, config, node_pid) {
-        warn!(
-            error = %e,
-            "Failed to write eBPF config map — falling back to userspace"
-        );
-        return Ok(None);
-    }
-
-    // Attach programs based on configuration
+    let mut monitors = Vec::new();
+    let mut config_maps = Vec::new();
     let mut links = Vec::new();
+    let mut failures = Vec::new();
 
-    if config.enable_process_tracker {
-        match attach_process_tracker(&mut ebpf) {
-            Ok(()) => {
-                info!(
-                    "Process tracker attached (tracepoint: sched_process_exec, sched_process_exit)"
+    let requested: [MonitorRequest; 6] = [
+        (
+            "process_tracker",
+            config.enable_process_tracker,
+            attach_process_tracker,
+        ),
+        ("tcp_monitor", config.enable_tcp_monitor, attach_tcp_monitor),
+        ("fd_watcher", config.enable_fd_watcher, attach_fd_watcher),
+        (
+            "mem_pressure",
+            config.enable_mem_pressure,
+            attach_mem_pressure,
+        ),
+        (
+            "disk_monitor",
+            config.enable_disk_monitor,
+            attach_disk_monitor,
+        ),
+        (
+            "syscall_counter",
+            config.enable_syscall_counter,
+            attach_syscall_counter,
+        ),
+    ];
+
+    for (name, enabled, attach) in requested {
+        if !enabled {
+            continue;
+        }
+        if std::env::var("WASM_EBPF_TEST_FAULT").as_deref() == Ok("probe_unavailable")
+            && name == "disk_monitor"
+        {
+            warn!(monitor = name, "test fault: required probe is unavailable");
+            failures.push(MonitorLoadFailure {
+                monitor: name,
+                stage: "probe_unavailable",
+            });
+            continue;
+        }
+        let mut ebpf = match load_monitor_object(name) {
+            Ok(ebpf) => ebpf,
+            Err(error) => {
+                let error_chain = format!("{error:#}");
+                failures.push(MonitorLoadFailure {
+                    monitor: name,
+                    stage: failure_stage("load", &error_chain),
+                });
+                warn!(error = %error_chain, monitor = name, "Failed to load eBPF monitor object — skipping");
+                continue;
+            }
+        };
+        if let Err(error) = write_config_map(&mut ebpf, config, node_pid) {
+            failures.push(MonitorLoadFailure {
+                monitor: name,
+                stage: "configure",
+            });
+            let error_chain = format!("{error:#}");
+            warn!(error = %error_chain, monitor = name, "Failed to configure eBPF monitor — skipping");
+            continue;
+        }
+        if let Err(error) = attach(&mut ebpf) {
+            let error_chain = format!("{error:#}");
+            failures.push(MonitorLoadFailure {
+                monitor: name,
+                stage: failure_stage("attach", &error_chain),
+            });
+            warn!(error = %error_chain, monitor = name, "Failed to attach eBPF monitor — skipping");
+            continue;
+        }
+        let config_map = match ebpf.take_map("CONFIG") {
+            Some(map) => match Array::try_from(map) {
+                Ok(map) => map,
+                Err(error) => {
+                    failures.push(MonitorLoadFailure {
+                        monitor: name,
+                        stage: "configure",
+                    });
+                    warn!(error = %error, monitor = name, "CONFIG map has wrong type — skipping");
+                    continue;
+                }
+            },
+            None => {
+                failures.push(MonitorLoadFailure {
+                    monitor: name,
+                    stage: "configure",
+                });
+                warn!(
+                    monitor = name,
+                    "CONFIG map disappeared after attachment — skipping"
                 );
-                links.push("process_tracker".to_string());
+                continue;
             }
-            Err(e) => {
-                warn!(error = %e, "Failed to attach process tracker — skipping");
-            }
-        }
-    }
-
-    if config.enable_tcp_monitor {
-        match attach_tcp_monitor(&mut ebpf) {
-            Ok(()) => {
-                info!("TCP monitor attached (tracepoint: inet_sock_set_state)");
-                links.push("tcp_monitor".to_string());
-            }
-            Err(e) => {
-                warn!(error = %e, "Failed to attach TCP monitor — skipping");
-            }
-        }
-    }
-
-    if config.enable_fd_watcher {
-        match attach_fd_watcher(&mut ebpf) {
-            Ok(()) => {
-                info!("FD watcher attached (kprobe: fd_install, do_filp_close)");
-                links.push("fd_watcher".to_string());
-            }
-            Err(e) => {
-                warn!(error = %e, "Failed to attach FD watcher — skipping");
-            }
-        }
-    }
-
-    if config.enable_mem_pressure {
-        match attach_mem_pressure(&mut ebpf) {
-            Ok(()) => {
-                info!("Memory pressure sentinel attached (kprobe: try_to_free_pages)");
-                links.push("mem_pressure".to_string());
-            }
-            Err(e) => {
-                warn!(error = %e, "Failed to attach memory pressure sentinel — skipping");
-            }
-        }
-    }
-
-    if config.enable_disk_monitor {
-        match attach_disk_monitor(&mut ebpf) {
-            Ok(()) => {
-                info!("Disk I/O monitor attached (tracepoint: block_rq_issue, block_rq_complete)");
-                links.push("disk_monitor".to_string());
-            }
-            Err(e) => {
-                warn!(error = %e, "Failed to attach disk I/O monitor — skipping");
-            }
-        }
-    }
-
-    if config.enable_syscall_counter {
-        match attach_syscall_counter(&mut ebpf) {
-            Ok(()) => {
-                info!("Syscall counter attached (tracepoint: raw_syscalls/sys_enter)");
-                links.push("syscall_counter".to_string());
-            }
-            Err(e) => {
-                warn!(error = %e, "Failed to attach syscall counter — skipping");
-            }
-        }
+        };
+        info!(monitor = name, "eBPF monitor attached");
+        links.push(name.to_string());
+        config_maps.push(config_map);
+        monitors.push(LoadedMonitor { name, ebpf });
     }
 
     let mut ns_ebpf = None;
@@ -180,18 +224,32 @@ pub async fn load_and_attach(config: &MonitorConfig, node_pid: u32) -> Result<Op
             Ok(mut ns_bpf) => match attach_namespace_enforcer(&mut ns_bpf) {
                 Ok(()) => {
                     info!("Namespace enforcer attached (tracepoints: sock/inet_sock_set_state, syscalls/sys_enter_sendto)");
-                    links.push("namespace_enforcer".to_string());
                     if let Err(e) = write_ns_enforce_config(&mut ns_bpf, config, node_pid) {
+                        failures.push(MonitorLoadFailure {
+                            monitor: "namespace_enforcer",
+                            stage: "configure",
+                        });
                         warn!(error = %e, "Failed to write NS_ENFORCE_CONFIG map — namespace enforcer may not enforce");
                     }
+                    links.push("namespace_enforcer".to_string());
                     ns_ebpf = Some(ns_bpf);
                 }
                 Err(e) => {
-                    warn!(error = %e, "Failed to attach namespace enforcer — skipping");
+                    let error_chain = format!("{e:#}");
+                    failures.push(MonitorLoadFailure {
+                        monitor: "namespace_enforcer",
+                        stage: failure_stage("attach", &error_chain),
+                    });
+                    warn!(error = %error_chain, "Failed to attach namespace enforcer — skipping");
                 }
             },
             Err(e) => {
-                warn!(error = %e, "Failed to load namespace enforcer eBPF object — skipping");
+                let error_chain = format!("{e:#}");
+                failures.push(MonitorLoadFailure {
+                    monitor: "namespace_enforcer",
+                    stage: failure_stage("load", &error_chain),
+                });
+                warn!(error = %error_chain, "Failed to load namespace enforcer eBPF object — skipping");
             }
         }
     }
@@ -211,7 +269,13 @@ pub async fn load_and_attach(config: &MonitorConfig, node_pid: u32) -> Result<Op
 
     if links.is_empty() {
         warn!("No eBPF programs attached — falling back to userspace monitoring");
-        return Ok(None);
+        return Ok(Some(LoadedEbpf {
+            monitors,
+            config_maps,
+            ns_ebpf,
+            links,
+            failures,
+        }));
     }
 
     info!(
@@ -220,9 +284,11 @@ pub async fn load_and_attach(config: &MonitorConfig, node_pid: u32) -> Result<Op
     );
 
     Ok(Some(LoadedEbpf {
-        ebpf,
+        monitors,
+        config_maps,
         ns_ebpf,
         links,
+        failures,
     }))
 }
 
@@ -237,15 +303,15 @@ pub async fn load_and_attach(config: &MonitorConfig, node_pid: u32) -> Result<Op
 ///
 /// If none of these work, returns an error suggesting the user compile the
 /// BPF programs first.
-fn load_ebpf_object() -> Result<Bpf> {
+fn load_monitor_object(name: &str) -> Result<Ebpf> {
     // Strategy 1: Try loading from well-known development paths
+    let repo_path = format!("crates/ebpf-monitor/bpf/target/bpfel-unknown-none/release/{name}");
+    let crate_path = format!("bpf/target/bpfel-unknown-none/release/{name}");
+    let install_path = format!("/opt/wasm-node/ebpf/{name}.o");
     let dev_paths = [
-        // Standard aya build output location
-        "./ebpf-monitor-bpf/target/bpfel-unknown-none/release/process_tracker",
-        // Relative to crate directory
-        "../ebpf-monitor-bpf/target/bpfel-unknown-none/release/process_tracker",
-        // System installation path
-        "/opt/wasm-node/ebpf/ebpf-monitor.o",
+        repo_path.as_str(),
+        crate_path.as_str(),
+        install_path.as_str(),
     ];
 
     for path_str in &dev_paths {
@@ -253,27 +319,13 @@ fn load_ebpf_object() -> Result<Bpf> {
         if path.exists() {
             info!(path = %path.display(), "Loading eBPF object from file");
             let bytes = std::fs::read(path).context("failed to read eBPF object file")?;
-            let bpf = Bpf::load(&bytes).context("failed to parse eBPF object")?;
+            let bpf = Ebpf::load(&bytes).context("failed to parse eBPF object")?;
             return Ok(bpf);
         }
     }
 
-    // Strategy 2: Try include_bytes_aligned (compile-time embedded)
-    // This is the production path but requires the BPF programs to be built first.
-    // We use a runtime check because the file may not exist during development.
-    #[cfg(feature = "ebpf")]
-    {
-        // If the BPF programs were compiled and included via build.rs,
-        // we would load them here. For now, we rely on file-based loading.
-        // In production, add a build.rs that compiles BPF programs and
-        // use include_bytes_aligned! to embed them.
-    }
-
     Err(anyhow!(
-        "eBPF object not found. Compile BPF programs first:\n\
-         \tcargo build --manifest-path crates/ebpf-monitor/bpf/Cargo.toml \
-         --target bpfel-unknown-none --release\n\
-         Or install them at /opt/wasm-node/ebpf/ebpf-monitor.o"
+        "eBPF object '{name}' not found; build it or install it at {install_path}"
     ))
 }
 
@@ -281,10 +333,10 @@ fn load_ebpf_object() -> Result<Bpf> {
 ///
 /// Tries multiple strategies similar to `load_ebpf_object` but for the
 /// `namespace_enforcer` ELF binary.
-fn load_namespace_enforcer_object() -> Result<Bpf> {
+fn load_namespace_enforcer_object() -> Result<Ebpf> {
     let dev_paths = [
-        "./ebpf-monitor-bpf/target/bpfel-unknown-none/release/namespace_enforcer",
-        "../ebpf-monitor-bpf/target/bpfel-unknown-none/release/namespace_enforcer",
+        "crates/ebpf-monitor/bpf/target/bpfel-unknown-none/release/namespace_enforcer",
+        "bpf/target/bpfel-unknown-none/release/namespace_enforcer",
         "/opt/wasm-node/ebpf/namespace_enforcer.o",
     ];
 
@@ -295,7 +347,7 @@ fn load_namespace_enforcer_object() -> Result<Bpf> {
             let bytes = std::fs::read(path)
                 .context("failed to read namespace enforcer eBPF object file")?;
             let bpf =
-                Bpf::load(&bytes).context("failed to parse namespace enforcer eBPF object")?;
+                Ebpf::load(&bytes).context("failed to parse namespace enforcer eBPF object")?;
             return Ok(bpf);
         }
     }
@@ -311,24 +363,14 @@ fn load_namespace_enforcer_object() -> Result<Bpf> {
 // ── Config Map ────────────────────────────────────────────────────────────────
 
 /// Write the configuration map that eBPF programs read at runtime.
-fn write_config_map(ebpf: &mut Bpf, config: &MonitorConfig, node_pid: u32) -> Result<()> {
-    let config_map: Array<_, MonitorConfigMap> = ebpf
+fn write_config_map(ebpf: &mut Ebpf, config: &MonitorConfig, node_pid: u32) -> Result<()> {
+    let mut config_map: Array<_, MonitorConfigMap> = ebpf
         .map_mut("CONFIG")
         .ok_or_else(|| anyhow!("CONFIG map not found in eBPF object"))?
         .try_into()
         .context("CONFIG map has wrong type")?;
 
-    let kernel_config = MonitorConfigMap {
-        node_pid,
-        fd_soft_limit: config.fd_soft_limit,
-        fd_hard_limit: config.fd_hard_limit,
-        mem_low_threshold_pages: config.mem_low_threshold_pages,
-        mem_critical_threshold_pages: config.mem_critical_threshold_pages,
-        disk_slow_threshold_ns: config.disk_slow_threshold_ns,
-        tcp_conn_limit_per_pid: config.tcp_conn_limit_per_pid,
-        syscall_rate_limit: config.syscall_rate_limit,
-        sampling_period_ns: config.sampling_period_secs * 1_000_000_000,
-    };
+    let kernel_config = kernel_config(config, node_pid)?;
 
     config_map
         .set(0, kernel_config, 0)
@@ -336,6 +378,7 @@ fn write_config_map(ebpf: &mut Bpf, config: &MonitorConfig, node_pid: u32) -> Re
 
     info!(
         node_pid,
+        node_cgroup_id = kernel_config.node_cgroup_id,
         fd_soft_limit = config.fd_soft_limit,
         fd_hard_limit = config.fd_hard_limit,
         mem_low_threshold_pages = config.mem_low_threshold_pages,
@@ -350,41 +393,105 @@ fn write_config_map(ebpf: &mut Bpf, config: &MonitorConfig, node_pid: u32) -> Re
     Ok(())
 }
 
+fn kernel_config(config: &MonitorConfig, node_pid: u32) -> Result<MonitorConfigMap> {
+    Ok(MonitorConfigMap {
+        node_pid,
+        _padding: 0,
+        node_cgroup_id: current_cgroup_id()?,
+        fd_soft_limit: config.fd_soft_limit,
+        fd_hard_limit: config.fd_hard_limit,
+        mem_low_threshold_pages: config.mem_low_threshold_pages,
+        mem_critical_threshold_pages: config.mem_critical_threshold_pages,
+        disk_slow_threshold_ns: config.disk_slow_threshold_ns,
+        tcp_conn_limit_per_pid: config.tcp_conn_limit_per_pid,
+        syscall_rate_limit: config.syscall_rate_limit,
+        sampling_period_ns: config.sampling_period_secs * 1_000_000_000,
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn current_cgroup_id() -> Result<u64> {
+    use std::os::unix::fs::MetadataExt;
+
+    if !Path::new("/sys/fs/cgroup/cgroup.controllers").is_file() {
+        return Err(anyhow!(
+            "cgroup v2 is not mounted at /sys/fs/cgroup; cannot scope system-wide eBPF probes"
+        ));
+    }
+    let membership =
+        std::fs::read_to_string("/proc/self/cgroup").context("failed to read /proc/self/cgroup")?;
+    let relative = membership
+        .lines()
+        .find_map(|line| line.strip_prefix("0::"))
+        .ok_or_else(|| anyhow!("cgroup v2 unified membership was not found"))?;
+    let cgroup_path = Path::new("/sys/fs/cgroup").join(relative.trim_start_matches('/'));
+    let id = std::fs::metadata(&cgroup_path)
+        .with_context(|| format!("failed to stat node cgroup {}", cgroup_path.display()))?
+        .ino();
+    if id == 0 {
+        return Err(anyhow!("node cgroup ID resolved to zero"));
+    }
+    Ok(id)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn current_cgroup_id() -> Result<u64> {
+    Err(anyhow!("cgroup v2 identity is available only on Linux"))
+}
+
 // ── Program Attachment Helpers ────────────────────────────────────────────────
 
 /// Attach the process tracker (sched_process_exec + sched_process_exit tracepoints).
-fn attach_process_tracker(ebpf: &mut Bpf) -> Result<()> {
+fn attach_process_tracker(ebpf: &mut Ebpf) -> Result<()> {
+    attach_tracepoint(ebpf, "monitored_tid_start", "raw_syscalls", "sys_enter")?;
     attach_tracepoint(ebpf, "sched_process_exec", "sched", "sched_process_exec")?;
     attach_tracepoint(ebpf, "sched_process_exit", "sched", "sched_process_exit")?;
     Ok(())
 }
 
 /// Attach the TCP connection monitor (inet_sock_set_state tracepoint).
-fn attach_tcp_monitor(ebpf: &mut Bpf) -> Result<()> {
-    attach_tracepoint(ebpf, "inet_sock_set_state", "sock", "inet_sock_set_state")
-}
-
-/// Attach the FD watcher (fd_install + do_filp_close kprobes).
-fn attach_fd_watcher(ebpf: &mut Bpf) -> Result<()> {
-    attach_kprobe(ebpf, "fd_install", "fd_install")?;
-    attach_kprobe(ebpf, "do_filp_close", "do_filp_close")?;
+fn attach_tcp_monitor(ebpf: &mut Ebpf) -> Result<()> {
+    attach_tracepoint(ebpf, "inet_sock_set_state", "sock", "inet_sock_set_state")?;
+    attach_tracepoint(ebpf, "sys_exit_accept4", "syscalls", "sys_exit_accept4")?;
+    attach_kprobe(ebpf, "inet_csk_accept", "inet_csk_accept")?;
+    attach_tracepoint(ebpf, "sys_enter_sendto", "syscalls", "sys_enter_sendto")?;
+    attach_tracepoint(ebpf, "sys_enter_recvfrom", "syscalls", "sys_enter_recvfrom")?;
+    attach_tracepoint(ebpf, "sys_exit_recvfrom", "syscalls", "sys_exit_recvfrom")?;
+    attach_kprobe(ebpf, "tcp_sendmsg", "tcp_sendmsg")?;
+    attach_kprobe(ebpf, "tcp_cleanup_rbuf", "tcp_cleanup_rbuf")?;
     Ok(())
 }
 
-/// Attach the memory pressure sentinel (try_to_free_pages kprobe).
-fn attach_mem_pressure(ebpf: &mut Bpf) -> Result<()> {
+/// Attach the FD watcher. Linux kernels expose the close hook as either
+/// `do_filp_close` or `filp_close`, so try both without reloading the program.
+fn attach_fd_watcher(ebpf: &mut Ebpf) -> Result<()> {
+    attach_kprobe(ebpf, "fd_install", "fd_install")?;
+    attach_kprobe_with_fallback(ebpf, "do_filp_close", "do_filp_close", "filp_close")?;
+    attach_tracepoint(ebpf, "sys_enter_close", "syscalls", "sys_enter_close")?;
+    Ok(())
+}
+
+/// Attach the memory pressure sentinel to both the stable vmscan tracepoint
+/// and the legacy reclaim kprobe. The BPF-side rate limit deduplicates them.
+fn attach_mem_pressure(ebpf: &mut Ebpf) -> Result<()> {
+    attach_tracepoint(
+        ebpf,
+        "direct_reclaim_begin",
+        "vmscan",
+        "mm_vmscan_direct_reclaim_begin",
+    )?;
     attach_kprobe(ebpf, "try_to_free_pages", "try_to_free_pages")
 }
 
 /// Attach the disk I/O monitor (block_rq_issue + block_rq_complete tracepoints).
-fn attach_disk_monitor(ebpf: &mut Bpf) -> Result<()> {
+fn attach_disk_monitor(ebpf: &mut Ebpf) -> Result<()> {
     attach_tracepoint(ebpf, "block_rq_issue", "block", "block_rq_issue")?;
     attach_tracepoint(ebpf, "block_rq_complete", "block", "block_rq_complete")?;
     Ok(())
 }
 
 /// Attach the syscall anomaly counter (raw_syscalls/sys_enter tracepoint).
-fn attach_syscall_counter(ebpf: &mut Bpf) -> Result<()> {
+fn attach_syscall_counter(ebpf: &mut Ebpf) -> Result<()> {
     attach_tracepoint(ebpf, "sys_enter", "raw_syscalls", "sys_enter")
 }
 
@@ -392,7 +499,7 @@ fn attach_syscall_counter(ebpf: &mut Bpf) -> Result<()> {
 ///
 /// Attaches `ns_inet_sock_set_state` to the `sock:inet_sock_set_state` tracepoint
 /// and `ns_audit_sendto` to the `syscalls:sys_enter_sendto` tracepoint.
-fn attach_namespace_enforcer(ebpf: &mut Bpf) -> Result<()> {
+fn attach_namespace_enforcer(ebpf: &mut Ebpf) -> Result<()> {
     attach_tracepoint(
         ebpf,
         "ns_inet_sock_set_state",
@@ -404,8 +511,8 @@ fn attach_namespace_enforcer(ebpf: &mut Bpf) -> Result<()> {
 }
 
 /// Write the NS_ENFORCE_CONFIG singleton array map.
-fn write_ns_enforce_config(ebpf: &mut Bpf, config: &MonitorConfig, node_pid: u32) -> Result<()> {
-    let config_map: Array<_, NsEnforceConfig> = ebpf
+fn write_ns_enforce_config(ebpf: &mut Ebpf, config: &MonitorConfig, node_pid: u32) -> Result<()> {
+    let mut config_map: Array<_, NsEnforceConfig> = ebpf
         .map_mut("NS_ENFORCE_CONFIG")
         .ok_or_else(|| anyhow!("NS_ENFORCE_CONFIG map not found in eBPF object"))?
         .try_into()
@@ -440,7 +547,12 @@ fn write_ns_enforce_config(ebpf: &mut Bpf, config: &MonitorConfig, node_pid: u32
 ///
 /// The program must be defined in the eBPF object with the given `program_name`.
 /// It is attached to the tracepoint identified by `category:name`.
-fn attach_tracepoint(ebpf: &mut Bpf, program_name: &str, category: &str, name: &str) -> Result<()> {
+fn attach_tracepoint(
+    ebpf: &mut Ebpf,
+    program_name: &str,
+    category: &str,
+    name: &str,
+) -> Result<()> {
     let program: &mut TracePoint = ebpf
         .program_mut(program_name)
         .ok_or_else(|| anyhow!("eBPF program '{}' not found in object", program_name))?
@@ -465,7 +577,7 @@ fn attach_tracepoint(ebpf: &mut Bpf, program_name: &str, category: &str, name: &
 ///
 /// The program must be defined in the eBPF object with the given `program_name`.
 /// It is attached to the kernel function `symbol`.
-fn attach_kprobe(ebpf: &mut Bpf, program_name: &str, symbol: &str) -> Result<()> {
+fn attach_kprobe(ebpf: &mut Ebpf, program_name: &str, symbol: &str) -> Result<()> {
     let program: &mut KProbe = ebpf
         .program_mut(program_name)
         .ok_or_else(|| anyhow!("eBPF program '{}' not found in object", program_name))?
@@ -483,6 +595,38 @@ fn attach_kprobe(ebpf: &mut Bpf, program_name: &str, symbol: &str) -> Result<()>
     Ok(())
 }
 
+/// Attach one loaded kprobe program to the first symbol available on the
+/// running kernel.
+fn attach_kprobe_with_fallback(
+    ebpf: &mut Ebpf,
+    program_name: &str,
+    primary_symbol: &str,
+    fallback_symbol: &str,
+) -> Result<()> {
+    let program: &mut KProbe = ebpf
+        .program_mut(program_name)
+        .ok_or_else(|| anyhow!("eBPF program '{}' not found in object", program_name))?
+        .try_into()
+        .with_context(|| format!("program '{}' is not a KProbe", program_name))?;
+
+    program
+        .load()
+        .with_context(|| format!("failed to load KProbe program '{}'", program_name))?;
+
+    match program.attach(primary_symbol, 0) {
+        Ok(_) => Ok(()),
+        Err(primary_error) => program
+            .attach(fallback_symbol, 0)
+            .map(|_| ())
+            .with_context(|| {
+                format!(
+                    "failed to attach KProbe '{}' to '{}' or '{}'; primary error: {}",
+                    program_name, primary_symbol, fallback_symbol, primary_error
+                )
+            }),
+    }
+}
+
 // ── Kernel Support Check ──────────────────────────────────────────────────────
 
 /// Check if the kernel supports the eBPF features we need.
@@ -494,11 +638,17 @@ fn attach_kprobe(ebpf: &mut Bpf, program_name: &str, symbol: &str) -> Result<()>
 ///
 /// Returns `true` if all requirements are met, `false` otherwise.
 fn is_kernel_supported() -> bool {
+    kernel_support_failure_reason().is_none()
+}
+
+/// Return a bounded reason when the current process cannot load the required
+/// kernel-monitoring programs.
+pub(crate) fn kernel_support_failure_reason() -> Option<&'static str> {
     // Check 1: BTF support (required for BTF-enabled eBPF programs)
     let btf_path = Path::new("/sys/kernel/btf/vmlinux");
     if !btf_path.exists() {
         warn!("BTF not available at /sys/kernel/btf/vmlinux — eBPF programs may not load");
-        return false;
+        return Some("missing_btf");
     }
 
     // Check 2: Kernel version >= 5.8
@@ -510,7 +660,7 @@ fn is_kernel_supported() -> bool {
                     minimum = "5.8.0",
                     "Kernel version too old for eBPF ring buffer support"
                 );
-                return false;
+                return Some("kernel_too_old");
             }
             info!(
                 kernel_version = format!("{}.{}.{}", major, minor, _patch),
@@ -529,10 +679,34 @@ fn is_kernel_supported() -> bool {
     #[cfg(not(target_os = "linux"))]
     {
         warn!("Not running on Linux — eBPF is not available");
-        return false;
+        return Some("unsupported_operating_system");
     }
 
-    true
+    #[cfg(target_os = "linux")]
+    if let Ok(status) = std::fs::read_to_string("/proc/self/status") {
+        if let Some(raw) = status
+            .lines()
+            .find_map(|line| line.strip_prefix("CapEff:\t"))
+        {
+            if let Ok(capabilities) = u64::from_str_radix(raw.trim(), 16) {
+                const CAP_NET_ADMIN: u32 = 12;
+                const CAP_SYS_ADMIN: u32 = 21;
+                const CAP_PERFMON: u32 = 38;
+                const CAP_BPF: u32 = 39;
+                let has = |capability: u32| capabilities & (1_u64 << capability) != 0;
+                if !has(CAP_BPF) && !has(CAP_SYS_ADMIN) {
+                    warn!("CAP_BPF or CAP_SYS_ADMIN is required for eBPF loading");
+                    return Some("missing_capability");
+                }
+                if !has(CAP_SYS_ADMIN) && (!has(CAP_PERFMON) || !has(CAP_NET_ADMIN)) {
+                    warn!("CAP_PERFMON and CAP_NET_ADMIN are required for eBPF monitoring");
+                    return Some("insufficient_privileges");
+                }
+            }
+        }
+    }
+
+    None
 }
 
 /// Parse the kernel version from `/proc/version` or `uname()`.
@@ -548,12 +722,13 @@ fn get_kernel_version() -> Option<(u32, u32, u32)> {
 
     // Try uname
     let info = unsafe {
-        let mut buf: [std::os::raw::c_char; 256] = [0; 256];
-        if libc::uname(buf.as_mut_ptr()) == -1 {
+        let mut uts = std::mem::MaybeUninit::<libc::utsname>::uninit();
+        if libc::uname(uts.as_mut_ptr()) == -1 {
             return None;
         }
+        let uts = uts.assume_init();
         // Convert C string to Rust String
-        std::ffi::CStr::from_ptr(buf.as_ptr())
+        std::ffi::CStr::from_ptr(uts.release.as_ptr())
             .to_string_lossy()
             .into_owned()
     };
@@ -642,6 +817,18 @@ mod tests {
     }
 
     #[test]
+    fn test_failure_stage_classifies_btf_errors() {
+        assert_eq!(
+            failure_stage("attach", "verifier rejected malformed in-kernel BTF"),
+            "missing_btf"
+        );
+        assert_eq!(
+            failure_stage("attach", "tracepoint is unavailable"),
+            "attach"
+        );
+    }
+
+    #[test]
     fn test_is_kernel_supported_on_linux() {
         // This test just verifies the function doesn't panic.
         // The result depends on the actual kernel.
@@ -655,6 +842,8 @@ mod tests {
         let config = MonitorConfig::default();
         let kernel_config = MonitorConfigMap {
             node_pid: 1234,
+            _padding: 0,
+            node_cgroup_id: 5678,
             fd_soft_limit: config.fd_soft_limit,
             fd_hard_limit: config.fd_hard_limit,
             mem_low_threshold_pages: config.mem_low_threshold_pages,
@@ -667,6 +856,7 @@ mod tests {
 
         // Verify the config map values are reasonable
         assert_eq!(kernel_config.node_pid, 1234);
+        assert_eq!(kernel_config.node_cgroup_id, 5678);
         assert_eq!(kernel_config.fd_soft_limit, 8192);
         assert_eq!(kernel_config.fd_hard_limit, 9728);
         assert_eq!(kernel_config.mem_low_threshold_pages, 65536);
@@ -675,6 +865,12 @@ mod tests {
         assert_eq!(kernel_config.tcp_conn_limit_per_pid, 10000);
         assert_eq!(kernel_config.syscall_rate_limit, 100_000);
         assert_eq!(kernel_config.sampling_period_ns, 10_000_000_000); // 10s in ns
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_current_cgroup_id_is_nonzero() {
+        assert!(current_cgroup_id().expect("cgroup v2 identity") > 0);
     }
 
     #[test]

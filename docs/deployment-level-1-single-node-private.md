@@ -62,7 +62,7 @@ Recommended choices:
 ## Move To Level 2 When
 
 - the platform serves real production traffic
-- you need a defensible Linux production baseline
+- you need the minimum Linux production control profile
 - you need TLS on the admin path
 - you need authenticated NATS in the real environment
 

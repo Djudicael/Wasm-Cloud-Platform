@@ -90,7 +90,7 @@
 //! | Variable | Purpose | Default |
 //! |----------|---------|---------|
 //! | `FIRECRACKER_PATH` | Path to firecracker binary | Auto-detect |
-//! | `VM_KERNEL_PATH` | Path to vmlinux kernel | `./assets/vmlinux-6.1` |
+//! | `VM_KERNEL_PATH` | Path to vmlinux kernel | `./assets/vmlinux-6.18` |
 //! | `VM_NATS_ROOTFS` | Path to NATS rootfs image | `./assets/nats-rootfs.ext4` |
 //! | `VM_NODE_ROOTFS` | Path to wasm-node rootfs | `./assets/wasm-node-rootfs.ext4` |
 //! | `VM_NODE_DATA_DRIVE` | Optional data drive template | None |

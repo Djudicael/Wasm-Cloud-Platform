@@ -79,6 +79,14 @@ pub enum Event {
         /// Canonical secret transport envelope for ctl -> NATS -> node.
         secret: secrets::SecretTransportEnvelope,
     },
+    /// Revoke a secret on a specific node. Delete events carry no secret
+    /// material but remain targeted so every recorded node can consume the
+    /// revocation when it reconnects.
+    SecretDelete {
+        app_id: AppId,
+        key: String,
+        target_node_id: String,
+    },
     ConfigUpdate {
         app_id: AppId,
         config: AppConfig,
@@ -282,6 +290,11 @@ impl Event {
                 }
                 None => format!("secrets.update.{}", app_id.0),
             },
+            Event::SecretDelete {
+                app_id,
+                target_node_id,
+                ..
+            } => format!("secrets.delete.{}.{}", app_id.0, target_node_id),
             Event::ConfigUpdate { app_id, .. } => {
                 format!("config.update.{}", app_id.0)
             }

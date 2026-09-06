@@ -1,11 +1,15 @@
 /// CLI overrides extracted from clap args.
 /// Only non-default values are set. `None` means "use the lower-priority value".
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct CliOverrides {
     pub node_id: Option<String>,
+    pub environment: Option<common::config::DeploymentEnvironment>,
     pub db_path: Option<String>,
     pub nats_url: Option<String>,
     pub nats_creds: Option<String>,
+    pub nats_ca_cert: Option<String>,
+    pub nats_client_cert: Option<String>,
+    pub nats_client_key: Option<String>,
     pub http_port: Option<u16>,
     pub https_port: Option<u16>,
     pub tls_cert: Option<String>,
@@ -22,11 +26,13 @@ pub struct CliOverrides {
     pub admin_advertised_artifact_url: Option<String>,
     pub port_start: Option<u16>,
     pub port_end: Option<u16>,
+    pub runtime_isolation_mode: Option<String>,
     pub key_source: Option<String>,
     pub key_file: Option<String>,
     pub key_command: Option<Vec<String>>,
     pub key_vault_url: Option<String>,
     pub key_vault_token_env: Option<String>,
+    pub key_vault_ca_cert: Option<String>,
     pub key_vault_mount: Option<String>,
     pub key_vault_path: Option<String>,
     pub key_vault_field: Option<String>,

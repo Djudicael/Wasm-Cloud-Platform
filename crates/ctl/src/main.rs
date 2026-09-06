@@ -41,6 +41,15 @@ struct Cli {
     #[arg(long, env = "WASM_CTL_NATS_CREDS")]
     nats_creds: Option<String>,
 
+    #[arg(long, env = "WASM_CTL_NATS_CA_CERT")]
+    nats_ca_cert: Option<String>,
+
+    #[arg(long, env = "WASM_CTL_NATS_CLIENT_CERT")]
+    nats_client_cert: Option<String>,
+
+    #[arg(long, env = "WASM_CTL_NATS_CLIENT_KEY")]
+    nats_client_key: Option<String>,
+
     /// Bearer token for admin API authentication.
     /// Can also be set via WASM_CTL_AUTH_TOKEN environment variable,
     /// or in ~/.wasm-ctl/config.toml under [auth] token = "...".
@@ -140,6 +149,12 @@ enum NodeAction {
     Readiness,
     /// Force a full node rebuild from cluster state
     Rebuild,
+    /// Drain application instances before an operator stops or replaces the node
+    Drain {
+        /// Time allowed for in-flight requests before instances are stopped
+        #[arg(long, default_value = "30")]
+        timeout_secs: u64,
+    },
     /// Show eBPF kernel-level monitor status
     EbpfStatus,
     /// Send commands to the eBPF monitor (prune idle instances, kill largest)
@@ -202,7 +217,13 @@ enum BillingAction {
 }
 
 impl NodeAction {
-    pub async fn run(&self, node_api: &str, http: &reqwest::Client) -> anyhow::Result<()> {
+    pub async fn run(
+        &self,
+        node_api: &str,
+        http: &reqwest::Client,
+        bus: &messaging::NatsBus,
+        target: Option<&str>,
+    ) -> anyhow::Result<()> {
         match self {
             NodeAction::Health => cmds::node::health(node_api, http).await,
             NodeAction::Startup => {
@@ -254,6 +275,26 @@ impl NodeAction {
                 Ok(())
             }
             NodeAction::Rebuild => cmds::node::rebuild(node_api, http).await,
+            NodeAction::Drain { timeout_secs } => {
+                let node_id = target.ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "node drain requires --target <NODE_ID>; refusing an ambiguous drain"
+                    )
+                })?;
+                anyhow::ensure!(
+                    (1..=3600).contains(timeout_secs),
+                    "drain timeout must be between 1 and 3600 seconds"
+                );
+                bus.publish(&messaging::events::Event::NodeDraining {
+                    node_id: node_id.to_string(),
+                    drain_timeout_secs: *timeout_secs,
+                })
+                .await?;
+                println!(
+                    "Drain requested for {node_id}; allow up to {timeout_secs}s before stopping the node"
+                );
+                Ok(())
+            }
             NodeAction::EbpfStatus => {
                 let url = format!("{}/admin/ebpf/status", node_api);
                 let resp = http.get(&url).send().await?;
@@ -509,9 +550,21 @@ impl NodeAction {
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
-    let bus = match &cli.nats_creds {
-        Some(creds) => messaging::NatsBus::connect_secure(&cli.nats_url, creds).await?,
-        None => messaging::NatsBus::connect(&cli.nats_url).await?,
+    let nats_has_explicit_security = cli.nats_creds.is_some()
+        || cli.nats_ca_cert.is_some()
+        || cli.nats_client_cert.is_some()
+        || cli.nats_client_key.is_some();
+    let bus = if nats_has_explicit_security {
+        messaging::NatsBus::connect_with_tls(
+            &cli.nats_url,
+            cli.nats_creds.as_deref(),
+            cli.nats_ca_cert.as_deref(),
+            cli.nats_client_cert.as_deref(),
+            cli.nats_client_key.as_deref(),
+        )
+        .await?
+    } else {
+        messaging::NatsBus::connect(&cli.nats_url).await?
     };
     let auth_token = resolve_auth_token(cli.auth_token.as_deref());
     let http = build_http_client(auth_token.as_deref())?;
@@ -578,7 +631,11 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
         },
-        Commands::Node { target: _, action } => action.run(&cli.node_api, &http).await?,
+        Commands::Node { target, action } => {
+            action
+                .run(&cli.node_api, &http, &bus, target.as_deref())
+                .await?
+        }
         Commands::Cluster => cmds::node::cluster_health(&bus).await?,
         Commands::Billing { store_path, action } => match action {
             BillingAction::Report {
@@ -681,4 +738,49 @@ pub fn handle_auth_response(response: reqwest::Response) -> anyhow::Result<reqwe
         anyhow::bail!("Server error: {}", status);
     }
     Ok(response)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_scoped_node_drain() {
+        let cli = Cli::try_parse_from([
+            "wasm-ctl",
+            "node",
+            "--target",
+            "local-test-node-2",
+            "drain",
+            "--timeout-secs",
+            "45",
+        ])
+        .expect("node drain command should parse");
+
+        match cli.command {
+            Commands::Node {
+                target,
+                action: NodeAction::Drain { timeout_secs },
+            } => {
+                assert_eq!(target.as_deref(), Some("local-test-node-2"));
+                assert_eq!(timeout_secs, 45);
+            }
+            _ => panic!("expected scoped node drain command"),
+        }
+    }
+
+    #[test]
+    fn node_drain_defaults_to_thirty_seconds() {
+        let cli =
+            Cli::try_parse_from(["wasm-ctl", "node", "--target", "local-test-node-0", "drain"])
+                .expect("node drain command should parse");
+
+        match cli.command {
+            Commands::Node {
+                action: NodeAction::Drain { timeout_secs },
+                ..
+            } => assert_eq!(timeout_secs, 30),
+            _ => panic!("expected node drain command"),
+        }
+    }
 }

@@ -76,12 +76,32 @@ fn make_dispatcher(callbacks: Arc<TestCallbacks>) -> ActionDispatcher {
 }
 
 #[test]
+fn test_dispatcher_resolves_registered_application_identity_by_tid() {
+    let callbacks = Arc::new(TestCallbacks::default());
+    let dispatcher = make_dispatcher(callbacks);
+    let namespace_map = Arc::new(NamespaceMap::new_fallback());
+    namespace_map
+        .register_tid(
+            420,
+            crate::common::TidIdentity::new("oidc", "oidc-backend:v1"),
+        )
+        .unwrap();
+    dispatcher.set_namespace_map(namespace_map);
+
+    assert_eq!(
+        dispatcher.identity_for_tid(420),
+        ("oidc".to_string(), "oidc-backend:v1".to_string())
+    );
+}
+
+#[test]
 fn test_oom_kill_triggers_backpressure_and_removal() {
     let callbacks = Arc::new(TestCallbacks::default());
     let dispatcher = make_dispatcher(callbacks.clone());
 
     dispatcher.dispatch(MonitorEvent::ProcessExit {
         pid: 1234,
+        tid: 1234,
         ppid: 1,
         exit_code: 0,
         signal: 9,
@@ -105,6 +125,7 @@ fn test_signal_death_removes_from_upstream() {
 
     dispatcher.dispatch(MonitorEvent::ProcessExit {
         pid: 5678,
+        tid: 5678,
         ppid: 1,
         exit_code: 1,
         signal: 6,
@@ -127,6 +148,7 @@ fn test_normal_exit_removes_from_upstream() {
 
     dispatcher.dispatch(MonitorEvent::ProcessExit {
         pid: 9999,
+        tid: 9999,
         ppid: 1,
         exit_code: 0,
         signal: 0,
@@ -150,6 +172,7 @@ fn test_nats_retransmit_marks_disconnected() {
 
     dispatcher.dispatch(MonitorEvent::TcpRetransmit {
         pid: 1,
+        tid: 1,
         src_port: 4222,
         dst_port: 54321,
         retransmits: 5,
@@ -168,6 +191,7 @@ fn test_non_nats_retransmit_does_not_mark_disconnected() {
 
     dispatcher.dispatch(MonitorEvent::TcpRetransmit {
         pid: 1,
+        tid: 1,
         src_port: 8080,
         dst_port: 9090,
         retransmits: 3,
@@ -186,6 +210,7 @@ fn test_fd_limit_approaching_prunes() {
 
     dispatcher.dispatch(MonitorEvent::FdLimitApproaching {
         pid: 1,
+        tid: 1,
         fd: 8000,
         current_fd_count: 8000,
         fd_soft_limit: 8192,
@@ -201,6 +226,7 @@ fn test_fd_hard_limit_approaching_activates_backpressure() {
 
     dispatcher.dispatch(MonitorEvent::FdLimitApproaching {
         pid: 1,
+        tid: 1,
         fd: 7800,
         current_fd_count: 7800,
         fd_soft_limit: 8192,
@@ -217,6 +243,7 @@ fn test_memory_pressure_medium() {
 
     dispatcher.dispatch(MonitorEvent::MemPressure {
         pid: 1,
+        tid: 1,
         free_pages: 50000,
         reclaim_pages: 1000,
         pressure_level: 1,
@@ -237,6 +264,7 @@ fn test_memory_pressure_critical() {
 
     dispatcher.dispatch(MonitorEvent::MemPressure {
         pid: 1,
+        tid: 1,
         free_pages: 10000,
         reclaim_pages: 5000,
         pressure_level: 2,
@@ -258,25 +286,74 @@ fn test_memory_pressure_recovery() {
 
     dispatcher.dispatch(MonitorEvent::MemPressure {
         pid: 1,
+        tid: 1,
         free_pages: 10000,
         reclaim_pages: 5000,
         pressure_level: 2,
         anon_pages: 50000,
     });
     assert!(dispatcher.is_backpressure_active());
+    assert!(dispatcher.is_degraded());
 
     dispatcher.dispatch(MonitorEvent::MemPressure {
         pid: 1,
+        tid: 1,
         free_pages: 100000,
         reclaim_pages: 0,
         pressure_level: 0,
         anon_pages: 10000,
     });
     assert!(!dispatcher.is_backpressure_active());
+    assert!(!dispatcher.is_degraded());
 
     let recovered = callbacks.node_pressure_recovered.lock().unwrap();
     assert_eq!(recovered.len(), 1);
     assert_eq!(recovered[0], "test-node");
+}
+
+#[test]
+fn test_slow_io_degraded_mode_recovers_after_quiet_cooldown() {
+    let callbacks = Arc::new(TestCallbacks::default());
+    let dispatcher = make_dispatcher(callbacks);
+
+    dispatcher.mark_slow_io_degraded_for("test slow I/O", Duration::from_millis(10));
+    assert!(dispatcher.is_degraded());
+
+    std::thread::sleep(Duration::from_millis(50));
+    assert!(!dispatcher.is_degraded());
+}
+
+#[test]
+fn test_new_slow_io_event_fences_older_recovery_timer() {
+    let callbacks = Arc::new(TestCallbacks::default());
+    let dispatcher = make_dispatcher(callbacks);
+
+    dispatcher.mark_slow_io_degraded_for("first slow I/O", Duration::from_millis(100));
+    std::thread::sleep(Duration::from_millis(5));
+    dispatcher.mark_slow_io_degraded_for("second slow I/O", Duration::from_millis(100));
+    std::thread::sleep(Duration::from_millis(50));
+    assert!(dispatcher.is_degraded());
+
+    std::thread::sleep(Duration::from_millis(160));
+    assert!(!dispatcher.is_degraded());
+}
+
+#[test]
+fn test_slow_io_burst_uses_one_recovery_worker() {
+    let callbacks = Arc::new(TestCallbacks::default());
+    let dispatcher = make_dispatcher(callbacks);
+
+    for _ in 0..1000 {
+        dispatcher.mark_slow_io_degraded_for("slow I/O burst", Duration::from_millis(10));
+    }
+    assert!(dispatcher.is_degraded());
+    assert!(dispatcher.slow_io_recovery.lock().unwrap().worker_running);
+
+    std::thread::sleep(Duration::from_millis(50));
+    let recovery = dispatcher.slow_io_recovery.lock().unwrap();
+    assert!(!recovery.active);
+    assert!(!recovery.worker_running);
+    assert!(!dispatcher.is_degraded());
 }
 
 #[test]
@@ -285,9 +362,15 @@ fn test_disk_slow_io_enters_degraded_mode() {
     let dispatcher = make_dispatcher(callbacks.clone());
 
     dispatcher.dispatch(MonitorEvent::DiskSlowIo {
+        pid: 0,
+        tid: 0,
         dev_major: 8,
         dev_minor: 0,
+        sector: 0,
+        nr_sector: 0,
+        bytes: 4096,
         latency_ns: 100_000_000,
+        cgroup_id: 42,
         io_type: 1,
     });
 
@@ -299,6 +382,14 @@ fn test_disk_slow_io_enters_degraded_mode() {
             .get_sample_count(),
         1
     );
+    assert_eq!(
+        dispatcher
+            .metrics
+            .disk_io_bytes
+            .with_label_values(&["write"])
+            .get(),
+        4096
+    );
 }
 
 #[test]
@@ -308,6 +399,7 @@ fn test_syscall_privilege_escalation() {
 
     dispatcher.dispatch(MonitorEvent::SyscallAnomaly {
         pid: 42,
+        tid: 420,
         syscall_nr: 101,
         syscall_category: SyscallCategory::PrivilegeEscalation,
         count_in_window: 1,
@@ -316,7 +408,7 @@ fn test_syscall_privilege_escalation() {
     assert_eq!(dispatcher.metrics.security_violations.get(), 1);
     let killed = callbacks.killed_instances.lock().unwrap();
     assert_eq!(killed.len(), 1);
-    assert_eq!(killed[0].0, 42);
+    assert_eq!(killed[0].0, 420);
 
     let incidents = callbacks.security_incidents.lock().unwrap();
     assert_eq!(incidents.len(), 1);
@@ -332,6 +424,7 @@ fn test_syscall_process_control() {
 
     dispatcher.dispatch(MonitorEvent::SyscallAnomaly {
         pid: 99,
+        tid: 990,
         syscall_nr: 59,
         syscall_category: SyscallCategory::ProcessControl,
         count_in_window: 1,
@@ -340,7 +433,7 @@ fn test_syscall_process_control() {
     assert_eq!(dispatcher.metrics.security_violations.get(), 1);
     let killed = callbacks.killed_instances.lock().unwrap();
     assert_eq!(killed.len(), 1);
-    assert_eq!(killed[0].0, 99);
+    assert_eq!(killed[0].0, 990);
 }
 
 #[test]
@@ -350,6 +443,7 @@ fn test_backpressure_deduplication() {
 
     dispatcher.dispatch(MonitorEvent::ProcessExit {
         pid: 100,
+        tid: 100,
         ppid: 1,
         exit_code: 0,
         signal: 9,
@@ -358,6 +452,7 @@ fn test_backpressure_deduplication() {
     });
     dispatcher.dispatch(MonitorEvent::ProcessExit {
         pid: 101,
+        tid: 101,
         ppid: 1,
         exit_code: 0,
         signal: 9,
@@ -374,9 +469,15 @@ fn test_exit_degraded_mode() {
     let dispatcher = make_dispatcher(callbacks.clone());
 
     dispatcher.dispatch(MonitorEvent::DiskSlowIo {
+        pid: 0,
+        tid: 0,
         dev_major: 8,
         dev_minor: 0,
+        sector: 0,
+        nr_sector: 0,
+        bytes: 4096,
         latency_ns: 100_000_000,
+        cgroup_id: 42,
         io_type: 1,
     });
     assert!(dispatcher.is_degraded());
@@ -393,6 +494,7 @@ fn test_tcp_connect_close_updates_connection_count() {
 
     dispatcher.dispatch(MonitorEvent::TcpConnect {
         pid: 1,
+        tid: 1,
         src_port: 8080,
         dst_port: 443,
         old_state: 0,
@@ -402,6 +504,7 @@ fn test_tcp_connect_close_updates_connection_count() {
 
     dispatcher.dispatch(MonitorEvent::TcpClose {
         pid: 1,
+        tid: 1,
         src_port: 8080,
         dst_port: 443,
     });
@@ -415,12 +518,14 @@ fn test_events_processed_counter() {
 
     dispatcher.dispatch(MonitorEvent::ProcessExec {
         pid: 1,
+        tid: 1,
         ppid: 0,
         comm: [0; 16],
         cgroup_id: 0,
     });
     dispatcher.dispatch(MonitorEvent::TcpConnect {
         pid: 1,
+        tid: 1,
         src_port: 80,
         dst_port: 443,
         old_state: 0,
@@ -428,6 +533,22 @@ fn test_events_processed_counter() {
     });
 
     assert_eq!(dispatcher.metrics.events_processed.get(), 2);
+    assert_eq!(
+        dispatcher
+            .metrics
+            .events_by_type
+            .with_label_values(&["process_start"])
+            .get(),
+        1
+    );
+    assert_eq!(
+        dispatcher
+            .metrics
+            .events_by_type
+            .with_label_values(&["tcp_connect"])
+            .get(),
+        1
+    );
 }
 
 #[test]
@@ -435,6 +556,7 @@ fn test_monitor_event_type_mapping() {
     assert_eq!(
         MonitorEvent::ProcessExec {
             pid: 0,
+            tid: 0,
             ppid: 0,
             comm: [0; 16],
             cgroup_id: 0
@@ -445,6 +567,7 @@ fn test_monitor_event_type_mapping() {
     assert_eq!(
         MonitorEvent::ProcessExit {
             pid: 0,
+            tid: 0,
             ppid: 0,
             exit_code: 0,
             signal: 0,
@@ -457,6 +580,7 @@ fn test_monitor_event_type_mapping() {
     assert_eq!(
         MonitorEvent::TcpConnect {
             pid: 0,
+            tid: 0,
             src_port: 0,
             dst_port: 0,
             old_state: 0,
@@ -468,6 +592,7 @@ fn test_monitor_event_type_mapping() {
     assert_eq!(
         MonitorEvent::TcpClose {
             pid: 0,
+            tid: 0,
             src_port: 0,
             dst_port: 0
         }
@@ -477,6 +602,7 @@ fn test_monitor_event_type_mapping() {
     assert_eq!(
         MonitorEvent::TcpRetransmit {
             pid: 0,
+            tid: 0,
             src_port: 0,
             dst_port: 0,
             retransmits: 0,
@@ -488,6 +614,7 @@ fn test_monitor_event_type_mapping() {
     assert_eq!(
         MonitorEvent::FdOpen {
             pid: 0,
+            tid: 0,
             fd: 0,
             current_fd_count: 0,
             fd_soft_limit: 0
@@ -498,6 +625,7 @@ fn test_monitor_event_type_mapping() {
     assert_eq!(
         MonitorEvent::FdLimitApproaching {
             pid: 0,
+            tid: 0,
             fd: 0,
             current_fd_count: 0,
             fd_soft_limit: 0
@@ -508,6 +636,7 @@ fn test_monitor_event_type_mapping() {
     assert_eq!(
         MonitorEvent::MemPressure {
             pid: 0,
+            tid: 0,
             free_pages: 0,
             reclaim_pages: 0,
             pressure_level: 0,
@@ -518,9 +647,15 @@ fn test_monitor_event_type_mapping() {
     );
     assert_eq!(
         MonitorEvent::DiskSlowIo {
+            pid: 0,
+            tid: 0,
             dev_major: 0,
             dev_minor: 0,
+            sector: 0,
+            nr_sector: 0,
+            bytes: 0,
             latency_ns: 0,
+            cgroup_id: 0,
             io_type: 0
         }
         .event_type(),
@@ -529,6 +664,7 @@ fn test_monitor_event_type_mapping() {
     assert_eq!(
         MonitorEvent::SyscallAnomaly {
             pid: 0,
+            tid: 0,
             syscall_nr: 0,
             syscall_category: SyscallCategory::Normal,
             count_in_window: 0

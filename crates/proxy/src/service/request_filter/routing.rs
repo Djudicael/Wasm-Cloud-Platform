@@ -1,22 +1,58 @@
+use opentelemetry::global;
+use opentelemetry::propagation::Extractor;
+use opentelemetry::trace::TraceContextExt as _;
 use pingora_core::Result as PingoraResult;
 use pingora_proxy::Session;
+use tracing_opentelemetry::OpenTelemetrySpanExt as _;
 
 use crate::service::{RequestCtx, WasmProxy};
 
-pub(super) fn extract_or_generate_trace_id(session: &Session) -> Option<String> {
-    session
-        .req_header()
-        .headers
-        .get("traceparent")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|tp| {
-            let parts: Vec<&str> = tp.split('-').collect();
-            parts.get(1).map(|id| id.to_string())
-        })
-        .or_else(|| {
-            let bytes: [u8; 16] = rand::random();
-            Some(hex::encode(bytes))
-        })
+struct HeaderExtractor<'a>(&'a http::HeaderMap);
+
+impl Extractor for HeaderExtractor<'_> {
+    fn get(&self, key: &str) -> Option<&str> {
+        self.0.get(key).and_then(|value| value.to_str().ok())
+    }
+
+    fn keys(&self) -> Vec<&str> {
+        self.0.keys().map(http::HeaderName::as_str).collect()
+    }
+}
+
+pub(super) fn initialize_request_span(
+    session: &Session,
+    host: &str,
+    path: &str,
+    ctx: &mut RequestCtx,
+) {
+    let method = session.req_header().method.as_str();
+    let span = tracing::info_span!(
+        "http.server.request",
+        otel.name = %format!("{method} {path}"),
+        otel.kind = "server",
+        http.request.method = %method,
+        url.path = %path,
+        server.address = %host,
+        http.response.status_code = tracing::field::Empty,
+        app_id = tracing::field::Empty,
+        trace_id = tracing::field::Empty,
+    );
+    let parent = global::get_text_map_propagator(|propagator| {
+        propagator.extract(&HeaderExtractor(&session.req_header().headers))
+    });
+    let _ = span.set_parent(parent);
+
+    let span_context = span.context();
+    let trace_id = span_context.span().span_context().trace_id();
+    let trace_id = if trace_id == opentelemetry::trace::TraceId::INVALID {
+        let bytes: [u8; 16] = rand::random();
+        hex::encode(bytes)
+    } else {
+        trace_id.to_string()
+    };
+    span.record("trace_id", trace_id.as_str());
+    ctx.trace_id = Some(trace_id);
+    ctx.request_span = span;
 }
 
 pub(super) async fn resolve_route(
@@ -33,6 +69,7 @@ pub(super) async fn resolve_route(
 
     if let Some(r) = &resolved {
         ctx.app_id = Some(r.app_id.clone());
+        ctx.request_span.record("app_id", r.app_id.0.as_str());
         ctx.strip_prefix = r.strip_prefix;
         ctx.matched_prefix = Some(r.matched_prefix.clone());
     }

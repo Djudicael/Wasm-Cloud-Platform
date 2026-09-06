@@ -1,11 +1,13 @@
 use super::{
     admin_tls_is_configured, admin_tls_material, artifact_server_url_is_loopback,
     bind_socket_address, build_artifact_server_url, build_proxy_advertised_address,
-    collect_missing_node_stream_subscriptions, collect_unbacked_node_subscriptions,
-    load_kek_from_config, load_kek_from_env_spec, load_passphrase_from_env_spec,
-    load_secret_transport_keypair_from_config, sanitize_subject, serve_admin_app,
-    subject_matches_filter, NODE_SUBSCRIPTION_SPECS, SEAL_KEY_DERIVATION_SALT_META_KEY,
-    SECRET_TRANSPORT_KEY_META_KEY,
+    clear_persisted_auth_override, collect_missing_node_stream_subscriptions,
+    collect_unbacked_node_subscriptions, decode_vault_transit_hmac, load_kek_from_config,
+    load_kek_from_env_spec, load_or_create_persisted_kek,
+    load_or_create_persisted_secret_transport_keypair, load_passphrase_from_env_spec,
+    load_secret_transport_keypair_from_config, sanitize_subject, serve_axum_app,
+    subject_matches_filter, validate_tls_material, NODE_SUBSCRIPTION_SPECS,
+    SEAL_KEY_DERIVATION_SALT_META_KEY, SECRET_TRANSPORT_KEY_META_KEY,
 };
 use common::auth::AuthConfig;
 use common::config::{AdminSection, NodeConfig, ProxySection, RuntimeSection};
@@ -325,6 +327,8 @@ fn test_app_config(app_id: &str) -> AppConfig {
         tenant_id: None,
         policy: None,
         namespace: "default".to_string(),
+        placement: common::types::PlacementPolicy::EveryNode,
+        local_dependencies: Vec::new(),
     }
 }
 
@@ -332,6 +336,66 @@ fn test_app_config(app_id: &str) -> AppConfig {
 fn test_bind_socket_address_formats_ipv6() {
     let addr = bind_socket_address("::1", 9090).unwrap();
     assert_eq!(addr, "[::1]:9090");
+}
+
+#[test]
+fn one_shot_auth_override_cleanup_removes_only_auth_record() {
+    let temp = NamedTempFile::new().unwrap();
+    let store = Store::open(temp.path()).unwrap();
+    store.save_meta("unrelated", "preserved").unwrap();
+    store
+        .save_auth_config(&AuthConfig::generate_default())
+        .unwrap();
+    drop(store);
+
+    clear_persisted_auth_override(temp.path().to_str().unwrap()).unwrap();
+
+    let store = Store::open(temp.path()).unwrap();
+    assert!(store.load_auth_config().unwrap().is_none());
+    assert_eq!(
+        store.load_meta("unrelated").unwrap().as_deref(),
+        Some("preserved")
+    );
+}
+
+#[test]
+fn external_seal_key_rotation_rewraps_all_node_secret_material() {
+    let temp = NamedTempFile::new().unwrap();
+    let store = Store::open(temp.path()).unwrap();
+    let old_seal_key = secrets::crypto::SymmetricKey::from_bytes([7; 32]);
+    let new_seal_key = secrets::crypto::SymmetricKey::from_bytes([9; 32]);
+
+    let original_kek = load_or_create_persisted_kek(&store, &old_seal_key, None).unwrap();
+    let original_transport =
+        load_or_create_persisted_secret_transport_keypair(&store, &old_seal_key, None).unwrap();
+
+    let reloaded_kek =
+        load_or_create_persisted_kek(&store, &new_seal_key, Some(&old_seal_key)).unwrap();
+    let reloaded_transport = load_or_create_persisted_secret_transport_keypair(
+        &store,
+        &new_seal_key,
+        Some(&old_seal_key),
+    )
+    .unwrap();
+    assert_eq!(original_kek.as_bytes(), reloaded_kek.as_bytes());
+    assert_eq!(
+        original_transport.secret_bytes(),
+        reloaded_transport.secret_bytes()
+    );
+
+    // The migration is durable: the previous key is no longer needed.
+    assert_eq!(
+        load_or_create_persisted_kek(&store, &new_seal_key, None)
+            .unwrap()
+            .as_bytes(),
+        original_kek.as_bytes()
+    );
+    assert_eq!(
+        load_or_create_persisted_secret_transport_keypair(&store, &new_seal_key, None)
+            .unwrap()
+            .secret_bytes(),
+        original_transport.secret_bytes()
+    );
 }
 
 #[test]
@@ -427,11 +491,12 @@ async fn test_serve_admin_app_tls_accepts_https_requests() {
     let port = probe_listener.local_addr().unwrap().port();
     drop(probe_listener);
 
-    let handle = tokio::spawn(serve_admin_app(
+    let handle = tokio::spawn(serve_axum_app(
         format!("127.0.0.1:{port}"),
         test_admin_app(),
         Some(cert_path.to_string_lossy().to_string()),
         Some(key_path.to_string_lossy().to_string()),
+        "admin API",
     ));
 
     let client = reqwest::Client::builder()
@@ -464,23 +529,37 @@ async fn test_serve_admin_app_tls_accepts_https_requests() {
 }
 
 #[tokio::test]
-async fn test_serve_admin_app_tls_rejects_missing_cert_file() {
+async fn test_serve_axum_app_tls_rejects_missing_cert_file() {
     install_test_rustls_provider();
 
-    let err = serve_admin_app(
+    let err = serve_axum_app(
         "127.0.0.1:0".to_string(),
         test_admin_app(),
         Some("/tmp/does-not-exist-admin.crt".to_string()),
         Some("/tmp/does-not-exist-admin.key".to_string()),
+        "admin API",
     )
     .await
     .expect_err("missing TLS files should fail");
 
-    assert!(err.to_string().contains("admin TLS config error"));
+    assert!(err.to_string().contains("admin API TLS config error"));
 }
 
 #[tokio::test]
-async fn test_serve_admin_app_tls_rejects_invalid_pem_contents() {
+async fn test_startup_tls_validation_rejects_missing_material() {
+    install_test_rustls_provider();
+    let error = validate_tls_material(
+        "artifact",
+        Some("/tmp/does-not-exist-artifact.crt"),
+        Some("/tmp/does-not-exist-artifact.key"),
+    )
+    .await
+    .expect_err("missing listener TLS material must fail startup validation");
+    assert!(error.to_string().contains("artifact TLS config error"));
+}
+
+#[tokio::test]
+async fn test_serve_axum_app_tls_rejects_invalid_pem_contents() {
     install_test_rustls_provider();
 
     let temp_dir = TempDir::new().unwrap();
@@ -489,22 +568,23 @@ async fn test_serve_admin_app_tls_rejects_invalid_pem_contents() {
     std::fs::write(&cert_path, b"not a cert").unwrap();
     std::fs::write(&key_path, b"not a key").unwrap();
 
-    let err = serve_admin_app(
+    let err = serve_axum_app(
         "127.0.0.1:0".to_string(),
         test_admin_app(),
         Some(cert_path.to_string_lossy().to_string()),
         Some(key_path.to_string_lossy().to_string()),
+        "admin API",
     )
     .await
     .expect_err("invalid TLS PEM should fail");
 
-    assert!(err.to_string().contains("admin TLS config error"));
+    assert!(err.to_string().contains("admin API TLS config error"));
 }
 
 #[test]
 fn test_build_artifact_server_url_defaults_to_loopback() {
     let admin = AdminSection::default();
-    let url = build_artifact_server_url(&admin).unwrap();
+    let url = build_artifact_server_url(&admin, false).unwrap();
     assert_eq!(url, "http://127.0.0.1:9091");
     assert!(artifact_server_url_is_loopback(&url));
 }
@@ -515,9 +595,19 @@ fn test_build_artifact_server_url_from_advertised_host() {
         advertised_host: Some("node-1.internal".to_string()),
         ..AdminSection::default()
     };
-    let url = build_artifact_server_url(&admin).unwrap();
+    let url = build_artifact_server_url(&admin, false).unwrap();
     assert_eq!(url, "http://node-1.internal:9091");
     assert!(!artifact_server_url_is_loopback(&url));
+}
+
+#[test]
+fn test_build_artifact_server_url_from_advertised_host_with_tls() {
+    let admin = AdminSection {
+        advertised_host: Some("node-1.internal".to_string()),
+        ..AdminSection::default()
+    };
+    let url = build_artifact_server_url(&admin, true).unwrap();
+    assert_eq!(url, "https://node-1.internal:9091");
 }
 
 #[test]
@@ -526,7 +616,7 @@ fn test_build_artifact_server_url_from_explicit_url() {
         advertised_artifact_url: Some("https://artifacts.node-1.internal/base/".to_string()),
         ..AdminSection::default()
     };
-    let url = build_artifact_server_url(&admin).unwrap();
+    let url = build_artifact_server_url(&admin, true).unwrap();
     assert_eq!(url, "https://artifacts.node-1.internal/base");
     assert!(!artifact_server_url_is_loopback(&url));
 }
@@ -1100,6 +1190,30 @@ fn test_vault_transit_key_source_initializes_and_reloads_sealed_kek() {
 
     server.join().unwrap();
     std::env::remove_var(token_env);
+}
+
+#[test]
+fn test_decode_vault_transit_hmac_accepts_real_base64_and_legacy_hex() {
+    use base64::Engine as _;
+
+    let expected = [0x5au8; 32];
+    let encoded = base64::engine::general_purpose::STANDARD.encode(expected);
+    assert_eq!(
+        decode_vault_transit_hmac(&format!("vault:v7:{encoded}"))
+            .expect("real Vault base64 HMAC should decode"),
+        expected
+    );
+    assert_eq!(
+        decode_vault_transit_hmac(&format!("vault:v3:{}", hex::encode(expected)))
+            .expect("legacy mock hex HMAC should decode"),
+        expected
+    );
+}
+
+#[test]
+fn test_decode_vault_transit_hmac_rejects_invalid_or_wrong_length_data() {
+    assert!(decode_vault_transit_hmac("vault:v1:not-base64").is_err());
+    assert!(decode_vault_transit_hmac("vault:v1:YQ==").is_err());
 }
 
 #[test]

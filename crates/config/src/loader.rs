@@ -1,8 +1,8 @@
 use crate::overrides::CliOverrides;
 use crate::validation::validate_config;
 use common::config::{
-    AdminSection, AuthSection, BillingSection, DatabaseSection, DnsSection, EbpfSection,
-    GatewayCircuitBreakerSection, GatewayRateLimitSection, GatewaySection, GcSection,
+    AdminSection, AuthSection, BillingSection, DatabaseSection, DeploymentEnvironment, DnsSection,
+    EbpfSection, GatewayCircuitBreakerSection, GatewayRateLimitSection, GatewaySection, GcSection,
     HealthSection, LoggingSection, NatsSection, NodeConfig, NodeSection, ProxySection,
     RateLimitSection, RuntimeSection, StorageIntegrityFailureMode, StorageOpenFailureMode,
     StorageSection,
@@ -55,6 +55,7 @@ pub(crate) fn merge_config(base: NodeConfig, overlay: NodeConfig) -> NodeConfig 
     NodeConfig {
         node: NodeSection {
             node_id: overlay.node.node_id,
+            environment: overlay.node.environment,
         },
         storage: StorageSection {
             db_path: overlay.storage.db_path,
@@ -64,6 +65,9 @@ pub(crate) fn merge_config(base: NodeConfig, overlay: NodeConfig) -> NodeConfig 
         nats: NatsSection {
             url: overlay.nats.url,
             creds_file: overlay.nats.creds_file.or(base.nats.creds_file),
+            ca_cert: overlay.nats.ca_cert.or(base.nats.ca_cert),
+            client_cert: overlay.nats.client_cert.or(base.nats.client_cert),
+            client_key: overlay.nats.client_key.or(base.nats.client_key),
         },
         proxy: ProxySection {
             http_port: overlay.proxy.http_port,
@@ -108,6 +112,10 @@ pub(crate) fn merge_config(base: NodeConfig, overlay: NodeConfig) -> NodeConfig 
             } else {
                 overlay.runtime.instance_bind_address
             },
+            isolation_mode: overlay
+                .runtime
+                .isolation_mode
+                .or(base.runtime.isolation_mode),
             key_source: overlay.runtime.key_source,
             key_file: overlay.runtime.key_file.or(base.runtime.key_file),
             key_command: if overlay.runtime.key_command.is_empty() {
@@ -120,6 +128,10 @@ pub(crate) fn merge_config(base: NodeConfig, overlay: NodeConfig) -> NodeConfig 
                 .runtime
                 .key_vault_token_env
                 .or(base.runtime.key_vault_token_env),
+            key_vault_ca_cert: overlay
+                .runtime
+                .key_vault_ca_cert
+                .or(base.runtime.key_vault_ca_cert),
             key_vault_mount: if overlay.runtime.key_vault_mount.is_empty() {
                 base.runtime.key_vault_mount.clone()
             } else {
@@ -147,6 +159,14 @@ pub(crate) fn merge_config(base: NodeConfig, overlay: NodeConfig) -> NodeConfig 
                 .runtime
                 .key_vault_transit_context
                 .or(base.runtime.key_vault_transit_context),
+            key_vault_transit_key_version: overlay
+                .runtime
+                .key_vault_transit_key_version
+                .or(base.runtime.key_vault_transit_key_version),
+            key_vault_transit_previous_key_version: overlay
+                .runtime
+                .key_vault_transit_previous_key_version
+                .or(base.runtime.key_vault_transit_previous_key_version),
             key_aws_kms_region: overlay
                 .runtime
                 .key_aws_kms_region
@@ -159,6 +179,10 @@ pub(crate) fn merge_config(base: NodeConfig, overlay: NodeConfig) -> NodeConfig 
                 .runtime
                 .key_aws_kms_key_id
                 .or(base.runtime.key_aws_kms_key_id),
+            key_aws_kms_previous_key_id: overlay
+                .runtime
+                .key_aws_kms_previous_key_id
+                .or(base.runtime.key_aws_kms_previous_key_id),
             key_aws_kms_context: overlay
                 .runtime
                 .key_aws_kms_context
@@ -227,6 +251,7 @@ pub(crate) fn merge_config(base: NodeConfig, overlay: NodeConfig) -> NodeConfig 
         },
         ebpf: EbpfSection {
             enabled: overlay.ebpf.enabled,
+            required: overlay.ebpf.required,
             fd_soft_limit: overlay.ebpf.fd_soft_limit,
             fd_hard_limit: overlay.ebpf.fd_hard_limit,
             mem_low_threshold_pages: overlay.ebpf.mem_low_threshold_pages,
@@ -256,6 +281,7 @@ pub(crate) fn merge_config(base: NodeConfig, overlay: NodeConfig) -> NodeConfig 
             failure_threshold: overlay.health.failure_threshold,
             success_threshold: overlay.health.success_threshold,
             min_disk_free_bytes: overlay.health.min_disk_free_bytes,
+            min_disk_free_inodes: overlay.health.min_disk_free_inodes,
             max_memory_bytes: overlay.health.max_memory_bytes,
             snapshot_interval_secs: overlay.health.snapshot_interval_secs,
             cluster_node_stale_after_secs: overlay.health.cluster_node_stale_after_secs,
@@ -286,6 +312,17 @@ pub(crate) fn merge_config(base: NodeConfig, overlay: NodeConfig) -> NodeConfig 
 }
 
 pub(crate) fn apply_env_overrides(mut config: NodeConfig) -> NodeConfig {
+    if let Ok(value) = std::env::var("WASM_NODE_ENVIRONMENT") {
+        config.node.environment = match value.trim().to_ascii_lowercase().as_str() {
+            "development" => DeploymentEnvironment::Development,
+            "test" => DeploymentEnvironment::Test,
+            "production" => DeploymentEnvironment::Production,
+            other => {
+                tracing::warn!(value = other, "ignoring invalid WASM_NODE_ENVIRONMENT");
+                config.node.environment
+            }
+        };
+    }
     if let Ok(v) = std::env::var("WASM_NODE_NODE_ID") {
         config.node.node_id = v;
     }
@@ -326,6 +363,15 @@ pub(crate) fn apply_env_overrides(mut config: NodeConfig) -> NodeConfig {
     }
     if let Ok(v) = std::env::var("WASM_NODE_NATS_CREDS_FILE") {
         config.nats.creds_file = Some(v);
+    }
+    if let Ok(v) = std::env::var("WASM_NODE_NATS_CA_CERT") {
+        config.nats.ca_cert = Some(v);
+    }
+    if let Ok(v) = std::env::var("WASM_NODE_NATS_CLIENT_CERT") {
+        config.nats.client_cert = Some(v);
+    }
+    if let Ok(v) = std::env::var("WASM_NODE_NATS_CLIENT_KEY") {
+        config.nats.client_key = Some(v);
     }
     if let Ok(v) = std::env::var("WASM_NODE_PROXY_HTTP_PORT") {
         if let Ok(port) = v.parse() {
@@ -447,6 +493,9 @@ pub(crate) fn apply_env_overrides(mut config: NodeConfig) -> NodeConfig {
     if let Ok(v) = std::env::var("WASM_NODE_RUNTIME_KEY_VAULT_TOKEN_ENV") {
         config.runtime.key_vault_token_env = Some(v);
     }
+    if let Ok(v) = std::env::var("WASM_NODE_RUNTIME_KEY_VAULT_CA_CERT") {
+        config.runtime.key_vault_ca_cert = Some(v);
+    }
     if let Ok(v) = std::env::var("WASM_NODE_RUNTIME_KEY_VAULT_MOUNT") {
         config.runtime.key_vault_mount = v;
     }
@@ -465,6 +514,16 @@ pub(crate) fn apply_env_overrides(mut config: NodeConfig) -> NodeConfig {
     if let Ok(v) = std::env::var("WASM_NODE_RUNTIME_KEY_VAULT_TRANSIT_CONTEXT") {
         config.runtime.key_vault_transit_context = Some(v);
     }
+    if let Ok(v) = std::env::var("WASM_NODE_RUNTIME_KEY_VAULT_TRANSIT_KEY_VERSION") {
+        if let Ok(version) = v.parse() {
+            config.runtime.key_vault_transit_key_version = Some(version);
+        }
+    }
+    if let Ok(v) = std::env::var("WASM_NODE_RUNTIME_KEY_VAULT_TRANSIT_PREVIOUS_KEY_VERSION") {
+        if let Ok(version) = v.parse() {
+            config.runtime.key_vault_transit_previous_key_version = Some(version);
+        }
+    }
     if let Ok(v) = std::env::var("WASM_NODE_RUNTIME_KEY_AWS_KMS_REGION") {
         config.runtime.key_aws_kms_region = Some(v);
     }
@@ -473,6 +532,9 @@ pub(crate) fn apply_env_overrides(mut config: NodeConfig) -> NodeConfig {
     }
     if let Ok(v) = std::env::var("WASM_NODE_RUNTIME_KEY_AWS_KMS_KEY_ID") {
         config.runtime.key_aws_kms_key_id = Some(v);
+    }
+    if let Ok(v) = std::env::var("WASM_NODE_RUNTIME_KEY_AWS_KMS_PREVIOUS_KEY_ID") {
+        config.runtime.key_aws_kms_previous_key_id = Some(v);
     }
     if let Ok(v) = std::env::var("WASM_NODE_RUNTIME_KEY_AWS_KMS_CONTEXT") {
         config.runtime.key_aws_kms_context = Some(v);
@@ -487,6 +549,9 @@ pub(crate) fn apply_env_overrides(mut config: NodeConfig) -> NodeConfig {
     }
     if let Ok(v) = std::env::var("WASM_NODE_RUNTIME_INSTANCE_BIND_ADDRESS") {
         config.runtime.instance_bind_address = v;
+    }
+    if let Ok(v) = std::env::var("WASM_NODE_RUNTIME_ISOLATION_MODE") {
+        config.runtime.isolation_mode = Some(v);
     }
     if let Ok(v) = std::env::var("WASM_NODE_RUNTIME_POOLING_TOTAL_COMPONENT_INSTANCES") {
         if let Ok(count) = v.parse() {
@@ -516,6 +581,9 @@ pub(crate) fn apply_cli_overrides(mut config: NodeConfig, cli: &CliOverrides) ->
     if let Some(v) = &cli.node_id {
         config.node.node_id = v.clone();
     }
+    if let Some(v) = cli.environment {
+        config.node.environment = v;
+    }
     if let Some(v) = &cli.db_path {
         config.storage.db_path = PathBuf::from(v);
     }
@@ -524,6 +592,15 @@ pub(crate) fn apply_cli_overrides(mut config: NodeConfig, cli: &CliOverrides) ->
     }
     if let Some(v) = &cli.nats_creds {
         config.nats.creds_file = Some(v.clone());
+    }
+    if let Some(v) = &cli.nats_ca_cert {
+        config.nats.ca_cert = Some(v.clone());
+    }
+    if let Some(v) = &cli.nats_client_cert {
+        config.nats.client_cert = Some(v.clone());
+    }
+    if let Some(v) = &cli.nats_client_key {
+        config.nats.client_key = Some(v.clone());
     }
     if let Some(v) = cli.http_port {
         config.proxy.http_port = v;
@@ -588,6 +665,9 @@ pub(crate) fn apply_cli_overrides(mut config: NodeConfig, cli: &CliOverrides) ->
     if let Some(v) = &cli.key_vault_token_env {
         config.runtime.key_vault_token_env = Some(v.clone());
     }
+    if let Some(v) = &cli.key_vault_ca_cert {
+        config.runtime.key_vault_ca_cert = Some(v.clone());
+    }
     if let Some(v) = &cli.key_vault_mount {
         config.runtime.key_vault_mount = v.clone();
     }
@@ -620,6 +700,9 @@ pub(crate) fn apply_cli_overrides(mut config: NodeConfig, cli: &CliOverrides) ->
     }
     if let Some(v) = &cli.runtime_cache_directory {
         config.runtime.cache_directory = Some(v.clone());
+    }
+    if let Some(v) = &cli.runtime_isolation_mode {
+        config.runtime.isolation_mode = Some(v.clone());
     }
     if let Some(v) = &cli.runtime_upgrade_signing_public_key {
         config.runtime.upgrade_signing_public_key = Some(v.clone());

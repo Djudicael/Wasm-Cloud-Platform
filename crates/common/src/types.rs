@@ -254,10 +254,31 @@ pub struct AppConfig {
     /// Default = "default". The Wasm app never sees this value.
     #[serde(default = "default_namespace")]
     pub namespace: String,
+
+    /// Placement contract for this application. The platform deliberately
+    /// supports node-local service mesh traffic only, so the current and
+    /// default policy replicates the application to every eligible node.
+    #[serde(default)]
+    pub placement: PlacementPolicy,
+
+    /// Applications that must be deployed on the same node before this
+    /// application can be admitted or started. These dependencies are never
+    /// resolved through another platform node.
+    #[serde(default)]
+    pub local_dependencies: Vec<AppId>,
 }
 
 fn default_namespace() -> String {
     "default".to_string()
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PlacementPolicy {
+    /// Replicate the workload and its declared dependency closure to every
+    /// eligible platform node. East-west calls remain inside each node.
+    #[default]
+    EveryNode,
 }
 
 /// Rate limit configuration, stored as part of AppConfig.
@@ -302,6 +323,8 @@ impl AppConfig {
             tenant_id: None,
             policy: None,
             namespace: default_namespace(),
+            placement: PlacementPolicy::EveryNode,
+            local_dependencies: Vec::new(),
         }
     }
 }
@@ -608,12 +631,20 @@ pub struct ApiKeyRecord {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct OidcConfig {
     /// The OIDC issuer URL (e.g., "https://keycloak.example.com/realms/my-realm")
-    /// Used to fetch /.well-known/openid-configuration
+    /// Used to validate the token `iss` claim and, unless `jwks_url` is set,
+    /// fetch `/.well-known/openid-configuration`.
     pub issuer_url: String,
 
     /// Expected audience (aud claim) in the JWT.
     /// Must match the client_id configured in Keycloak.
     pub audience: String,
+
+    /// Optional private JWKS endpoint. This supports split-horizon deployments
+    /// where clients use a public issuer URL but platform nodes fetch signing
+    /// keys over a private network. The token issuer is still validated against
+    /// `issuer_url`.
+    #[serde(default)]
+    pub jwks_url: Option<String>,
 
     /// How often to refresh the JWKS cache (seconds).
     /// Default: 3600 (1 hour). Keycloak rotates keys infrequently.

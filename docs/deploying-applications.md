@@ -461,8 +461,8 @@ memory_pages = 2048        # 128 MB
 max_instances = 10
 idle_timeout_secs = 300
 
-[policy]
-profile = "http_api"
+[policy.network]
+allow_inbound = true
 ```
 
 ### Deploy from manifest
@@ -490,9 +490,6 @@ quota = 1_000_000_000
 memory_pages = 4096
 max_instances = 20
 idle_timeout_secs = 300
-
-[policy]
-profile = "http_api"
 
 [policy.network]
 allow_outbound_tcp = true
@@ -738,17 +735,11 @@ In that example:
 
 ### Managing API keys
 
-```bash
-# Add an API key to an app
-wasm-ctl gateway api-key add api-users:v2 \
-  --namespace production \
-  --name "mobile-client" \
-  --scopes "/api/public" \
-  --key "ak_live_xxxxxxxx"
-
-# The CLI hashes the key immediately and discards the plaintext.
-# Only the SHA-256 hash is stored in redb and replicated via NATS.
-```
+The proxy can validate `ApiKeyRecord` entries stored by the platform, but the
+current `wasm-ctl gateway` surface does not expose API-key creation, rotation,
+or deletion. Provisioning those records therefore requires an operator-owned
+integration with the storage/control-plane API. Do not place plaintext API keys
+in deploy manifests.
 
 ---
 
@@ -781,15 +772,16 @@ The actual values are stored encrypted in the platform's `redb` database and inj
 **Set a secret:**
 
 ```bash
-wasm-ctl secrets set api-users:v2 DATABASE_URL "postgres://..."
-wasm-ctl secrets set api-users:v2 STRIPE_KEY "sk_live_..."
+printf '%s' 'postgres://...' | wasm-ctl secrets set \
+  --app api-users:v2 --key DATABASE_URL --value-file -
+printf '%s' 'sk_live_...' | wasm-ctl secrets set \
+  --app api-users:v2 --key STRIPE_KEY --value-file -
 ```
 
-**List secrets for an app:**
-
-```bash
-wasm-ctl secrets list api-users:v2
-```
+Secret values are intentionally not listed by the CLI. Track required secret
+names in the application manifest and use `wasm-ctl secrets delete --app
+api-users:v2 --key KEY` to revoke a value from every node in the authoritative
+registry.
 
 ---
 
@@ -813,7 +805,7 @@ wasm-ctl app list --namespace production
 ### View an app's effective manifest
 
 ```bash
-wasm-ctl app manifest api-users:v2 --namespace production
+wasm-ctl app manifest production/api-users:v2
 ```
 
 This reconstructs the full manifest from the live config stored in redb, including any runtime changes.
@@ -821,7 +813,7 @@ This reconstructs the full manifest from the live config stored in redb, includi
 ### Remove an app
 
 ```bash
-wasm-ctl remove api-users:v2
+wasm-ctl remove production/api-users:v2
 ```
 
 This sends a `RemoveApp` event to all nodes, which gracefully drain and delete the app's instances.
@@ -847,13 +839,13 @@ wasm-ctl deploy \
   --manifest ./api-users-v2.toml \
   --version v2
 
-# Gradually shift traffic by updating the route
-wasm-ctl routes update \
+# Point the host route at v2
+wasm-ctl routes add \
   --host api-users.example.com \
-  --app api-users:v2
+  --app production/api-users:v2
 
 # Once confirmed, remove v1
-wasm-ctl remove api-users:v1
+wasm-ctl remove production/api-users:v1
 ```
 
 ### How it works

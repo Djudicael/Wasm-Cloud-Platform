@@ -13,9 +13,7 @@ use pingora_proxy::Session;
 
 use super::{RequestCtx, WasmProxy};
 use auth::{authenticate_request, authorize_request, resolve_effective_auth};
-use routing::{
-    extract_or_generate_trace_id, find_endpoint_rule, handle_cors_preflight, resolve_route,
-};
+use routing::{find_endpoint_rule, handle_cors_preflight, initialize_request_span, resolve_route};
 use throttling::{apply_rate_limits, enforce_backpressure, enforce_circuit_breaker};
 
 pub(super) async fn request_filter(
@@ -31,10 +29,13 @@ pub(super) async fn request_filter(
         .unwrap_or("")
         .to_string();
     let normalized_host = super::extract_request_host(session);
+    let path = session.req_header().uri.path().to_string();
 
-    if normalized_host.is_empty() || session.req_header().uri.path() == "/_platform/health" {
+    if normalized_host.is_empty() || path == "/_platform/health" {
         return Ok(false);
     }
+
+    initialize_request_span(session, &normalized_host, &path, ctx);
 
     if let Some(content_length) = session
         .req_header()
@@ -54,9 +55,6 @@ pub(super) async fn request_filter(
         }
     }
 
-    ctx.trace_id = extract_or_generate_trace_id(session);
-
-    let path = session.req_header().uri.path().to_string();
     resolve_route(proxy, &normalized_host, &path, ctx).await;
 
     if ctx.app_id.is_none() {

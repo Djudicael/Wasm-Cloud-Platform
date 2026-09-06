@@ -479,6 +479,8 @@ impl NatsBus {
 ### Connection
 - [ ] `NatsBus::connect(url)` connects to a running NATS server without error
 - [ ] `NatsBus::connect_secure(url, creds)` connects with credentials and rejects invalid creds
+- [x] `NatsBus::connect_with_tls(...)` authenticates a private CA and NATS
+      mutual-TLS identity; incomplete client certificate/key input fails closed
 - [ ] On NATS server restart, the client reconnects automatically within 5 seconds
 
 ### Publishing

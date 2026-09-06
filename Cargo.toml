@@ -47,12 +47,12 @@ tracing               = "0.1"
 tracing-subscriber    = { version = "0.3", features = ["env-filter", "json"] }
 
 # Wasm runtime
-wasmtime              = "47.0.3"
-wasmtime-wasi         = "47.0.3"
-wasmtime-wasi-http    = "47.0.3"
+wasmtime              = "48.0.1"
+wasmtime-wasi         = "48.0.1"
+wasmtime-wasi-http    = "48.0.1"
 
 # Proxy
-pingora               = "0.8.1"
+pingora               = { version = "0.8.1", features = ["rustls"] }
 pingora-proxy         = "0.8.1"
 pingora-load-balancing = "0.8.1"
 pingora-core          = "0.8.1"
@@ -85,7 +85,7 @@ reqwest = { version = "0.13.4", features = ["json"] }
 # Crypto
 sha2 = "0.11"
 hex = "0.4"
-jsonwebtoken = { version = "11.0.0", features = ["rust_crypto"] }
+jsonwebtoken = { version = "11.0.0", features = ["aws_lc_rs"] }
 
 # URL parsing
 url = "2"

@@ -1,5 +1,6 @@
 // crates/metrics/src/health_metrics.rs
 use prometheus::{IntGauge, IntGaugeVec, Opts, Registry};
+use std::{collections::HashSet, sync::Mutex};
 
 /// Prometheus metrics for the health check subsystem.
 pub struct HealthMetrics {
@@ -21,14 +22,32 @@ pub struct HealthMetrics {
     /// Available disk space in MB.
     pub disk_free_mb: IntGauge,
 
+    /// Available filesystem inodes.
+    pub disk_free_inodes: IntGauge,
+
+    /// Configured hard free-space reserve in MB.
+    pub disk_min_free_mb: IntGauge,
+
+    /// Configured hard free-inode reserve.
+    pub disk_min_free_inodes: IntGauge,
+
     /// Process memory usage in MB.
     pub memory_used_mb: IntGauge,
+
+    /// Effective memory limit in MB.
+    pub memory_limit_mb: IntGauge,
+
+    /// Process memory use as an integer percentage of the effective limit.
+    pub memory_usage_percent: IntGauge,
 
     /// Per-app healthy instance count (labeled by app_id).
     pub app_healthy_instances: IntGaugeVec,
 
     /// Per-app total instance count (labeled by app_id).
     pub app_total_instances: IntGaugeVec,
+
+    /// App labels exported by the previous report, used to delete stale series.
+    previous_app_ids: Mutex<HashSet<String>>,
 }
 
 impl HealthMetrics {
@@ -81,10 +100,52 @@ impl HealthMetrics {
             .register(Box::new(disk_free_mb.clone()))
             .unwrap_or(());
 
+        let disk_free_inodes =
+            IntGauge::new("wasm_node_disk_free_inodes", "Available filesystem inodes").unwrap();
+        registry
+            .register(Box::new(disk_free_inodes.clone()))
+            .unwrap_or(());
+
+        let disk_min_free_mb = IntGauge::new(
+            "wasm_node_disk_min_free_mb",
+            "Configured hard free-space reserve in MB",
+        )
+        .unwrap();
+        registry
+            .register(Box::new(disk_min_free_mb.clone()))
+            .unwrap_or(());
+
+        let disk_min_free_inodes = IntGauge::new(
+            "wasm_node_disk_min_free_inodes",
+            "Configured hard free-inode reserve",
+        )
+        .unwrap();
+        registry
+            .register(Box::new(disk_min_free_inodes.clone()))
+            .unwrap_or(());
+
         let memory_used_mb =
             IntGauge::new("wasm_node_memory_used_mb", "Process memory usage in MB").unwrap();
         registry
             .register(Box::new(memory_used_mb.clone()))
+            .unwrap_or(());
+
+        let memory_limit_mb = IntGauge::new(
+            "wasm_node_memory_limit_mb",
+            "Effective process memory limit in MB",
+        )
+        .unwrap();
+        registry
+            .register(Box::new(memory_limit_mb.clone()))
+            .unwrap_or(());
+
+        let memory_usage_percent = IntGauge::new(
+            "wasm_node_memory_usage_percent",
+            "Process memory use as a percentage of the effective limit",
+        )
+        .unwrap();
+        registry
+            .register(Box::new(memory_usage_percent.clone()))
             .unwrap_or(());
 
         let app_healthy_instances = IntGaugeVec::new(
@@ -118,10 +179,25 @@ impl HealthMetrics {
             nats_connected,
             accepting_requests,
             disk_free_mb,
+            disk_free_inodes,
+            disk_min_free_mb,
+            disk_min_free_inodes,
             memory_used_mb,
+            memory_limit_mb,
+            memory_usage_percent,
             app_healthy_instances,
             app_total_instances,
+            previous_app_ids: Mutex::new(HashSet::new()),
         }
+    }
+
+    /// Publish the configured filesystem reserves used by node readiness so
+    /// alert expressions remain aligned with the actual node policy.
+    pub fn set_disk_capacity_limits(&self, min_disk_free_bytes: u64, min_disk_free_inodes: u64) {
+        self.disk_min_free_mb
+            .set(i64::try_from(min_disk_free_bytes / (1024 * 1024)).unwrap_or(i64::MAX));
+        self.disk_min_free_inodes
+            .set(i64::try_from(min_disk_free_inodes).unwrap_or(i64::MAX));
     }
 
     /// Update all metrics from a health report.
@@ -155,21 +231,53 @@ impl HealthMetrics {
                     {
                         self.disk_free_mb.set(mb);
                     }
+                    let words: Vec<_> = dep.message.split_whitespace().collect();
+                    if let Some(inodes) = words.windows(2).find_map(|window| {
+                        (window[1] == "inodes")
+                            .then(|| window[0].parse::<i64>().ok())
+                            .flatten()
+                    }) {
+                        self.disk_free_inodes.set(inodes);
+                    }
                 }
                 "memory" => {
                     // Parse "XXX MB / YYY MB" from the message
-                    if let Some(part) = dep.message.split('/').next() {
-                        if let Some(val) = part
+                    let mut parts = dep.message.split('/');
+                    if let Some(part) = parts.next() {
+                        if let Some(used) = part
                             .trim()
                             .strip_suffix(" MB")
                             .and_then(|s| s.parse::<i64>().ok())
                         {
-                            self.memory_used_mb.set(val);
+                            self.memory_used_mb.set(used);
+                            if let Some(limit) = parts
+                                .next()
+                                .and_then(|value| value.split_whitespace().next())
+                                .and_then(|value| value.parse::<i64>().ok())
+                            {
+                                self.memory_limit_mb.set(limit);
+                                if limit > 0 {
+                                    self.memory_usage_percent.set(used * 100 / limit);
+                                }
+                            }
                         }
                     }
                 }
                 _ => {}
             }
+        }
+
+        // Remove labels for apps absent from the current report. Leaving a zero
+        // gauge behind would make an undeployed application alert forever.
+        let current_app_ids: HashSet<_> =
+            report.apps.iter().map(|app| app.app_id.clone()).collect();
+        let mut previous_app_ids = self
+            .previous_app_ids
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        for removed in previous_app_ids.difference(&current_app_ids) {
+            let _ = self.app_healthy_instances.remove_label_values(&[removed]);
+            let _ = self.app_total_instances.remove_label_values(&[removed]);
         }
 
         // Per-app metrics: iterate all apps and set gauge values with the app label.
@@ -181,5 +289,68 @@ impl HealthMetrics {
                 .with_label_values(&[&app.app_id])
                 .set(app.instances as i64);
         }
+        *previous_app_ids = current_app_ids;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use common::health::{AppHealthSummary, NodeHealthReport, NodeHealthStatus};
+    use prometheus::core::Collector;
+
+    fn report(apps: Vec<AppHealthSummary>) -> NodeHealthReport {
+        NodeHealthReport {
+            status: NodeHealthStatus::Healthy,
+            node_id: "node-0".to_string(),
+            timestamp: "2026-08-27T00:00:00Z".to_string(),
+            uptime_secs: 1,
+            startup_complete: true,
+            accepting_requests: true,
+            active_instances: apps.iter().map(|app| app.instances).sum(),
+            deployed_apps: apps.len() as u32,
+            dependencies: Vec::new(),
+            apps,
+        }
+    }
+
+    #[test]
+    fn removed_apps_delete_their_prometheus_series() {
+        let registry = Registry::new();
+        let metrics = HealthMetrics::new(&registry);
+        metrics.update_from_report(&report(vec![AppHealthSummary {
+            app_id: "default/lifecycle:v1".to_string(),
+            instances: 1,
+            healthy_instances: 1,
+            serving: true,
+        }]));
+        assert_eq!(
+            metrics.app_healthy_instances.collect()[0]
+                .get_metric()
+                .len(),
+            1
+        );
+
+        metrics.update_from_report(&report(Vec::new()));
+        assert!(metrics
+            .app_healthy_instances
+            .collect()
+            .iter()
+            .all(|family| family.get_metric().is_empty()));
+        assert!(metrics
+            .app_total_instances
+            .collect()
+            .iter()
+            .all(|family| family.get_metric().is_empty()));
+    }
+
+    #[test]
+    fn configured_disk_reserves_are_exported() {
+        let registry = Registry::new();
+        let metrics = HealthMetrics::new(&registry);
+        metrics.set_disk_capacity_limits(512 * 1024 * 1024, 12_345);
+
+        assert_eq!(metrics.disk_min_free_mb.get(), 512);
+        assert_eq!(metrics.disk_min_free_inodes.get(), 12_345);
     }
 }

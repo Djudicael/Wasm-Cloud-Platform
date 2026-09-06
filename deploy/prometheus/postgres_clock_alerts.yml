@@ -1,0 +1,22 @@
+groups:
+  - name: postgresql_clock_validation
+    rules:
+      - alert: PostgreSQLClockSkewHigh
+        expr: abs(time() - pg_clock_epoch_seconds) > 5
+        for: 15s
+        labels: {severity: critical}
+        annotations: {summary: "PostgreSQL wall clock differs from Prometheus by more than five seconds"}
+      - alert: PostgreSQLClockMetricMissing
+        expr: absent(pg_clock_epoch_seconds) == 1
+        for: 30s
+        labels: {severity: warning}
+        annotations: {summary: "The PostgreSQL wall-clock metric is unavailable"}
+      - alert: PostgreSQLTimeSourceUnavailable
+        expr: >-
+          up{job="postgresql-chrony"} == 0
+          or wcp_postgres_chrony_synchronized != 1
+          or wcp_postgres_chrony_reachable_sources < 1
+          or time() - wcp_postgres_chrony_last_sample_timestamp_seconds > 60
+        for: 30s
+        labels: {severity: critical}
+        annotations: {summary: "PostgreSQL Chrony synchronization or its usable time sources are unavailable"}

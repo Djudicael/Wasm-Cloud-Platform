@@ -107,33 +107,48 @@ pub enum ProbeType {
 /// blocking the tokio runtime.
 pub fn check_memory(max_memory_bytes: u64) -> DependencyHealth {
     let usage = get_process_memory_usage();
+    let physical_bytes = get_physical_memory_bytes();
+    let cgroup_bytes = get_cgroup_memory_limit_bytes();
+    let effective_limit = effective_memory_limit(max_memory_bytes, physical_bytes, cgroup_bytes);
 
     let (status, message) = match usage {
         Some(used) => {
             let used_mb = used / (1024 * 1024);
-            let max_mb = max_memory_bytes / (1024 * 1024);
-            let percent = (used as f64 / max_memory_bytes as f64) * 100.0;
+            let effective_mb = effective_limit / (1024 * 1024);
+            let configured_mb = max_memory_bytes / (1024 * 1024);
+            let physical_mb = physical_bytes.map(|bytes| bytes / (1024 * 1024));
+            let cgroup_mb = cgroup_bytes.map(|bytes| bytes / (1024 * 1024));
+            let percent = (used as f64 / effective_limit as f64) * 100.0;
+            let capacity = format!(
+                "configured={} MB, physical={}, cgroup={}",
+                configured_mb,
+                display_optional_mebibytes(physical_mb),
+                display_optional_mebibytes(cgroup_mb),
+            );
 
-            if used > max_memory_bytes {
+            if used > effective_limit {
                 (
                     DependencyStatus::Unhealthy,
                     format!(
-                        "memory exceeded: {} MB / {} MB ({:.0}%)",
-                        used_mb, max_mb, percent
+                        "memory exceeded: {} MB / {} MB ({:.0}% effective; {})",
+                        used_mb, effective_mb, percent, capacity
                     ),
                 )
-            } else if used > max_memory_bytes * 9 / 10 {
+            } else if used > effective_limit * 9 / 10 {
                 (
                     DependencyStatus::Degraded,
                     format!(
-                        "memory high: {} MB / {} MB ({:.0}%)",
-                        used_mb, max_mb, percent
+                        "memory high: {} MB / {} MB ({:.0}% effective; {})",
+                        used_mb, effective_mb, percent, capacity
                     ),
                 )
             } else {
                 (
                     DependencyStatus::Healthy,
-                    format!("{} MB / {} MB ({:.0}%)", used_mb, max_mb, percent),
+                    format!(
+                        "{} MB / {} MB ({:.0}% effective; {})",
+                        used_mb, effective_mb, percent, capacity
+                    ),
                 )
             }
         }
@@ -150,6 +165,25 @@ pub fn check_memory(max_memory_bytes: u64) -> DependencyHealth {
         latency_ms: None,
         last_check: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
     }
+}
+
+fn effective_memory_limit(
+    configured_bytes: u64,
+    physical_bytes: Option<u64>,
+    cgroup_bytes: Option<u64>,
+) -> u64 {
+    [Some(configured_bytes), physical_bytes, cgroup_bytes]
+        .into_iter()
+        .flatten()
+        .filter(|value| *value > 0)
+        .min()
+        .unwrap_or(1)
+}
+
+fn display_optional_mebibytes(value: Option<u64>) -> String {
+    value
+        .map(|mebibytes| format!("{mebibytes} MB"))
+        .unwrap_or_else(|| "unlimited/unknown".to_string())
 }
 
 /// Get the current process memory usage in bytes (RSS).
@@ -174,5 +208,74 @@ fn get_process_memory_usage() -> Option<u64> {
     {
         // Fallback: not available on non-Linux platforms
         None
+    }
+}
+
+fn get_physical_memory_bytes() -> Option<u64> {
+    #[cfg(target_os = "linux")]
+    {
+        parse_memtotal_bytes(&std::fs::read_to_string("/proc/meminfo").ok()?)
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        None
+    }
+}
+
+fn get_cgroup_memory_limit_bytes() -> Option<u64> {
+    #[cfg(target_os = "linux")]
+    {
+        let value = std::fs::read_to_string("/sys/fs/cgroup/memory.max").ok()?;
+        parse_cgroup_limit_bytes(&value)
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        None
+    }
+}
+
+fn parse_memtotal_bytes(meminfo: &str) -> Option<u64> {
+    let value_kib = meminfo.lines().find_map(|line| {
+        line.strip_prefix("MemTotal:")?
+            .split_whitespace()
+            .next()?
+            .parse::<u64>()
+            .ok()
+    })?;
+    value_kib.checked_mul(1024)
+}
+
+fn parse_cgroup_limit_bytes(value: &str) -> Option<u64> {
+    let value = value.trim();
+    if value == "max" {
+        None
+    } else {
+        value.parse().ok().filter(|limit| *limit > 0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn effective_limit_uses_smallest_real_boundary() {
+        assert_eq!(
+            effective_memory_limit(4_096, Some(2_048), Some(3_072)),
+            2_048
+        );
+        assert_eq!(effective_memory_limit(4_096, Some(8_192), None), 4_096);
+    }
+
+    #[test]
+    fn parses_linux_memory_boundaries() {
+        assert_eq!(
+            parse_memtotal_bytes("MemFree: 1 kB\nMemTotal:       2048 kB\n"),
+            Some(2 * 1024 * 1024)
+        );
+        assert_eq!(parse_cgroup_limit_bytes("1073741824\n"), Some(1 << 30));
+        assert_eq!(parse_cgroup_limit_bytes("max\n"), None);
     }
 }

@@ -93,8 +93,12 @@ async fn test_corrupted_routes_rebuild_from_jetstream() {
             .await
             .expect("Failed to restart node");
 
-    // Wait for state to be restored from JetStream
-    sleep(Duration::from_secs(5)).await;
+    // Wait for state to be restored from JetStream and the recovered app to be
+    // ready. Runtime upgrades can change compilation time, so a fixed delay is
+    // not a reliable readiness signal.
+    wait_for_app_ready(node2.proxy_port, "route1.local", 30)
+        .await
+        .expect("App did not become ready after rebuild");
 
     // Verify routes still work after "rebuild"
     let response2 = send_request(node2.proxy_port, "route1.local", "/")
@@ -304,9 +308,24 @@ async fn test_integrity_check_at_startup() {
         .await
         .expect("Failed to setup JetStream");
 
-    let node = NodeProcess::start("test-dr-integrity", &nats.url, 18294, 19114)
-        .await
-        .expect("Failed to start node");
+    // Keep this test focused on storage integrity. Optional eBPF monitoring may
+    // legitimately be degraded on unprivileged CI runners and has separate
+    // end-to-end coverage.
+    let admin_port = reserve_test_port().expect("Failed to reserve admin port");
+    let launch_env = [("WASM_NODE_EBPF_ENABLED", "false")];
+    let node = NodeProcess::start_with_admin_and_options(
+        "test-dr-integrity",
+        &nats.url,
+        18294,
+        19114,
+        admin_port,
+        NodeLaunchOptions {
+            extra_args: &[],
+            extra_env: &launch_env,
+        },
+    )
+    .await
+    .expect("Failed to start node");
 
     sleep(Duration::from_secs(2)).await;
 
@@ -355,7 +374,22 @@ async fn test_integrity_check_at_startup() {
             .and_then(|v| v.as_str())
             .unwrap_or_default(),
         "healthy",
-        "Node should be healthy after startup integrity check"
+        "Node should be healthy after startup integrity check: {health_json}"
+    );
+    let redb_status = health_json
+        .get("dependencies")
+        .and_then(|v| v.as_array())
+        .and_then(|dependencies| {
+            dependencies
+                .iter()
+                .find(|dependency| dependency.get("name").and_then(|v| v.as_str()) == Some("redb"))
+        })
+        .and_then(|dependency| dependency.get("status"))
+        .and_then(|v| v.as_str());
+    assert_eq!(
+        redb_status,
+        Some("healthy"),
+        "redb should be healthy after the startup integrity check: {health_json}"
     );
     assert_eq!(
         health_json

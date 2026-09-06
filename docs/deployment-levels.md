@@ -8,9 +8,9 @@ The project targets **Linux**. Windows is not a production target for this platf
 
 - developer laptop: [`Level 0 - Local Development`](deployment-level-0-local-development.md)
 - internal single-node service: [`Level 1 - Single-Node Private Environment`](deployment-level-1-single-node-private.md)
-- first real Linux production rollout: [`Level 2 - Production Baseline`](deployment-level-2-production-baseline.md)
-- serious multi-node production: [`Level 3 - Hardened Production`](deployment-level-3-hardened-production.md)
-- strongest currently supported posture: [`Level 4 - High-Assurance`](deployment-level-4-high-assurance.md)
+- minimum production control profile: [`Level 2 - Production Baseline`](deployment-level-2-production-baseline.md)
+- hardened multi-node control profile: [`Level 3 - Hardened Production`](deployment-level-3-hardened-production.md)
+- high-assurance control profile: [`Level 4 - High-Assurance`](deployment-level-4-high-assurance.md)
 
 ## How To Use These Guides
 
@@ -18,13 +18,19 @@ The project targets **Linux**. Windows is not a production target for this platf
 2. use that file as the install and configuration path for the current rollout
 3. only move to the next level when the added controls are worth the operational cost
 
-## Current Production Claim
+## Production claim boundary
 
 For this codebase as it stands today:
 
-- **Level 2** is the production baseline
-- **Level 3** is the hardened multi-node production path
-- **Level 4** is the strongest currently supported Linux posture
+- **Level 2** is the minimum production control profile
+- **Level 3** adds hardened multi-node controls
+- **Level 4** adds the strictest controls documented by this repository
+
+Selecting a level does not make a deployment production-ready. Apply the
+[production deployment checklist](../INFRA_IMPL/process/PLATFORM_PRODUCTION_DEPLOYMENT_CHECKLIST.md)
+to the exact signed release, configuration, hosts, NATS cluster, PKI, secret
+backend, load balancer, observability stack, capacity plan, and recovery plan.
+The local Firecracker testbed supplies rehearsal evidence only.
 
 ## Seal-Key Source Order For Linux Production
 
@@ -43,11 +49,11 @@ Notes:
 - `command` is the escape hatch for custom brokers or external hardware-backed tooling
 - `file` is acceptable when file distribution is already part of your security model, but it is weaker operationally than remote derivation
 
-## Intentionally Deferred
+## Repository and operator boundaries
 
-These are future hardening items, not blockers for the current Linux production baseline:
-
-- native TPM/HSM SDK integration
-- transparency logs / external attestations
-- deeper Wasmtime host/resource wrapping for the remaining byte-accurate paths
-- artifact-plane long-term identity end-state
+The release workflow now produces and verifies SLSA provenance and SPDX
+attestations. A GA release still requires an approved semantic-version tag and
+independent admission of the downloaded bytes. Native TPM/HSM SDK integration,
+stronger artifact-plane identity, and process-per-application isolation remain
+outside the implemented platform boundary. Operators must retain any resulting
+deployment gate rather than treating a profile choice as evidence.

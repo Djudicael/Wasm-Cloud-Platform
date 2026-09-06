@@ -64,6 +64,11 @@ mod test_helpers {
         assert!(output.contains("wasm_request_duration_seconds"));
         assert!(output.contains("wasm_active_instances"));
         assert!(output.contains("wasm_trap_total"));
+        #[cfg(target_os = "linux")]
+        {
+            assert!(output.contains("process_open_fds"));
+            assert!(output.contains("process_max_fds"));
+        }
 
         // Assert labels
         assert!(output.contains("app=\"test-app:v1\""));

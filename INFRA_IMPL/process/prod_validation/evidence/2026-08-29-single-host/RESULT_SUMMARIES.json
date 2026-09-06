@@ -1,0 +1,121 @@
+{
+  "schema_version": 1,
+  "run_id": "single-host-2026-08-23--2026-08-29",
+  "cargo_audit": {
+    "status": "pass",
+    "advisories_loaded": 1226,
+    "dependencies_scanned": 749
+  },
+  "final_observability": {
+    "targets": [
+      {"job": "alertmanager", "instance": "127.0.0.1:9093", "health": "up"},
+      {"job": "haproxy", "instance": "127.0.0.1:8405", "health": "up"},
+      {"job": "host", "instance": "127.0.0.1:9100", "health": "up"},
+      {"job": "nats", "instance": "127.0.0.1:7777", "health": "up"},
+      {"job": "otel-collector", "instance": "127.0.0.1:8888", "health": "up"},
+      {"job": "platform-node", "instance": "172.20.0.12:9090", "health": "up"},
+      {"job": "platform-node", "instance": "172.20.0.13:9090", "health": "up"},
+      {"job": "platform-node", "instance": "172.20.0.14:9090", "health": "up"},
+      {"job": "postgresql", "instance": "127.0.0.1:9187", "health": "up"},
+      {"job": "prometheus", "instance": "127.0.0.1:9095", "health": "up"}
+    ],
+    "active_alerts": 0,
+    "wasm_ebpf_active_sum": 3,
+    "wasm_ebpf_monitoring_degraded_sum": 0
+  },
+  "ebpf_overhead": {
+    "source_sha256": "8656d4e9036cce15c4cda7ebc7ca0b602e88edbe470bff9f8741f7ec231c40b8",
+    "passed": true,
+    "thresholds": {
+      "throughput_loss_percent": 5,
+      "cpu_increase_percent": 15,
+      "context_switch_increase_percent": 25,
+      "additional_peak_rss_mib": 64,
+      "allowed_failures_or_event_loss": 0
+    },
+    "baseline": {
+      "requests": 80000,
+      "failed_requests": 0,
+      "median_requests_per_second": 344.87617098361955,
+      "p99_ms": 120.0043715,
+      "peak_rss_bytes": 52908032
+    },
+    "enabled": {
+      "requests": 80000,
+      "failed_requests": 0,
+      "median_requests_per_second": 344.4597249659503,
+      "p99_ms": 121.1154605,
+      "peak_rss_bytes": 61947904,
+      "events": 170842,
+      "parse_errors": 0,
+      "ring_drops": 0,
+      "queue_saturations": 0
+    },
+    "comparison": {
+      "throughput_loss_percent": 0.12075233162138435,
+      "p99_increase_ms": 1.1110889999999927,
+      "node_cpu_increase_percent": 1.7177071063996814,
+      "application_cpu_increase_percent": 2.9451363177381324,
+      "node_context_switch_increase_percent": 11.99522350493201,
+      "application_context_switch_increase_percent": 0.31752039700562396,
+      "additional_peak_rss_bytes": 9039872
+    }
+  },
+  "capacity": {
+    "configured_local_envelope_requests_per_second": 5,
+    "accepted_soak": {
+      "duration_seconds": 120,
+      "requests": 600,
+      "failures": 0,
+      "route_p99_ms": {
+        "frontend": 5.224775,
+        "discovery": 54.705169999999995,
+        "readiness": 57.113965,
+        "login": 166.4
+      }
+    },
+    "n_minus_one": {
+      "requests": 151,
+      "failures": 0,
+      "frontend_p99_ms": 6.002229000000001,
+      "discovery_p99_ms": 13.20546,
+      "readiness_p99_ms": 74.173428,
+      "login_p99_ms": 131.136524
+    },
+    "limitation": "This is the configured per-client front-door envelope on one host, not production hardware capacity."
+  },
+  "upgrade_rollback": {
+    "source_sha256": "a532ffed017ba8aff1b75f2c025c400192abb38848ff27c22dbdc0f70df87b16",
+    "status": "pass",
+    "lkg_backend": "oidc/openid-connect-wasi:vdc1902621308",
+    "candidate_backend": "oidc/openid-connect-wasi:vdc1902621308-phase8-candidate",
+    "artifact_sha256": "c9fdafa74897137a826d2a1f1903557b05ed02772701106e738e6e6056c39628",
+    "requests": 450,
+    "http_200": 450,
+    "failed": 0,
+    "requests_per_second": 5.009148618984352,
+    "p99_ms": 68.47149800000001,
+    "failed_candidate_http_status": 500,
+    "migrations_before": "11|11",
+    "migrations_after": "11|11",
+    "limitation": "Candidate and LKG identities used the same Wasm digest; repeat with distinct signed release artifacts."
+  },
+  "disaster_recovery": {
+    "source_sha256": "f943b5681ef0adda885fe5cd2574baad7a3e6b0b794d5370edb97ca0bba1ecb9",
+    "status": "pass-with-database-clock-and-local-encryption-retention-limitations",
+    "public_tables_verified": 26,
+    "migration_count_and_distinct_count": "11|11",
+    "observed_rpo_seconds": 0.002,
+    "backup_duration_seconds": 1.221,
+    "database_restore_rto_seconds": 6.338,
+    "application_ready_rto_seconds": 43.47,
+    "full_journey_rto_seconds": 52.053,
+    "source_database_clock_skew_seconds": 12398.867,
+    "playwright": "6/6 focused login/dashboard tests passed",
+    "encrypted_backup_sha256": "e20b30f120e33183b3f6a6cc1670537b4133b8b77b18149f1c3a0b43bf904229"
+  },
+  "telemetry_absence": {
+    "logs": "NOT VALIDATED: no bounded host log shipper or separated audit destination was deployed.",
+    "traces": "NOT VALIDATED: the healthy OTLP Collector accepted no application spans and no end-to-end correlated trace exists."
+  }
+}
