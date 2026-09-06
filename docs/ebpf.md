@@ -25,32 +25,37 @@ eBPF (extended Berkeley Packet Filter) is a technology that allows running sandb
 - **Verified**: The kernel checks every eBPF program before loading it to ensure it cannot crash the kernel, hang, or access arbitrary memory
 - **Event-driven**: eBPF programs run in response to kernel events (syscalls, network packets, tracepoints) rather than polling
 - **High-performance**: They run directly in kernel space with minimal overhead
-- **Safe**: A bug in an eBPF program cannot crash the host — the verifier rejects unsafe code
+- **Verifier checked**: The kernel verifier rejects many unsafe programs before attachment; eBPF still requires careful review and host-kernel patching
 
-On this platform, eBPF provides **sub-millisecond detection** of failures that userspace polling would detect only after seconds or minutes.
+On this platform, eBPF provides event-driven kernel signals. Detection latency depends on the hook, scheduler load, ring-buffer delivery, and userspace dispatch; the platform does not claim a universal sub-millisecond service level.
 
 ---
 
 ## Why eBPF on This Platform
 
-### Detection Latency Comparison
+### Detection and attribution
 
-| Failure | Userspace Detection | eBPF Detection | Speedup |
-|---------|---------------------|----------------|---------|
-| Instance crash (OOM/trap) | 0–5s (health loop) | <1ms (tracepoint) | 5000x |
-| NATS disconnection | 5–30s (heartbeat) | <1ms (TCP retransmit) | 30x |
-| Memory pressure | 1–5min (Prometheus alert) | <1ms (vmpressure) | 300x |
-| FD exhaustion | At failure (accept() fails) | ~1ms (fd_install kprobe) | Immediate |
-| Syscall anomaly | Never (WASI SFI only) | <1ms (sys_enter tracepoint) | New capability |
-| Disk I/O saturation | 5–10min (Prometheus alert) | ~1ms (block_rq_complete) | 600x |
+| Signal | Kernel mode | Userspace fallback |
+|---------|-------------|--------------------|
+| Process lifecycle | Tracepoint/syscall events for registered runtime TIDs and the node PID | Supervisor task and health-loop state |
+| TCP activity | TID-scoped connection events with port correlation | Socket and dependency health probes |
+| File descriptors | TID-scoped open/install/close activity | Process-level polling |
+| Memory pressure | Events restricted to the dedicated `wasm-node` cgroup | `/proc/meminfo` polling |
+| Block I/O | Issue/completion records originating in the node cgroup | No equivalent application-attributed signal |
+| Syscalls | Counts for registered runtime TIDs | No equivalent syscall stream |
+| Namespace policy | Socket and namespace-related events for registered TIDs | Runtime socket policy remains authoritative |
 
-### What eBPF Enables
+These signals shorten some detection paths and improve attribution, but they do not replace the supervisor, WASI policy enforcement, readiness checks, Prometheus alerts, or host monitoring.
 
-1. **Preemptive recovery**: Detect memory pressure *before* the OOM killer fires, allowing proactive instance pruning
-2. **Zero-day syscall detection**: Catch hypothetical Wasmtime sandbox escapes at the kernel level
-3. **Network partition prediction**: Detect TCP retransmits on the NATS connection before the heartbeat fails
-4. **FD leak detection**: Identify file descriptor leaks before they cause `EMFILE` failures
-5. **No external agents**: eBPF programs load from within `wasm-node` itself — no Datadog, Falco, or Tetragon required
+### What eBPF enables
+
+1. Earlier resource-pressure and lifecycle signals for the supervisor and proxy.
+2. TID and node-cgroup attribution for events that retain application execution context.
+3. Metrics for monitor availability, parser failures, queue saturation, and ring-buffer drops.
+4. Node-local namespace and forged-header defense in depth.
+5. A required-monitoring mode that fails readiness when kernel monitoring cannot remain active.
+
+The current in-process runtime is a single trust domain. Applications share the `wasm-node` process, UID, address space, capabilities, and node cgroup; eBPF does not turn that design into hostile multi-tenant isolation.
 
 ---
 
@@ -96,381 +101,248 @@ On this platform, eBPF provides **sub-millisecond detection** of failures that u
 | Component | Technology | Purpose |
 |-----------|-----------|---------|
 | eBPF Programs | aya-rs (Rust → BPF bytecode) | Kernel-level event hooks |
-| Ring Buffer | Linux perf buffer | Lock-free kernel→userspace communication |
+| Ring buffers | aya ring buffers, one set per loaded object | Kernel-to-userspace event delivery |
 | Loader | `aya::Ebpf::load()` | Load and attach programs at runtime |
 | Consumer | Tokio background task | Read events, parse, dispatch |
-| Action Dispatcher | Rust async | Execute recovery actions |
+| Action Dispatcher | Rust async | Translate events into metrics, backpressure, cleanup callbacks, and control-plane events |
 
 ---
 
 ## eBPF Programs
 
-The platform loads six eBPF programs, each monitoring a different subsystem. All programs share a single ring buffer and a configuration map.
+The build produces seven independent eBPF objects. Each object owns its program links, CONFIG map, monitoring identity maps, ring buffer, and drop counters for the lifetime of the monitor handle.
 
-### 1. Process Tracker
+| Object | Main scope | Platform use |
+|--------|------------|--------------|
+| `process_tracker` | Raw syscall entry plus process exec/exit for registered runtime TIDs and the node PID | Lifecycle counters and exit/OOM signals |
+| `tcp_monitor` | TCP state/send/receive hooks for registered runtime TIDs | Connection counts, retransmit signals, and port-to-TID close correlation |
+| `fd_watcher` | File open/install/close activity for registered runtime TIDs | FD counts and threshold actions |
+| `mem_pressure` | Direct reclaim activity restricted to the dedicated node cgroup | Pressure level, idle pruning, and backpressure |
+| `disk_monitor` | Block request issue/completion originating from the node cgroup | Latency and completed-byte metrics |
+| `syscall_counter` | Raw syscall entry for registered runtime TIDs | Syscall-rate and selected security signals |
+| `namespace_enforcer` | Socket and namespace-related hooks for registered runtime TIDs | Node-local mesh identity and forged-header defense in depth |
 
-**Hooks**: `sched_process_exec`, `sched_process_exit` tracepoints
+### 1. Process tracker
 
-**Monitors**:
-- Wasm instance thread exits (panic, kill, OOM)
-- Unexpected child processes (defense in depth)
-- OOM kills by signal detection (`SIGKILL` with exit code 0)
+The process tracker observes raw syscall entry plus process execution and exit events. It accepts events for registered WASI runtime TIDs and for the node PID, and carries the registered application identity when the event occurs in a runtime worker.
 
-**Event**: `ProcessEvent`
+The userspace dispatcher uses these records for lifecycle, exit, and OOM-related counters and callbacks. A process event is an early signal for reconciliation; the supervisor task result and health state remain the source used to decide whether capacity must be replaced. The monitor does not claim that every `SIGKILL` is an OOM kill without supporting evidence.
 
-**Actions**:
-- **OOM kill**: Notify Supervisor immediately, emit metric, log SECURITY alert
-- **Normal exit**: Preemptively remove from upstream table (no 502s during health loop gap)
-- **Signal death**: Log signal number, notify Supervisor
+### 2. TCP monitor
 
-**Prometheus metrics**:
-```
-wasm_ebpf_oom_kills_total{app_id="api-users"}
-wasm_ebpf_process_exits_total{app_id="api-users",reason="oom|signal|normal"}
-```
+The TCP object observes state, send, and receive hooks for registered runtime TIDs. It records connection activity and retransmit-related signals and maintains port-to-TID correlation so a close event can release the correct runtime connection reservation.
 
-### 2. TCP Connection Monitor
+This correlation is especially relevant for long-lived WASI CLI workloads: the close may arrive outside the immediate request path. The dispatcher can update pressure and connectivity metrics, but NATS health is also checked at the protocol layer; a retransmit alone is not treated as proof that JetStream is unavailable.
 
-**Hooks**: `inet_sock_set_state` tracepoint
+### 3. File-descriptor watcher
 
-**Monitors**:
-- TCP connection state transitions per PID
-- Connection count per instance
-- Retransmit detection (earliest network degradation signal)
-- Connection storm detection (burst of `SYN_SENT`)
+The FD object observes file open, descriptor installation, and close activity for registered runtime TIDs. Its soft and hard thresholds come from the eBPF configuration and can trigger warning, pruning, or backpressure behavior through the userspace dispatcher.
 
-**Event**: `TcpEvent`
+The WASI `ResourceTable` limit remains the guest-facing descriptor bound. Kernel FD events add visibility and recovery signals around the whole node process; they are not a substitute for the runtime limit and do not provide byte-level filesystem accounting.
 
-**Actions**:
-- **Connection limit exceeded**: Activate backpressure before userspace rate limiter sees the request
-- **Retransmit spike on NATS port (4222)**: Preemptively mark NATS degraded, start catch-up early
-- **Connection storm**: Activate Slowloris protection (reduce timeouts, lower per-IP limits)
+### 4. Memory-pressure monitor
 
-**Prometheus metrics**:
-```
-wasm_ebpf_tcp_retransmits_total{node_id="node-1"}
-wasm_ebpf_tcp_connections{pid="12345"}
-```
+The memory object observes direct-reclaim activity and restricts accepted events to the dedicated `wasm-node` cgroup. Configured low and critical page thresholds feed pressure levels into the dispatcher.
 
-### 3. File Descriptor Watcher
+At higher pressure the dispatcher can stop new work, prune idle instances, and invoke the configured largest-instance termination callback. These actions reduce risk but cannot guarantee that the host OOM killer never runs. Operators must still configure host and cgroup memory limits and alert on sustained pressure.
 
-**Hooks**: `fd_install` (open), `do_filp_close` (close) kprobes
+### 5. Disk-I/O monitor
 
-**Monitors**:
-- FD count per PID in real time
-- FD limit approach (80% soft limit)
-- FD leak detection (monotonic increase over 3 windows)
+The disk object correlates block request issue and completion records that originate from the node cgroup. It exports completed operation, byte, and latency information and identifies operations over `disk_slow_threshold_ns`.
 
-**Event**: `FdEvent`
+Block tracepoints describe kernel requests rather than WASI file operations. Direct I/O can retain useful node/application context, while buffered ext4 writeback may later run in a kernel worker. The monitor deliberately avoids assigning that work to an arbitrary application, so its byte totals must not be used as authoritative per-tenant billing or quota data.
 
-**Actions**:
-- **Soft limit (80%)**: Log warning, emit gauge, consider pruning idle instances
-- **Hard limit (95%)**: Kill most idle instance, activate backpressure until FDs freed
-- **FD leak**: Log SECURITY alert, kill instance, audit log entry
+### 6. Syscall counter
 
-**Prometheus metrics**:
-```
-wasm_ebpf_fd_usage_ratio{pid="12345"}
-wasm_ebpf_fd_limit_approaching_total{pid="12345"}
-```
+The syscall object counts raw syscall entry for registered runtime TIDs and reports selected security-sensitive activity and configured rate pressure. The dispatcher can emit metrics, audit/control-plane events, and a workload response when its classification rules match.
 
-### 4. Memory Pressure Sentinel
+These events are defense-in-depth evidence. Wasmtime and WASI capability policy remain the application sandbox boundary, and operators should correlate the syscall number, TID, application registration, surrounding audit events, and artifact provenance before classifying an incident.
 
-**Hooks**: `try_to_free_pages` kprobe, `vmpressure_level_change` tracepoint
+### 7. Namespace enforcer
 
-**Monitors**:
-- `kswapd` background reclaim activity
-- Direct reclaim (allocation path under pressure)
-- `vmpressure` notifier levels: low, medium, critical
-- Anonymous page tracking (Wasm linear memory)
+The namespace object observes socket and namespace-related activity for registered runtime TIDs. Together with the userspace namespace map, it supports source-port-to-application attribution for requests arriving at the loopback internal gateway and detects selected attempts to forge internal identity headers.
 
-**Event**: `MemPressureEvent`
+The internal gateway strips caller-supplied identity headers and fails closed when required attribution is unavailable. Cross-namespace calls require an explicit allowlist. The object does not provide cross-host identity or forwarding; `<app>.<namespace>.internal` deliberately resolves to the node-local gateway.
 
-**Graduated Response**:
+### Program and resource metrics
 
-| Level | Trigger | Action |
-|-------|---------|--------|
-| **Low** | `kswapd` active | Log info. Emit `memory_pressure=1`. No instance action. |
-| **Medium** | Direct reclaim | Log warning. Emit `memory_pressure=2`. Prune idle instances. Backpressure 30s. No cold starts. |
-| **Critical** | vmpressure critical | Log error. Emit `memory_pressure=3`. Kill largest instance. Kill non-essential instances. Permanent backpressure. Publish `NodeUnderPressure` to NATS. |
+The event dispatcher exports these workload and resource series in addition to the monitor-health series listed later in this guide:
 
-This graduated response **prevents the OOM killer from ever firing**.
+| Metric | Meaning |
+|--------|---------|
+| `wasm_ebpf_oom_kills_total` | OOM-classified process events by application |
+| `wasm_ebpf_process_exits_total` | Process exits by application and classification |
+| `wasm_ebpf_signal_deaths_total` | Signal-related deaths by application |
+| `wasm_ebpf_tcp_retransmits_total` | TCP retransmit observations |
+| `wasm_ebpf_nats_retransmits_total` | Retransmits associated with the NATS path |
+| `wasm_ebpf_tcp_connection_count` | Current tracked TCP connections |
+| `wasm_ebpf_fd_count` | Current tracked descriptor count |
+| `wasm_ebpf_fd_usage_ratio` | Descriptor use relative to the configured threshold |
+| `wasm_ebpf_memory_pressure_level` | Current dispatcher pressure level |
+| `wasm_ebpf_disk_io_latency_seconds` | Completed block-request latency histogram |
+| `wasm_ebpf_disk_io_bytes_total` | Completed bytes by operation/device labels |
+| `wasm_ebpf_security_violations_total` | Classified syscall or namespace security events |
 
-**Prometheus metrics**:
-```
-wasm_ebpf_memory_pressure{node_id="node-1"}  # 0=none, 1=low, 2=medium, 3=critical
-```
+Label sets are defined by `crates/ebpf-monitor/src/metrics.rs`. Keep PromQL and alert labels synchronized with that registry when metrics change.
 
-### 5. Disk I/O Monitor
+### Identity scope
 
-**Hooks**: `block_rq_issue`, `block_rq_complete` tracepoints
+WASI CLI execution uses a dedicated runtime thread. Its TID is registered in every relevant MONITORED_TIDS map. The loader also records the cgroup-v2 ID of the `wasm-node` service. Events outside those identities are discarded where the probe supports that filter.
 
-**Monitors**:
-- I/O latency per block device (issue → complete time)
-- Slow I/O detection (threshold: 50ms default)
-- Write amplification tracking
+Buffered filesystem writeback can run in a kernel worker after application context is lost. The disk monitor excludes or reports such work without claiming exact per-application ownership. Byte-accurate filesystem and egress quotas remain runtime or host-wrapper work.
 
-**Event**: `DiskIoEvent`
+### Event handling and recovery
 
-**Actions**:
-- **Slow I/O**: Log warning, emit histogram metric. If device holds `state.redb`, switch to read-only temporarily.
-- **Sustained slow I/O (>30s)**: Enter degraded mode. Publish `NodeUnderPressure`. Other nodes stop steering traffic.
-- **Recovered**: Exit degraded mode. Publish `NodeReady`.
+The userspace dispatcher updates metrics and can invoke supervisor callbacks for idle pruning, largest-instance termination, and backpressure. Recovery actions depend on the event type and configured threshold; an observed kernel event does not by itself prove compromise.
 
-**Prometheus metrics**:
-```
-wasm_ebpf_disk_io_latency_seconds_bucket{dev="sda"}
-wasm_ebpf_disk_slow_io_total{dev="sda"}
-```
+Security incidents are published through the normal NATS control path when the dispatcher classifies a matching event. Operators must correlate the application ID, TID/cgroup identity, audit record, node logs, and workload behavior before deciding whether an artifact is malicious.
 
-### 6. Syscall Anomaly Detector
+### Lifecycle
 
-**Hooks**: `raw_syscalls/sys_enter` tracepoint
-
-**Monitors**:
-- Syscall rate per PID (detect tight syscall loops)
-- Privileged syscalls (`ptrace`, `bpf`, `mount`, `setuid`)
-- Unexpected `execve` from Wasm instances
-- Network control syscalls (`bind` on unauthorized ports)
-
-**Event**: `SyscallEvent`
-
-**Actions**:
-- **Privilege escalation**: **Critical security incident**. Kill instance immediately. Log SECURITY alert. Emit metric. Publish `SecurityIncident` to NATS. Quarantine artifact hash.
-- **High syscall rate**: Reduce fuel allocation or kill if persistent.
-- **`execve` from Wasm**: Kill instance, SECURITY alert (indicates Wasmtime bug or compromise).
-
-**Prometheus metrics**:
-```
-wasm_ebpf_security_violations_total{node_id="node-1",syscall="ptrace"}
-wasm_ebpf_syscall_rate{pid="12345"}
-```
+`LoadedEbpf` owns all programs, maps, and links. Dropping the monitor detaches them. The lifecycle validation script repeatedly deploys, restarts, and removes workloads and verifies that stale application identities are not left in the maps.
 
 ---
 
 ## Configuration
 
-### Config File
+### Config file
 
 ```toml
+[runtime]
+isolation_mode = "single-trust-domain"
+
 [ebpf]
 enabled = true
-fd_soft_limit = 8192          # Warn at 80% of 10240
-fd_hard_limit = 9728          # Kill at 95% of 10240
-mem_low_threshold_pages = 65536      # ~256 MB free
-mem_critical_threshold_pages = 16384 # ~64 MB free
-disk_slow_threshold_ns = 50000000    # 50 ms
+required = true
+fd_soft_limit = 8192
+fd_hard_limit = 9728
+mem_low_threshold_pages = 65536
+mem_critical_threshold_pages = 16384
+disk_slow_threshold_ns = 50000000
 tcp_conn_limit_per_pid = 10000
-syscall_rate_limit = 100000   # per second
+syscall_rate_limit = 100000
 sampling_period_secs = 10
-
-# Enable/disable individual programs
-enable_process_tracker = true
-enable_tcp_monitor = true
-enable_fd_watcher = true
-enable_mem_pressure = true
-enable_disk_monitor = true
-enable_syscall_counter = true
+enable_namespace_enforcer = true
+gateway_port = 9080
+enable_forged_header_detect = true
 ```
 
-### Environment Variables
+Production admission requires `runtime.isolation_mode = "single-trust-domain"` and `ebpf.required = true`. Optional mode starts the reduced userspace fallback and reports degraded monitoring when loading, attachment, a probe, or the consumer fails.
+
+### Environment variables
+
+The normal `WASM_NODE_<SECTION>_<KEY>` mapping applies to supported configuration fields, for example:
 
 ```bash
 WASM_NODE_EBPF_ENABLED=true
-WASM_NODE_EBPF_FD_SOFT_LIMIT=8192
+WASM_NODE_EBPF_REQUIRED=true
 WASM_NODE_EBPF_MEM_CRITICAL_THRESHOLD_PAGES=16384
 WASM_NODE_EBPF_DISK_SLOW_THRESHOLD_NS=50000000
 ```
 
-### Hot-Reloadable Parameters
+### Hot-reloadable thresholds
 
-All eBPF thresholds are hot-reloadable via `wasm-ctl` or the admin API:
+The supported hot-config keys use dotted names:
 
 ```bash
-# View current eBPF config
-wasm-ctl node config | grep ebpf
-
-# Update threshold at runtime
-wasm-ctl node config --set ebpf_fd_soft_limit=4096
-wasm-ctl node config --set ebpf_disk_slow_threshold_ns=100000000
-
-# Disable a specific program
-wasm-ctl node config --set ebpf_enable_syscall_counter=false
+wasm-ctl node config --json | jq '.ebpf'
+wasm-ctl node config \
+  --set ebpf.mem_low_threshold_pages=65536 \
+  --set ebpf.mem_critical_threshold_pages=16384 \
+  --set ebpf.disk_slow_threshold_ns=50000000
 ```
 
-The updated config is written to the eBPF config map within 1 second. No restart required.
+The node updates the userspace dispatcher and every loaded kernel CONFIG map. Enabling or disabling eBPF, changing required mode, and changing individual program selection are startup decisions and require a controlled node restart.
 
 ---
 
 ## Operational Commands
 
-### Check eBPF Status
+### Check eBPF status
 
 ```bash
 wasm-ctl node ebpf-status
 ```
 
-Example output:
-```
-Mode:                    eBPF (kernel)
-Kernel:                  6.8.0-generic
-BTF:                     available
-Programs loaded:         6/6
-Ring buffer size:        1 MB
-Events processed:        1048576
-Events dropped:          0
-Parse errors:            0
+The response reports whether eBPF is active, required, or degraded; the number of attached programs; the degradation reason; queue/backpressure state; event and parser counters; and resource/security totals.
 
-Backpressure:            normal
-Degraded mode:           no
-Pressure level:          none
-
-OOM kills (total):       0
-Process exits (total):   12
-TCP retransmits:         3
-Security violations:     0
-FD limit approaches:     1
-Disk slow I/O events:    0
-Memory pressure events:  2 (low)
-```
-
-### Manual Recovery Commands
+### Manual recovery commands
 
 ```bash
-# Prune idle instances to free FDs
+# Prune instances idle for at least 60 seconds
 wasm-ctl node ebpf-config --prune-idle --idle-threshold-secs 60
 
-# Kill the largest instance (memory pressure recovery)
-wasm-ctl node ebpf-config --kill-largest --reason "manual memory pressure recovery"
-
-# Reset backpressure to normal
-wasm-ctl node ebpf-config --clear-backpressure
-
-# Trigger a full eBPF program reload (if maps are corrupted)
-wasm-ctl node ebpf-config --reload
+# Terminate the instance currently reporting the largest memory footprint
+wasm-ctl node ebpf-config \
+  --kill-largest \
+  --kill-largest-reason "manual memory pressure recovery"
 ```
 
-### View Recent Security Incidents
+The CLI does not expose eBPF reload or clear-backpressure actions. Program reload requires a controlled node restart. Backpressure clears through the dispatcher's recovery logic.
+
+### Metrics queries
 
 ```bash
-# Last 20 security events
-grep "SECURITY" /var/log/wasm-node/audit.jsonl | tail -20
-
-# Or via NATS event stream
-wasm-ctl events --subject "security.incidents.>" --last 50
-```
-
-### Metrics Queries
-
-```bash
-# Current memory pressure by node
-curl -s http://node:9090/metrics | grep wasm_ebpf_memory_pressure
-
-# Security violations in last 5 minutes
+curl -s http://node:9090/metrics | grep '^wasm_ebpf_'
 curl -s http://prometheus:9090/api/v1/query \
-  -d 'query=rate(wasm_ebpf_security_violations_total[5m])'
-
-# FD usage ratio by PID
-curl -s http://node:9090/metrics | grep wasm_ebpf_fd_usage_ratio
+  --data-urlencode 'query=rate(wasm_ebpf_security_violations_total[5m])'
 ```
+
+Security incidents are available in the configured audit/log pipeline and NATS subject permissions. There is no top-level `wasm-ctl events` command.
 
 ---
 
 ## Security Incident Response
 
-### Severity Levels
+### Severity and evidence
 
-| Level | Event | Auto-Action | Operator Action |
-|-------|-------|-------------|-----------------|
-| **Critical** | Privilege escalation syscall (`ptrace`, `bpf`, `mount`) | Kill instance, quarantine hash, publish `SecurityIncident` | Investigate immediately. Check if false positive. Update WASI policy if needed. |
-| **Critical** | `execve` from Wasm instance | Kill instance, quarantine hash | Investigate. Likely Wasmtime bug or compromised host. |
-| **High** | FD leak (monotonic increase) | Kill instance, audit log | Review app code. Check for missing `close()` in WASI bindings. |
-| **High** | Memory pressure critical | Kill largest instance, backpressure | Add RAM or reduce instance density. |
-| **Medium** | Syscall rate limit exceeded | Throttle fuel or kill | Check for infinite loops in app. |
-| **Medium** | TCP retransmit spike | Mark NATS degraded | Check network path to NATS. |
-| **Low** | FD soft limit approach | Log, emit metric | Monitor. Prune idle instances if sustained. |
+| Signal | Automatic platform response | Operator check |
+|--------|-----------------------------|----------------|
+| Process exit or OOM classification | Counters, audit/log signal, and configured backpressure callback | Confirm task exit, billing finalization, and replacement capacity |
+| FD threshold | Metric update; hard-threshold handling can prune idle instances and enable backpressure | Inspect node FD use and workload lifecycle |
+| Memory pressure | Pressure metric; medium/critical handling can prune idle instances and enable backpressure | Check host/cgroup memory, recent deployments, and sustained pressure |
+| TCP retransmit or connection pressure | Metrics and degraded/backpressure signals according to dispatcher logic | Check NATS and application network paths |
+| Syscall or forged-header violation | Security metric, audit/control-plane event, and configured workload response | Correlate TID, application identity, policy, and artifact provenance |
 
-### Incident Response Playbook
+### Incident response playbook
 
-**Step 1: Identify**
-```bash
-wasm-ctl node ebpf-status
-# Check security_violations count
-```
+1. Record `wasm-ctl node ebpf-status`, readiness, relevant Prometheus series, and the node's structured logs.
+2. Confirm that the reported TID and cgroup belong to the expected `wasm-node` process and application.
+3. Fence or remove the application through the normal deployment lifecycle when containment is required.
+4. Preserve the artifact digest, deployment manifest, audit records, and release provenance.
+5. Reproduce on an isolated node class before changing thresholds or WASI policy.
+6. Deploy a new signed artifact version and verify that counters stabilize.
 
-**Step 2: Isolate**
-```bash
-# The system already killed the instance and quarantined the hash
-# Verify the app is not running
-wasm-ctl instances --app <app_id>
-```
-
-**Step 3: Investigate**
-```bash
-# Get incident details from audit log
-jq 'select(.event_type == "SyscallAnomaly")' /var/log/wasm-node/audit.jsonl | tail -5
-
-# Check if it was a false positive
-grep "SyscallAnomaly" /var/log/wasm-node/app.log | grep <pid>
-```
-
-**Step 4: Remediate**
-- If false positive: Update WASI policy allowlist in config, reload
-- If real: Do not redeploy same artifact hash. Patch app. Deploy new version.
-
-**Step 5: Verify**
-```bash
-wasm-ctl node ebpf-status
-# Confirm security_violations count stable
-```
+Do not assume that the monitor quarantines every suspicious artifact automatically. Containment and artifact admission remain separate controls.
 
 ---
 
 ## Monitoring eBPF Itself
 
-### eBPF Health Metrics
+The monitor exports availability and data-path health separately from application health:
 
-The eBPF system exports its own health metrics:
-
+```text
+wasm_ebpf_active
+wasm_ebpf_monitoring_required
+wasm_ebpf_monitoring_degraded
+wasm_ebpf_monitoring_failures_total{reason="..."}
+wasm_ebpf_events_processed_total
+wasm_ebpf_events_by_type_total{event_type="..."}
+wasm_ebpf_events_parse_errors_total
+wasm_ebpf_ring_buffer_dropped_events_total{program="..."}
+wasm_ebpf_ring_buffer_drop_counter_read_errors_total{program="..."}
+wasm_ebpf_dispatch_queue_depth
+wasm_ebpf_dispatch_queue_capacity
+wasm_ebpf_dispatch_queue_saturations_total
 ```
-wasm_ebpf_programs_loaded{program="process_tracker"} 1
-wasm_ebpf_programs_loaded{program="tcp_monitor"} 1
-wasm_ebpf_events_processed_total 1048576
-wasm_ebpf_events_dropped_total 0
-wasm_ebpf_parse_errors_total 0
-wasm_ebpf_ring_buffer_full_total 0
+
+The tracked rules in `config/prometheus/rules/wasm-cloud-platform.yml` distinguish monitor unavailability from a down node. Validate them and the state-scoped Alertmanager delivery path with:
+
+```bash
+bash scripts/vm/validate-alerting.sh --state-file PATH
 ```
 
-### Alerts for eBPF System Health
-
-```yaml
-# prometheus/alerts.yml
-- alert: EbpfProgramsNotLoaded
-  expr: sum(wasm_ebpf_programs_loaded) < 6
-  for: 1m
-  labels:
-    severity: warning
-  annotations:
-    summary: "eBPF programs not fully loaded on {{ $labels.node_id }}"
-
-- alert: EbpfEventsDropped
-  expr: rate(wasm_ebpf_events_dropped_total[5m]) > 0
-  for: 1m
-  labels:
-    severity: warning
-  annotations:
-    summary: "eBPF ring buffer dropping events on {{ $labels.node_id }}"
-    description: "Increase ring buffer size or reduce event generation."
-
-- alert: EbpfParseErrors
-  expr: rate(wasm_ebpf_parse_errors_total[5m]) > 0
-  for: 1m
-  labels:
-    severity: warning
-  annotations:
-    summary: "eBPF event parsing errors on {{ $labels.node_id }}"
-    description: "Kernel/userspace struct mismatch. May need platform upgrade."
-```
+A zero event count is not sufficient proof of monitor health; alert on the availability, drop, parse-error, and queue-saturation series as well.
 
 ---
 
@@ -510,7 +382,7 @@ wasm-ctl node ebpf-status
 **Fix:**
 - Heavy load: Increase ring buffer size (requires restart)
 - Reduce sampling: Increase `sampling_period_secs`
-- Disable less critical programs: Set `enable_disk_monitor = false`
+- If the drop source remains saturated, change startup probe selection only through a reviewed code/config change and restart; the current operator schema does not expose a per-program disk-monitor toggle.
 
 ### Symptom: False positive security violations
 
@@ -524,9 +396,9 @@ cat /usr/include/asm/unistd_64.h | grep <nr>
 ```
 
 **Fix:**
-- Legitimate syscall: Update WASI policy allowlist in node config
-- Hot-reload config: `wasm-ctl node config --set ...`
-- If persistent: Disable syscall counter temporarily
+- Legitimate workload activity: verify the event attribution and adjust the WASI policy through a reviewed deployment manifest when that policy actually governs the operation.
+- Threshold-only changes: use the three documented `ebpf.*` hot-config keys.
+- Persistent unexplained events: fence the workload and reproduce on an isolated node; the current operator schema does not expose a live syscall-counter toggle.
 
 ### Symptom: eBPF causing high CPU
 
@@ -541,70 +413,42 @@ cat /proc/vmstat | grep -i bpf
 
 **Fix:**
 - Reduce sampling frequency: `sampling_period_secs = 30`
-- Disable heavy programs (disk monitor on high-I/O nodes)
+- If a specific probe dominates cost, change startup probe selection through a reviewed configuration/code change and restart the node
 - Ensure BTF is available (reduces program complexity)
 
 ---
 
 ## Non-Linux Fallback
 
-On macOS, Windows, or Linux kernels < 4.15, eBPF is not available. The platform degrades gracefully:
+When eBPF is disabled or optional and unavailable, the monitor starts a userspace polling fallback. It provides process-level memory/FD/TCP observations and feeds the same dispatcher where supported.
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│              Non-Linux / Old Kernel Host                     │
-│                                                              │
-│   ┌─────────────────┐    ┌─────────────────┐                │
-│   │ Userspace Polling│───►│ Existing Health │                │
-│   │ (5s interval)   │    │ Loop (Step 07)  │                │
-│   └─────────────────┘    └─────────────────┘                │
-│                                                              │
-│   Detection latency: seconds instead of milliseconds         │
-│   No syscall anomaly detection                               │
-│   No preemptive memory pressure handling                     │
-│   All other platform features work normally                  │
-└─────────────────────────────────────────────────────────────┘
-```
+| Capability | Kernel mode | Userspace fallback |
+|------------|-------------|--------------------|
+| TID/cgroup application attribution | Available for supported probes | Unavailable |
+| Namespace/forged-header kernel signals | Available | Unavailable |
+| Block request latency/bytes | Available within the documented attribution limit | Unavailable |
+| Process-level pressure sampling | Available alongside events | Available |
+| Required-monitoring readiness | Passes only while kernel monitoring is active | Fails |
 
-### Fallback Behavior
-
-| Feature | eBPF Mode | Fallback Mode |
-|---------|-----------|---------------|
-| Instance crash detection | <1ms | 0–5s (health loop) |
-| Memory pressure | Preemptive (3 levels) | Reactive (OOM kill) |
-| FD exhaustion | Pre-warning | At failure time |
-| Syscall anomaly | Detected | Not detected |
-| Disk I/O saturation | ~1ms | Prometheus alert (minutes) |
-| TCP retransmit prediction | <1ms | Heartbeat timeout (seconds) |
-
-The platform is **fully functional** without eBPF. eBPF is an enhancement, not a dependency.
+The fallback is suitable only where reduced monitoring is explicitly accepted. Production configuration requires eBPF because node-local mesh identity and persistent WASI CLI connection cleanup depend on its kernel events.
 
 ---
 
 ## Performance Impact
 
-### Benchmarks
+The repository does not claim a universal latency or CPU overhead. Cost varies with kernel, enabled hooks, event rate, workload syscall/network behavior, and node size.
 
-Measured on a 16-core AMD EPYC, kernel 6.8, 10,000 requests/sec:
+Use the controlled validation script to compare a baseline and monitored run on the intended node class:
 
-| Metric | Without eBPF | With eBPF | Overhead |
-|--------|--------------|-----------|----------|
-| Request latency (p99) | 12ms | 12.1ms | +0.8% |
-| CPU usage (node) | 45% | 47% | +4.4% |
-| Memory usage | 2.1GB | 2.15GB | +2.4% |
-| eBPF ring buffer throughput | — | 50,000 events/sec | — |
+```bash
+bash scripts/vm/validate-ebpf-overhead.sh \
+  --state-file PATH \
+  --evidence-dir EVIDENCE_DIRECTORY
+```
 
-### When eBPF Overhead is Noticeable
+Preserve the raw samples and result summary with the production-validation evidence. A Firecracker or WSL result characterizes that test environment only; repeat the gate on every production host class.
 
-- **Very high syscall rates** (>100k/sec per PID): syscall counter adds ~1μs per syscall
-- **High churn workloads** (thousands of spawn/kill per minute): process tracker fires frequently
-- **Old kernels without BTF**: programs are less optimized, higher overhead
-
-### Mitigations
-
-- Increase `sampling_period_secs` to reduce periodic work
-- Disable individual programs if not needed
-- Use `perf_event_open` instead of tracepoints where available (lower overhead)
+To reduce overhead, first identify the busy event type and ring-buffer source from metrics. Changing startup program selection requires a restart, and weakening required monitoring changes the production security contract.
 
 ---
 
@@ -614,14 +458,11 @@ Measured on a 16-core AMD EPYC, kernel 6.8, 10,000 requests/sec:
 |------|---------|
 | Check eBPF status | `wasm-ctl node ebpf-status` |
 | View eBPF config | `wasm-ctl node config \| grep ebpf` |
-| Update threshold | `wasm-ctl node config --set ebpf_fd_soft_limit=4096` |
+| Update thresholds | `wasm-ctl node config --set ebpf.mem_low_threshold_pages=65536` |
 | Prune idle instances | `wasm-ctl node ebpf-config --prune-idle` |
 | Kill largest instance | `wasm-ctl node ebpf-config --kill-largest` |
-| Reload eBPF programs | `wasm-ctl node ebpf-config --reload` |
 | View security incidents | `grep SECURITY /var/log/wasm-node/audit.jsonl` |
 | Check metrics | `curl http://node:9090/metrics \| grep wasm_ebpf` |
-| Disable eBPF | `wasm-ctl node config --set ebpf_enabled=false` |
-| Enable specific program | `wasm-ctl node config --set ebpf_enable_mem_pressure=true` |
 
 ---
 

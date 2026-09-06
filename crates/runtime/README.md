@@ -74,53 +74,34 @@ This review is the current evidence path for startup and instantiation latency. 
 
 ## Known Issues & Improvements
 
-### Concurrency Bugs
+The connection limit is reserved with compare-and-swap, disconnect uses underflow protection, and instance teardown resets or releases its active reservations. Remaining limitations are:
 
-- **TOCTOU race condition in `check_outbound_tcp_connect`**: The current implementation uses load-then-compare instead of a compare-and-swap (CAS) operation, which can lead to race conditions where multiple threads pass the check simultaneously.
-- **`outbound_connections_active` can underflow**: Using `fetch_sub` causes the counter to wrap to `u32::MAX` if decremented below zero, leading to incorrect connection tracking.
+- **`VirtualDns` is not the WASI resolver**: The type provides namespace-aware name mapping, while guest DNS uses Wasmtime's resolver subject to `allow_dns` and socket-address policy.
+- **Filesystem activity accounting is incomplete**: Allowed paths are enforced with WASI preopens and the resource table is capped by `max_open_fds`, but per-operation file write accounting is not connected to wrapped WASI host calls.
 
-### Security Issues
+### Removed Legacy Paths
 
-- **No preopened directories**: Wasm modules can access the entire host filesystem instead of being restricted to specific directories.
-- **`inherit_network()` gives full network access**: Full network access is granted before policy filtering is applied, creating a window where policies can be bypassed.
-- **CIDR strings re-parsed on every check**: CIDR strings should be parsed once at configuration time rather than on every policy check (performance and correctness concern).
-- **Invalid CIDR strings silently skipped**: Typos in CIDR configuration result in no blocking rather than an error, making misconfiguration hard to detect.
-- **`VirtualDns` not integrated into WASI DNS resolution**: The virtual DNS implementation is not connected to the actual WASI DNS resolution layer.
-
-### Dead Code
-
-- **`policy_wasi` module**: All 12 functions are orphans — never called by the WASI layer.
-- **`ChannelPipe` and `MetadataInjectingStream`**: Dead code with no callers.
-- **`wasi.rs`**: Dead code with an outdated API.
-- **`IoResourceTracker`**: Dead code, superseded by `PolicyEnforcer`.
+The old `policy_wasi`, `ChannelPipe`, `MetadataInjectingStream`, and `wasi.rs` paths have been removed. `IoResourceTracker` remains as the I/O snapshot returned in execution statistics.
 
 ### Design Issues
 
-- **`build_engine()` uses `expect()`**: Panics on configuration errors instead of returning a `Result`.
-- **Hardcoded WASI version list**: Must be manually maintained when new WASI versions are supported.
-- **`spawn_instance` returns `(RunningInstance, ())`**: The meaningless second element should be removed or replaced with useful data.
-- **`PreparedModule` owns Engine instead of `Arc<Engine>`**: Cloning the engine is expensive; it should be shared via `Arc`.
-- **`RunningInstance` has no Drop impl**: Policy counters are not cleaned up when an instance is dropped, leading to resource leaks.
-- **`PolicyCounters` not connected to Prometheus metrics pipeline**: Counters are tracked but not exported for monitoring.
+- **WASI interface versions are enumerated explicitly**: Detection lists supported `wasi:cli/run` and `wasi:http/incoming-handler` 0.2 versions, so another interface version requires a code update.
+- **Policy counters are runtime-local data**: Running CLI and HTTP instances expose their counters, but this crate does not itself publish them to Prometheus.
 
 ## Security Considerations
 
 ### Filesystem Access
 
-The lack of preopened directory support means Wasm modules have unrestricted access to the host filesystem. This is a critical security vulnerability that should be addressed before production deployment. Implement WASI preopened directories to restrict filesystem access to only what each module requires.
+Only paths listed in `policy.filesystem.allowed_paths` are preopened. With an empty list the guest receives no host-directory preopen. Directory and file permissions are derived from the create/delete policy flags, and a missing configured path causes instance preparation to fail. The remaining limitation is that the current WASI integration does not feed every file write into `max_fs_write_bytes` accounting.
 
 ### Network Policy Enforcement
 
-The current network policy enforcement has several gaps:
-
-1. **`inherit_network()` bypass**: Full network access is granted before policies are applied, creating a potential window for policy bypass.
-2. **TOCTOU in connection tracking**: Race conditions in `check_outbound_tcp_connect` could allow connection limits to be exceeded.
-3. **Counter underflow**: The `outbound_connections_active` underflow issue could be exploited to make the system think fewer connections are active than reality.
+Wasmtime networking is enabled at the context level so permitted applications can use sockets, then constrained with protocol flags and the composed socket-address callback. The callback applies bind, CIDR, DNS, and connection-limit policy.
 
 ### CIDR Configuration
 
-Invalid CIDR strings are silently ignored rather than causing errors. This means a typo in a security-critical CIDR block (e.g., blocking access to internal services) could result in the block not being applied. The system should fail fast on invalid CIDR configuration.
+Normal `PolicyConfig::resolve()` validation rejects invalid CIDRs before instance creation. The runtime's lower-level parsers also warn and omit an invalid entry if a caller constructs an `InstancePolicy` directly and bypasses that resolution path.
 
 ### DNS Resolution
 
-`VirtualDns` is not integrated into the WASI DNS resolution layer, meaning Wasm modules may bypass virtual DNS rules by using the host's DNS resolver directly.
+Guest name lookup uses Wasmtime's DNS path when `allow_dns` permits it and still passes resolved addresses through socket policy. `VirtualDns` is a separate mapping utility and is not installed as the guest's resolver.

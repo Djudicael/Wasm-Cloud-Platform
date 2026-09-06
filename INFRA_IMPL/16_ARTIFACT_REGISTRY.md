@@ -419,4 +419,3 @@ tokio::spawn(async move {
 - [x] A test uploads a binary via `PUT`, then retrieves it via `GET`, verifying byte-for-byte equality
 - [x] A test uploads a binary with a mismatched SHA-256 and verifies `400` is returned
 - [x] A test verifies that a second node can successfully fetch an artifact from the first node's artifact server
-```

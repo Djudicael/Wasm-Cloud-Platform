@@ -44,7 +44,7 @@ Each layer overwrites values from the previous one. Later layers always take pre
 ```
 ┌─────────────────┐     ┌──────────────────┐
 │  HotConfigUpdate │────▶│  HotConfigHandle  │
-│  (caller side)   │     │  (RwLock guard)   │
+│  (caller side)   │     │ (cloned snapshot) │
 └─────────────────┘     └────────┬─────────┘
                                  │
                                  ▼
@@ -74,7 +74,7 @@ Hot configuration allows runtime updates to a subset of settings. Updates are ap
 
 ### Hot Config Operations
 
-- **`HotConfigHandle::read()`** — Acquires a read lock and returns a guard to the current hot config.
+- **`HotConfigHandle::read()`** — Reads the configuration on a blocking worker and returns a cloned snapshot.
 - **`HotConfigHandle::apply_update()`** — Applies a `HotConfigUpdate` to the current hot configuration.
 - **`HotConfigHandle::reset()`** — Resets hot configuration back to the cold defaults.
 
@@ -84,7 +84,7 @@ Hot configuration allows runtime updates to a subset of settings. Updates are ap
 
 | Issue | Impact | Recommendation |
 |-------|--------|----------------|
-| `merge_config` overwrites non-Option fields with TOML defaults | Partial TOML files reset unset fields to defaults, silently discarding values from earlier layers | Change merge strategy to only overwrite fields explicitly present in TOML; use `Option` wrappers or serde defaults |
+| File overlays deserialize into a complete `NodeConfig` | Omitted non-optional TOML fields take their serde/default values. This is safe for the current defaults-first pipeline, but `merge_config` is not a general presence-aware merge for a future additional file layer | Use an all-optional file-overlay type before adding another pre-environment configuration layer |
 | Corrupted persisted hot config prevents node startup | No fallback mechanism; node cannot start if hot config file is malformed | Add fallback to cold defaults when hot config fails to load; log a warning |
 | `HotConfigHandle::read()/apply_update()/reset()` can panic on poisoned lock | A panic in any thread holding the lock crashes all subsequent operations | Return `Result` types instead of unwrapping; handle poisoned locks gracefully |
 

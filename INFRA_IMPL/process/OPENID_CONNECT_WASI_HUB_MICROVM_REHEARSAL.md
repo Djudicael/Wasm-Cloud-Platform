@@ -1,8 +1,17 @@
 # OpenID-Connect-WASI-Hub microVM rehearsal
 
+> **Current rerun note (2026-09-06):** The result and addresses below record an
+> earlier interactive run. The former `vmlinux-6.1.102` asset is superseded by
+> the checksum-pinned Linux 6.18.48 / Firecracker 1.16.1 testbed in
+> `scripts/vm/kernel-testbed.env`. For a new run, build assets with
+> `scripts/vm/build-all-images.sh`, use `assets/vmlinux-6.18` and the current
+> rootfs images, and let the state file supply all dynamic addresses. Do not
+> interpret the recorded local credentials or running-state claim as current.
+
 ## Result
 
-The application is running locally and is intentionally being retained for interactive testing.
+The application was running locally when this rehearsal was recorded and was
+intentionally retained for interactive testing at that time.
 
 - Application: `http://localhost:8088`
 - Realm login: `http://localhost:8088/realms/master/login`
@@ -51,25 +60,20 @@ cd /mnt/d/dev/Wasm-Cloud-Platform
 
 ## 1. Prepare VM assets
 
-The successful rehearsal used persistent Linux-side assets under `/var/lib/wasm-cloud-platform-test`:
+The recorded rehearsal used persistent Linux-side assets under
+`/var/lib/wasm-cloud-platform-test`:
 
-- Firecracker CI kernel `vmlinux-6.1.102`
+- Firecracker CI kernel `vmlinux-6.1.102` (superseded test fixture)
 - `wasm-node-rootfs.ext4`
 - `nats-rootfs.ext4`
 - `postgres-rootfs.ext4`
 
-Build the root filesystems with the canonical scripts:
+For a current rerun, build the versioned assets with the canonical aggregate
+script:
 
 ```bash
-mkdir -p /var/tmp/wcp-vm-assets
-OUTPUT_DIR=/var/tmp/wcp-vm-assets \
-  CARGO_TARGET_DIR=/var/tmp/wcp-target-djudicael \
-  scripts/vm/build-node-rootfs.sh
-OUTPUT_DIR=/var/tmp/wcp-vm-assets scripts/vm/build-nats-rootfs.sh
-OUTPUT_DIR=/var/tmp/wcp-vm-assets scripts/vm/build-postgres-rootfs.sh
-
-sudo install -m 0644 /var/tmp/wcp-vm-assets/*.ext4 \
-  /var/lib/wasm-cloud-platform-test/
+bash scripts/vm/install-firecracker.sh
+bash scripts/vm/build-all-images.sh
 ```
 
 Invoke the builders as the WSL user; they request `sudo` only for the image operations that need it. Running the whole node builder through `sudo` makes the shared Cargo target root-owned and later user builds fail on `.cargo-build-lock`.
@@ -81,9 +85,9 @@ The PostgreSQL image must include `postgresql17-contrib`; the application migrat
 For a fresh environment:
 
 ```bash
-export VM_KERNEL_PATH=/var/lib/wasm-cloud-platform-test/vmlinux-6.1.102
-export VM_NODE_ROOTFS=/var/lib/wasm-cloud-platform-test/wasm-node-rootfs.ext4
-export VM_NATS_ROOTFS=/var/lib/wasm-cloud-platform-test/nats-rootfs.ext4
+export VM_KERNEL_PATH="$PWD/assets/vmlinux-6.18"
+export VM_NODE_ROOTFS="$PWD/assets/wasm-node-rootfs.ext4"
+export VM_NATS_ROOTFS="$PWD/assets/nats-rootfs.ext4"
 
 bash scripts/vm/provision-testbed.sh \
   --preset production-like \

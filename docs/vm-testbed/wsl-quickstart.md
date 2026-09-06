@@ -132,6 +132,7 @@ cd Wasm-Cloud-Platform
 
 ```bash
 # Build all workspace binaries
+export CARGO_TARGET_DIR=/tmp/wasm-cloud-platform-target
 cargo build --release --bin wasm-node --bin wasm-ctl
 
 # Build test Wasm app

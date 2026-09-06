@@ -112,65 +112,27 @@ Exposes metrics including:
 
 ## Known Issues & Improvements
 
-### Critical Bugs
+### Garbage collection
 
-| Issue | Description | Impact |
-|-------|-------------|--------|
-| `get_db_path()` returns placeholder | Returns a hardcoded placeholder string instead of the actual database path | Breaks disk monitoring and path-dependent operations |
-| `get_billing_sequence()` returns wrong value | Returns the max node number instead of the max sequence number | Billing sequence tracking is incorrect |
-| `delete_raw_wasm_by_key` uses wrong key format | Key format mismatch means raw Wasm artifacts are never cleaned by GC | Disk space leaks over time |
-| `has_active_instances` always returns `false` | No artifacts are protected from garbage collection | Active artifacts may be prematurely deleted |
-| `prune_raw_wasm_older_than` ignores hours parameter | Deletes all raw Wasm regardless of age | Data loss of potentially needed artifacts |
-| `count_artifacts` always returns `0` | Artifact count metric is non-functional | Monitoring and alerting broken |
+- `prune_raw_wasm_older_than(hours)` currently ignores `hours` and deletes every raw artifact entry. Callers must not treat it as an age-based retention control.
+- `gc_artifacts()` deletes raw Wasm by the application-version artifact key even though the raw table is keyed by SHA-256. The compiled artifact and config are removed, but the corresponding raw blob may remain.
+- The private `has_active_instances()` helper uses the presence of a deployed configuration as a conservative proxy for activity. It protects deployed versions but does not observe the supervisor's live instance set.
 
-### Versioning & Sorting Issues
+### API and performance
 
-| Issue | Description | Impact |
-|-------|-------------|--------|
-| `prune_old_versions` uses lexicographic sort | Versions like `v1`, `v10`, `v2` sort incorrectly (`v10` before `v2`) | Wrong versions may be pruned, keeping older instead of newer |
+- Both `db_path()` and `get_db_path()` expose the recorded database path. The duplicate names should be consolidated.
+- `Store::db()` exposes the underlying redb handle to workspace callers, so those callers can bypass higher-level validation.
+- Billing queries scan and deserialize the billing table. Retention and query cost must be monitored as the table grows.
+- `artifact_exists()` loads the stored artifact rather than using a key-only existence check.
 
-### Design & Encapsulation Issues
+### Schema behavior
 
-| Issue | Description | Impact |
-|-------|-------------|--------|
-| `Store::db` is `pub` | Internal database handle is publicly accessible | Breaks encapsulation; callers can bypass Store API |
-| Mixed error types | Some methods return `redb::Error`, others return `PlatformError` | Inconsistent error handling for callers |
-| Duplicate `db_path()`/`get_db_path()` | Two methods with same purpose but different behavior | Confusion and potential bugs |
-| `panic!()` on schema downgrade | Schema version downgrade causes a panic instead of returning `Err` | Node crashes instead of graceful error handling |
-
-### Performance Issues
-
-| Issue | Description | Impact |
-|-------|-------------|--------|
-| `artifact_exists` loads entire artifact | Checks existence by loading the full artifact into memory | Wasteful memory usage; should use key existence check |
-| Billing queries do full table scan | Loads and deserializes all billing records to answer queries | Poor performance at scale |
-
-### Input Validation Issues
-
-| Issue | Description | Impact |
-|-------|-------------|--------|
-| No validation on SHA-256 path parameter | Artifact server accepts unvalidated SHA-256 hashes | Potential path traversal or injection attacks |
+Schema version 8 is current. Opening a database written by a newer binary returns a storage error; it no longer panics. Supported older schemas are backed up and migrated sequentially during `Store::open()`.
 
 ## Security Considerations
 
-### Critical
-
-| Issue | Severity | Description |
-|-------|----------|-------------|
-| KEK stored as plaintext | **High** | The Key Encryption Key is stored as plaintext in the database. If the database is compromised, all encrypted secrets can be decrypted. The KEK should be stored outside the database (e.g., in a hardware security module or external secret store). |
-| Artifact server has no authentication | **High** | The HTTP artifact server serves artifacts without any authentication or authorization. Any network-reachable client can download all stored artifacts, potentially exposing proprietary code or sensitive logic. |
-| No input validation on SHA-256 path parameter | **Medium** | The artifact server endpoint that accepts SHA-256 hashes does not validate the input format. Malformed input could cause unexpected behavior or be used for path traversal attacks. |
-
-### Recommendations
-
-1. **KEK Protection**: Move KEK storage out of the database. Use a dedicated secret management solution (HashiCorp Vault, AWS KMS, etc.) or at minimum encrypt the KEK itself with a key derived from a node-specific secret.
-
-2. **Artifact Server Authentication**: Add authentication middleware to the artifact server. At minimum, implement token-based or mutual TLS authentication. Consider adding authorization to restrict which artifacts each caller can access.
-
-3. **Input Validation**: Validate all user-supplied inputs, especially the SHA-256 hash path parameter. Ensure it matches the expected format (64 hexadecimal characters) before using it in database lookups.
-
-4. **Encryption at Rest**: Consider enabling redb's encryption-at-rest feature if available, or use filesystem-level encryption for the database file.
-
-5. **Access Logging**: Add audit logging for all read/write operations on sensitive data (secrets, KEK, API keys).
-
-6. **Principle of Least Privilege**: Make `Store::db` private and ensure all database access goes through the `Store` API, allowing validation and auditing at a single point.
+- **Seal the key-encryption key.** The storage crate persists opaque KEK bytes. Node startup seals that material with the configured file, command, Vault KV, Vault Transit, AWS KMS HMAC, or development-only passphrase source. Production admission rejects the insecure unsealed path.
+- **Artifact authorization is enforced for remote peers.** Loopback access is trusted. Non-loopback reads require a valid signed transfer manifest; writes require a compatible bearer token or signed manifest. Operators must still protect the listener with the platform TLS/network policy.
+- **Raw artifacts are content-addressed.** PUT computes SHA-256 and rejects a mismatch. GET uses the supplied value only as a redb key; it is not interpolated into a filesystem path.
+- **Protect the database file.** redb does not provide application-level encryption for every table. Use restrictive filesystem permissions and encrypted storage where the threat model requires it.
+- **Treat storage access as privileged.** Secrets, management state, artifact credentials, and billing records share the database. Limit direct use of `Store::db()` and audit sensitive mutations.

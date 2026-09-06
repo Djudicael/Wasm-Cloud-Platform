@@ -1,13 +1,14 @@
 # Level 4 - High-Assurance
 
-Use this guide when you want the strongest Linux posture the current codebase supports without adding new platform features.
+Use this guide for the strictest Linux control profile documented by this
+repository. It still depends on operator-supplied infrastructure and validation.
 
 See also: [`deployment-levels.md`](deployment-levels.md)
 
 ## When To Choose This Level
 
 - you already meet the Level 3 bar
-- you want the strongest currently supported posture
+- you need the strictest documented control profile
 - you are willing to accept higher operational discipline
 
 ## What To Install
@@ -48,9 +49,10 @@ Recommended additions:
 
 ## What Remains Deferred Even Here
 
-These are future hardening items, not required for the current Linux production target:
+These capabilities remain outside the implemented platform boundary and may be
+required by your threat model:
 
 - native TPM/HSM SDK integration
-- transparency logs / external attestations
+- an external transparency-log policy beyond the workflow's verified GitHub attestations
 - deeper Wasmtime host/resource wrapping for remaining byte-accurate paths
 - artifact-plane long-term identity end-state

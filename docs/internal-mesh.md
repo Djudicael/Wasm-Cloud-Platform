@@ -245,10 +245,10 @@ When the Supervisor spawns an instance, it injects service URLs as environment v
 ```bash
 # If "payment-service:v1" is running in the "production" namespace:
 #   - If payment-service has endpoint rules:
-PAYMENT_SERVICE_URL=http://payment-service.production.internal:9080
+PAYMENT_SERVICE_SERVICE_URL=http://payment-service.production.internal:9080
 
 #   - If payment-service has NO endpoint rules (fast path):
-PAYMENT_SERVICE_URL=http://127.0.0.1:10101
+PAYMENT_SERVICE_SERVICE_URL=http://127.0.0.1:10101
 ```
 
 The Supervisor uses the **slow path** (`<app>.<namespace>.internal:9080`) when the target app has endpoint-level gateway rules, so that auth, role/scope checks, API-key checks, rate limits, and circuit breakers are enforced on East-West traffic. It uses the **fast path** (direct loopback) when there are no endpoint rules.
@@ -258,8 +258,8 @@ For `wasi:http` / gRPC services on the slow path, the internal gateway now prese
 **Inside the Wasm app:**
 
 ```rust
-let payment_url = std::env::var("PAYMENT_SERVICE_URL")
-    .expect("PAYMENT_SERVICE_URL not set");
+let payment_url = std::env::var("PAYMENT_SERVICE_SERVICE_URL")
+    .expect("PAYMENT_SERVICE_SERVICE_URL not set");
 
 let client = reqwest::Client::new();
 let resp = client
@@ -493,8 +493,8 @@ quota = 1_000_000_000
 memory_pages = 2048
 max_instances = 5
 
-[policy]
-profile = "http_api"
+[policy.network]
+allow_inbound = true
 
 [placement]
 policy = "every_node"
@@ -502,7 +502,7 @@ policy = "every_node"
 [[gateway.endpoints]]
 path = "/process"
 methods = ["POST"]
-auth = "api_key"
+auth = "none"
 ```
 
 ```bash
@@ -524,8 +524,10 @@ quota = 500_000_000
 memory_pages = 2048
 max_instances = 10
 
-[policy]
-profile = "http_api"
+[policy.network]
+allow_inbound = true
+allow_outbound_tcp = true
+allow_dns = true
 
 [placement]
 policy = "every_node"
@@ -548,7 +550,7 @@ allowed_roles = ["user", "admin"]
 
 ```bash
 wasm-ctl deploy --manifest ./order-service.toml
-wasm-ctl routes add --host orders.example.com --app order-service:v1
+wasm-ctl routes add --host orders.example.com --app production/order-service:v1
 ```
 
 ### Inside order-service (Rust code)
@@ -567,7 +569,7 @@ async fn create_order(
     Json(payload): Json<Value>,
 ) -> Result<String, String> {
     // Call payment-service internally using the injected env var
-    let payment_url = std::env::var("PAYMENT_SERVICE_URL")
+    let payment_url = std::env::var("PAYMENT_SERVICE_SERVICE_URL")
         .unwrap_or_else(|_| "http://payment-service.production.internal:9080".to_string());
 
     let payment_resp = state.http
@@ -633,14 +635,14 @@ wasm-ctl app list --namespace production
 1. External client calls `POST https://orders.example.com/api/orders`
 2. Pingora routes to `order-service:v1`
 3. `order-service` spawns, receives the request
-4. `order-service` reads `PAYMENT_SERVICE_URL=http://payment-service.production.internal:9080` (injected by Supervisor)
+4. `order-service` reads `PAYMENT_SERVICE_SERVICE_URL=http://payment-service.production.internal:9080` (injected by Supervisor)
 5. `order-service` calls `http://payment-service.production.internal:9080/process`
 6. Embedded DNS resolves `payment-service.production.internal` → `127.0.0.1`
 7. `socket_addr_check` allows `127.0.0.1:9080` (internal gateway port)
 8. Internal gateway reads `Host: payment-service.production.internal:9080`
 9. Parses target: namespace="production", app="payment-service"
 10. Resolves in NamespaceRegistry → `127.0.0.1:10101`
-11. Endpoint rule says `auth = "api_key"` — validates `X-Api-Key` header
+11. Endpoint rule says `auth = "none"`; the gateway has already enforced the caller's workload namespace identity
 12. Request reaches `payment-service`, which processes the payment
 13. Response flows back through the gateway to `order-service`
 14. `order-service` returns the final result to the external client

@@ -21,7 +21,12 @@ Repository-scoped Open Agent Skills live in `.agents/skills` and are intended fo
   documentation stale. Treat `docs/` as the primary platform usage and operator
   manual, keep its root README navigation current, preserve historical
   production-validation evidence, and distinguish local microVM validation from
-  production guarantees.
+  production guarantees. Refresh documentation surgically: retain all accurate
+  technical detail, correct changed behavior, add missing APIs and operational
+  information, and remove only claims disproven by authoritative repository
+  sources. Review substantial deletions explicitly. Add or update Mermaid, text
+  diagrams, or tables when they make complex flows and trust boundaries easier
+  to understand without replacing the supporting explanation.
 - Use `$update-rust-dependencies` for Cargo dependency updates, Rust toolchain
   bumps, advisory remediation, and dependency-policy CI failures. It covers the
   main workspace, explicit WASI targets, and the separate eBPF workspace.

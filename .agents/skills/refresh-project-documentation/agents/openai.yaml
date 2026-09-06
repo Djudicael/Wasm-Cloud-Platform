@@ -1,4 +1,4 @@
 interface:
   display_name: "Refresh Project Documentation"
-  short_description: "Synchronize platform docs with repository reality"
-  default_prompt: "Use $refresh-project-documentation to audit and synchronize all maintained project documentation with the current implementation."
+  short_description: "Refresh docs while preserving accurate detail"
+  default_prompt: "Use $refresh-project-documentation to audit and synchronize all maintained project documentation with the current implementation. Preserve accurate detail, add missing information, correct changed behavior, remove only disproven claims, and add diagrams where they clarify technical flows."

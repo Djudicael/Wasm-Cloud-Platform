@@ -98,67 +98,42 @@ The proxy crate serves as the front-door to the Wasm Cloud Platform. It handles 
 
 ## Known Issues & Improvements
 
-### Dead Code / Unfinished Features
+### Routing and transport
 
-| Issue | Impact | Suggested Fix |
-|-------|--------|---------------|
-| `node_is_overloaded()` always returns `false` | Cross-node load balancing is non-functional; all traffic stays on the local node regardless of load | Implement actual load-based overload detection using `NodeLoadTable` metrics |
-| `UpstreamRegistry::next_healthy()` and `UpstreamHealthChecker` never wired in | Health checking exists in code but doesn't influence upstream selection | Connect the health checker to the upstream selection pipeline |
-| Gateway metrics use a throwaway `Registry` | Prometheus scrape endpoint returns no gateway metrics | Use the shared Prometheus registry instead of creating a local one |
-| `ProxyTimeouts` logged but not applied to Pingora | Configured timeouts have no effect; requests can hang indefinitely | Pass timeout values to Pingora's `ProxySession` configuration |
+- Local upstream selection runs before overload steering. If a healthy local endpoint exists, the request stays local even when the node is above the remote-steering threshold.
+- `HostRouter::resolve()` takes an asynchronous read lock on each request. This is correct but remains a potential contention point at very high route lookup rates.
+- `ProxyTimeouts` records the intended header, body, keepalive, and connection limits, but Pingora's public configuration does not expose all corresponding transport controls. The server logs these values and otherwise uses Pingora's transport defaults.
 
-### Correctness Bugs
+### Request limits
 
-| Issue | Impact | Suggested Fix |
-|-------|--------|---------------|
-| `partial_cmp().unwrap()` on floats can panic on NaN | If a float metric is NaN, the proxy will panic and crash | Handle the `None` case from `partial_cmp()` with a sensible default |
-| `Gateway::authenticate()` returns `Err` for `AuthPolicy::None` | Routes with no auth policy return an authentication error | Return `Ok(())` immediately when `AuthPolicy::None` is encountered |
-| CORS wildcard + credentials is invalid per spec | Browsers reject `Access-Control-Allow-Origin: *` when `Access-Control-Allow-Credentials: true` | Echo the requesting origin instead of using `*` when credentials are allowed |
-| No request body size limits | A malicious client can send an arbitrarily large request body, exhausting memory | Add configurable max body size limits in the proxy pipeline |
+- The proxy rejects a request when a valid `Content-Length` exceeds `max_body_size_bytes` (10 MiB in node startup). It does not currently count streamed bytes, so a chunked request without `Content-Length` is not bounded by this check.
+- The local rate limiter prunes idle per-IP buckets every five minutes. Per-app buckets and success counters remain until application removal calls the cleanup path.
+- `CircuitBreakerManager::prune_removed_apps()` exists, but lifecycle callers must invoke it with the active application set; the manager has no independent background pruning loop.
 
-### Performance Issues
+### Gateway lifecycle
 
-| Issue | Impact | Suggested Fix |
-|-------|--------|---------------|
-| `HostRouter::resolve()` acquires `RwLock` on every request | Contention under high concurrency reduces throughput | Replace `RwLock` with `ArcSwap` for lock-free reads |
-| `RateLimiter::check_request()` clones config on every request | Unnecessary allocation on the hot path | Store config in `Arc` and clone only the `Arc` pointer |
-| No pruning of `AdminRateLimiter` buckets | Memory grows without bound as new client IPs are seen | Add periodic cleanup of stale rate limiter entries |
-| `CircuitBreakerManager` never prunes stale circuits | Circuits for removed routes persist indefinitely | Add a pruning mechanism triggered on route removal or periodically |
-
-### Configuration Hardcoding
-
-| Issue | Impact | Suggested Fix |
-|-------|--------|---------------|
-| `OidcProvider` JWKS URL hardcoded to Keycloak path | Only works with Keycloak at a specific path; breaks with other OIDC providers | Use OIDC discovery endpoint (`/.well-known/openid-configuration`) to fetch the JWKS URI dynamically |
+- OIDC uses provider discovery by default and accepts an explicit private JWKS override. Issuer, audience, signature, expiry, and role/scope authorization are enforced in the request filter.
+- API-key validation hashes the presented key with SHA-256 and compares the resulting map key. Keys therefore need high entropy; the current CLI does not expose an API-key creation or rotation lifecycle.
+- Gateway route configuration is held in asynchronous locks to support live updates. Large, frequent configuration updates can briefly contend with request reads.
 
 ## Security Considerations
 
-### Timing Attack on Bearer Token Comparison
+### Forwarded client addresses
 
-Bearer token comparison uses `==`, which short-circuits on the first differing byte. An attacker can measure response times to progressively guess the token one character at a time.
+`X-Forwarded-For` and `X-Real-IP` are used only when the direct peer belongs to `auth.trusted_proxies`. Otherwise the proxy uses the socket peer and ignores forwarded headers. Keep the trusted proxy CIDRs narrow.
 
-**Mitigation:** Use a constant-time comparison function such as `subtle::ConstantTimeEq` or `ring::constant_time::verify_slices_are_equal`.
+### Bearer and API keys
 
-### IP Spoofing via X-Forwarded-For
+Admin bearer tokens use `common::crypto::constant_time_eq`. API keys are stored and looked up as unsalted SHA-256 digests, so operators must generate random high-entropy keys and protect the storage database.
 
-The `X-Forwarded-For` header is trusted without validation for rate limiting. A malicious client can spoof this header to bypass per-IP rate limits by rotating fake IP addresses.
+### Request bodies
 
-**Mitigation:** Only trust `X-Forwarded-For` from known, trusted reverse proxies (validate against a allowlist of proxy IPs), or use the direct socket address for rate limiting when no trusted proxy is in front.
+The configured body limit currently relies on `Content-Length`. An upstream load balancer should also enforce a byte-counted body limit, especially for chunked requests.
 
-### Unsalted API Key Hashing
+### CORS
 
-API keys are hashed with SHA-256 without a salt. While SHA-256 is fast, the lack of salt means an attacker with access to the hash store can use precomputed rainbow tables to recover common API keys.
+When credentials are enabled with a wildcard origin, the proxy echoes the validated request origin instead of returning the invalid `Access-Control-Allow-Origin: *` combination. Restrict `allowed_origins` rather than using a wildcard for sensitive routes.
 
-**Mitigation:** Use a keyed HMAC (e.g., HMAC-SHA256 with a server-side secret) or a slow hash function like Argon2id for API key storage.
+### Internal identity
 
-### No Request Body Size Limits
-
-The proxy pipeline does not enforce maximum request body sizes. A malicious client can upload arbitrarily large payloads, potentially causing out-of-memory conditions on the proxy or upstream instances.
-
-**Mitigation:** Add configurable `max_request_body_size` and reject requests exceeding the limit with `413 Payload Too Large` before forwarding.
-
-### CORS Misconfiguration
-
-The current CORS implementation sets `Access-Control-Allow-Origin: *` alongside `Access-Control-Allow-Credentials: true`. This combination is explicitly forbidden by the CORS specification and browsers will reject it, meaning credentialed cross-origin requests will fail silently.
-
-**Mitigation:** When credentials are allowed, echo the specific requesting `Origin` header value instead of `*`, and validate it against an allowlist.
+The proxy removes caller-supplied platform identity and trace headers before adding trusted values. Node-local `.internal` routing still depends on correct namespace-qualified application IDs and the supervisor's local placement contract.

@@ -2,7 +2,7 @@
 
 ## Overview
 
-The `internal_gateway` crate provides a transparent internal gateway for East-West traffic between applications running on the platform. It listens on the loopback interface on port 9080 and acts as a reverse proxy that routes requests to the appropriate backend application based on the `Host` header.
+The `internal_gateway` crate provides a transparent internal gateway for east-west traffic between applications on the same platform node. It listens on loopback, using port 9080 by default, and routes requests to a local backend based on the `Host` header.
 
 The gateway parses incoming `Host` headers in the format `<app>.<namespace>.internal`, resolves the target application, applies any configured policies (authentication, rate limiting, etc.), and forwards the request to the appropriate app instance.
 
@@ -34,13 +34,13 @@ The gateway parses incoming `Host` headers in the format `<app>.<namespace>.inte
 
 The main gateway struct that binds to the loopback interface and handles incoming connections. Responsible for orchestrating the full request lifecycle from parsing through forwarding.
 
-### `parse_internal_host()`
+### Host parsing helper
 
 ```rust
-pub fn parse_internal_host(host: &str) -> Option<(String, String)>
+fn parse_internal_host(host: &str) -> Option<(&str, &str)>
 ```
 
-Parses a `Host` header value in the format `<app>.<namespace>.internal` and returns a tuple of `(app_name, namespace)`. Returns `None` if the host does not conform to the expected format.
+This private helper parses `<app>.<namespace>.internal[:port]` and returns borrowed `(app_name, namespace)` values. A bare `<app>.internal` name uses the `default` namespace, and app names may themselves contain dots.
 
 ### `EndpointAuth`
 
@@ -71,4 +71,4 @@ Endpoint rules may also require JWT scopes through `required_scopes`.
 
 - **Loopback-Only Binding**: The gateway binds only to the loopback interface, which limits exposure to local processes. This is a required security property and should be maintained.
 
-- **Plaintext Internal Traffic**: Traffic between the gateway and backend apps is unencrypted. Since all traffic stays on the loopback interface, this is acceptable for single-host deployments but may be insufficient for distributed setups.
+- **Plaintext Internal Traffic**: Traffic between the gateway and backend apps is unencrypted and remains on loopback. The `.internal` mesh is deliberately node-local; callers must use an explicit external endpoint and its separate security policy for remote-node traffic.

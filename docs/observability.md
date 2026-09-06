@@ -1,6 +1,6 @@
 # Observability & Monitoring
 
-This guide covers the complete observability stack of the Wasm Cloud Platform — metrics, logging, distributed tracing, eBPF-based kernel monitoring, health checks, and alerting.
+This guide covers the platform's observability interfaces and the optional local validation stack: metrics, structured logging, distributed tracing, eBPF-based kernel monitoring, health checks, and alerting. Production storage, dashboards, receivers, retention, and on-call integrations remain operator-managed services.
 
 For the dedicated eBPF kernel monitoring and security guide, see [`docs/ebpf.md`](ebpf.md).
 
@@ -77,17 +77,19 @@ GET http://<node>:9090/metrics
 
 | Metric | Type | Description |
 |--------|------|-------------|
-| `wasm_proxy_requests_total` | Counter | Total HTTP requests by app, status, method |
-| `wasm_proxy_request_duration_seconds` | Histogram | Request latency by app |
-| `wasm_proxy_upstream_errors_total` | Counter | Failed upstream connections |
-| `wasm_proxy_active_connections` | Gauge | Current active client connections |
+| `wasm_requests_total` | Counter | Completed executions by app and status |
+| `wasm_request_duration_seconds` | Histogram | Request wall-clock duration by app |
+| `wasm_fuel_consumed_total` | Counter | Fuel consumed by app |
+| `wasm_ram_usage_bytes` | Gauge | Current reported linear-memory use by app |
+| `wasm_active_instances` | Gauge | Running instances by app |
+| `wasm_trap_total` | Counter | Wasm traps by app and reason |
 
 #### Rate limiting metrics
 
 | Metric | Type | Description |
 |--------|------|-------------|
-| `wasm_rate_limit_rejections_total` | Counter | Rejected requests by app, reason |
-| `wasm_rate_limit_allowed_total` | Counter | Allowed requests by app |
+| `proxy_rate_limit_rejected_total` | Counter | Local limiter rejections by app and reason |
+| `wasm_gateway_rate_limit_denied_total` | Counter | Gateway route-policy rate-limit denials |
 
 #### Gateway metrics
 
@@ -101,22 +103,23 @@ GET http://<node>:9090/metrics
 | `wasm_gateway_cors_preflight_total` | Counter | CORS preflight requests handled |
 | `wasm_gateway_circuits_open` | Gauge | Number of open circuits |
 
-#### Supervisor metrics
+#### Node health metrics
 
 | Metric | Type | Description |
 |--------|------|-------------|
-| `wasm_supervisor_instances` | Gauge | Running instances by app |
-| `wasm_supervisor_spawn_total` | Counter | Instance spawn events |
-| `wasm_supervisor_kill_total` | Counter | Instance kill events |
-| `wasm_supervisor_fuel_consumed_total` | Counter | Total fuel consumed by app |
-| `wasm_supervisor_memory_bytes` | Gauge | Memory usage by instance |
+| `wasm_node_health_status` | Gauge | Encoded aggregate node health state |
+| `wasm_node_active_instances` | Gauge | Active instance count reported by the node |
+| `wasm_node_deployed_apps` | Gauge | Deployed application count |
+| `wasm_node_nats_connected` | Gauge | NATS dependency connectivity |
+| `wasm_node_accepting_requests` | Gauge | Whether the node accepts new requests |
+| `wasm_node_memory_usage_percent` | Gauge | Node-process memory usage against its configured limit |
 
-#### Billing metrics
+#### Billing records
 
-| Metric | Type | Description |
-|--------|------|-------------|
-| `wasm_billing_fuel_consumed` | Counter | Fuel per app per tenant |
-| `wasm_billing_wall_clock_ms` | Counter | Wall-clock time per instance |
+Billing is persisted as tamper-evident records and queried with `wasm-ctl
+billing`; there are no separate `wasm_billing_*` Prometheus series. The
+`wasm_fuel_consumed_total` metric is useful for operations but does not replace
+the billing chain.
 
 #### eBPF metrics
 
@@ -127,7 +130,7 @@ GET http://<node>:9090/metrics
 | `wasm_ebpf_tcp_retransmits_total` | Counter | TCP retransmit events |
 | `wasm_ebpf_security_violations_total` | Counter | Syscall anomaly events |
 | `wasm_ebpf_fd_usage_ratio` | Gauge | FD usage as ratio |
-| `wasm_ebpf_memory_pressure` | Gauge | Memory pressure level (0–3) |
+| `wasm_ebpf_memory_pressure_level` | Gauge | Current memory pressure level |
 
 ### Prometheus configuration
 
@@ -168,43 +171,37 @@ scrape_configs:
 
 ```promql
 # Request rate by app
-sum(rate(wasm_proxy_requests_total[5m])) by (app_id)
+sum(rate(wasm_requests_total[5m])) by (app)
 
 # 95th percentile latency
 histogram_quantile(0.95, 
-  sum(rate(wasm_proxy_request_duration_seconds_bucket[5m])) by (le, app_id)
+  sum(rate(wasm_request_duration_seconds_bucket[5m])) by (le, app)
 )
 
 # Error rate
-sum(rate(wasm_proxy_requests_total{status=~"5.."}[5m])) by (app_id)
+sum(rate(wasm_requests_total{status=~"5.."}[5m])) by (app)
 
 # Open circuit breakers
 wasm_gateway_circuits_open
 
-# Instances per node
-sum(wasm_supervisor_instances) by (node_id)
+# Instances per app on the scraped node
+sum(wasm_active_instances) by (app)
 
 # Fuel consumption rate
-sum(rate(wasm_supervisor_fuel_consumed_total[5m])) by (app_id)
+sum(rate(wasm_fuel_consumed_total[5m])) by (app)
 
 # eBPF security violations
-sum(rate(wasm_ebpf_security_violations_total[5m])) by (node_id)
+rate(wasm_ebpf_security_violations_total[5m])
 ```
 
 ### Operational Monitoring Queries
 
 ```promql
-# Nodes that have restarted recently (uptime < 5 minutes)
-wasm_node_uptime_seconds < 300
+# Node processes that started within the last five minutes
+time() - process_start_time_seconds < 300
 
 # Apps with zero healthy instances
-sum(wasm_supervisor_instances{state="healthy"}) by (app_id) == 0
-
-# Cold start rate (instances spawned without idle pool)
-sum(rate(wasm_supervisor_spawn_total{cold_start="true"}[5m])) by (app_id)
-
-# Request queue depth (waiting for instance)
-sum(wasm_proxy_request_queue_depth) by (app_id)
+sum(wasm_active_instances) by (app) == 0
 
 # NATS control-plane lag per node
 sum(nats_consumer_pending_messages) by (node_id)
@@ -212,23 +209,17 @@ sum(nats_consumer_pending_messages) by (node_id)
 # Disk usage trend (predict full in 24h)
 predict_linear(node_filesystem_avail_bytes{mountpoint="/var/lib/wasm-node"}[1h], 86400) < 0
 
-# Memory leak detection (memory grows over 1h)
-deriv(wasm_supervisor_memory_bytes[1h]) > 1000000
-
-# Zombie instances (reported but not accepting connections)
-(wasm_supervisor_instances - wasm_proxy_healthy_upstreams) > 0
+# Node-process resident-memory growth over one hour
+deriv(process_resident_memory_bytes[1h]) > 1000000
 ```
 
 ### Metric Retention
 
-| Storage | Retention | Granularity |
-|---------|-----------|-------------|
-| Prometheus (raw) | 15 days | 15s |
-| Prometheus (downsampled) | 1 year | 5m |
-| redb ( MetricBucket) | 7 days | 1min |
-| redb (audit log) | 90 days | event |
-| Loki / Elasticsearch | 30 days | line |
-| Tempo / Jaeger | 7 days | trace |
+The platform does not set production retention for Prometheus, Loki, Tempo, or
+other external backends. Configure retention, downsampling, replication, and
+backup in those services according to capacity and compliance requirements.
+The node's redb GC settings cover platform-local metric buckets; they do not
+control external telemetry stores or establish audit-log retention.
 
 ---
 
@@ -536,9 +527,9 @@ The platform exposes multiple health endpoints for orchestrators and load balanc
 
 | Endpoint | Purpose | Checks |
 |----------|---------|--------|
-| `GET /livez` | Liveness probe | Node process is running |
+| `GET /livez` | Startup probe | Node startup has completed |
 | `GET /readyz` | Readiness probe | All dependencies healthy |
-| `GET /healthz` | Health check | Node is accepting requests |
+| `GET /healthz` | Liveness probe | Node process is running |
 | `GET /status` | Full status | Detailed health report with dependencies |
 
 ### Response format
@@ -751,7 +742,7 @@ wasm-ctl node health | jq '.dependencies[] | select(.name == "nats")'
 nats consumer info DEPLOY_EVENTS wasm-node-<node_id>
 
 # Verify node is in routing table
-wasm-ctl nodes
+wasm-ctl status
 ```
 
 **Resolution**:
@@ -761,23 +752,21 @@ wasm-ctl nodes
 
 ### Playbook: Rolling Upgrade Stuck at 50%
 
-**Symptoms**: `wasm-ctl upgrade status` shows "in_progress" for >10 minutes.
+**Symptoms**: `wasm-ctl platform status` shows an upgrade that has not completed within the operator's rollout window.
 
 **Diagnosis**:
 ```bash
-# Check which nodes haven't acked
-wasm-ctl upgrade status --json | jq '.pending_nodes'
+# Inspect the upgrade record exposed by the node API
+wasm-ctl platform status
 
-# Check those nodes' health
-for node in $(wasm-ctl upgrade status --json | jq -r '.pending_nodes[]'); do
-  curl -s http://$node:9090/readyz | jq '.status'
-done
+# Check each recorded platform node through its operator-managed admin address
+curl -s https://node-admin.example/readyz | jq '.status'
 ```
 
 **Resolution**:
 1. If node is UNHEALTHY: Remove from LB, investigate separately
-2. If node is DEGRADED: Wait for recovery, or force-ack with `wasm-ctl upgrade ack --node <id>`
-3. If node is healthy but not acking: Check NATS subject `upgrade.ack.>` for dropped messages
+2. If a node is DEGRADED: wait for recovery or remove it from the load balancer and follow the rollback gate.
+3. If a healthy node does not progress: inspect the `platform.upgrade.>` and `platform.upgrade_complete.>` streams and the node logs. The CLI has no force-ack command.
 
 ### Playbook: Fuel Billing Discrepancy
 
@@ -786,14 +775,13 @@ done
 **Diagnosis**:
 ```bash
 # Compare fuel metrics from multiple sources
-curl http://node:9090/metrics | grep 'wasm_billing_fuel_consumed{app_id="api-users"}'
-curl http://node:9090/metrics | grep 'wasm_supervisor_fuel_consumed_total{app_id="api-users"}'
+curl http://node:9090/metrics | grep 'wasm_fuel_consumed_total'
 
 # Check for duplicate instances
-wasm-ctl instances --app api-users:v2
+wasm-ctl instances | grep -F 'api-users:v2'
 
 # Verify no metric double-counting from restarts
-curl http://node:9090/metrics | grep 'wasm_node_start_time'
+wasm-ctl billing records --app api-users:v2 --last 20
 ```
 
 **Resolution**:
@@ -808,18 +796,19 @@ curl http://node:9090/metrics | grep 'wasm_node_start_time'
 **Diagnosis**:
 ```bash
 # Check if upstream table has stale instances
-curl http://node:9090/admin/upstream | jq '.instances[] | select(.app_id == "api-users:v2")'
+curl http://node:9090/upstreams | jq '.[] | select(.app_id == "api-users:v2")'
 
 # Check instance health
-wasm-ctl instances --app api-users:v2 --health
+wasm-ctl instances | grep -F 'api-users:v2'
+wasm-ctl node health
 
 # Look for pre-emptive removals in logs
-grep "preemptive_remove" /var/log/wasm-node/supervisor.log | tail -20
+journalctl -u wasm-node --since '-15 minutes' | grep -E 'upstream removed|instance (killed|not responding)'
 ```
 
 **Resolution**:
 1. If stale instances in table: eBPF detected exits faster than health loop — this is expected, gaps close in <5s
-2. If instances are crashing: Check `wasm_supervisor_kill_total{reason="trap"}`
+2. If instances are crashing: check `wasm_trap_total` and the eBPF process/OOM counters.
 3. If consistent 502s: Verify app binds to correct port, check WASI config
 
 ### Playbook: Platform-Wide Latency Spike
@@ -860,10 +849,10 @@ nats server report gateways
 wasm-ctl node health
 
 # Are instances being killed frequently?
-curl http://node:9090/metrics | grep wasm_supervisor_kill_total
+curl http://node:9090/metrics | grep -E 'wasm_ebpf_(process_exits|oom_kills)_total'
 
 # Is backpressure active?
-curl http://node:9090/metrics | grep backpressure
+wasm-ctl node ebpf-status
 ```
 
 **Likely causes:**
@@ -880,10 +869,10 @@ curl http://node:9090/metrics | grep backpressure
 curl <issuer_url>/.well-known/openid-configuration
 
 # Is JWKS cached?
-wasm-ctl node config | grep jwks
+wasm-ctl gateway show <app_id>
 
 # Check auth metrics
-curl http://node:9090/metrics | grep wasm_gateway_auth_failure
+curl http://node:9090/metrics | grep wasm_gateway_auth_failure_total
 ```
 
 **Likely causes:**
@@ -900,7 +889,7 @@ curl http://node:9090/metrics | grep wasm_gateway_auth_failure
 wasm-ctl gateway show <app_id>
 
 # Rate limit metrics
-curl http://node:9090/metrics | grep wasm_rate_limit_rejections
+curl http://node:9090/metrics | grep wasm_gateway_rate_limit_denied_total
 ```
 
 **Fix:**

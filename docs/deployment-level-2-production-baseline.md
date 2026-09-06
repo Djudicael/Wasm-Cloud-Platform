@@ -1,13 +1,14 @@
 # Level 2 - Production Baseline
 
-Use this guide for the first real Linux production rollout. This is the current production baseline for the project.
+Use this guide as the minimum control profile for a Linux production rollout.
+It is a checklist starting point, not a certification of the target environment.
 
 See also: [`deployment-levels.md`](deployment-levels.md)
 
 ## When To Choose This Level
 
 - the platform serves real production traffic
-- you need a credible Linux production baseline
+- you need the repository's minimum Linux production controls
 - you want the audited baseline without every optional hardening feature
 
 ## What To Install
@@ -60,8 +61,10 @@ Recommended choices:
 
 ## Validation
 
-- run real CI before release
-- run a production-like Linux rehearsal
+- admit a signed semantic-version release with the release-promotion procedure
+- complete the production deployment checklist for the exact environment
+- run CI and the required source, dependency, WASI, eBPF, and release gates
+- run a production-equivalent Linux rehearsal; local microVM evidence alone is insufficient
 - verify restart continuity for secrets and node state
 - verify deploy, undeploy, and rolling upgrade flows
 - verify metrics scraping and logging in the real environment
