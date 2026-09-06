@@ -74,7 +74,7 @@ The Wasm Cloud Platform is a multi-tenant, Wasm-native application platform. Ins
 
 ### Required
 
-- **Rust** 1.97.1 from the committed `rust-toolchain.toml`, including the
+- **Rust** 1.98.1 from the committed `rust-toolchain.toml`, including the
   `wasm32-wasip2` target
 - **NATS Server** 2.10+ (with JetStream enabled)
 - **PostgreSQL** 14+ (for apps that need databases)

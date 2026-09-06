@@ -26,14 +26,12 @@ use wasmtime::component::{Component, Instance, Linker, ResourceTable};
 use wasmtime::{Engine, Store};
 use wasmtime_wasi::p2::add_to_linker_async as add_wasi_to_linker_async;
 use wasmtime_wasi::p2::add_to_linker_sync as add_wasi_to_linker_sync;
-use wasmtime_wasi::{DirPerms, FilePerms, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
+use wasmtime_wasi::{FsPerms, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 use wasmtime_wasi_http::p2::bindings::http::types::Scheme;
 use wasmtime_wasi_http::p2::bindings::ProxyPre;
 use wasmtime_wasi_http::p2::body::HyperOutgoingBody;
-use wasmtime_wasi_http::p2::{
-    add_only_http_to_linker_async, add_only_http_to_linker_sync, WasiHttpCtxView, WasiHttpView,
-};
-use wasmtime_wasi_http::WasiHttpCtx;
+use wasmtime_wasi_http::p2::{add_only_http_to_linker_async, add_only_http_to_linker_sync};
+use wasmtime_wasi_http::{WasiHttpCtx, WasiHttpCtxView, WasiHttpView};
 
 const WASI_CLI_RUN_INTERFACES: &[&str] = &[
     "wasi:cli/run@0.2.6",
@@ -79,20 +77,17 @@ fn configure_filesystem_preopens(
         return Ok(());
     }
 
-    let mut dir_perms = DirPerms::READ;
-    let mut file_perms = FilePerms::READ;
-    if policy.filesystem.allow_file_create || policy.filesystem.allow_file_delete {
-        dir_perms |= DirPerms::MUTATE;
-        file_perms |= FilePerms::WRITE;
-    }
+    let perms = if policy.filesystem.allow_file_create || policy.filesystem.allow_file_delete {
+        FsPerms::ReadWrite
+    } else {
+        FsPerms::ReadOnly
+    };
 
     for path in &policy.filesystem.allowed_paths {
         let host_path = Path::new(path);
-        builder
-            .preopened_dir(host_path, path, dir_perms, file_perms)
-            .map_err(|e| {
-                PlatformError::runtime(format!("failed to preopen allowed path {}: {}", path, e))
-            })?;
+        builder.preopened_dir(host_path, path, perms).map_err(|e| {
+            PlatformError::runtime(format!("failed to preopen allowed path {}: {}", path, e))
+        })?;
     }
 
     Ok(())
@@ -137,12 +132,12 @@ fn build_store_state(
     builder.socket_addr_check(move |addr, use_type| {
         let use_enum = match use_type {
             wasmtime_wasi::sockets::SocketAddrUse::TcpBind => SocketAddrUse::TcpBind,
+            wasmtime_wasi::sockets::SocketAddrUse::TcpListen => SocketAddrUse::TcpListen,
+            wasmtime_wasi::sockets::SocketAddrUse::TcpAccept => SocketAddrUse::TcpAccept,
             wasmtime_wasi::sockets::SocketAddrUse::TcpConnect => SocketAddrUse::TcpConnect,
             wasmtime_wasi::sockets::SocketAddrUse::UdpBind => SocketAddrUse::UdpBind,
-            wasmtime_wasi::sockets::SocketAddrUse::UdpConnect => SocketAddrUse::UdpConnect,
-            wasmtime_wasi::sockets::SocketAddrUse::UdpOutgoingDatagram => {
-                SocketAddrUse::UdpOutgoingDatagram
-            }
+            wasmtime_wasi::sockets::SocketAddrUse::UdpSend => SocketAddrUse::UdpSend,
+            wasmtime_wasi::sockets::SocketAddrUse::UdpReceive => SocketAddrUse::UdpReceive,
         };
         combined_socket_check(addr, use_enum)
     });

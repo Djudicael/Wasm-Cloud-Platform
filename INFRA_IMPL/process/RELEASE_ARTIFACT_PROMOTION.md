@@ -28,7 +28,7 @@ The release workflow:
    checkout matches GitHub's immutable source identity;
 2. accepts production promotion only for a `vMAJOR.MINOR.PATCH` tag; manual runs
    produce non-promotable candidates;
-3. uses the pinned Rust 1.97.1 toolchain, pinned eBPF nightly and linker, both
+3. uses the pinned Rust 1.98.1 toolchain, pinned eBPF nightly and linker, both
    committed lockfiles, and `--locked --frozen` builds;
 4. creates a deterministic gzip/tar archive using the commit timestamp;
 5. records the pinned `cargo-audit` result and the exact deduplicated exception

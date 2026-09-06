@@ -12,7 +12,6 @@ ignore = [
     "RUSTSEC-2025-0069", # daemonize via pingora
     "RUSTSEC-2024-0388", # derivative via pingora
     "RUSTSEC-2024-0384", # instant via wstd / wasi-pg-client 0.2
-    "RUSTSEC-2026-0173", # proc-macro-error2 via pingora/cf-rustracing-jaeger
     "RUSTSEC-2025-0134", # rustls-pemfile via pingora-rustls
 
     # upstream stacks currently pin these vulnerable or otherwise flagged crates

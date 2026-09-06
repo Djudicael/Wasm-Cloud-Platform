@@ -235,7 +235,7 @@ impl Supervisor {
                         "[SOCKET DEBUG] socket_addr_check called"
                     );
                     match use_type {
-                        SocketAddrUse::TcpConnect | SocketAddrUse::UdpConnect => {
+                        SocketAddrUse::TcpConnect | SocketAddrUse::UdpSend => {
                             if !dest.ip().is_loopback() {
                                 tracing::info!(
                                     dest = %dest,
@@ -291,7 +291,9 @@ impl Supervisor {
                                 true
                             }
                         }
-                        SocketAddrUse::TcpBind | SocketAddrUse::UdpBind => {
+                        SocketAddrUse::TcpBind
+                        | SocketAddrUse::TcpListen
+                        | SocketAddrUse::UdpBind => {
                             let ok = is_instance_bind_allowed(dest, &allowed, instance_bind_ip);
                             tracing::info!(
                                 dest = %dest,

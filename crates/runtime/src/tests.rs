@@ -447,6 +447,40 @@ fn test_socket_policy_check_separates_bind_from_outbound_tcp() {
 }
 
 #[test]
+fn test_socket_policy_check_handles_wasmtime_48_socket_operations() {
+    let policy = base_instance_policy();
+    let check = SocketPolicyCheck::from_instance_policy(&policy);
+
+    assert!(check
+        .check("127.0.0.1:8080".parse().unwrap(), SocketAddrUse::TcpListen)
+        .is_ok());
+    assert!(check
+        .check("127.0.0.1:49152".parse().unwrap(), SocketAddrUse::TcpAccept)
+        .is_ok());
+
+    let mut denied = policy.clone();
+    denied.network.allow_inbound = false;
+    let denied_check = SocketPolicyCheck::from_instance_policy(&denied);
+    assert_eq!(
+        denied_check.check("127.0.0.1:49152".parse().unwrap(), SocketAddrUse::TcpAccept),
+        Err("inbound tcp accept disabled")
+    );
+
+    let mut udp = policy;
+    udp.network.allow_outbound_udp = true;
+    let udp_check = SocketPolicyCheck::from_instance_policy(&udp);
+    assert!(udp_check
+        .check("93.184.216.34:53".parse().unwrap(), SocketAddrUse::UdpSend)
+        .is_ok());
+    assert!(udp_check
+        .check(
+            "93.184.216.34:53".parse().unwrap(),
+            SocketAddrUse::UdpReceive
+        )
+        .is_ok());
+}
+
+#[test]
 fn test_socket_policy_check_applies_cidr_filters() {
     let mut policy = base_instance_policy();
     policy.network.allow_outbound_tcp = true;

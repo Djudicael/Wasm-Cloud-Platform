@@ -6,7 +6,6 @@ ignore = [
     "RUSTSEC-2025-0069", # daemonize via pingora
     "RUSTSEC-2024-0388", # derivative via pingora
     "RUSTSEC-2024-0384", # instant via wstd / wasi-pg-client
-    "RUSTSEC-2026-0173", # proc-macro-error2 via pingora and tabled
     # Pingora 0.8.1 pins lru ^0.16.3 while the fix requires >=0.18.2. Its pop() call
     # sites use integer/connection-ID keys, so the advisory's panicking key-Drop
     # prerequisite is not reachable in this dependency path.

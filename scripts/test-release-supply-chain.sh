@@ -28,7 +28,7 @@ cat > "$fixture/sbom.spdx.json" <<'JSON'
 }
 JSON
 cat > "$fixture/security-audit.json" <<'JSON'
-{"database":{"advisory-count":1},"lockfile":{"dependency-count":1},"settings":{"ignore":["RUSTSEC-2026-0173"]},"vulnerabilities":{"count":0,"list":[]},"warnings":{}}
+{"database":{"advisory-count":1},"lockfile":{"dependency-count":1},"settings":{"ignore":["RUSTSEC-2025-0069"]},"vulnerabilities":{"count":0,"list":[]},"warnings":{}}
 JSON
 
 git_sha="0123456789abcdef0123456789abcdef01234567"

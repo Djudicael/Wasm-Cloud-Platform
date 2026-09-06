@@ -10,10 +10,12 @@ use std::sync::Arc;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SocketAddrUse {
     TcpBind,
+    TcpListen,
+    TcpAccept,
     TcpConnect,
     UdpBind,
-    UdpConnect,
-    UdpOutgoingDatagram,
+    UdpSend,
+    UdpReceive,
 }
 
 /// Async callback for validating outbound socket addresses.
@@ -81,12 +83,18 @@ impl SocketPolicyCheck {
         use_type: SocketAddrUse,
     ) -> Result<(), &'static str> {
         match use_type {
-            SocketAddrUse::TcpBind => {
+            SocketAddrUse::TcpBind | SocketAddrUse::TcpListen => {
                 if !self.allow_inbound {
                     return Err("inbound tcp bind disabled");
                 }
                 if !self.allowed_bind_ports.contains(&addr.port()) {
                     return Err("bind port not allowed");
+                }
+                Ok(())
+            }
+            SocketAddrUse::TcpAccept => {
+                if !self.allow_inbound {
+                    return Err("inbound tcp accept disabled");
                 }
                 Ok(())
             }
@@ -96,9 +104,7 @@ impl SocketPolicyCheck {
                 }
                 self.outbound_ip_allowed(addr.ip())
             }
-            SocketAddrUse::UdpBind
-            | SocketAddrUse::UdpConnect
-            | SocketAddrUse::UdpOutgoingDatagram => {
+            SocketAddrUse::UdpBind | SocketAddrUse::UdpSend | SocketAddrUse::UdpReceive => {
                 if !self.allow_outbound_udp {
                     return Err("outbound udp disabled");
                 }
@@ -119,13 +125,27 @@ pub(crate) fn compose_socket_addr_check(
         let extra_check = extra_check.clone();
         Box::pin(async move {
             let reserved_outbound_slot = match use_type {
-                SocketAddrUse::TcpBind => match policy_enforcer.check_tcp_bind(addr.port()) {
+                SocketAddrUse::TcpBind | SocketAddrUse::TcpListen => {
+                    match policy_enforcer.check_tcp_bind(addr.port()) {
+                        Ok(()) => false,
+                        Err(err) => {
+                            tracing::warn!(
+                                dest = %addr,
+                                use_type = ?use_type,
+                                error = ?err,
+                                "socket operation denied by runtime policy"
+                            );
+                            return false;
+                        }
+                    }
+                }
+                SocketAddrUse::TcpAccept => match snapshot_check.check(addr, use_type) {
                     Ok(()) => false,
-                    Err(err) => {
+                    Err(reason) => {
                         tracing::warn!(
                             dest = %addr,
                             use_type = ?use_type,
-                            error = ?err,
+                            reason,
                             "socket operation denied by runtime policy"
                         );
                         return false;
@@ -145,9 +165,7 @@ pub(crate) fn compose_socket_addr_check(
                         }
                     }
                 }
-                SocketAddrUse::UdpBind
-                | SocketAddrUse::UdpConnect
-                | SocketAddrUse::UdpOutgoingDatagram => {
+                SocketAddrUse::UdpBind | SocketAddrUse::UdpSend | SocketAddrUse::UdpReceive => {
                     if let Err(reason) = snapshot_check.check(addr, use_type) {
                         tracing::warn!(
                             dest = %addr,

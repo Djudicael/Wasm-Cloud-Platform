@@ -93,8 +93,12 @@ async fn test_corrupted_routes_rebuild_from_jetstream() {
             .await
             .expect("Failed to restart node");
 
-    // Wait for state to be restored from JetStream
-    sleep(Duration::from_secs(5)).await;
+    // Wait for state to be restored from JetStream and the recovered app to be
+    // ready. Runtime upgrades can change compilation time, so a fixed delay is
+    // not a reliable readiness signal.
+    wait_for_app_ready(node2.proxy_port, "route1.local", 30)
+        .await
+        .expect("App did not become ready after rebuild");
 
     // Verify routes still work after "rebuild"
     let response2 = send_request(node2.proxy_port, "route1.local", "/")

@@ -255,7 +255,7 @@ impl NodeProcess {
         let deploy_port = reserve_test_port()?;
         let temp_dir = tempfile::tempdir()?;
         let db_path = temp_dir.path().join("node.db");
-        let process = Self::spawn_process(NodeSpawn {
+        let mut process = Self::spawn_process(NodeSpawn {
             node_id,
             nats_url,
             proxy_port,
@@ -265,7 +265,11 @@ impl NodeProcess {
             db_path: &db_path,
             launch,
         })?;
-        wait_for_node_ready(admin_port, proxy_port, artifact_port).await?;
+        if let Err(error) = wait_for_node_ready(admin_port, proxy_port, artifact_port).await {
+            let _ = process.kill();
+            let _ = process.wait();
+            return Err(error);
+        }
 
         eprintln!("✓ Node startup wait complete");
 
@@ -388,7 +392,7 @@ impl NodeProcess {
         let deploy_port = reserve_test_port()?;
         eprintln!("Restarting node {} with existing DB", node_id);
 
-        let process = Self::spawn_process(NodeSpawn {
+        let mut process = Self::spawn_process(NodeSpawn {
             node_id,
             nats_url,
             proxy_port,
@@ -399,7 +403,12 @@ impl NodeProcess {
             launch: options.launch,
         })?;
 
-        wait_for_node_ready(options.admin_port, proxy_port, artifact_port).await?;
+        if let Err(error) = wait_for_node_ready(options.admin_port, proxy_port, artifact_port).await
+        {
+            let _ = process.kill();
+            let _ = process.wait();
+            return Err(error);
+        }
         eprintln!("✓ Node restart complete");
 
         Ok(NodeProcess {
@@ -530,7 +539,7 @@ async fn wait_for_node_ready(
     proxy_port: u16,
     artifact_port: u16,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    wait_for_health(admin_port, Duration::from_secs(60)).await?;
+    wait_for_health(admin_port, Duration::from_secs(90)).await?;
     wait_for_tcp(proxy_port, Duration::from_secs(10)).await?;
     wait_for_tcp(artifact_port, Duration::from_secs(10)).await?;
     Ok(())

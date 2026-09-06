@@ -201,13 +201,13 @@ cache:
 
 unit-tests:
   stage: test
-  image: rust:1.97.1
+  image: rust:1.98.1
   script:
     - cargo check --workspace --all-targets --exclude http-hello-component --exclude wasi-grpc-echo
 
 vm-testbed:
   stage: vm-testbed
-  image: rust:1.97.1
+  image: rust:1.98.1
   tags:
     - kvm  # Requires GitLab runner with KVM
   script:
