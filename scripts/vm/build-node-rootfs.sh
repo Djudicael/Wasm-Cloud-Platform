@@ -335,7 +335,10 @@ if command -v chronyd >/dev/null 2>&1; then
         poweroff -f
         exit 1
     }
-    chronyd 'server 162.159.200.1 iburst' || {
+    # A later laptop/WSL suspend can introduce a large offset after initial
+    # synchronization. Permit correction on later updates as in the local
+    # PostgreSQL fixture; slewing alone can leave the node registry stale.
+    chronyd 'server 162.159.200.1 iburst' 'makestep 0.1 -1' || {
         echo "failed to start continuous clock synchronization" >&2
         poweroff -f
         exit 1

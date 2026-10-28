@@ -2,6 +2,42 @@ use super::*;
 use std::collections::HashMap;
 
 #[test]
+fn schedules_round_trip_and_reject_unsupported_or_unbounded_options() {
+    let input = r#"
+[[triggers]]
+kind = "schedule"
+id = "dispatch"
+every = "2s"
+route = "/_platform/triggers/dispatch"
+method = "POST"
+max_concurrency = 4
+timeout = "25s"
+"#;
+    let manifest: DeployManifest = toml::from_str(input).unwrap();
+    let config = manifest.to_app_config();
+    common::triggers::validate(&config.triggers).unwrap();
+    let restored = super::conversion::manifest_from_config(&config, None, &[]);
+    let encoded = toml::to_string(&restored).unwrap();
+    let decoded: DeployManifest = toml::from_str(&encoded).unwrap();
+    assert_eq!(decoded.to_app_config().triggers, config.triggers);
+    for bad in [
+        input.replace("schedule", "nats"),
+        format!("{input}\nsubject = \"jobs\"\n"),
+    ] {
+        assert!(toml::from_str::<DeployManifest>(&bad).is_err());
+    }
+    for bad in [
+        input.replace("2s", "0s"),
+        input.replace("max_concurrency = 4", "max_concurrency = 0"),
+        input.replace("/_platform/triggers/dispatch", "/dispatch"),
+        input.replace("POST", "GET"),
+    ] {
+        let parsed: DeployManifest = toml::from_str(&bad).unwrap();
+        assert!(common::triggers::validate(&parsed.triggers).is_err());
+    }
+}
+
+#[test]
 fn test_manifest_parse_minimal() {
     let toml = r#"
 [app]
@@ -96,6 +132,7 @@ required_scopes = ["admin:users"]
 #[test]
 fn test_manifest_to_app_config() {
     let manifest = DeployManifest {
+        triggers: Vec::new(),
         app: AppManifestSection {
             name: "test".to_string(),
             version: "v1".to_string(),
@@ -135,10 +172,12 @@ fn test_manifest_to_app_config() {
 #[test]
 fn test_manifest_to_gateway_config() {
     let manifest = DeployManifest {
+        triggers: Vec::new(),
         app: AppManifestSection::default(),
         fuel: FuelManifestSection::default(),
         policy: None,
         gateway: Some(GatewayManifestSection {
+            allowed_callers: None,
             host: Some("api.example.com".to_string()),
             routes: Vec::new(),
             auth: Some(GatewayAuthManifest {
@@ -320,4 +359,35 @@ credential_ref = "ghcr-reader"
     assert_eq!(artifact.credential_ref.as_deref(), Some("ghcr-reader"));
     assert!(artifact.url.is_empty());
     assert!(artifact.sha256.is_empty());
+}
+
+#[test]
+fn restrictive_policy_and_caller_list_round_trip_through_manifest() {
+    let input = r#"
+[app]
+name = "model-gateway"
+version = "v2"
+namespace = "agents"
+[policy.network]
+profile = "egress-allowlist"
+allowed_cidrs = ["203.0.113.0/24"]
+allowed_http_hosts = ["models.example.com"]
+max_egress_bytes = 1048576
+[gateway]
+allowed_callers = ["agents/broker:v1"]
+"#;
+    let manifest: DeployManifest = toml::from_str(input).unwrap();
+    let config = manifest.to_app_config();
+    let policy = config.policy.as_ref().unwrap().resolve(8080).unwrap();
+    assert_eq!(
+        policy.network.profile,
+        Some(common::policy::NetworkProfile::EgressAllowlist)
+    );
+    let gateway = manifest.to_gateway_config().unwrap();
+    gateway.validate_allowed_callers().unwrap();
+    let restored = super::conversion::manifest_from_config(&config, Some(&gateway), &[]);
+    let encoded = toml::to_string(&restored).unwrap();
+    let decoded: DeployManifest = toml::from_str(&encoded).unwrap();
+    assert_eq!(decoded.to_gateway_config(), Some(gateway));
+    assert_eq!(decoded.to_app_config().policy, config.policy);
 }

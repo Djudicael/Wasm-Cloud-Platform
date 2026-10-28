@@ -173,6 +173,9 @@ impl Store {
         app_id: &str,
         config: &GatewayRouteConfig,
     ) -> Result<(), PlatformError> {
+        config
+            .validate_allowed_callers()
+            .map_err(PlatformError::ConfigValidation)?;
         let json = serde_json::to_string(config).map_err(|e| {
             PlatformError::storage_with_msg("failed to serialize gateway config", e)
         })?;

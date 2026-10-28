@@ -57,3 +57,10 @@ Repository-scoped Open Agent Skills live in `.agents/skills` and are intended fo
 - Run skill scripts in WSL2. Keep the same `--state-file` value across all three skills.
 - Never point these local-testing skills at production infrastructure.
 - For production planning, use `INFRA_IMPL/process/PLATFORM_PRODUCTION_DEPLOYMENT_CHECKLIST.md`; it is an operator gate, not authorization for agents to mutate production systems.
+
+Application object-storage validation can use `scripts/vm/build-rustfs-rootfs.sh`
+and `scripts/vm/provision-rustfs-service.sh` with an immutable OCI image and the
+existing testbed state. RustFS is a separate service microVM, not a platform
+node. Keep its credential-bearing rootfs and data on the private Linux
+filesystem; never overwrite a recorded live image. Follow
+`docs/vm-testbed/service-microvms.md` for IAM and teardown/retention boundaries.

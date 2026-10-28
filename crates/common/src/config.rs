@@ -378,6 +378,8 @@ impl From<crate::auth::AuthConfig> for AuthSection {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RuntimeSection {
+    #[serde(default)]
+    pub network_admission: crate::policy::NetworkAdmissionConfig,
     #[serde(default = "default_port_start")]
     pub port_start: u16,
     #[serde(default = "default_port_end")]
@@ -517,6 +519,7 @@ fn default_pooling_total_component_instances() -> u32 {
 impl Default for RuntimeSection {
     fn default() -> Self {
         RuntimeSection {
+            network_admission: Default::default(),
             port_start: default_port_start(),
             port_end: default_port_end(),
             instance_bind_address: default_instance_bind_address(),

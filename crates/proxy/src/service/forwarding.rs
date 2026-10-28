@@ -33,6 +33,7 @@ impl Injector for RequestHeaderInjector<'_> {
 /// proxy writes authoritative values. This also prevents duplicate header
 /// values from surviving `insert_header` implementation changes.
 pub(super) fn remove_untrusted_platform_headers(request: &mut RequestHeader) {
+    crate::gateway::identity::strip_identity_headers(&mut request.headers);
     for header in ["x-app-id", "x-trace-id", "traceparent", "tracestate"] {
         request.remove_header(header);
     }
@@ -60,8 +61,7 @@ pub(super) async fn upstream_peer(
     Ok(Box::new(peer))
 }
 
-pub(super) async fn upstream_request_filter(
-    _session: &mut Session,
+pub(super) fn upstream_request_filter(
     upstream_request: &mut RequestHeader,
     ctx: &mut RequestCtx,
 ) -> PingoraResult<()> {
@@ -112,6 +112,12 @@ pub(super) async fn upstream_request_filter(
             );
         }
     }
+
+    // Authentication is independent of whether a route has a transform.
+    crate::gateway::identity::write_user_identity(
+        &mut upstream_request.headers,
+        ctx.user_identity.as_ref(),
+    );
 
     Ok(())
 }

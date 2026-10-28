@@ -25,6 +25,7 @@ pub struct NamespaceRegistry {
     /// Reverse lookup: source_port (TCP ephemeral port allocated to an instance) → AppId.
     /// Populated by the Supervisor when an instance is spawned.
     port_to_app: Arc<RwLock<HashMap<u16, AppId>>>,
+    endpoint_owners: Arc<RwLock<HashMap<SocketAddr, AppId>>>,
 }
 
 impl NamespaceRegistry {
@@ -42,11 +43,16 @@ impl NamespaceRegistry {
             .entry(app_id.bare_app_name().to_string())
             .or_default()
             .push(endpoint);
+        self.endpoint_owners
+            .write()
+            .await
+            .insert(endpoint.addr, app_id.clone());
     }
 
     /// Deregister an instance address.
     pub async fn deregister(&self, app_id: &AppId, addr: &SocketAddr) {
         let mut map = self.instances.write().await;
+        self.endpoint_owners.write().await.remove(addr);
         if let Some(ns) = map.get_mut(app_id.namespace()) {
             let key = app_id.bare_app_name();
             if let Some(addrs) = ns.get_mut(key) {
@@ -83,15 +89,16 @@ impl NamespaceRegistry {
     /// Resolve an app by its destination port (for cross-namespace checks).
     /// Scans the instances map to find which app is listening on the given port.
     pub async fn resolve_app_by_port(&self, port: u16) -> Option<AppId> {
-        let map = self.instances.read().await;
-        for (ns, apps) in map.iter() {
-            for (bare_app_name, addrs) in apps.iter() {
-                if addrs.iter().any(|endpoint| endpoint.addr.port() == port) {
-                    return Some(AppId::new_namespaced(ns, bare_app_name, "v1"));
-                }
-            }
-        }
-        None
+        self.endpoint_owners
+            .read()
+            .await
+            .iter()
+            .find(|(addr, _)| addr.port() == port)
+            .map(|(_, app)| app.clone())
+    }
+
+    pub async fn resolve_app_by_endpoint(&self, address: SocketAddr) -> Option<AppId> {
+        self.endpoint_owners.read().await.get(&address).cloned()
     }
 
     /// Register which app owns a given source port (for outbound call attribution).

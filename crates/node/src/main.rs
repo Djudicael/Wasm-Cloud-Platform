@@ -1587,12 +1587,11 @@ async fn main() -> anyhow::Result<()> {
         if !config.env_vars.contains_key("HOST") {
             vars.push(("HOST".to_string(), instance_bind_address.clone()));
         }
-        // Inject DATABASE_URL if not already provided in env_vars
-        if !config.env_vars.contains_key("DATABASE_URL") {
-            vars.push((
-                "DATABASE_URL".to_string(),
-                db_config.default_database_url.clone(),
-            ));
+        // Legacy database-proxy defaults require explicit application opt-in.
+        if let Some(value) =
+            db_config::default_database_env(config, &db_config.default_database_url)
+        {
+            vars.push(value);
         }
         vars
     });
@@ -1635,6 +1634,9 @@ async fn main() -> anyhow::Result<()> {
         Some(billing_collector.tx()),
     );
 
+    Arc::get_mut(&mut supervisor)
+        .ok_or_else(|| anyhow::anyhow!("supervisor already shared before network admission setup"))?
+        .configure_network_admission(config.runtime.network_admission.clone())?;
     supervisor.restore_from_storage().await?;
     info!("supervisor state restored from storage");
 
@@ -1676,6 +1678,7 @@ async fn main() -> anyhow::Result<()> {
         kek.as_bytes(),
     );
     let secret_provider = Arc::new(secrets::LocalSecretProvider::new(store.clone(), kek));
+    supervisor.set_secret_provider(secret_provider.clone())?;
 
     // Determine whether this node still needs bootstrap. An empty node that has
     // already completed a valid bootstrap session (including an empty snapshot)
@@ -1780,6 +1783,7 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let dispatcher = Arc::new(handlers::EventDispatcher {
+        lifecycle_gate: tokio::sync::Mutex::new(()),
         supervisor: supervisor.clone(),
         upstream: upstream_registry.clone(),
         host_router: host_router.clone(),
@@ -1811,10 +1815,15 @@ async fn main() -> anyhow::Result<()> {
         let d = dispatcher.clone();
         let consumer = format!("node-{}-{}", config.node.node_id, sanitize_subject(subject));
         tracing::info!(stream, subject, consumer = %consumer, "subscribing durable consumer");
-        bus.subscribe_durable(stream, &consumer, Some(subject), move |event| {
-            let d = d.clone();
-            async move { d.handle(event).await }
-        })
+        bus.subscribe_durable_with_delivery(
+            stream,
+            &consumer,
+            Some(subject),
+            move |event, delivery| {
+                let d = d.clone();
+                async move { d.handle_durable(event, delivery).await }
+            },
+        )
         .await?;
     }
 
@@ -2077,7 +2086,7 @@ async fn main() -> anyhow::Result<()> {
     let wasm_proxy = proxy::service::WasmProxy {
         router: host_router.clone(),
         upstream: upstream_registry.clone(),
-        rate_limiter,
+        rate_limiter: rate_limiter.clone(),
         node_table: node_load_table.clone(),
         local_node_id: config.node.node_id.clone(),
         cold_start,
@@ -2567,7 +2576,7 @@ async fn main() -> anyhow::Result<()> {
                 }
             }),
         )
-        .merge(metrics::exporter::metrics_router(prom_metrics))
+        .merge(metrics::exporter::metrics_router(prom_metrics.clone()))
         // -- eBPF Monitor Admin Endpoints ------------------------------
         .route(
             "/admin/ebpf/status",
@@ -2916,6 +2925,48 @@ async fn main() -> anyhow::Result<()> {
                                     "message": e.to_string(),
                                 })),
                             ),
+                        }
+                    }
+                }
+            }),
+        )
+        .route(
+            "/admin/policy/explain",
+            axum::routing::get({
+                let store = store.clone();
+                let supervisor = supervisor_instances.clone();
+                move |axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>| {
+                    let store = store.clone();
+                    let supervisor = supervisor.clone();
+                    async move {
+                        let result = (|| -> Result<serde_json::Value, common::error::PlatformError> {
+                            let id = params.get("app_id").ok_or_else(|| common::error::PlatformError::ConfigValidation("app_id is required".into()))?;
+                            let id = common::types::AppId::new_validate(id).map_err(|error| common::error::PlatformError::ConfigValidation(error.into()))?;
+                            let app = store.load_config(&id)?.ok_or_else(|| common::error::PlatformError::AppNotFound(id.0.clone()))?;
+                            Ok(serde_json::json!({
+                                "app_id": id.0,
+                                "effective_policy": supervisor.effective_network_policy(&app)?,
+                                "raw_socket_byte_metering": true,
+                                "network_byte_accounting": "raw-payload-reservations-and-http-wire",
+                                "raw_socket_host_deadlines": true,
+                                "raw_socket_connect_timeout_secs": runtime::limits::RAW_SOCKET_CONNECT_TIMEOUT.as_secs(),
+                                "raw_socket_io_timeout_secs": runtime::limits::RAW_SOCKET_IO_TIMEOUT.as_secs(),
+                                "raw_socket_connection_accounting": "resource-lifetime",
+                                "http_only_hostname_allowlist": true,
+                                "mesh_gateway_port": common::INTERNAL_GATEWAY_PORT,
+                                "allowed_bind_ports_are_spawn_templates": true,
+                            }))
+                        })();
+                        match result {
+                            Ok(policy) => (axum::http::StatusCode::OK, axum::Json(policy)),
+                            Err(error) => {
+                                let status = match &error {
+                                    common::error::PlatformError::AppNotFound(_) => axum::http::StatusCode::NOT_FOUND,
+                                    common::error::PlatformError::ConfigValidation(_) => axum::http::StatusCode::BAD_REQUEST,
+                                    _ => axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                                };
+                                (status, axum::Json(serde_json::json!({"error": error.to_string()})))
+                            }
                         }
                     }
                 }
@@ -3843,6 +3894,15 @@ async fn main() -> anyhow::Result<()> {
         "node fully started"
     );
 
+    let (schedule_stop, schedule_stopped) = tokio::sync::watch::channel(false);
+    let scheduler = Arc::new(supervisor::triggers::Scheduler {
+        supervisor: supervisor.clone(),
+        metrics: prom_metrics.clone(),
+        rate_limiter: rate_limiter.clone(),
+        circuit_breaker: gateway.circuit_breaker.clone(),
+    });
+    let schedule_task = tokio::spawn(scheduler.run(schedule_stopped));
+
     // Run Pingora in background to allow graceful shutdown setup
     std::thread::spawn(move || {
         proxy_server.run();
@@ -3868,6 +3928,9 @@ async fn main() -> anyhow::Result<()> {
         tokio::signal::ctrl_c().await.unwrap();
         info!("Ctrl-C received - gracefully shutting down all instances");
     }
+
+    let _ = schedule_stop.send(true);
+    let _ = schedule_task.await;
 
     // Gracefully shutdown all instances with timeout
     let shutdown_timeout = std::time::Duration::from_secs(30);

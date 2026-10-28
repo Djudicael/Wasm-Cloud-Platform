@@ -3,6 +3,8 @@
 pub enum PolicyEnforcementLayer {
     WasmtimeNetworkToggle,
     WasmtimeSocketAddrCheck,
+    WasiHttpTransport,
+    WasiSocketEgress,
     WasmtimePreopenDirectories,
     WasmtimeResourceLimiter,
     SupervisorExtraSocketGate,
@@ -19,6 +21,27 @@ pub struct PolicyBoundaryCapability {
 }
 
 pub const POLICY_BOUNDARY_CAPABILITIES: &[PolicyBoundaryCapability] = &[
+    PolicyBoundaryCapability {
+        capability: "p3_http_service",
+        primary_layer: PolicyEnforcementLayer::WasiHttpTransport,
+        authoritative_enforcement: true,
+        authoritative_counters: false,
+        notes: "P3 bounded HTTP handlers share P2 outgoing HTTP policy hooks and the dedicated identity thread. Bodies are capped at 16 MiB and execution at 30 seconds. P3 outbound TCP has destination/supervisor checks, owned connection slots, metered writes and host connect/read/write deadlines. Raw UDP/bind, socket options and native triggers are not supported; this is not full P3 conformance. Handler timeout/body-denial counters are not separately exported.",
+    },
+    PolicyBoundaryCapability {
+        capability: "network_host_io_deadlines",
+        primary_layer: PolicyEnforcementLayer::WasiSocketEgress,
+        authoritative_enforcement: true,
+        authoritative_counters: true,
+        notes: "P2 raw connect/name resolution has a 10-second host deadline; pending raw TCP/UDP read/write waits, blocking streams, splice, and asynchronous stream destruction have 30-second host caps. Pending deadlines survive poll cancellation; idle listeners are untimed. Expiration traps the CLI invocation or HTTP request store and feeds per-instance timeout counters. Outgoing HTTP retains its bounded connect/first-byte/idle/total transport caps.",
+    },
+    PolicyBoundaryCapability {
+        capability: "http_outbound",
+        primary_layer: PolicyEnforcementLayer::WasiHttpTransport,
+        authoritative_enforcement: true,
+        authoritative_counters: true,
+        notes: "WASI HTTP resolves once, applies TCP CIDR and supervisor checks, verifies TLS against the original host, and enforces host deadlines, response-body limits, connection reservations, and wire egress quotas. Explicit ExtendedLimits network ceilings intersect with policy ceilings.",
+    },
     PolicyBoundaryCapability {
         capability: "tcp_bind",
         primary_layer: PolicyEnforcementLayer::WasmtimeSocketAddrCheck,
@@ -38,7 +61,7 @@ pub const POLICY_BOUNDARY_CAPABILITIES: &[PolicyBoundaryCapability] = &[
         primary_layer: PolicyEnforcementLayer::WasmtimeSocketAddrCheck,
         authoritative_enforcement: true,
         authoritative_counters: false,
-        notes: "UDP address allow/deny is enforced through the runtime socket hook, but UDP-specific byte/operation counters are not yet wired into PolicyEnforcer.",
+        notes: "UDP address allow/deny is enforced through the runtime socket hook. Datagram payloads feed the shared egress quota; separate UDP operation counters are not wired.",
     },
     PolicyBoundaryCapability {
         capability: "dns_lookup",
@@ -69,11 +92,18 @@ pub const POLICY_BOUNDARY_CAPABILITIES: &[PolicyBoundaryCapability] = &[
         notes: "Filesystem write byte limits exist in PolicyEnforcer but are not driven by wrapped WASI write hooks yet; authoritative enforcement still requires future host wrapping or external observation.",
     },
     PolicyBoundaryCapability {
+        capability: "socket_payload_egress_bytes",
+        primary_layer: PolicyEnforcementLayer::WasiSocketEgress,
+        authoritative_enforcement: true,
+        authoritative_counters: true,
+        notes: "P2 raw TCP payload reservations, accepted UDP payloads, and outgoing HTTP wire writes share the resolved egress quota. TCP charges remain on failure because Wasmtime can send a prefix or queue background writes. This measures guest socket payload commitments plus HTTP/TLS wire bytes, not total NIC traffic; DNS, packet overhead, and host-served incoming HTTP responses are excluded.",
+    },
+    PolicyBoundaryCapability {
         capability: "network_egress_bytes",
         primary_layer: PolicyEnforcementLayer::ExternalEbpf,
         authoritative_enforcement: false,
         authoritative_counters: false,
-        notes: "Egress byte limits exist in PolicyEnforcer but are not driven by per-write TCP hooks yet; authoritative enforcement still requires future host wrapping or external observation.",
+        notes: "The socket payload and outgoing HTTP budget is enforced, but total network traffic is not metered: packet overhead, retransmissions, host DNS, and host-served incoming HTTP responses are excluded.",
     },
 ];
 

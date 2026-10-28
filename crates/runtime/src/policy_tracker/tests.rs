@@ -449,6 +449,60 @@ fn test_release_tracked_connections_preserves_other_store_reservations() {
 }
 
 #[test]
+fn host_lifecycle_teardown_preserves_other_owner_with_kernel_observation_enabled() {
+    let counters = Arc::new(PolicyCounters::new());
+    counters.enable_host_tcp_close_tracking();
+    counters.enable_host_socket_lifecycle();
+    let raw = PolicyEnforcer::with_counters(make_policy(), counters.clone());
+    let http = PolicyEnforcer::with_counters(make_policy(), counters.clone());
+    raw.check_outbound_tcp_connect("127.0.0.1".parse().unwrap(), 9080)
+        .unwrap();
+    http.check_outbound_http_connect("127.0.0.1".parse().unwrap(), 9080)
+        .unwrap();
+    raw.release_tracked_outbound_connections();
+    assert_eq!(
+        counters.outbound_connections_active.load(Ordering::Acquire),
+        1
+    );
+    http.record_outbound_disconnect();
+    assert_eq!(
+        counters.outbound_connections_active.load(Ordering::Acquire),
+        0
+    );
+}
+
+#[test]
+fn concurrent_duplicate_closes_preserve_another_stores_slot() {
+    let counters = Arc::new(PolicyCounters::new());
+    let first = PolicyEnforcer::with_counters(make_policy(), counters.clone());
+    let other = PolicyEnforcer::with_counters(make_policy(), counters.clone());
+    let ip = "93.184.216.34".parse().unwrap();
+    first.check_outbound_tcp_connect(ip, 443).unwrap();
+    other.check_outbound_tcp_connect(ip, 443).unwrap();
+    let barrier = std::sync::Barrier::new(8);
+    std::thread::scope(|scope| {
+        for _ in 0..8 {
+            scope.spawn(|| {
+                barrier.wait();
+                for _ in 0..100 {
+                    first.record_outbound_disconnect();
+                }
+            });
+        }
+    });
+    first.release_tracked_outbound_connections();
+    assert_eq!(
+        counters.outbound_connections_active.load(Ordering::Acquire),
+        1
+    );
+    other.record_outbound_disconnect();
+    assert_eq!(
+        counters.outbound_connections_active.load(Ordering::Acquire),
+        0
+    );
+}
+
+#[test]
 fn test_check_fs_write() {
     let policy = InstancePolicy {
         filesystem: FilesystemPolicy {
@@ -567,4 +621,31 @@ fn test_parse_cidrs_invalid_skipped() {
     ];
     let parsed = PolicyEnforcer::parse_cidrs(&cidrs);
     assert_eq!(parsed.len(), 2);
+}
+
+#[test]
+fn observed_socket_teardown_does_not_release_another_transports_slot() {
+    let counters = Arc::new(PolicyCounters::new());
+    counters.enable_host_tcp_close_tracking();
+    let enforcer =
+        PolicyEnforcer::with_counters(common::policy::InstancePolicy::default(), counters.clone());
+    enforcer
+        .check_outbound_tcp_connect("127.0.0.1".parse().unwrap(), 80)
+        .unwrap();
+    // Kernel close releases this raw socket before its originating store drops.
+    counters
+        .outbound_connections_active
+        .fetch_sub(1, Ordering::Relaxed);
+    // Another store/transport then reserves a live slot.
+    let other =
+        PolicyEnforcer::with_counters(common::policy::InstancePolicy::default(), counters.clone());
+    other
+        .check_outbound_tcp_connect("127.0.0.1".parse().unwrap(), 443)
+        .unwrap();
+    enforcer.release_tracked_outbound_connections();
+    assert_eq!(
+        counters.outbound_connections_active.load(Ordering::Relaxed),
+        1
+    );
+    other.record_outbound_disconnect();
 }

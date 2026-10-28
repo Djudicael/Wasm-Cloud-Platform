@@ -223,16 +223,23 @@ fn check_route_rate_limit(
     bucket.try_acquire()
 }
 
-/// Parse a hostname in the format `<app>.<namespace>.internal[:port]`.
-/// Returns (app_name, namespace) if the format matches.
-///
-/// Handles app names that contain dots (e.g., "my.api-service.production.internal")
-/// by taking the last segment before ".internal" as the namespace and everything
-/// before it as the app name.
+/// Remove caller-supplied identity before workload attribution or authentication.
 fn strip_internal_identity_headers(headers: &mut HeaderMap) {
-    headers.remove("x-namespace");
-    headers.remove("x-source-app");
-    headers.remove("x-source-tid");
+    proxy::gateway::identity::strip_identity_headers(headers);
+}
+
+/// Invalid workload metadata must fail closed, rather than omit caller identity.
+fn write_caller_identity(
+    headers: &mut HeaderMap,
+    caller: &CallerIdentity,
+) -> Result<(), StatusCode> {
+    let app = http::HeaderValue::from_str(&caller.app_id)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let namespace = http::HeaderValue::from_str(&caller.namespace)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    headers.insert("x-source-app", app);
+    headers.insert("x-source-namespace", namespace);
+    Ok(())
 }
 
 fn endpoint_auth_policy(
@@ -281,7 +288,7 @@ async fn forward_request(
 
     for (k, v) in &headers {
         let name = k.as_str();
-        if name != "x-source-app" && name != "host" {
+        if name != "host" {
             req_builder = req_builder.header(k, v);
         }
     }
@@ -331,6 +338,12 @@ fn map_hyper_response(response: http::Response<Incoming>) -> Response<axum::body
     Response::from_parts(parts, axum::body::Body::new(body))
 }
 
+/// Parse a hostname in the format `<app>.<namespace>.internal[:port]`.
+/// Returns (app_name, namespace) if the format matches.
+///
+/// Handles app names that contain dots (e.g., "my.api-service.production.internal")
+/// by taking the last segment before ".internal" as the namespace and everything
+/// before it as the app name.
 fn parse_internal_host(host: &str) -> Option<(&str, &str)> {
     // Strip port number if present (e.g., "echo-service.default.internal:9080")
     let hostname = if host.starts_with('[') {
@@ -512,14 +525,46 @@ async fn proxy_handler(
         return Err(StatusCode::TOO_MANY_REQUESTS);
     }
 
-    let target_app_id =
-        common::types::AppId::new_namespaced(target_namespace, target_app_name, "v1");
-
-    let target_endpoint = match gw
+    let existing_endpoint = gw
         .registry
         .resolve_endpoint(target_namespace, target_app_name)
-        .await
+        .await;
+    let target_app_id = if let Some(endpoint) = existing_endpoint {
+        gw.registry
+            .resolve_app_by_port(endpoint.addr.port())
+            .await
+            .ok_or(StatusCode::SERVICE_UNAVAILABLE)?
+    } else {
+        let configs = gw.gateway_config.route_configs.read().await;
+        let mut candidates = configs
+            .keys()
+            .map(|id| common::types::AppId(id.clone()))
+            .filter(|id| {
+                id.namespace() == target_namespace && id.bare_app_name() == target_app_name
+            });
+        let candidate = candidates.next();
+        if candidates.next().is_some() {
+            return Err(StatusCode::CONFLICT);
+        }
+        candidate.unwrap_or_else(|| {
+            common::types::AppId::new_namespaced(target_namespace, target_app_name, "v1")
+        })
+    };
+
+    if target_app_id.namespace() != target_namespace
+        || target_app_id.bare_app_name() != target_app_name
     {
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    }
+    let route_config = gw.gateway_config.get_route_config(&target_app_id).await;
+    if route_config
+        .as_ref()
+        .is_some_and(|cfg| !cfg.caller_allowed(Some(&caller_identity.app_id)))
+    {
+        return Err(StatusCode::FORBIDDEN);
+    }
+
+    let target_endpoint = match existing_endpoint {
         Some(endpoint) => endpoint,
         None => {
             if let Some(ref cold_start) = gw.cold_start {
@@ -557,7 +602,6 @@ async fn proxy_handler(
         "[INTERNAL-GW] resolved target address"
     );
 
-    let route_config = gw.gateway_config.get_route_config(&target_app_id).await;
     let route_auth = route_config
         .as_ref()
         .map(|cfg| cfg.auth.clone())
@@ -685,20 +729,19 @@ async fn proxy_handler(
         .unwrap_or_else(|| "/".to_string());
 
     let mut forwarded_headers = sanitized_headers.clone();
-    if let Some(identity) = user_identity.as_ref() {
-        if let Ok(value) = http::HeaderValue::from_str(&identity.sub) {
-            forwarded_headers.insert("X-User-Id", value);
-        }
-        if let Some(email) = identity.email.as_ref() {
-            if let Ok(value) = http::HeaderValue::from_str(email) {
-                forwarded_headers.insert("X-User-Email", value);
-            }
-        }
-        if !identity.roles.is_empty() {
-            if let Ok(value) = http::HeaderValue::from_str(&identity.roles.join(",")) {
-                forwarded_headers.insert("X-User-Roles", value);
-            }
-        }
+    proxy::gateway::identity::write_user_identity(&mut forwarded_headers, user_identity.as_ref());
+    write_caller_identity(&mut forwarded_headers, &caller_identity)?;
+
+    // Authentication/rate checks can await I/O. Revalidate after those waits
+    // so a stale selected endpoint cannot use another revision's admission.
+    if gw
+        .registry
+        .resolve_app_by_port(target_endpoint.addr.port())
+        .await
+        .as_ref()
+        != Some(&target_app_id)
+    {
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
     }
 
     let result: Result<Response<axum::body::Body>, StatusCode> = match forward_request(

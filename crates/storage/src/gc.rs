@@ -376,6 +376,7 @@ impl Store {
 
     /// Delete ALL data for an app across all redb tables (except secrets).
     fn purge_app_state(&self, app_name: &str) -> Result<(), PlatformError> {
+        self.delete_trigger_cursors_for_app(app_name)?;
         use redb::ReadableTable;
 
         let prefix = format!("{}:", app_name);

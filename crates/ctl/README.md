@@ -202,3 +202,12 @@ Deploy manifests, remote artifact inputs, gateway rate-limit mode, secret target
 - An invalid bearer-token header currently causes a warning followed by an unauthenticated request. Treat the warning as a command failure until the CLI is changed to reject it.
 
 The previous version of this file accidentally contained concatenated copies of the e2e, eBPF monitor, internal gateway, and node READMEs. Those documents remain in their owning crate directories; they are not part of the `wasm-ctl` crate reference.
+
+
+### Periodic application triggers
+
+Deployment manifests accept `[[triggers]]` with `kind = "schedule"`. Manifest
+conversion and export preserve these declarations; invalid bounds, unsupported
+kinds, and unknown trigger options are rejected. See the canonical
+[periodic trigger contract](../../docs/deploying-applications.md#periodic-triggers)
+for the reserved POST route, interval syntax, node replication, and limits.

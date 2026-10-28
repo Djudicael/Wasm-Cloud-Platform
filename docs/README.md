@@ -11,7 +11,8 @@ instructions.
 - [Deployment levels](deployment-levels.md) selects an operating profile and
   links each level's requirements.
 - [Deploying applications](deploying-applications.md) covers artifacts,
-  manifests, routes, policy, secrets, updates, and removal.
+  manifests, routes, policy, secrets, updates, removal, and
+  [periodic triggers](deploying-applications.md#periodic-triggers).
 - [Full-stack example](full-stack-example.md) connects applications, PostgreSQL,
   OIDC, and the node-local internal mesh.
 - [gRPC compatibility](grpc-compatibility.md) defines the tested native and

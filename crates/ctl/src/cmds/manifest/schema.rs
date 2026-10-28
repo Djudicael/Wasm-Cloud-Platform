@@ -6,6 +6,8 @@ use std::collections::HashMap;
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct DeployManifest {
     #[serde(default)]
+    pub triggers: Vec<common::triggers::Trigger>,
+    #[serde(default)]
     pub app: AppManifestSection,
 
     #[serde(default)]
@@ -133,6 +135,8 @@ impl Default for FuelManifestSection {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct GatewayManifestSection {
+    #[serde(default)]
+    pub allowed_callers: Option<Vec<String>>,
     #[serde(default)]
     pub host: Option<String>,
 

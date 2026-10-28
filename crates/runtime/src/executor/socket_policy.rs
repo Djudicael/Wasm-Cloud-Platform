@@ -28,6 +28,7 @@ pub type SocketAddrCheckFn = Arc<
 /// Snapshot of the instance network policy used by the WASI socket address checker.
 #[derive(Debug, Clone)]
 pub(crate) struct SocketPolicyCheck {
+    network: common::policy::NetworkPolicy,
     allow_inbound: bool,
     allow_outbound_tcp: bool,
     allow_outbound_udp: bool,
@@ -39,6 +40,7 @@ pub(crate) struct SocketPolicyCheck {
 impl SocketPolicyCheck {
     pub(crate) fn from_instance_policy(policy: &InstancePolicy) -> Self {
         SocketPolicyCheck {
+            network: policy.network.clone(),
             allow_inbound: policy.network.allow_inbound,
             allow_outbound_tcp: policy.network.allow_outbound_tcp,
             allow_outbound_udp: policy.network.allow_outbound_udp,
@@ -64,6 +66,7 @@ impl SocketPolicyCheck {
     }
 
     fn outbound_ip_allowed(&self, ip: IpAddr) -> Result<(), &'static str> {
+        let ip = ip.to_canonical();
         if self.denied_cidrs.iter().any(|cidr| cidr.contains(&ip)) {
             return Err("destination in denied_cidrs");
         }
@@ -83,6 +86,9 @@ impl SocketPolicyCheck {
         use_type: SocketAddrUse,
     ) -> Result<(), &'static str> {
         match use_type {
+            // WASI TCP clients bind an ephemeral local endpoint before connect.
+            // Listen is checked separately against the assigned service port.
+            SocketAddrUse::TcpBind if addr.port() == 0 && self.allow_outbound_tcp => Ok(()),
             SocketAddrUse::TcpBind | SocketAddrUse::TcpListen => {
                 if !self.allow_inbound {
                     return Err("inbound tcp bind disabled");
@@ -99,6 +105,7 @@ impl SocketPolicyCheck {
                 Ok(())
             }
             SocketAddrUse::TcpConnect => {
+                self.network.check_profile_destination(addr, false)?;
                 if !self.allow_outbound_tcp {
                     return Err("outbound tcp disabled");
                 }
@@ -114,17 +121,50 @@ impl SocketPolicyCheck {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn compose_socket_addr_check(
     policy_check: SocketPolicyCheck,
     policy_enforcer: PolicyEnforcer,
     extra_check: Option<SocketAddrCheckFn>,
 ) -> SocketAddrCheckFn {
+    compose_addr_check(policy_check, policy_enforcer, extra_check, false, false)
+}
+
+pub(super) fn compose_resource_socket_addr_check(
+    policy_check: SocketPolicyCheck,
+    policy_enforcer: PolicyEnforcer,
+    extra_check: Option<SocketAddrCheckFn>,
+) -> SocketAddrCheckFn {
+    compose_addr_check(policy_check, policy_enforcer, extra_check, false, true)
+}
+
+pub(super) fn compose_http_addr_check(
+    policy_check: SocketPolicyCheck,
+    policy_enforcer: PolicyEnforcer,
+    extra_check: Option<SocketAddrCheckFn>,
+) -> SocketAddrCheckFn {
+    compose_addr_check(policy_check, policy_enforcer, extra_check, true, false)
+}
+
+fn compose_addr_check(
+    policy_check: SocketPolicyCheck,
+    policy_enforcer: PolicyEnforcer,
+    extra_check: Option<SocketAddrCheckFn>,
+    http: bool,
+    resource_managed: bool,
+) -> SocketAddrCheckFn {
     Arc::new(move |addr, use_type| {
+        // The supervisor must see mapped IPv4 as IPv4 too, otherwise its
+        // loopback/namespace gate could mistake it for an external address.
+        let addr = SocketAddr::new(addr.ip().to_canonical(), addr.port());
         let policy_enforcer = policy_enforcer.clone();
         let snapshot_check = policy_check.clone();
         let extra_check = extra_check.clone();
         Box::pin(async move {
             let reserved_outbound_slot = match use_type {
+                SocketAddrUse::TcpBind if addr.port() == 0 && snapshot_check.allow_outbound_tcp => {
+                    false
+                }
                 SocketAddrUse::TcpBind | SocketAddrUse::TcpListen => {
                     match policy_enforcer.check_tcp_bind(addr.port()) {
                         Ok(()) => false,
@@ -151,8 +191,21 @@ pub(crate) fn compose_socket_addr_check(
                         return false;
                     }
                 },
+                SocketAddrUse::TcpConnect if resource_managed => {
+                    // The P2 start-connect host call owns the reservation.
+                    // Keep address/protocol checks and the supervisor gate here.
+                    if snapshot_check.check(addr, use_type).is_err() {
+                        return false;
+                    }
+                    false
+                }
                 SocketAddrUse::TcpConnect => {
-                    match policy_enforcer.check_outbound_tcp_connect(addr.ip(), addr.port()) {
+                    let decision = if http {
+                        policy_enforcer.check_outbound_http_connect(addr.ip(), addr.port())
+                    } else {
+                        policy_enforcer.check_outbound_tcp_connect(addr.ip(), addr.port())
+                    };
+                    match decision {
                         Ok(()) => true,
                         Err(err) => {
                             tracing::warn!(
@@ -180,12 +233,25 @@ pub(crate) fn compose_socket_addr_check(
             };
 
             let extra_allowed = if let Some(check) = extra_check.as_ref() {
-                check(addr, use_type).await
+                // Cancellation while an asynchronous supervisor check is pending
+                // must not leak the reservation made above.
+                let mut reservation = PendingReservation {
+                    enforcer: reserved_outbound_slot.then(|| policy_enforcer.clone()),
+                };
+                let allowed = check(addr, use_type).await;
+                reservation.enforcer = None;
+                allowed
             } else {
                 true
             };
 
             if !extra_allowed {
+                if use_type == SocketAddrUse::TcpConnect {
+                    policy_enforcer
+                        .counters
+                        .connection_denied_total
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
                 if reserved_outbound_slot {
                     policy_enforcer.record_outbound_disconnect();
                 }
@@ -199,4 +265,16 @@ pub(crate) fn compose_socket_addr_check(
             true
         })
     })
+}
+
+struct PendingReservation {
+    enforcer: Option<PolicyEnforcer>,
+}
+
+impl Drop for PendingReservation {
+    fn drop(&mut self) {
+        if let Some(enforcer) = &self.enforcer {
+            enforcer.record_outbound_disconnect();
+        }
+    }
 }

@@ -29,6 +29,8 @@ pub struct BillingInfo {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct PolicyCounterSnapshot {
+    pub egress_bytes: u64,
+    pub io_timeouts: [u64; 4],
     pub connection_denied_total: u64,
     pub egress_denied_total: u64,
     pub fd_denied_total: u64,
@@ -46,6 +48,13 @@ pub(crate) struct PolicyCounterSnapshot {
 impl PolicyCounterSnapshot {
     pub(crate) fn from_counters(counters: &PolicyCounters) -> Self {
         Self {
+            egress_bytes: counters.egress_bytes.load(Ordering::Relaxed),
+            io_timeouts: [
+                counters.io_connect_timeouts.load(Ordering::Relaxed),
+                counters.io_read_timeouts.load(Ordering::Relaxed),
+                counters.io_write_timeouts.load(Ordering::Relaxed),
+                counters.io_http_timeouts.load(Ordering::Relaxed),
+            ],
             connection_denied_total: counters.connection_denied_total.load(Ordering::Relaxed),
             egress_denied_total: counters.egress_denied_total.load(Ordering::Relaxed),
             fd_denied_total: counters.fd_denied_total.load(Ordering::Relaxed),
@@ -66,6 +75,7 @@ impl PolicyCounterSnapshot {
 
 /// A live Wasm instance managed by the Supervisor.
 pub struct ManagedInstance {
+    pub(crate) trigger_handle: Option<runtime::executor::TriggerHandle>,
     pub id: InstanceId,
     pub app_id: AppId,
     pub addr: SocketAddr,
@@ -236,6 +246,7 @@ mod tests {
             tid: None,
             policy_counters: None,
             last_policy_export: PolicyCounterSnapshot::default(),
+            trigger_handle: None,
         };
 
         instance.begin_shutdown().await;

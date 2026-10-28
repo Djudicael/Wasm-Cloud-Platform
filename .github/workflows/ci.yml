@@ -90,6 +90,12 @@ jobs:
         run: cargo test -p runtime --tests
         timeout-minutes: 6
 
+      - name: Build and exercise the P3 HTTP service boundary
+        run: |
+          cargo build --locked --target wasm32-wasip2 -p http-p3-probe
+          cargo test --locked -p runtime --test p3_service -- --ignored --skip p3_postgres
+        timeout-minutes: 10
+
   # Job 3: Critical gateway + supervisor integration suites
   gateway-supervisor-tests:
     name: Gateway and Supervisor Integration Tests

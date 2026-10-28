@@ -13,12 +13,14 @@ pub mod gc;
 pub mod gc_metrics;
 pub mod health;
 pub mod integrity;
+pub mod lifecycle;
 mod management_state;
 pub mod metrics;
 mod migrations;
 pub mod routes;
 pub mod secrets;
 pub mod tables;
+pub mod triggers;
 
 #[cfg(test)]
 mod tests;

@@ -285,7 +285,7 @@ Both approaches work. The `<app>.<namespace>.internal` hostname is more portable
 
 ## Network Interception
 
-The Supervisor configures a `socket_addr_check` callback on every Wasm instance's WASI context. This callback intercepts **all** outbound TCP connections.
+The Supervisor configures a `socket_addr_check` callback on every Wasm instance's WASI context. This callback checks outbound WASI TCP socket connections. Outgoing `wasi:http` requests use a platform transport that calls the same composed address policy before opening its native TCP connection.
 
 ### What is allowed
 
@@ -342,7 +342,45 @@ make the authorization decision. This is not an authorization bypass. The eBPF
 namespace enforcer observes the established TCP connection, binds its ephemeral
 source port to the registered workload TID, and the gateway resolves the caller
 identity from that kernel-derived binding. Caller-supplied `X-Namespace`,
-`X-Source-App`, and `X-Source-Tid` headers are stripped.
+`X-Source-App`, `X-Source-Namespace`, `X-Source-Tid`, `X-App-Id`, and all
+`X-User-*` headers (including duplicate values) are stripped.
+
+After attribution and authorization, the gateway writes `X-Source-App` with the
+exact application ID registered for the caller, and `X-Source-Namespace` with its
+namespace. These describe the calling workload, not the end user or an
+application-level run. Unavailable attribution still fails closed. Gateway
+configuration can additionally restrict caller applications with an exact
+`allowed_callers` list; namespace admission and user authentication still apply.
+
+A target can restrict its mesh callers in its deployment manifest:
+
+```toml
+[gateway]
+allowed_callers = ["agents/coordinator:v1", "agents/broker:v2"]
+```
+
+Omitting the list preserves legacy caller admission. An empty list denies all
+callers. Entries must be unique, fully qualified `namespace/app:version` IDs;
+there are no wildcards or implicit version upgrades. The gateway uses only the
+resolved workload identity, never a supplied header. A configured list rejects
+edge traffic (including authenticated clients) because the edge has no trusted
+mesh caller identity. This is an application gateway policy covering its routes;
+endpoint authentication does not override it.
+
+Authorization runs before cold start. Direct connections to a target with caller
+restrictions or endpoint rules are denied by the supervisor; injected service
+URLs use the gateway for these targets. The gateway and direct-port checks use
+the actual registered target version, including versions other than `v1`.
+If a cold target has several configured versions, name-only discovery is
+ambiguous and returns 409 instead of choosing a policy arbitrarily. A missing
+or inconsistent endpoint-owner binding fails closed.
+
+User claims follow the [gateway identity contract](gateway/oidc-setup.md#upstream-identity-contract).
+A mesh caller must supply a verifiable bearer token when the target requires
+user authentication; forwarding `X-User-*` from a prior request grants no user
+authority. Applications may implement separately verified run-scoped tokens.
+Trust this contract only on paths protected by the gateways and platform network
+policy; an unprotected direct endpoint cannot authenticate these headers.
 
 ```
 App A (payments:v1) in namespace "staging"
@@ -409,10 +447,15 @@ App B receives the request
 
 | Target app gateway config | Internal path |
 |---------------------------|---------------|
-| No endpoint rules | Direct connection (fast path) |
-| Has endpoint rules | Via internal gateway on port 9080 |
+| No endpoint rules or caller restriction | Direct connection (fast path) |
+| Has endpoint rules or `allowed_callers` | Via internal gateway on port 9080 |
 
-The app **does not know** which path was taken. Both are transparent.
+The injected service URL follows the target's gateway requirements.
+Caller-restricted and endpoint-protected targets reject attempts to connect
+directly to their application port. Restrictive callers should use the literal
+qualified `.internal:9080` URLs described in the
+[profile contract](deploying-applications.md#restrictive-network-profiles);
+legacy injected URLs for unprotected targets can still be direct.
 
 ### Limitations
 
@@ -422,7 +465,9 @@ The app **does not know** which path was taken. Both are transparent.
   public gateway. That is not part of the internal mesh.
 - Namespace enforcement depends on active eBPF identity attribution. Mandatory
   enforcement fails closed when the program, map, consumer, or binding is absent.
-- Active outbound-connection accounting relies on eBPF TCP-close events. If
+- Active raw WASI socket outbound-connection accounting relies on eBPF TCP-close
+  events. The HTTP transport releases its own reservations on close or
+  cancellation. If
   `max_outbound_connections` is an enforcement control, production must set
   eBPF as required rather than accepting degraded monitoring.
 - **Endpoint-level rate limiting** is structural but uses simplified checks; full distributed rate limiting is applied at the external Pingora gateway.
@@ -656,7 +701,7 @@ wasm-ctl app list --namespace production
 | Attack | Defense |
 |--------|---------|
 | Forge its namespace | Namespace is not exposed to the app |
-| Bypass the proxy | All outbound TCP is intercepted by `socket_addr_check` |
+| Bypass the proxy | WASI sockets and outgoing HTTP apply the composed runtime/supervisor address policy |
 | Scan arbitrary ports | Unknown loopback destinations are blocked |
 | Reach cross-namespace apps (direct port) | `ECONNREFUSED` at WASI layer — direct app ports are namespace-checked |
 | Reach cross-namespace apps (gateway port) | Kernel-derived caller identity is resolved and cross-namespace access is denied unless explicitly allowed |

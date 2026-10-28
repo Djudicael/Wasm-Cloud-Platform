@@ -3,6 +3,12 @@ use crate::limits::{
     configure_service_store, configure_store, read_fuel_remaining, IoStats, MemoryLimiter,
 };
 use crate::policy_tracker::{PolicyCounters, PolicyEnforcer};
+mod http_policy;
+mod p3;
+mod triggers;
+pub use triggers::TriggerHandle;
+mod socket_deadlines;
+mod socket_egress;
 mod socket_policy;
 use common::{
     error::PlatformError,
@@ -13,8 +19,11 @@ use hyper::body::{Body as HyperBodyTrait, Frame, SizeHint};
 use hyper::server::conn::http2;
 use hyper::service::service_fn;
 use hyper_util::rt::{TokioExecutor, TokioIo};
-pub(crate) use socket_policy::{compose_socket_addr_check, SocketPolicyCheck};
+#[cfg(test)]
+pub(crate) use socket_policy::compose_socket_addr_check;
+pub(crate) use socket_policy::SocketPolicyCheck;
 pub use socket_policy::{SocketAddrCheckFn, SocketAddrUse};
+use std::collections::HashSet;
 use std::future::Future;
 use std::net::SocketAddr;
 use std::path::Path;
@@ -94,11 +103,9 @@ fn configure_filesystem_preopens(
 }
 
 fn resolve_instance_policy(config: &AppConfig, port: u16) -> Result<InstancePolicy, PlatformError> {
-    match config.policy.as_ref() {
-        Some(p) => p.resolve(port),
-        None => common::policy::PolicyConfig::default().resolve(port),
-    }
-    .map_err(|e| PlatformError::runtime(format!("invalid policy config: {e}")))
+    config
+        .resolve_instance_policy(port)
+        .map_err(|e| PlatformError::runtime(format!("invalid policy config: {e}")))
 }
 
 fn build_store_state(
@@ -123,12 +130,19 @@ fn build_store_state(
         Some(counters) => PolicyEnforcer::with_counters(policy.clone(), counters),
         None => PolicyEnforcer::new(policy.clone()),
     };
+    policy_enforcer.counters.enable_host_socket_lifecycle();
     let policy_socket_check = SocketPolicyCheck::from_instance_policy(&policy);
-    let combined_socket_check = compose_socket_addr_check(
+    // HTTP owns its reservations until transport close, independently of store
+    // teardown; share aggregate counters with sockets but not reservation ownership.
+    let http_enforcer =
+        PolicyEnforcer::with_counters(policy.clone(), policy_enforcer.counters.clone());
+    let http_hooks = http_policy::PolicyHttpHooks::new(http_enforcer, socket_addr_check.clone());
+    let combined_socket_check = socket_policy::compose_resource_socket_addr_check(
         policy_socket_check,
         policy_enforcer.clone(),
         socket_addr_check,
     );
+    let p3_socket_check = combined_socket_check.clone();
     builder.socket_addr_check(move |addr, use_type| {
         let use_enum = match use_type {
             wasmtime_wasi::sockets::SocketAddrUse::TcpBind => SocketAddrUse::TcpBind,
@@ -164,8 +178,12 @@ fn build_store_state(
     table.set_max_capacity(policy.filesystem.max_open_fds as usize);
 
     Ok(StoreState {
+        p3_socket_check,
+        raw_connections: HashSet::new(),
+        io_deadlines: socket_deadlines::SocketDeadlines::new(policy_enforcer.counters.clone()),
         ctx: builder.build(),
         http: WasiHttpCtx::new(),
+        http_hooks,
         table,
         limiter: MemoryLimiter::new(
             config.memory_limit,
@@ -182,6 +200,10 @@ fn build_runtime_linker(engine: &Engine) -> Result<Linker<StoreState>, PlatformE
         .map_err(|e| PlatformError::runtime(format!("wasi linker error: {e}")))?;
     add_only_http_to_linker_sync(&mut linker)
         .map_err(|e| PlatformError::runtime(format!("wasi:http linker error: {e}")))?;
+    socket_egress::add_to_linker(&mut linker)
+        .map_err(|e| PlatformError::runtime(format!("socket egress linker error: {e}")))?;
+    socket_deadlines::add_to_linker(&mut linker, false)
+        .map_err(|e| PlatformError::runtime(format!("socket deadline linker error: {e}")))?;
     Ok(linker)
 }
 
@@ -191,13 +213,21 @@ fn build_async_http_linker(engine: &Engine) -> Result<Linker<StoreState>, Platfo
         .map_err(|e| PlatformError::runtime(format!("wasi linker error: {e}")))?;
     add_only_http_to_linker_async(&mut linker)
         .map_err(|e| PlatformError::runtime(format!("wasi:http linker error: {e}")))?;
+    socket_egress::add_to_linker(&mut linker)
+        .map_err(|e| PlatformError::runtime(format!("socket egress linker error: {e}")))?;
+    socket_deadlines::add_to_linker(&mut linker, true)
+        .map_err(|e| PlatformError::runtime(format!("socket deadline linker error: {e}")))?;
     Ok(linker)
 }
 
 /// Store state for WASI Preview 2
 pub struct StoreState {
+    p3_socket_check: SocketAddrCheckFn,
+    raw_connections: HashSet<u32>,
+    io_deadlines: socket_deadlines::SocketDeadlines,
     pub ctx: WasiCtx,
     pub http: WasiHttpCtx,
+    http_hooks: http_policy::PolicyHttpHooks,
     pub table: ResourceTable,
     pub limiter: MemoryLimiter,
     pub policy_enforcer: PolicyEnforcer,
@@ -232,7 +262,7 @@ impl WasiHttpView for StoreState {
         WasiHttpCtxView {
             ctx: &mut self.http,
             table: &mut self.table,
-            hooks: Default::default(),
+            hooks: &mut self.http_hooks,
         }
     }
 }
@@ -326,7 +356,15 @@ impl PreparedModule {
     ) -> Result<Self, PlatformError> {
         // SAFETY: artifact was produced by our own compiler::compile()
         let module = unsafe { crate::compiler::deserialize(&engine, artifact_bytes) }?;
+        common::triggers::validate(&config.triggers).map_err(PlatformError::ConfigValidation)?;
         let execution_model = detect_component_execution_model(&engine, &module, &config)?;
+        if !config.triggers.is_empty()
+            && execution_model != ComponentExecutionModel::WasiHttpIncomingHandler
+        {
+            return Err(PlatformError::ConfigValidation(
+                "schedule triggers require wasi:http".into(),
+            ));
+        }
         Ok(PreparedModule {
             engine,
             module,
@@ -399,6 +437,11 @@ impl PreparedModule {
         socket_addr_check: Option<SocketAddrCheckFn>,
         thread_start_hook: Option<HttpServerThreadStartHook>,
     ) -> Result<HttpServerInstance, PlatformError> {
+        if p3::is_service(&self.engine, &self.module) {
+            return p3::spawn(self, env_vars, addr, socket_addr_check, thread_start_hook);
+        }
+        common::triggers::validate(&self.config.triggers)
+            .map_err(PlatformError::ConfigValidation)?;
         if self.execution_model != ComponentExecutionModel::WasiHttpIncomingHandler {
             return Err(PlatformError::runtime(
                 "spawn_http_server called for non-wasi:http component",
@@ -415,6 +458,7 @@ impl PreparedModule {
         let policy_counters = Arc::new(PolicyCounters::new());
         let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel::<()>();
         let task_policy_counters = policy_counters.clone();
+        let (trigger_tx, mut trigger_rx) = tokio::sync::mpsc::channel::<triggers::Invocation>(32);
 
         let runtime_error_config = config.clone();
         let task = spawn_dedicated_current_thread(
@@ -504,6 +548,25 @@ impl PreparedModule {
                     }
                 };
                 let pre = Arc::new(pre);
+                let trigger_context = Arc::new(triggers::Context {
+                    config: config.clone(),
+                    engine: engine.clone(),
+                    pre: pre.clone(),
+                    env: env_vars.clone(),
+                    socket_check: socket_addr_check.clone(),
+                    counters: task_policy_counters.clone(),
+                    port: addr.port(),
+                    limits: config
+                        .triggers
+                        .iter()
+                        .map(|t| {
+                            Arc::new(tokio::sync::Semaphore::new(
+                                t.schedule().max_concurrency as usize,
+                            ))
+                        })
+                        .collect(),
+                });
+                let mut trigger_tasks = tokio::task::JoinSet::new();
                 let mut trap: Option<String> = None;
 
                 loop {
@@ -511,6 +574,10 @@ impl PreparedModule {
                         _ = &mut shutdown_rx => {
                             break;
                         }
+                        Some(invocation) = trigger_rx.recv() => {
+                            trigger_tasks.spawn(triggers::invoke(trigger_context.clone(), invocation));
+                        }
+                        _ = trigger_tasks.join_next(), if !trigger_tasks.is_empty() => {}
                         accept = listener.accept() => {
                             match accept {
                                 Ok((client, _peer_addr)) => {
@@ -532,6 +599,12 @@ impl PreparedModule {
                                             let request_policy_counters = request_policy_counters.clone();
                                             let app_id_for_request = app_id.clone();
                                             async move {
+                                                let mut req = req;
+                                                if common::triggers::reserved_network_path(req.uri().path()) {
+                                                    return Ok(triggers::denied_response());
+                                                }
+                                                let names: Vec<_> = req.headers().keys().filter(|n| n.as_str().starts_with("x-trigger-")).cloned().collect();
+                                                for name in names { req.headers_mut().remove(name); }
                                                 let (sender, receiver) = tokio::sync::oneshot::channel();
                                                 let (response_started_tx, response_started_rx) =
                                                     tokio::sync::oneshot::channel::<bool>();
@@ -709,6 +782,7 @@ impl PreparedModule {
             task,
             shutdown_tx,
             policy_counters,
+            trigger_handle: TriggerHandle(trigger_tx),
             policy,
         })
     }
@@ -763,6 +837,7 @@ where
 }
 
 pub struct HttpServerInstance {
+    pub trigger_handle: TriggerHandle,
     pub task: tokio::task::JoinHandle<ExecutionStats>,
     pub shutdown_tx: tokio::sync::oneshot::Sender<()>,
     pub policy_counters: Arc<PolicyCounters>,
@@ -850,6 +925,20 @@ fn detect_component_execution_model(
     module: &Component,
     config: &AppConfig,
 ) -> Result<ComponentExecutionModel, PlatformError> {
+    if p3::is_service(engine, module) {
+        if !config.triggers.is_empty() {
+            return Err(PlatformError::ConfigValidation(
+                "P3 native triggers are not supported".into(),
+            ));
+        }
+        let linker = p3::linker(engine)?;
+        let pre = linker
+            .instantiate_pre(module)
+            .map_err(|e| PlatformError::runtime(format!("P3 pre-instantiation error: {e}")))?;
+        wasmtime_wasi_http::p3::bindings::ServicePre::new(pre)
+            .map_err(|e| PlatformError::runtime(format!("P3 service contract error: {e}")))?;
+        return Ok(ComponentExecutionModel::WasiHttpIncomingHandler);
+    }
     let state = build_store_state(config, Vec::new(), config.wasm_bind_port, None, None)?;
     let mut store = Store::new(engine, state);
     store.limiter(|s| &mut s.limiter);
@@ -905,7 +994,7 @@ impl RunningInstance {
                     }
                 },
                 Err(e) => {
-                    let err_msg = e.to_string();
+                    let err_msg = format!("{e:#}");
                     tracing::error!(instance_id = %self.id.0, entry_point = %entry_point.name, error = %err_msg, "WASM trap");
                     tracing::error!(instance = %self.id.0, entry_point = %entry_point.name, error = %err_msg, "WASM function call failed");
                     Some(err_msg)
@@ -922,7 +1011,7 @@ impl RunningInstance {
                     None
                 }
                 Err(e) => {
-                    let err_msg = e.to_string();
+                    let err_msg = format!("{e:#}");
                     tracing::error!(instance_id = %self.id.0, entry_point = %entry_point.name, error = %err_msg, "WASM trap");
                     tracing::error!(instance = %self.id.0, entry_point = %entry_point.name, error = %err_msg, "WASM function call failed");
                     Some(err_msg)
@@ -932,7 +1021,7 @@ impl RunningInstance {
 
         tracing::debug!(entry_point = %entry_point.name, "typed entry point invocation failed, trying untyped fallback");
         if let Err(e) = entry_point.func.call(&mut self.store, &[], &mut []) {
-            let err_msg = e.to_string();
+            let err_msg = format!("{e:#}");
             tracing::error!(instance_id = %self.id.0, entry_point = %entry_point.name, error = %err_msg, "WASM trap");
             tracing::error!(instance = %self.id.0, entry_point = %entry_point.name, error = %err_msg, "WASM function call failed");
             Some(err_msg)
@@ -976,6 +1065,18 @@ impl RunningInstance {
         let fuel_consumed = fuel_limit.saturating_sub(fuel_remaining);
         let ram_bytes = self.read_memory_usage();
         let wall_clock_ms = start.elapsed().as_millis() as u64;
+
+        if self.store.data().io_deadlines.tripped() {
+            // A host deadline terminates this invocation. Drop all socket
+            // resources now, including abort-on-drop native I/O tasks, even if
+            // a caller keeps the RunningInstance to inspect its statistics.
+            let state = self.store.data_mut();
+            let mut empty = ResourceTable::new();
+            empty.set_max_capacity(state.table.max_capacity());
+            state.table = empty;
+            state.policy_enforcer.release_tracked_outbound_connections();
+            state.raw_connections.clear();
+        }
 
         // Populate io_stats from policy counters
         let counters = &self.store.data().policy_enforcer.counters;

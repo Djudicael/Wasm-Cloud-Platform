@@ -15,6 +15,7 @@ The supervisor operates as a long-running service that coordinates multiple subs
 - **Billing**: Records fuel and resource consumption for running instances.
 - **Audit Logging**: Records significant events (spawns, kills, deployments) to a structured JSON log.
 - **Connection Proxying**: Proxies database connections from Wasm instances to backend databases.
+- **Periodic Triggers**: `triggers::Scheduler` delivers generic node-local schedule ticks through a native runtime capability. Durable cursors, bounded concurrency, audit/metrics, and `Supervisor::stop_schedules` integrate with drain and shutdown; see the [contract](../../docs/deploying-applications.md#periodic-triggers). NATS message triggers remain open.
 - **Deployment**: Supports hot-swap and manual rollback mechanics. `RollbackPolicy` is a model for automatic rollback thresholds but is not wired to an automatic controller.
 - **Admission Control**: Uses fuel-based and concurrency-based controllers to limit resource usage per application.
 
@@ -48,13 +49,17 @@ The supervisor operates as a long-running service that coordinates multiple subs
 
 ### Spawn and scaling
 
-- `ensure_instance()` checks for a ready instance and then calls `spawn()` without a per-application single-flight guard. Concurrent cold requests can therefore initiate more than one spawn, bounded by the application's instance limits.
+- `ensure_instance()` and explicit `spawn()` share a per-application gate. Concurrent cold requests reuse the first ready instance. `undeploy_app()` persists an admission fence before waiting for the same gate, then stops and forgets the empty pool. New admissions reject the undeploy marker even when an existing ready instance remains during cleanup.
 - Spawn error paths release the allocated port. If the process starts but fails the 500 ms readiness check, the current path releases the port without first signalling and joining the spawned task.
 - `ConcurrencyController` adds semaphore permits after a successful scale-up. Those permits are not reduced when instances later stop, so its concurrency model can drift from the live pool size.
 
 ### Shutdown and accounting
 
 Instance shutdown now fences the upstream, signals the runtime, waits for its join handle, records billing, deregisters service state, and releases the port. A timed-out task is reinserted in a fenced state and reaped after it exits.
+
+`forget_app()` rejects pools containing any tracked instance, including fenced
+instances whose shutdown timed out. Removal cannot silently discard their task
+or release ownership before exit is confirmed.
 
 `shutdown_all(timeout)` applies the supplied duration to each application and instance sequence rather than enforcing one global deadline. Total shutdown time can therefore exceed `timeout` when many applications are running.
 

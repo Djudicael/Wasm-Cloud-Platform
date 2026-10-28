@@ -3,7 +3,7 @@
 
 use crate::{
     instance::{BillingInfo, ManagedInstance},
-    is_instance_bind_allowed,
+    is_instance_bind_allowed, is_instance_ephemeral_bind_allowed,
     network_interceptor::{ConnectDecision, NetworkInterceptor},
     pool::InstancePool,
     Supervisor,
@@ -25,8 +25,39 @@ use std::{
 use tracing::info;
 
 impl Supervisor {
+    /// Shared by cold starts and undeploy. Weak entries cannot keep retired
+    /// application identities alive indefinitely or create a second gate while
+    /// another caller still owns the first one.
+    pub(crate) async fn spawn_gate(&self, app: &AppId) -> Arc<tokio::sync::Mutex<()>> {
+        let mut gates = self.spawn_gates.lock().await;
+        gates.retain(|_, gate| gate.strong_count() > 0);
+        if let Some(gate) = gates.get(&app.0).and_then(std::sync::Weak::upgrade) {
+            return gate;
+        }
+        let gate = Arc::new(tokio::sync::Mutex::new(()));
+        gates.insert(app.0.clone(), Arc::downgrade(&gate));
+        gate
+    }
+
     /// Enforce node-local ceilings before an app can be admitted to a pool.
     pub fn check_resource_limits(&self, config: &AppConfig) -> Result<(), PlatformError> {
+        common::triggers::validate(&config.triggers).map_err(PlatformError::ConfigValidation)?;
+        self.network_admission
+            .validate_app(config)
+            .map_err(PlatformError::ConfigValidation)?;
+        if config
+            .policy
+            .as_ref()
+            .and_then(|p| p.network.as_ref())
+            .and_then(|n| n.profile)
+            .is_some_and(|profile| profile != common::policy::NetworkProfile::Isolated)
+            && self.internal_gateway_port != common::INTERNAL_GATEWAY_PORT
+        {
+            return Err(PlatformError::ConfigValidation(
+                "restrictive mesh/egress profiles require the canonical internal gateway port 9080"
+                    .into(),
+            ));
+        }
         // Maximum fuel quota: 10 billion units (prevents absurdly long compute)
         if config.fuel_quota.0 > 10_000_000_000 {
             return Err(PlatformError::runtime(
@@ -65,6 +96,14 @@ impl Supervisor {
 
     /// Ensure at least one instance is available for the given app.
     pub async fn ensure_instance(&self, app_id: &AppId) -> Result<SocketAddr, PlatformError> {
+        let gate = self.spawn_gate(app_id).await;
+        let _guard = gate.lock().await;
+        if self.store.is_undeployed(&app_id.0)? {
+            return Err(PlatformError::AppNotFound(format!(
+                "{} is undeployed",
+                app_id.0
+            )));
+        }
         let existing = {
             let pools = self.pools.read().await;
             pools
@@ -76,12 +115,18 @@ impl Supervisor {
             return Ok(addr);
         }
 
-        self.spawn(app_id).await
+        self.spawn_inner(app_id).await
     }
 
     /// Spawn a new instance for the given app.
     /// Returns the SocketAddr where the instance is listening.
     pub async fn spawn(&self, app_id: &AppId) -> Result<SocketAddr, PlatformError> {
+        let gate = self.spawn_gate(app_id).await;
+        let _guard = gate.lock().await;
+        self.spawn_inner(app_id).await
+    }
+
+    async fn spawn_inner(&self, app_id: &AppId) -> Result<SocketAddr, PlatformError> {
         if self.store.is_undeployed(&app_id.0)? {
             return Err(PlatformError::AppNotFound(format!(
                 "{} is undeployed",
@@ -139,12 +184,26 @@ impl Supervisor {
             "[SPAWN] Building qualified AppId"
         );
 
+        // Resolve before reserving a port or launching guest work. Plaintext is
+        // ephemeral and never written into the persisted/public AppConfig.
+        let provider = self
+            .secret_provider
+            .read()
+            .map_err(|_| PlatformError::runtime("secret provider unavailable"))?
+            .clone();
+        let secret_env =
+            crate::secret_environment::resolve_declared(&config, provider.as_deref()).await?;
+
         // 3. Allocate a host port
         let host_port = self.port_alloc.allocate()?;
         let addr = self.port_alloc.socket_addr(host_port);
 
         // 4. Resolve env vars - note: we pass host_port, not wasm_bind_port
         let mut env_vars = (self.env_resolver)(&config, host_port);
+        for (key, value) in secret_env {
+            env_vars.retain(|(name, _)| name != &key);
+            env_vars.push((key, value));
+        }
 
         // 4b. Inject service discovery env vars for other running apps in the same namespace
         let target_namespace = qualified_app_id.namespace();
@@ -169,17 +228,11 @@ impl Supervisor {
                     bare_app_name.to_uppercase().replace('-', "_")
                 );
 
-                let unqualified = format!("{}:v1", bare_app_name);
-                let qualified =
-                    AppId::new_namespaced(qualified_app_id.namespace(), bare_app_name, "v1").0;
-                let gateway_config = self
-                    .store
-                    .load_gateway_config(&unqualified)
-                    .ok()
-                    .flatten()
-                    .or_else(|| self.store.load_gateway_config(&qualified).ok().flatten());
+                let target_id = self.service_registry.resolve_app_by_port(addr.port()).await;
+                let gateway_config =
+                    target_id.and_then(|id| self.store.load_gateway_config(&id.0).ok().flatten());
                 let has_endpoint_rules = gateway_config
-                    .map(|cfg| !cfg.endpoints.is_empty())
+                    .map(|cfg| cfg.requires_mesh_gateway())
                     .unwrap_or(false);
 
                 let url = if has_endpoint_rules {
@@ -221,12 +274,16 @@ impl Supervisor {
         let source_app = qualified_app_id.clone();
         let internal_gateway_port = self.internal_gateway_port;
         let instance_bind_ip = addr.ip();
+        let network_admission = self.network_admission.clone();
+        let policy_store = self.store.clone();
         let socket_addr_check: SocketAddrCheckFn =
             Arc::new(move |dest: std::net::SocketAddr, use_type: SocketAddrUse| {
                 let allowed = allowed_ports.clone();
                 let registry = registry.clone();
                 let source_app = source_app.clone();
                 let instance_bind_ip = instance_bind_ip;
+                let network_admission = network_admission.clone();
+                let policy_store = policy_store.clone();
                 Box::pin(async move {
                     tracing::info!(
                         source_app = %source_app.0,
@@ -236,12 +293,17 @@ impl Supervisor {
                     );
                     match use_type {
                         SocketAddrUse::TcpConnect | SocketAddrUse::UdpSend => {
+                            if network_admission.denies(dest.ip()) {
+                                return false;
+                            }
                             if !dest.ip().is_loopback() {
-                                tracing::info!(
-                                    dest = %dest,
-                                    "[SOCKET DEBUG] external connection - allowed"
+                                return matches!(
+                                    NetworkInterceptor::new(registry, source_app.clone())
+                                        .with_store(policy_store)
+                                        .check_connect(SocketAddr::new(instance_bind_ip, 0), dest)
+                                        .await,
+                                    ConnectDecision::Allow(_)
                                 );
-                                return true;
                             }
 
                             if !allowed.contains(&dest.port()) {
@@ -254,7 +316,8 @@ impl Supervisor {
 
                             if dest.port() != internal_gateway_port {
                                 let interceptor =
-                                    NetworkInterceptor::new(registry, source_app.clone());
+                                    NetworkInterceptor::new(registry, source_app.clone())
+                                        .with_store(policy_store);
                                 match interceptor
                                     .check_connect(
                                         std::net::SocketAddr::new(
@@ -291,6 +354,14 @@ impl Supervisor {
                                 true
                             }
                         }
+                        // A client must bind before WASI start-connect. Runtime
+                        // policy still checks outbound permission/destination;
+                        // TcpListen remains restricted to assigned service ports.
+                        SocketAddrUse::TcpBind
+                            if is_instance_ephemeral_bind_allowed(dest, instance_bind_ip) =>
+                        {
+                            true
+                        }
                         SocketAddrUse::TcpBind
                         | SocketAddrUse::TcpListen
                         | SocketAddrUse::UdpBind => {
@@ -319,202 +390,212 @@ impl Supervisor {
         let app_id_clone = app_id.clone();
         let instance_id = InstanceId(uuid::Uuid::new_v4());
 
-        let (task, shutdown_tx, instance_tid, instance_policy_counters) = match prepared
-            .execution_model()
-        {
-            ComponentExecutionModel::WasiCli => {
-                let (shutdown_tx, _shutdown_rx) = tokio::sync::oneshot::channel::<()>();
-                let prepared_clone = prepared.clone();
-                let (spawn_result_tx, spawn_result_rx) =
-                    tokio::sync::oneshot::channel::<Result<(), PlatformError>>();
-                let namespace_map_for_spawn = self.namespace_map();
-                let (tid_tx, tid_rx) = tokio::sync::oneshot::channel::<u32>();
-                let (policy_counters_tx, policy_counters_rx) = tokio::sync::oneshot::channel();
-                let (registration_tx, registration_rx) = std::sync::mpsc::sync_channel::<()>(0);
-                let (execution_tx, execution_rx) = tokio::sync::oneshot::channel();
+        let (task, shutdown_tx, instance_tid, instance_policy_counters, trigger_handle) =
+            match prepared.execution_model() {
+                ComponentExecutionModel::WasiCli => {
+                    let (shutdown_tx, _shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+                    let prepared_clone = prepared.clone();
+                    let (spawn_result_tx, spawn_result_rx) =
+                        tokio::sync::oneshot::channel::<Result<(), PlatformError>>();
+                    let namespace_map_for_spawn = self.namespace_map();
+                    let track_host_tcp_closes = namespace_map_for_spawn.is_some();
+                    let (tid_tx, tid_rx) = tokio::sync::oneshot::channel::<u32>();
+                    let (policy_counters_tx, policy_counters_rx) = tokio::sync::oneshot::channel();
+                    let (registration_tx, registration_rx) = std::sync::mpsc::sync_channel::<()>(0);
+                    let (execution_tx, execution_rx) = tokio::sync::oneshot::channel();
 
-                let instance_thread = match std::thread::Builder::new()
-                    .name("wasi-cli-instance".to_string())
-                    .spawn(move || {
-                        let tid = crate::gettid();
-                        let _ = tid_tx.send(tid);
-                        let _ = registration_rx.recv();
+                    let instance_thread = match std::thread::Builder::new()
+                        .name("wasi-cli-instance".to_string())
+                        .spawn(move || {
+                            let tid = crate::gettid();
+                            let _ = tid_tx.send(tid);
+                            let _ = registration_rx.recv();
 
-                        let mut instance = match prepared_clone.spawn_instance(
-                            env_vars,
-                            host_port,
-                            Some(socket_addr_check),
-                        ) {
-                            Ok(instance) => instance,
-                            Err(e) => {
-                                let _ = spawn_result_tx.send(Err(PlatformError::runtime(format!(
-                                    "Failed to spawn instance: {}",
-                                    e
-                                ))));
-                                let _ = execution_tx.send(ExecutionStats {
-                                    instance_id: InstanceId(uuid::Uuid::nil()),
-                                    fuel_limit: 0,
-                                    fuel_consumed: 0,
-                                    ram_bytes: 0,
-                                    wall_clock_ms: 0,
-                                    trap: Some("spawn_failed".to_string()),
-                                    io_stats: IoStats {
-                                        open_fds_peak: 0,
-                                        fs_bytes_written: 0,
-                                        net_egress_bytes: 0,
-                                        outbound_connections: 0,
-                                    },
-                                });
-                                return;
+                            let mut instance = match prepared_clone.spawn_instance(
+                                env_vars,
+                                host_port,
+                                Some(socket_addr_check),
+                            ) {
+                                Ok(instance) => instance,
+                                Err(e) => {
+                                    let _ = spawn_result_tx.send(Err(PlatformError::runtime(
+                                        format!("Failed to spawn instance: {}", e),
+                                    )));
+                                    let _ = execution_tx.send(ExecutionStats {
+                                        instance_id: InstanceId(uuid::Uuid::nil()),
+                                        fuel_limit: 0,
+                                        fuel_consumed: 0,
+                                        ram_bytes: 0,
+                                        wall_clock_ms: 0,
+                                        trap: Some("spawn_failed".to_string()),
+                                        io_stats: IoStats {
+                                            open_fds_peak: 0,
+                                            fs_bytes_written: 0,
+                                            net_egress_bytes: 0,
+                                            outbound_connections: 0,
+                                        },
+                                    });
+                                    return;
+                                }
+                            };
+
+                            let counters = instance.policy_counters();
+                            if track_host_tcp_closes {
+                                counters.enable_host_tcp_close_tracking();
                             }
-                        };
+                            let _ = policy_counters_tx.send(counters);
+                            let _ = spawn_result_tx.send(Ok(()));
+                            let stats = instance.run();
 
-                        let _ = policy_counters_tx.send(instance.policy_counters());
-                        let _ = spawn_result_tx.send(Ok(()));
-                        let stats = instance.run();
-
-                        if let Some(ref trap) = stats.trap {
-                            tracing::error!(
-                                app = %app_id_clone.0,
-                                fuel_consumed = stats.fuel_consumed,
-                                ram_bytes = stats.ram_bytes,
-                                trap = %trap,
-                                "instance crashed with trap"
-                            );
-                        } else {
-                            tracing::info!(
-                                app = %app_id_clone.0,
-                                fuel_consumed = stats.fuel_consumed,
-                                ram_bytes = stats.ram_bytes,
-                                "instance exited"
-                            );
+                            if let Some(ref trap) = stats.trap {
+                                tracing::error!(
+                                    app = %app_id_clone.0,
+                                    fuel_consumed = stats.fuel_consumed,
+                                    ram_bytes = stats.ram_bytes,
+                                    trap = %trap,
+                                    "instance crashed with trap"
+                                );
+                            } else {
+                                tracing::info!(
+                                    app = %app_id_clone.0,
+                                    fuel_consumed = stats.fuel_consumed,
+                                    ram_bytes = stats.ram_bytes,
+                                    "instance exited"
+                                );
+                            }
+                            let _ = execution_tx.send(stats);
+                        }) {
+                        Ok(thread) => thread,
+                        Err(e) => {
+                            self.port_alloc.release(host_port);
+                            return Err(PlatformError::runtime(format!(
+                                "Failed to create dedicated wasi:cli thread: {e}"
+                            )));
                         }
-                        let _ = execution_tx.send(stats);
-                    }) {
-                    Ok(thread) => thread,
-                    Err(e) => {
-                        self.port_alloc.release(host_port);
-                        return Err(PlatformError::runtime(format!(
-                            "Failed to create dedicated wasi:cli thread: {e}"
-                        )));
-                    }
-                };
+                    };
 
-                let instance_tid = tid_rx.await.map_err(|_| {
-                    PlatformError::runtime("Dedicated wasi:cli thread did not report its TID")
-                })?;
-                if let Some(ref ns_map) = namespace_map_for_spawn {
-                    let identity = ebpf_monitor::common::TidIdentity::new(
-                        qualified_app_id.namespace(),
-                        &qualified_app_id.0,
-                    );
-                    if let Err(e) = ns_map.register_tid(instance_tid, identity) {
-                        tracing::warn!(
-                            tid = instance_tid,
-                            error = %e,
-                            "Failed to register dedicated wasi:cli TID"
-                        );
-                    }
-                }
-                let _ = registration_tx.send(());
-
-                match spawn_result_rx.await {
-                    Ok(Ok(())) => {}
-                    Ok(Err(e)) => {
-                        self.port_alloc.release(host_port);
-                        return Err(e);
-                    }
-                    Err(_) => {
-                        self.port_alloc.release(host_port);
-                        return Err(PlatformError::runtime(
-                            "Spawn result channel closed unexpectedly",
-                        ));
-                    }
-                }
-
-                let namespace_map_for_cleanup = namespace_map_for_spawn.clone();
-                let task = tokio::spawn(async move {
-                    let stats = execution_rx.await.unwrap_or_else(|_| ExecutionStats {
-                        instance_id: InstanceId(uuid::Uuid::nil()),
-                        fuel_limit: 0,
-                        fuel_consumed: 0,
-                        ram_bytes: 0,
-                        wall_clock_ms: 0,
-                        trap: Some("dedicated wasi:cli thread terminated unexpectedly".to_string()),
-                        io_stats: IoStats {
-                            open_fds_peak: 0,
-                            fs_bytes_written: 0,
-                            net_egress_bytes: 0,
-                            outbound_connections: 0,
-                        },
-                    });
-                    if let Err(error) =
-                        tokio::task::spawn_blocking(move || instance_thread.join()).await
-                    {
-                        tracing::warn!(%error, tid = instance_tid, "Failed to join dedicated wasi:cli thread");
-                    }
-                    if let Some(ref ns_map) = namespace_map_for_cleanup {
-                        let _ = ns_map.deregister_tid(instance_tid);
-                    }
-                    stats
-                });
-
-                (
-                    task,
-                    shutdown_tx,
-                    Some(instance_tid),
-                    policy_counters_rx.await.ok(),
-                )
-            }
-            ComponentExecutionModel::WasiHttpIncomingHandler => {
-                let namespace_map_for_registration = self.namespace_map();
-                let (tid_tx, tid_rx) = tokio::sync::oneshot::channel::<u32>();
-                let (registration_tx, registration_rx) = std::sync::mpsc::sync_channel::<()>(0);
-                let thread_start_hook = Box::new(move || {
-                    let tid = crate::gettid();
-                    let _ = tid_tx.send(tid);
-                    let _ = registration_rx.recv();
-                });
-
-                let http_server = match prepared.spawn_http_server(
-                    env_vars,
-                    addr,
-                    Some(socket_addr_check),
-                    Some(thread_start_hook),
-                ) {
-                    Ok(server) => server,
-                    Err(e) => {
-                        self.port_alloc.release(host_port);
-                        return Err(e);
-                    }
-                };
-
-                let instance_tid = tid_rx.await.ok();
-                if let Some(tid) = instance_tid {
-                    if let Some(ref ns_map) = namespace_map_for_registration {
+                    let instance_tid = tid_rx.await.map_err(|_| {
+                        PlatformError::runtime("Dedicated wasi:cli thread did not report its TID")
+                    })?;
+                    if let Some(ref ns_map) = namespace_map_for_spawn {
                         let identity = ebpf_monitor::common::TidIdentity::new(
                             qualified_app_id.namespace(),
                             &qualified_app_id.0,
                         );
-                        if let Err(e) = ns_map.register_tid(tid, identity) {
+                        if let Err(e) = ns_map.register_tid(instance_tid, identity) {
                             tracing::warn!(
-                                tid,
+                                tid = instance_tid,
                                 error = %e,
-                                "Failed to register dedicated wasi:http TID"
+                                "Failed to register dedicated wasi:cli TID"
                             );
                         }
                     }
-                }
-                let _ = registration_tx.send(());
+                    let _ = registration_tx.send(());
 
-                (
-                    http_server.task,
-                    http_server.shutdown_tx,
-                    instance_tid,
-                    Some(http_server.policy_counters),
-                )
-            }
-        };
+                    match spawn_result_rx.await {
+                        Ok(Ok(())) => {}
+                        Ok(Err(e)) => {
+                            self.port_alloc.release(host_port);
+                            return Err(e);
+                        }
+                        Err(_) => {
+                            self.port_alloc.release(host_port);
+                            return Err(PlatformError::runtime(
+                                "Spawn result channel closed unexpectedly",
+                            ));
+                        }
+                    }
+
+                    let namespace_map_for_cleanup = namespace_map_for_spawn.clone();
+                    let task = tokio::spawn(async move {
+                        let stats = execution_rx.await.unwrap_or_else(|_| ExecutionStats {
+                            instance_id: InstanceId(uuid::Uuid::nil()),
+                            fuel_limit: 0,
+                            fuel_consumed: 0,
+                            ram_bytes: 0,
+                            wall_clock_ms: 0,
+                            trap: Some(
+                                "dedicated wasi:cli thread terminated unexpectedly".to_string(),
+                            ),
+                            io_stats: IoStats {
+                                open_fds_peak: 0,
+                                fs_bytes_written: 0,
+                                net_egress_bytes: 0,
+                                outbound_connections: 0,
+                            },
+                        });
+                        if let Err(error) =
+                            tokio::task::spawn_blocking(move || instance_thread.join()).await
+                        {
+                            tracing::warn!(%error, tid = instance_tid, "Failed to join dedicated wasi:cli thread");
+                        }
+                        if let Some(ref ns_map) = namespace_map_for_cleanup {
+                            let _ = ns_map.deregister_tid(instance_tid);
+                        }
+                        stats
+                    });
+
+                    (
+                        task,
+                        shutdown_tx,
+                        Some(instance_tid),
+                        policy_counters_rx.await.ok(),
+                        None,
+                    )
+                }
+                ComponentExecutionModel::WasiHttpIncomingHandler => {
+                    let namespace_map_for_registration = self.namespace_map();
+                    let (tid_tx, tid_rx) = tokio::sync::oneshot::channel::<u32>();
+                    let (registration_tx, registration_rx) = std::sync::mpsc::sync_channel::<()>(0);
+                    let thread_start_hook = Box::new(move || {
+                        let tid = crate::gettid();
+                        let _ = tid_tx.send(tid);
+                        let _ = registration_rx.recv();
+                    });
+
+                    let http_server = match prepared.spawn_http_server(
+                        env_vars,
+                        addr,
+                        Some(socket_addr_check),
+                        Some(thread_start_hook),
+                    ) {
+                        Ok(server) => server,
+                        Err(e) => {
+                            self.port_alloc.release(host_port);
+                            return Err(e);
+                        }
+                    };
+
+                    let instance_tid = tid_rx.await.ok();
+                    if namespace_map_for_registration.is_some() {
+                        http_server.policy_counters.enable_host_tcp_close_tracking();
+                    }
+                    if let Some(tid) = instance_tid {
+                        if let Some(ref ns_map) = namespace_map_for_registration {
+                            let identity = ebpf_monitor::common::TidIdentity::new(
+                                qualified_app_id.namespace(),
+                                &qualified_app_id.0,
+                            );
+                            if let Err(e) = ns_map.register_tid(tid, identity) {
+                                tracing::warn!(
+                                    tid,
+                                    error = %e,
+                                    "Failed to register dedicated wasi:http TID"
+                                );
+                            }
+                        }
+                    }
+                    let _ = registration_tx.send(());
+
+                    (
+                        http_server.task,
+                        http_server.shutdown_tx,
+                        instance_tid,
+                        Some(http_server.policy_counters),
+                        Some(http_server.trigger_handle),
+                    )
+                }
+            };
 
         if let Err(e) = crate::instance::wait_for_ready(addr, Duration::from_millis(500)).await {
             self.port_alloc.release(host_port);
@@ -575,6 +656,7 @@ impl Supervisor {
             },
             tid: instance_tid,
             policy_counters: instance_policy_counters,
+            trigger_handle,
             last_policy_export: crate::instance::PolicyCounterSnapshot::default(),
         };
 

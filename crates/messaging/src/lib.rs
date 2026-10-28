@@ -16,6 +16,14 @@ use tokio::time::{sleep, Duration};
 use tokio_stream::StreamExt;
 
 const DURABLE_MAX_DELIVER: i64 = 3;
+
+/// Broker-assigned ordering, independent of publisher clocks and event bodies.
+#[derive(Debug, Clone)]
+pub struct DurableDelivery {
+    pub stream: String,
+    pub stream_created: String,
+    pub sequence: u64,
+}
 pub const QUARANTINE_STREAM: &str = "QUARANTINE";
 const QUARANTINE_SUBJECT_PREFIX: &str = "quarantine";
 pub const DEPLOY_STREAM_SUBJECTS: &[&str] = &["deploy.>", "routes.>"];
@@ -304,11 +312,59 @@ impl NatsBus {
         F: Fn(Event) -> Fut + Send + Sync + 'static,
         Fut: std::future::Future<Output = Result<(), PlatformError>> + Send + 'static,
     {
+        self.subscribe_durable_with_delivery(
+            stream_name,
+            consumer_name,
+            filter_subject,
+            move |event, _| handler(event),
+        )
+        .await
+    }
+
+    pub async fn subscribe_durable_with_delivery<F, Fut>(
+        &self,
+        stream_name: &str,
+        consumer_name: &str,
+        filter_subject: Option<&str>,
+        handler: F,
+    ) -> Result<(), PlatformError>
+    where
+        F: Fn(Event, DurableDelivery) -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = Result<(), PlatformError>> + Send + 'static,
+    {
+        self.subscribe_durable_configured(
+            stream_name,
+            consumer_name,
+            filter_subject,
+            Duration::from_secs(30),
+            handler,
+        )
+        .await
+    }
+
+    async fn subscribe_durable_configured<F, Fut>(
+        &self,
+        stream_name: &str,
+        consumer_name: &str,
+        filter_subject: Option<&str>,
+        ack_wait: Duration,
+        handler: F,
+    ) -> Result<(), PlatformError>
+    where
+        F: Fn(Event, DurableDelivery) -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = Result<(), PlatformError>> + Send + 'static,
+    {
         let js = jetstream::new(self.client.clone());
-        let stream = js
+        let mut stream = js
             .get_stream(stream_name)
             .await
             .map_err(PlatformError::messaging_source)?;
+        let stream_created = stream
+            .info()
+            .await
+            .map_err(PlatformError::messaging_source)?
+            .created
+            .to_string();
 
         let filter_subject = filter_subject.unwrap_or_default().to_string();
         let consumer = stream
@@ -319,7 +375,7 @@ impl NatsBus {
                     filter_subject,
                     // Give the consumer 30 seconds to process and ACK each message
                     // before it becomes eligible for redelivery.
-                    ack_wait: std::time::Duration::from_secs(30),
+                    ack_wait,
                     // Redeliver up to 3 times before giving up on a message.
                     // Prevents infinite redelivery loops for poison messages.
                     max_deliver: 3,
@@ -329,7 +385,12 @@ impl NatsBus {
             .await
             .map_err(PlatformError::messaging_source)?;
 
+        // Do not prefetch a large batch that can expire while another event
+        // compiles. Handler progress acknowledgements keep the current lease.
+        let actual_wait = consumer.cached_info().config.ack_wait;
         let mut messages = consumer
+            .stream()
+            .max_messages_per_batch(1)
             .messages()
             .await
             .map_err(PlatformError::messaging_source)?;
@@ -350,31 +411,78 @@ impl NatsBus {
                         continue;
                     }
                 };
+                let info = match msg.info() {
+                    Ok(info) => info,
+                    Err(error) => {
+                        Self::quarantine_message(
+                            &quarantine_client,
+                            &msg,
+                            format!("invalid JetStream delivery metadata: {error}"),
+                        )
+                        .await;
+                        let _ = msg.ack_with(async_nats::jetstream::AckKind::Term).await;
+                        continue;
+                    }
+                };
+                let delivery = DurableDelivery {
+                    stream: info.stream.to_owned(),
+                    stream_created: stream_created.clone(),
+                    sequence: info.stream_sequence,
+                };
                 match Self::deserialize_event(&msg.payload) {
-                    Ok(event) => match handler(event).await {
-                        Ok(()) => {
-                            let _ = msg.ack().await;
-                        }
-                        Err(e) => {
-                            if Self::delivery_exhausted(&msg) {
-                                Self::quarantine_message(
-                                    &quarantine_client,
-                                    &msg,
-                                    format!("handler failed after retry exhaustion: {e}"),
-                                )
-                                .await;
-                                let _ = msg.ack_with(async_nats::jetstream::AckKind::Term).await;
-                                continue;
-                            }
-                            tracing::warn!(
-                                error = %e,
-                                "JetStream handler failed; NAKing for redelivery"
+                    Ok(event) => {
+                        let result = {
+                            let processing = handler(event, delivery);
+                            tokio::pin!(processing);
+                            let period = if actual_wait.is_zero() {
+                                Duration::from_secs(10)
+                            } else {
+                                (actual_wait / 3).max(Duration::from_millis(1))
+                            };
+                            let mut progress = tokio::time::interval_at(
+                                tokio::time::Instant::now() + period,
+                                period,
                             );
-                            let _ = msg
-                                .ack_with(async_nats::jetstream::AckKind::Nak(None))
-                                .await;
+                            progress
+                                .set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                            loop {
+                                tokio::select! {
+                                    result = &mut processing => break result,
+                                    _ = progress.tick() => {
+                                        if !matches!(tokio::time::timeout(Duration::from_secs(2),
+                                            msg.ack_with(async_nats::jetstream::AckKind::Progress)).await, Ok(Ok(()))) {
+                                            tracing::warn!("JetStream processing acknowledgement failed");
+                                        }
+                                    }
+                                }
+                            }
+                        };
+                        match result {
+                            Ok(()) => {
+                                let _ = msg.ack().await;
+                            }
+                            Err(e) => {
+                                if Self::delivery_exhausted(&msg) {
+                                    Self::quarantine_message(
+                                        &quarantine_client,
+                                        &msg,
+                                        format!("handler failed after retry exhaustion: {e}"),
+                                    )
+                                    .await;
+                                    let _ =
+                                        msg.ack_with(async_nats::jetstream::AckKind::Term).await;
+                                    continue;
+                                }
+                                tracing::warn!(
+                                    error = %e,
+                                    "JetStream handler failed; NAKing for redelivery"
+                                );
+                                let _ = msg
+                                    .ack_with(async_nats::jetstream::AckKind::Nak(None))
+                                    .await;
+                            }
                         }
-                    },
+                    }
                     Err(e) => {
                         if Self::delivery_exhausted(&msg) {
                             Self::quarantine_message(

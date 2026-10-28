@@ -83,6 +83,7 @@ fn extract_proxy_host(address: &str) -> Option<String> {
 }
 
 pub struct EventDispatcher {
+    pub(crate) lifecycle_gate: Mutex<()>,
     pub supervisor: Arc<Supervisor>,
     pub upstream: Arc<UpstreamRegistry>,
     pub host_router: Arc<HostRouter>,
@@ -109,6 +110,36 @@ pub struct EventDispatcher {
 }
 
 impl EventDispatcher {
+    pub async fn handle_durable(
+        &self,
+        event: Event,
+        delivery: messaging::DurableDelivery,
+    ) -> Result<(), PlatformError> {
+        let (app, remove) = match &event {
+            Event::DeployApp { app_id, .. } => (app_id.clone(), false),
+            Event::RemoveApp { app_id } => (app_id.clone(), true),
+            _ => return self.handle(event).await,
+        };
+        let _guard = self.lifecycle_gate.lock().await;
+        if !self.store.begin_lifecycle_event(
+            &delivery.stream,
+            &delivery.stream_created,
+            delivery.sequence,
+            &app,
+            remove,
+        )? {
+            tracing::info!(app = %app.0, sequence = delivery.sequence, "ignoring superseded or completed lifecycle delivery");
+            return Ok(());
+        }
+        self.handle(event).await?;
+        self.store.complete_lifecycle_event(
+            &delivery.stream,
+            &delivery.stream_created,
+            delivery.sequence,
+            &app,
+        )
+    }
+
     pub async fn handle(&self, event: Event) -> Result<(), PlatformError> {
         let event_name = format!("{:?}", std::mem::discriminant(&event));
         tracing::info!(event = %event_name, "received event in handler");
@@ -427,8 +458,11 @@ impl EventDispatcher {
     async fn handle_remove(&self, app_id: AppId) -> Result<(), PlatformError> {
         info!(app = %app_id.0, "removing app");
 
-        // Remove routes before stopping instances so new requests cannot race
-        // the undeploy and cold-start an application being removed.
+        // Fence new admissions before any await in route/instance cleanup.
+        // Persisted artifacts remain available for the storage GC grace period.
+        self.supervisor.undeploy_app(&app_id).await?;
+
+        // Admissions are fenced while persisted routes are removed.
         let route_hosts: std::collections::BTreeSet<_> = self
             .store
             .list_routes_for_app(&app_id.0)?
@@ -439,13 +473,6 @@ impl EventDispatcher {
             self.handle_route_remove(host).await?;
         }
 
-        // Kill all running instances first (this creates billing records)
-        self.supervisor.kill_all_instances(&app_id).await?;
-
-        // Mark app as undeployed - starts grace period
-        // Actual deletion happens after grace period expires in GC loop
-        self.store.mark_undeployed(&app_id.0)?;
-        self.supervisor.forget_app(&app_id).await?;
         self.rate_limiter.remove_app_config(&app_id.0);
 
         // Note: We don't immediately delete artifacts/configs anymore

@@ -65,6 +65,7 @@ All modules are designed to be consumed independently; there are no circular dep
 | `LogReloadHandle::set_module_level()` | `logging` | Add or replace a module-level logging directive while retaining the current filter |
 | `init_logging()` | `logging` | Initialize the global logger with configured filters |
 | `PolicyConfig::resolve()` | `policy` | Validate operator policy overrides and resolve an instance policy |
+| `AppConfig::resolve_instance_policy()` | `types` | Resolve policy and intersect explicit ExtendedLimits network ceilings; used by runtime and effective-policy inspection |
 | `check_memory()` | `health` | Check available system memory |
 
 ## Known Issues & Improvements

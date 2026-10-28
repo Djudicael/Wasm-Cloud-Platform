@@ -880,3 +880,22 @@ fn test_load_config_with_cli_overrides() {
     assert_eq!(config.proxy.http_port, 3000);
     assert_eq!(config.logging.level, "trace");
 }
+
+#[test]
+fn network_admission_config_rejects_invalid_ranges_and_survives_overlay() {
+    let mut base = NodeConfig::default();
+    base.runtime.network_admission.protected_namespaces = vec!["agents".into()];
+    base.runtime.network_admission.denied_cidrs = vec!["172.20.0.0/24".into()];
+    let merged = merge_config(base, NodeConfig::default());
+    assert_eq!(
+        merged.runtime.network_admission.protected_namespaces,
+        vec!["agents"]
+    );
+    assert_eq!(
+        merged.runtime.network_admission.denied_cidrs,
+        vec!["172.20.0.0/24"]
+    );
+    let mut bad = merged;
+    bad.runtime.network_admission.denied_cidrs = vec!["not-a-cidr".into()];
+    assert!(validate_config(&bad).is_err());
+}

@@ -243,6 +243,7 @@ fn test_build_deploy_payload_extracts_manifest_routes() {
         "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
     ]);
     let manifest = super::super::manifest::DeployManifest {
+        triggers: Vec::new(),
         app: super::super::manifest::AppManifestSection {
             name: "api".to_string(),
             version: "v1".to_string(),
@@ -254,6 +255,7 @@ fn test_build_deploy_payload_extracts_manifest_routes() {
         fuel: super::super::manifest::FuelManifestSection::default(),
         policy: None,
         gateway: Some(super::super::manifest::GatewayManifestSection {
+            allowed_callers: None,
             host: Some("api.example.com".to_string()),
             routes: vec![super::super::manifest::RouteManifestSection {
                 host: "api.example.com".to_string(),

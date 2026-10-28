@@ -271,6 +271,9 @@ fn validate_production_secret_policy(config: &NodeConfig, errors: &mut Vec<Strin
 /// Validate the final merged configuration.
 pub(crate) fn validate_config(config: &NodeConfig) -> Result<(), PlatformError> {
     let mut errors = Vec::new();
+    if let Err(error) = config.runtime.network_admission.validate() {
+        errors.push(format!("runtime.network_admission: {error}"));
+    }
 
     if config
         .runtime

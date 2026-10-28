@@ -63,6 +63,15 @@ pub(super) async fn request_filter(
         return Ok(true);
     }
 
+    if ctx
+        .route_config
+        .as_ref()
+        .is_some_and(|cfg| !cfg.caller_allowed(None))
+    {
+        session.respond_error(403).await?;
+        return Ok(true);
+    }
+
     if handle_cors_preflight(proxy, session, ctx).await? {
         return Ok(true);
     }

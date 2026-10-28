@@ -23,7 +23,8 @@ members = [
     "apps/postgres-app",
     "apps/grpc-echo",
     "apps/http-hello-component",
-    "apps/wasi-grpc-echo"
+    "apps/wasi-grpc-echo",
+    "apps/http-p3-probe"
 ]
 
 [workspace.package]

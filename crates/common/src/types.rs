@@ -172,7 +172,11 @@ impl Default for ExtendedLimits {
 pub struct ExtendedLimitsConfig {
     pub max_open_fds: Option<u32>,
     pub max_fs_write_bytes: Option<u64>,
+    /// Additional ceiling for raw socket payloads and HTTP wire bytes; zero
+    /// adds no ceiling. TCP charges are conservative; omission preserves policy.
     pub max_net_egress_bytes: Option<u64>,
+    /// Additional active TCP/HTTP ceiling; zero denies outbound connections.
+    /// Omission preserves the network policy.
     pub max_outbound_connections: Option<u32>,
     pub max_table_elements: Option<u32>,
 }
@@ -200,6 +204,8 @@ impl ExtendedLimitsConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AppConfig {
+    #[serde(default)]
+    pub triggers: Vec<crate::triggers::Trigger>,
     /// Unique app identifier: "<name>:<version>" or "<namespace>/<name>:<version>"
     pub id: AppId,
 
@@ -305,8 +311,33 @@ impl Default for AppRateLimitConfig {
 }
 
 impl AppConfig {
+    /// Resolve the instance policy, intersecting explicitly configured network
+    /// limits with the policy ceilings. ExtendedLimits defaults must not add
+    /// undeclared limits to existing applications.
+    pub fn resolve_instance_policy(
+        &self,
+        port: u16,
+    ) -> Result<crate::policy::InstancePolicy, String> {
+        let mut policy = self.policy.clone().unwrap_or_default().resolve(port)?;
+        if let Some(limits) = &self.extended_limits {
+            if let Some(connections) = limits.max_outbound_connections {
+                policy.network.max_outbound_connections =
+                    policy.network.max_outbound_connections.min(connections);
+            }
+            if let Some(bytes) = limits.max_net_egress_bytes.filter(|bytes| *bytes > 0) {
+                policy.network.max_egress_bytes = if policy.network.max_egress_bytes == 0 {
+                    bytes
+                } else {
+                    policy.network.max_egress_bytes.min(bytes)
+                };
+            }
+        }
+        Ok(policy)
+    }
+
     /// Default safe config for a new app.
     pub fn default_for(app_id: AppId) -> Self {
+        let namespace = app_id.namespace().to_string();
         AppConfig {
             id: app_id,
             fuel_quota: FuelQuota(500_000_000), // ~500ms of compute
@@ -322,9 +353,10 @@ impl AppConfig {
             rate_limit: None,
             tenant_id: None,
             policy: None,
-            namespace: default_namespace(),
+            namespace,
             placement: PlacementPolicy::EveryNode,
             local_dependencies: Vec::new(),
+            triggers: Vec::new(),
         }
     }
 }
@@ -388,6 +420,11 @@ impl DnsConfig {
 /// default rate limits).
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub struct GatewayRouteConfig {
+    /// Exact namespace/application:version identities allowed on the mesh.
+    /// None preserves legacy admission; Some(empty) denies every caller.
+    /// Any configured list closes this route to edge traffic.
+    #[serde(default)]
+    pub allowed_callers: Option<Vec<String>>,
     /// Authentication policy for this route.
     #[serde(default)]
     pub auth: AuthPolicy,
@@ -412,6 +449,44 @@ pub struct GatewayRouteConfig {
     /// Evaluated top-to-bottom; first match wins.
     #[serde(default)]
     pub endpoints: Vec<EndpointRule>,
+}
+
+impl GatewayRouteConfig {
+    pub fn validate_allowed_callers(&self) -> Result<(), String> {
+        if let Some(callers) = &self.allowed_callers {
+            let mut seen = std::collections::HashSet::new();
+            for caller in callers {
+                let parts: Vec<_> = caller.split(['/', ':']).collect();
+                if caller.find('/') >= caller.find(':')
+                    || parts.len() != 3
+                    || parts.iter().any(|part| part.is_empty())
+                    || !caller.contains('/')
+                    || !caller.contains(':')
+                    || caller.contains('*')
+                    || caller.bytes().any(|byte| byte.is_ascii_whitespace())
+                    || AppId::new_validate(caller).is_err()
+                    || !seen.insert(caller)
+                {
+                    return Err(format!("allowed_callers requires unique exact namespace/app:version IDs: {caller:?}"));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub fn caller_allowed(&self, caller: Option<&str>) -> bool {
+        self.validate_allowed_callers().is_ok()
+            && match &self.allowed_callers {
+                None => true,
+                Some(allowed) => {
+                    caller.is_some_and(|caller| allowed.iter().any(|item| item == caller))
+                }
+            }
+    }
+
+    pub fn requires_mesh_gateway(&self) -> bool {
+        self.allowed_callers.is_some() || !self.endpoints.is_empty()
+    }
 }
 
 /// Authentication policy for a route.

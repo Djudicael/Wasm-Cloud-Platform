@@ -110,6 +110,7 @@ pub(crate) async fn handle_node_upgrade(ctx: UpgradeContext<'_>, event: Event) {
 }
 
 pub(crate) async fn begin_graceful_shutdown(supervisor: &Arc<Supervisor>, timeout_secs: u64) {
+    supervisor.stop_schedules().await;
     tracing::info!("Beginning graceful shutdown with {}s timeout", timeout_secs);
     tokio::time::sleep(tokio::time::Duration::from_secs(timeout_secs)).await;
     tracing::info!("drain timeout elapsed, stopping all instances");

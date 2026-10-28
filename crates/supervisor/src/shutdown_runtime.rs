@@ -275,6 +275,7 @@ impl Supervisor {
     /// Fence all ready instances for an app from routing, then wait for the
     /// provided timeout so in-flight requests can complete.
     pub async fn drain_app(&self, app_id: &AppId, timeout: Duration) -> Result<(), PlatformError> {
+        self.paused_triggers.write().await.insert(app_id.0.clone());
         {
             let pools = self.pools.read().await;
             if let Some(pool) = pools.get(&app_id.0) {
@@ -312,20 +313,33 @@ impl Supervisor {
         Ok(())
     }
 
+    /// Persist the admission fence before awaiting a cold start or shutdown.
+    /// An already-starting instance reaches Supervisor ownership, then is reaped;
+    /// no concurrent ensure/spawn can register a new instance after this returns.
+    pub async fn undeploy_app(&self, app_id: &AppId) -> Result<(), PlatformError> {
+        self.paused_triggers.write().await.insert(app_id.0.clone());
+        self.store.mark_undeployed(&app_id.0)?;
+        let gate = self.spawn_gate(app_id).await;
+        let _guard = gate.lock().await;
+        self.kill_all_instances(app_id).await?;
+        self.forget_app(app_id).await
+    }
+
     /// Remove an undeployed application's now-empty pool from live state.
     /// Persisted artifacts remain available to the storage GC grace period.
     pub async fn forget_app(&self, app_id: &AppId) -> Result<(), PlatformError> {
         let mut pools = self.pools.write().await;
         if pools
             .get(&app_id.0)
-            .is_some_and(|pool| pool.active_count() != 0)
+            .is_some_and(|pool| pool.instance_count() != 0)
         {
             return Err(PlatformError::runtime(format!(
-                "cannot forget app {} while instances are active",
+                "cannot forget app {} while instances are still tracked",
                 app_id.0
             )));
         }
         pools.remove(&app_id.0);
+        self.paused_triggers.write().await.remove(&app_id.0);
         Ok(())
     }
 

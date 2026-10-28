@@ -8,31 +8,11 @@ pub fn apply_request_transform(
     transform: &RequestTransform,
     user_identity: Option<&UserIdentity>,
 ) {
-    // 1. Inject user identity headers (always, when authenticated)
-    if let Some(identity) = user_identity {
-        let _ = request.headers.insert(
-            http::header::HeaderName::from_bytes(b"X-User-Id").unwrap(),
-            http::header::HeaderValue::from_str(&identity.sub)
-                .unwrap_or_else(|_| http::header::HeaderValue::from_static("unknown")),
-        );
-        if let Some(ref email) = identity.email {
-            let _ = request.headers.insert(
-                http::header::HeaderName::from_bytes(b"X-User-Email").unwrap(),
-                http::header::HeaderValue::from_str(email)
-                    .unwrap_or_else(|_| http::header::HeaderValue::from_static("")),
-            );
-        }
-        if !identity.roles.is_empty() {
-            let _ = request.headers.insert(
-                http::header::HeaderName::from_bytes(b"X-User-Roles").unwrap(),
-                http::header::HeaderValue::from_str(&identity.roles.join(","))
-                    .unwrap_or_else(|_| http::header::HeaderValue::from_static("")),
-            );
-        }
-    }
-
-    // 2. Add custom headers from route config
+    // Add custom headers from route config
     for (key, value) in &transform.add_headers {
+        if super::identity::is_identity_header(key) {
+            continue;
+        }
         if let Ok(name) = http::header::HeaderName::from_bytes(key.as_bytes()) {
             let _ = request.headers.insert(
                 name,
@@ -42,14 +22,14 @@ pub fn apply_request_transform(
         }
     }
 
-    // 3. Remove headers from route config
+    // Remove headers from route config
     for key in &transform.remove_headers {
         if let Ok(name) = http::header::HeaderName::from_bytes(key.as_bytes()) {
             request.headers.remove(name);
         }
     }
 
-    // 4. Path prefix injection
+    // Path prefix injection
     if let Some(ref prefix) = transform.path_prefix {
         let original = request.uri.to_string();
         let new_path = format!("{}{}", prefix.trim_end_matches('/'), original);
@@ -58,7 +38,7 @@ pub fn apply_request_transform(
         }
     }
 
-    // 5. Strip query parameters
+    // Strip query parameters
     if !transform.strip_query_params.is_empty() {
         let original = request.uri.to_string();
         if let Some((path, query)) = original.split_once('?') {
@@ -79,6 +59,7 @@ pub fn apply_request_transform(
             }
         }
     }
+    super::identity::write_user_identity(&mut request.headers, user_identity);
 }
 
 #[cfg(test)]
@@ -160,5 +141,28 @@ mod tests {
             req.headers.get("X-User-Roles").unwrap().to_str().unwrap(),
             "admin,user"
         );
+    }
+
+    #[test]
+    fn route_transform_cannot_override_authenticated_identity() {
+        let mut req = RequestHeader::build(http::Method::GET, b"/", None).unwrap();
+        let transform = RequestTransform {
+            add_headers: vec![
+                ("X-User-Roles".into(), "admin".into()),
+                ("X-Source-App".into(), "forged-app".into()),
+            ],
+            remove_headers: vec!["X-User-Id".into()],
+            ..Default::default()
+        };
+        let identity = UserIdentity {
+            sub: "verified-user".into(),
+            email: None,
+            roles: vec![],
+            raw_claims: serde_json::json!({}),
+        };
+        apply_request_transform(&mut req, &transform, Some(&identity));
+        assert_eq!(req.headers["x-user-id"], "verified-user");
+        assert!(!req.headers.contains_key("x-user-roles"));
+        assert!(!req.headers.contains_key("x-source-app"));
     }
 }

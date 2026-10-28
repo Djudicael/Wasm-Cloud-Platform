@@ -58,6 +58,7 @@ async fn test_database_url_injection() {
         namespace: "default".to_string(),
         placement: common::types::PlacementPolicy::EveryNode,
         local_dependencies: Vec::new(),
+        triggers: Vec::new(),
     };
 
     // Simulate the env_resolver from node/main.rs

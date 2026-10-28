@@ -8,6 +8,7 @@ pub mod db_proxy;
 pub mod deployment;
 mod health_provider;
 mod health_runtime;
+pub mod triggers;
 
 pub mod instance;
 pub mod instance_manager;
@@ -17,6 +18,7 @@ mod policy_metrics_runtime;
 pub mod pool;
 pub mod port_alloc;
 pub mod scaling;
+mod secret_environment;
 mod shutdown_runtime;
 mod spawn_runtime;
 
@@ -44,6 +46,13 @@ pub(crate) fn is_instance_bind_allowed(
     instance_bind_ip: std::net::IpAddr,
 ) -> bool {
     allowed_ports.contains(&dest.port()) && dest.ip() == instance_bind_ip
+}
+
+pub(crate) fn is_instance_ephemeral_bind_allowed(
+    dest: std::net::SocketAddr,
+    instance_bind_ip: std::net::IpAddr,
+) -> bool {
+    dest.port() == 0 && (dest.ip().is_unspecified() || dest.ip() == instance_bind_ip)
 }
 
 /// Get the OS Thread ID (TID) of the current thread.
@@ -115,10 +124,16 @@ pub struct Supervisor {
     /// Node-local memory budget used for application admission. An app's
     /// declared maximum instance pool must fit inside this boundary.
     node_memory_budget_bytes: u64,
+    network_admission: common::policy::NetworkAdmissionConfig,
     env_resolver: Arc<EnvResolver>,
+    secret_provider: std::sync::RwLock<Option<Arc<dyn secrets::SecretProvider>>>,
 
     /// Map of `app_id` to instance pool.
     pools: Arc<RwLock<HashMap<String, InstancePool>>>,
+    spawn_gates: tokio::sync::Mutex<HashMap<String, std::sync::Weak<tokio::sync::Mutex<()>>>>,
+    paused_triggers: RwLock<std::collections::HashSet<String>>,
+    trigger_stop: tokio::sync::watch::Sender<bool>,
+    trigger_idle: tokio::sync::watch::Sender<bool>,
 
     /// Channel to publish events to NATS
     event_tx: mpsc::Sender<Event>,
@@ -152,6 +167,25 @@ pub struct Supervisor {
 }
 
 impl Supervisor {
+    /// Startup-only operator policy; configure before restoring deployments.
+    pub fn configure_network_admission(
+        &mut self,
+        config: common::policy::NetworkAdmissionConfig,
+    ) -> Result<(), PlatformError> {
+        config.validate().map_err(PlatformError::ConfigValidation)?;
+        self.network_admission = config;
+        Ok(())
+    }
+
+    pub fn effective_network_policy(
+        &self,
+        config: &common::types::AppConfig,
+    ) -> Result<common::policy::InstancePolicy, PlatformError> {
+        self.network_admission
+            .effective_policy(config)
+            .map_err(PlatformError::ConfigValidation)
+    }
+
     #[allow(clippy::too_many_arguments, clippy::type_complexity)]
     pub fn new(
         store: Store,
@@ -178,8 +212,14 @@ impl Supervisor {
             service_registry,
             internal_gateway_port,
             node_memory_budget_bytes,
+            network_admission: Default::default(),
             env_resolver,
+            secret_provider: std::sync::RwLock::new(None),
             pools: Arc::new(RwLock::new(HashMap::new())),
+            spawn_gates: tokio::sync::Mutex::new(HashMap::new()),
+            paused_triggers: RwLock::new(std::collections::HashSet::new()),
+            trigger_stop: tokio::sync::watch::channel(false).0,
+            trigger_idle: tokio::sync::watch::channel(true).0,
             event_tx,
             log_tx: None,
             policy_metrics: std::sync::RwLock::new(None),
@@ -217,6 +257,17 @@ impl Supervisor {
 
     pub fn set_log_dispatcher(&mut self, log_tx: mpsc::Sender<metrics::WasmLogRecord>) {
         self.log_tx = Some(log_tx);
+    }
+    /// Configure the backend used to resolve only declared secrets at spawn.
+    pub fn set_secret_provider(
+        &self,
+        provider: Arc<dyn secrets::SecretProvider>,
+    ) -> Result<(), PlatformError> {
+        *self
+            .secret_provider
+            .write()
+            .map_err(|_| PlatformError::runtime("secret provider unavailable"))? = Some(provider);
+        Ok(())
     }
 
     pub fn set_policy_metrics(&self, policy_metrics: Arc<metrics::exporter::PolicyMetrics>) {
@@ -336,6 +387,7 @@ impl Supervisor {
     /// Gracefully shutdown all instances across all apps.
     /// Used during node shutdown (SIGTERM).
     pub async fn shutdown_all(&self, timeout: Duration) {
+        self.stop_schedules().await;
         command_runtime::shutdown_all(self, timeout).await;
     }
 }

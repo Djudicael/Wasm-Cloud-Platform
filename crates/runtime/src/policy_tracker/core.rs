@@ -113,6 +113,15 @@ impl PolicyEnforcer {
         if owned == 0 {
             return;
         }
+        // Legacy kernel observation may already have released these raw slots.
+        // The kernel owns release only without host lifecycle accounting;
+        // subtracting the store's historical count again could steal slots from
+        // other stores or live host-managed HTTP transports.
+        if self.counters.tcp_close_observation_enabled()
+            && !self.counters.uses_host_socket_lifecycle()
+        {
+            return;
+        }
         let _ = self.counters.outbound_connections_active.fetch_update(
             Ordering::AcqRel,
             Ordering::Acquire,

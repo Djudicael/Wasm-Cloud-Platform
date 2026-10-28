@@ -65,6 +65,12 @@ fn untrusted_platform_identity_and_trace_headers_are_removed() {
     let mut request = RequestHeader::build("GET", b"/", None).unwrap();
     for (name, value) in [
         ("x-app-id", "attacker-app"),
+        ("x-source-app", "attacker-source"),
+        ("x-source-namespace", "attacker-namespace"),
+        ("x-user-id", "attacker-user"),
+        ("x-user-email", "attacker@example.com"),
+        ("x-user-roles", "admin"),
+        ("x-user-custom", "attacker-extension"),
         ("x-trace-id", "attacker-trace"),
         (
             "traceparent",
@@ -79,7 +85,18 @@ fn untrusted_platform_identity_and_trace_headers_are_removed() {
 
     super::forwarding::remove_untrusted_platform_headers(&mut request);
 
-    for name in ["x-app-id", "x-trace-id", "traceparent", "tracestate"] {
+    for name in [
+        "x-app-id",
+        "x-trace-id",
+        "traceparent",
+        "tracestate",
+        "x-source-app",
+        "x-source-namespace",
+        "x-user-id",
+        "x-user-email",
+        "x-user-roles",
+        "x-user-custom",
+    ] {
         assert!(
             request.headers.get(name).is_none(),
             "{name} must be removed"
@@ -207,4 +224,44 @@ async fn test_select_upstream_prefers_remote_proxy_when_local_node_is_overloaded
         !cold_start_triggered.load(Ordering::SeqCst),
         "local cold start should not run when an eligible remote node exists"
     );
+}
+
+#[test]
+fn edge_forwards_verified_identity_without_a_route_transform() {
+    use pingora::http::RequestHeader;
+    for authenticated in [false, true] {
+        let mut ctx = RequestCtx {
+            app_id: Some(AppId("target:v1".into())),
+            upstream_addr: None,
+            start: std::time::Instant::now(),
+            strip_prefix: false,
+            matched_prefix: None,
+            trace_id: None,
+            request_span: tracing::Span::none(),
+            route_config: Some(crate::gateway::config::GatewayRouteConfig::default()),
+            user_identity: authenticated.then(|| crate::gateway::oidc::UserIdentity {
+                sub: "verified-user".into(),
+                email: None,
+                roles: vec![],
+                raw_claims: serde_json::json!({}),
+            }),
+        };
+        let mut request = RequestHeader::build("GET", b"/", None).unwrap();
+        for name in ["X-User-Id", "X-User-Email", "X-User-Roles", "X-Source-App"] {
+            request.append_header(name, "forged").unwrap();
+            request.append_header(name, "duplicate").unwrap();
+        }
+        super::forwarding::upstream_request_filter(&mut request, &mut ctx).unwrap();
+        assert_eq!(request.headers["x-app-id"], "target:v1");
+        assert_eq!(
+            request.headers.get_all("x-user-id").iter().count(),
+            usize::from(authenticated)
+        );
+        if authenticated {
+            assert_eq!(request.headers["x-user-id"], "verified-user");
+        }
+        for name in ["x-user-email", "x-user-roles", "x-source-app"] {
+            assert!(!request.headers.contains_key(name));
+        }
+    }
 }

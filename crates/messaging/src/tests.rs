@@ -13,6 +13,48 @@ mod test_helpers {
     use tokio_stream::StreamExt;
 
     #[tokio::test]
+    async fn slow_durable_handler_renews_delivery_without_prefetch_expiry() {
+        let port = reserve_host_port().unwrap();
+        let container = NatsContainer::start(port).unwrap();
+        let bus = NatsBus::connect(&container.url).await.unwrap();
+        bus.setup_jetstream().await.unwrap();
+        let (tx, mut rx) = mpsc::channel(16);
+        bus.subscribe_durable_configured(
+            "DEPLOY",
+            "slow-handler",
+            Some("deploy.>"),
+            Duration::from_millis(300),
+            move |event, delivery| {
+                let tx = tx.clone();
+                async move {
+                    tokio::time::sleep(Duration::from_millis(1100)).await;
+                    tx.send((event, delivery.sequence)).await.unwrap();
+                    Ok(())
+                }
+            },
+        )
+        .await
+        .unwrap();
+        for revision in ["v1", "v2", "v3"] {
+            bus.publish(&Event::RemoveApp {
+                app_id: AppId::new("slow", revision),
+            })
+            .await
+            .unwrap();
+        }
+        let mut sequences = Vec::new();
+        for _ in 0..3 {
+            let (_, sequence) = timeout(Duration::from_secs(6), rx.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            sequences.push(sequence);
+        }
+        assert_eq!(sequences, vec![1, 2, 3]);
+        assert!(timeout(Duration::from_secs(2), rx.recv()).await.is_err());
+    }
+
+    #[tokio::test]
     async fn test_nats_mutual_tls_requires_certificate_and_key_pair() {
         let error =
             NatsBus::connect_with_tls("tls://127.0.0.1:1", None, None, Some("client.crt"), None)

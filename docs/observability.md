@@ -73,6 +73,39 @@ GET http://<node>:9090/metrics
 
 ### Key metrics
 
+#### Network policy and host I/O metrics
+
+The supervisor publishes runtime counters for live instances with qualified
+`app_id` and `instance_id` labels:
+
+| Metric | Extra label | Meaning |
+| --- | --- | --- |
+| `wasm_policy_instance_egress_bytes` | — | Cumulative raw payload commitments and outgoing HTTP/TLS wire bytes |
+| `wasm_policy_instance_outbound_connections` | — | Active raw TCP resource and HTTP transport reservations |
+| `wasm_policy_instance_network_denials` | `resource="egress"` or `"connections"` | Cumulative byte/connection quota or destination-policy denials |
+| `wasm_policy_instance_io_timeouts` | `operation="connect"`, `"read"`, `"write"`, `"http"` | Cumulative host deadline expirations; connect includes raw name resolution |
+
+These are gauges containing instance-lifetime values, removed when the instance
+exits so the exporter does not accumulate labels for dead instances. Restarting
+an application creates a new instance identity and starts fresh counters.
+Signed integer gauges saturate at `i64::MAX`. Prometheus can retain previously
+scraped history according to its own retention policy.
+
+`wasm_policy_io_timeouts_total{operation=...}` is the cumulative node counter
+for deadline expirations. Existing `wasm_policy_egress_denied_total` and
+`wasm_policy_connection_denied_total` retain node-level denial totals. The
+supervisor exports only new deltas and flushes them before removing a stopped
+instance's live series. HTTP response-body and transport expiration count at
+most once per outbound HTTP request.
+
+TCP byte accounting is conservative, while HTTP counts successful transport
+writes. Read the [network accounting and deadline contract](deploying-applications.md#socket-host-deadlines)
+before interpreting these as bandwidth or end-user request deadlines.
+
+```promql
+sum by (operation) (rate(wasm_policy_io_timeouts_total[5m]))
+```
+
 #### Request metrics (proxy)
 
 | Metric | Type | Description |
@@ -952,3 +985,40 @@ curl http://node:9090/readyz | jq '.dependencies'
 | View app list | `wasm-ctl app list` |
 | View instances | `wasm-ctl instances` |
 | Stream logs | `wasm-ctl logs <app_id>` |
+
+## Schedule telemetry
+
+`wasm_schedule_events_total{outcome="..."}` is a cumulative node counter for
+periodic triggers. Outcomes are a fixed set: `activated`, `invoked`, `success`,
+`failure`, `timeout`, `missed`, `skipped_concurrency`, `skipped_capacity`,
+`rate_limited`, `circuit_open`, and `cancelled`. A missed event increments by
+the number of elapsed buckets that were discarded. Activation identifies a
+newly observed schedule, including after a node restart; it is not an invocation.
+These labels deliberately omit application, trigger, and delivery IDs to keep
+metric cardinality bounded. Counters reset with the node process; schedule
+high-water marks remain in the node's redb store.
+
+Each event also uses the existing local audit path
+`/var/log/wasm-node/audit.jsonl`, with event type `schedule_event`, actor
+`platform:scheduler`, node ID, application revision, trigger name, outcome,
+count, and scheduled bucket timestamp. The existing audit collector envelope
+is emitted through the `audit` target. Audit-file write failures are reported
+by the existing audit writer; these events do not constitute a separate durable
+message queue. Operational warnings include reconciliation and invocation
+errors. No model credentials or checkpoint payloads are part of this telemetry.
+
+```promql
+sum(rate(wasm_schedule_events_total{outcome=~"failure|timeout|missed|skipped_concurrency|skipped_capacity"}[5m]))
+```
+
+A persistent `missed` increase can indicate restart downtime, host contention,
+or slow reconciliation. `skipped_concurrency` means the preceding delivery or
+cold start still occupies the configured slot; increase bounds only after
+checking application leases and resource capacity. `rate_limited` and
+`circuit_open` share the node's application controls with ordinary traffic.
+For the execution, duplicate-delivery, and crash-loss boundaries, see
+[periodic triggers](deploying-applications.md#periodic-triggers).
+
+Validation for this feature uses a real `wasm32-wasip2` fixture and local native
+loopback tests in WSL. It does not establish production timing guarantees or
+validate a Firecracker/kernel-eBPF deployment.

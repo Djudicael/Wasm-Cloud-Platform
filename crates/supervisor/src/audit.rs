@@ -28,6 +28,7 @@ pub enum AuditEventType {
     AuthFailure,
     TokenRotated,
     InternalGatewayRequest,
+    ScheduleEvent,
     CrossNamespaceDenied,
     NamespaceSecurityIncident,
 }

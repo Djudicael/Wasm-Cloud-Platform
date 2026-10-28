@@ -19,6 +19,7 @@ pub(super) fn build_deploy_payload(
     Ok(if let Some(manifest) = manifest {
         let mut config = manifest.to_app_config();
         config.id = app_id.clone();
+        config.namespace = namespace.to_string();
         if args.fuel != 500_000_000 {
             config.fuel_quota = FuelQuota(args.fuel);
         }
@@ -43,9 +44,18 @@ pub(super) fn build_deploy_payload(
         if policy.is_some() {
             config.policy = policy;
         }
+        let gateway_config = manifest.to_gateway_config();
+        if let Some(gateway) = &gateway_config {
+            gateway
+                .validate_allowed_callers()
+                .map_err(anyhow::Error::msg)?;
+        }
+        config
+            .resolve_instance_policy(config.wasm_bind_port)
+            .map_err(anyhow::Error::msg)?;
         (
             config,
-            manifest.to_gateway_config(),
+            gateway_config,
             manifest.to_routes(app_id)?,
             manifest.api_keys.clone(),
         )
@@ -70,6 +80,7 @@ pub(super) fn build_deploy_payload(
             namespace: namespace.to_string(),
             placement: common::types::PlacementPolicy::EveryNode,
             local_dependencies: Vec::new(),
+            triggers: Vec::new(),
         };
         (config, gateway_config, Vec::new(), Vec::new())
     })

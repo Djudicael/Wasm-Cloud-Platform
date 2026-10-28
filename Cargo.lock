@@ -2931,6 +2931,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "http-p3-probe"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "http 1.5.0",
+ "http-body-util",
+ "wasi-pg-client",
+ "wasip3",
+]
+
+[[package]]
 name = "httparse"
 version = "1.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5365,15 +5376,18 @@ dependencies = [
  "hyper",
  "hyper-util",
  "ipnet",
+ "rustls",
  "storage",
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
+ "tokio-rustls",
  "tracing",
  "wasmtime",
  "wasmtime-wasi",
  "wasmtime-wasi-http",
  "wat",
+ "webpki-roots 1.0.9",
 ]
 
 [[package]]
@@ -7209,6 +7223,10 @@ version = "0.8.0+wasi-0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "42a999271e77c083825863fc85404197523b3f3cebe9b402aece658ebea90065"
 dependencies = [
+ "bytes",
+ "http 1.5.0",
+ "http-body 1.1.0",
+ "thiserror 2.0.20",
  "wit-bindgen 0.61.1",
 ]
 
@@ -7387,6 +7405,7 @@ dependencies = [
  "async-trait",
  "bitflags 2.13.1",
  "bumpalo",
+ "bytes",
  "cc",
  "encoding_rs",
  "futures",
@@ -7654,6 +7673,7 @@ dependencies = [
  "rustls",
  "tokio",
  "tokio-rustls",
+ "tokio-util",
  "tracing",
  "wasmtime",
  "wasmtime-wasi",
@@ -8105,6 +8125,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e473fd0095479f9689ac7d2a52c427cc96bb2b973ace50238dfcc1ab1cd52d93"
 dependencies = [
  "bitflags 2.13.1",
+ "futures",
  "wit-bindgen-rust-macro",
 ]
 

@@ -962,6 +962,7 @@ pub fn build_app_config(
         namespace: "default".to_string(),
         placement: common::types::PlacementPolicy::EveryNode,
         local_dependencies: Vec::new(),
+        triggers: Vec::new(),
     }
 }
 

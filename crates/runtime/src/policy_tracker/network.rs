@@ -10,6 +10,37 @@ impl PolicyEnforcer {
         dest_ip: IpAddr,
         _dest_port: u16,
     ) -> Result<(), PolicyDenied> {
+        self.check_outbound_connect(dest_ip, _dest_port, false)
+    }
+
+    pub(crate) fn check_outbound_http_connect(
+        &self,
+        ip: IpAddr,
+        port: u16,
+    ) -> Result<(), PolicyDenied> {
+        self.check_outbound_connect(ip, port, true)
+    }
+
+    fn check_outbound_connect(
+        &self,
+        dest_ip: IpAddr,
+        port: u16,
+        http: bool,
+    ) -> Result<(), PolicyDenied> {
+        let dest_ip = dest_ip.to_canonical();
+        if let Err(reason) = self
+            .policy
+            .network
+            .check_profile_destination(std::net::SocketAddr::new(dest_ip, port), http)
+        {
+            self.counters
+                .connection_denied_total
+                .fetch_add(1, Ordering::Relaxed);
+            return Err(PolicyDenied::DestinationDenied {
+                ip: dest_ip.to_string(),
+                reason: reason.into(),
+            });
+        }
         if !self.policy.network.allow_outbound_tcp {
             self.counters
                 .connection_denied_total
@@ -75,25 +106,22 @@ impl PolicyEnforcer {
 
     /// Record that an outbound connection was closed.
     pub fn record_outbound_disconnect(&self) {
-        let local_prev = self
-            .local_outbound_connections_active
-            .fetch_sub(1, Ordering::AcqRel);
-        if local_prev == 0 {
-            self.local_outbound_connections_active
-                .store(0, Ordering::Release);
+        // Do not publish a transient u32::MAX when a duplicate close races
+        // another release or store teardown.
+        let released = self.local_outbound_connections_active.fetch_update(
+            Ordering::AcqRel,
+            Ordering::Acquire,
+            |current| current.checked_sub(1),
+        );
+        if released.is_err() {
             return;
         }
 
-        let prev = self
-            .counters
-            .outbound_connections_active
-            .fetch_sub(1, Ordering::AcqRel);
-        if prev == 0 {
-            // Underflow - correct back to 0.
-            self.counters
-                .outbound_connections_active
-                .store(0, Ordering::Release);
-        }
+        let _ = self.counters.outbound_connections_active.fetch_update(
+            Ordering::AcqRel,
+            Ordering::Acquire,
+            |current| current.checked_sub(1),
+        );
     }
 
     /// Check if egress data is allowed (before sending).
@@ -144,8 +172,7 @@ impl PolicyEnforcer {
 
         loop {
             let current = self.counters.egress_bytes.load(Ordering::Acquire);
-            let new_val = current + bytes;
-            if new_val > limit {
+            if bytes > limit.saturating_sub(current) {
                 self.counters
                     .egress_denied_total
                     .fetch_add(1, Ordering::Relaxed);
@@ -155,6 +182,7 @@ impl PolicyEnforcer {
                     limit,
                 });
             }
+            let new_val = current + bytes;
             if self
                 .counters
                 .egress_bytes

@@ -12,6 +12,7 @@ pub mod logging;
 
 pub mod policy;
 pub mod protocol;
+pub mod triggers;
 pub mod types;
 pub mod upgrade_provenance;
 

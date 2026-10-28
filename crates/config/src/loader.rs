@@ -105,6 +105,23 @@ pub(crate) fn merge_config(base: NodeConfig, overlay: NodeConfig) -> NodeConfig 
             },
         },
         runtime: RuntimeSection {
+            network_admission: common::policy::NetworkAdmissionConfig {
+                protected_namespaces: if overlay
+                    .runtime
+                    .network_admission
+                    .protected_namespaces
+                    .is_empty()
+                {
+                    base.runtime.network_admission.protected_namespaces
+                } else {
+                    overlay.runtime.network_admission.protected_namespaces
+                },
+                denied_cidrs: if overlay.runtime.network_admission.denied_cidrs.is_empty() {
+                    base.runtime.network_admission.denied_cidrs
+                } else {
+                    overlay.runtime.network_admission.denied_cidrs
+                },
+            },
             port_start: overlay.runtime.port_start,
             port_end: overlay.runtime.port_end,
             instance_bind_address: if overlay.runtime.instance_bind_address.is_empty() {

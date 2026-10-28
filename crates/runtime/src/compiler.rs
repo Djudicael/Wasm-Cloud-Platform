@@ -87,6 +87,7 @@ pub fn build_engine(runtime: Option<&RuntimeSection>) -> Result<Engine, Platform
 
     // Enable Component Model
     config.wasm_component_model(true);
+    config.wasm_component_model_async(true);
 
     configure_pooling_allocator(&mut config, runtime);
 

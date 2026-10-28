@@ -12,6 +12,8 @@ use common::policy::{FilesystemPolicyConfig, NetworkPolicyConfig, PolicyProfile}
 /// Policy-related commands.
 #[derive(Subcommand)]
 pub enum PolicyCommand {
+    /// Explain the resolved policy and operator deny ranges on a node.
+    Explain { app_id: String },
     /// View the effective policy for a deployed application
     Policy {
         /// Application ID (e.g. "api-users:v2")
@@ -30,6 +32,17 @@ pub enum PolicyCommand {
 
 pub async fn run(cmd: PolicyCommand, node_api: &str, http: &reqwest::Client) -> Result<()> {
     match cmd {
+        PolicyCommand::Explain { app_id } => {
+            let mut url = reqwest::Url::parse(&format!(
+                "{}/admin/policy/explain",
+                node_api.trim_end_matches('/')
+            ))?;
+            url.query_pairs_mut().append_pair("app_id", &app_id);
+            let response = http.get(url).send().await?.error_for_status()?;
+            let policy: serde_json::Value = response.json().await?;
+            println!("{}", serde_json::to_string_pretty(&policy)?);
+            Ok(())
+        }
         PolicyCommand::Policy { app_id } => show_policy(&app_id, node_api, http).await,
         PolicyCommand::PolicyViolations { app_id } => {
             show_violations(&app_id, node_api, http).await
@@ -201,6 +214,9 @@ fn display_network_policy(policy: &serde_json::Value) {
 
 fn display_network_policy_defaults() {
     let defaults = NetworkPolicyConfig {
+        profile: None,
+        allowed_http_hosts: None,
+        allowed_tcp_endpoints: None,
         allow_outbound_tcp: None,
         allow_outbound_udp: None,
         allow_dns: None,
@@ -463,6 +479,8 @@ fn list_profiles() -> Result<()> {
             }
         }
     }
+
+    println!("Restrictive manifest profiles ([policy.network].profile): isolated, mesh-only, egress-allowlist");
 
     Ok(())
 }

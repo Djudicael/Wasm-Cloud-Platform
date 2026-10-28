@@ -1,6 +1,24 @@
 use crate::instance::wait_for_ready;
 use crate::instance::{BillingInfo, ManagedInstance, PolicyCounterSnapshot};
 use crate::is_instance_bind_allowed;
+use crate::is_instance_ephemeral_bind_allowed;
+
+#[test]
+fn ephemeral_client_bind_is_limited_to_local_zero_ports() {
+    let own_ip = "127.0.0.2".parse().unwrap();
+    for address in ["0.0.0.0:0", "[::]:0", "127.0.0.2:0"] {
+        assert!(is_instance_ephemeral_bind_allowed(
+            address.parse().unwrap(),
+            own_ip
+        ));
+    }
+    for address in ["127.0.0.3:0", "127.0.0.2:8080", "0.0.0.0:8080"] {
+        assert!(!is_instance_ephemeral_bind_allowed(
+            address.parse().unwrap(),
+            own_ip
+        ));
+    }
+}
 use crate::network::LocalServiceRegistry;
 use crate::pool::InstancePool;
 use crate::port_alloc::PortAllocator;
@@ -377,6 +395,7 @@ fn dummy_managed_instance_with_counters(counters: Arc<PolicyCounters>) -> Manage
         tid: None,
         policy_counters: Some(counters),
         last_policy_export: PolicyCounterSnapshot::default(),
+        trigger_handle: None,
     }
 }
 
@@ -410,11 +429,28 @@ async fn ebpf_tcp_close_releases_only_outbound_connection_reservations() {
         1
     );
 
+    // The HTTP transport already released its slot. A delayed kernel event
+    // must not consume the remaining raw socket's reservation.
+    counters.enable_host_tcp_close_tracking();
+    assert!(counters.track_host_tcp_close(40_001, 443));
+    release_outbound_connection(&supervisor, 77, 40_001, 443).await;
+    assert_eq!(
+        counters.outbound_connections_active.load(Ordering::Relaxed),
+        1
+    );
+
     release_outbound_connection(&supervisor, 77, 18_105, 40_000).await;
     assert_eq!(
         counters.outbound_connections_active.load(Ordering::Relaxed),
         1,
         "closing an accepted inbound socket must not release an outbound slot"
+    );
+    counters.enable_host_socket_lifecycle();
+    release_outbound_connection(&supervisor, 77, 40_002, 443).await;
+    assert_eq!(
+        counters.outbound_connections_active.load(Ordering::Relaxed),
+        1,
+        "host-owned resource lifetimes must not be decremented by delayed kernel events"
     );
 }
 
@@ -557,10 +593,13 @@ async fn undeployed_application_cannot_be_cold_started_from_retained_artifacts()
 
 #[test]
 fn test_policy_metrics_export_flushes_deltas_once() {
-    let policy_metrics = metrics::exporter::Metrics::new().policy;
+    let exported_metrics = metrics::exporter::Metrics::new();
+    let policy_metrics = exported_metrics.policy.clone();
     let counters = Arc::new(PolicyCounters::new());
     counters.connection_denied_total.store(2, Ordering::Relaxed);
     counters.egress_denied_total.store(3, Ordering::Relaxed);
+    counters.egress_bytes.store(101, Ordering::Relaxed);
+    counters.io_read_timeouts.store(2, Ordering::Relaxed);
     counters.fd_denied_total.store(5, Ordering::Relaxed);
     counters.fs_write_denied_total.store(7, Ordering::Relaxed);
     counters.bind_denied_total.store(11, Ordering::Relaxed);
@@ -592,6 +631,61 @@ fn test_policy_metrics_export_flushes_deltas_once() {
     assert_eq!(policy_metrics.table_growth_denied_total.get(), 37);
     assert_eq!(policy_metrics.active_outbound_connections.get(), 17);
     assert_eq!(policy_metrics.open_fds.get(), 19);
+    assert_eq!(
+        policy_metrics
+            .io_timeouts_total
+            .with_label_values(&["read"])
+            .get(),
+        2
+    );
+    let app = instances[0].app_id.0.as_str();
+    let id = instances[0].id.0.to_string();
+    assert_eq!(
+        policy_metrics
+            .instance_egress_bytes
+            .with_label_values(&[app, &id])
+            .get(),
+        101
+    );
+    assert_eq!(
+        policy_metrics
+            .instance_outbound_connections
+            .with_label_values(&[app, &id])
+            .get(),
+        17
+    );
+    assert_eq!(
+        policy_metrics
+            .instance_network_denials
+            .with_label_values(&[app, &id, "egress"])
+            .get(),
+        3
+    );
+    assert_eq!(
+        policy_metrics
+            .instance_io_timeouts
+            .with_label_values(&[app, &id, "read"])
+            .get(),
+        2
+    );
+    policy_metrics.remove_instance_network(app, &id);
+    let families = exported_metrics.registry.gather();
+    for name in [
+        "wasm_policy_instance_egress_bytes",
+        "wasm_policy_instance_io_timeouts",
+    ] {
+        assert!(families
+            .iter()
+            .find(|family| family.name() == name)
+            .is_none_or(|family| family.get_metric().is_empty()));
+    }
+    assert_eq!(
+        policy_metrics
+            .io_timeouts_total
+            .with_label_values(&["read"])
+            .get(),
+        2
+    );
     assert_eq!(policy_metrics.current_memory_bytes.get(), 23);
     assert_eq!(policy_metrics.current_table_elements.get(), 29);
 }
@@ -722,6 +816,7 @@ async fn test_shutdown_timeout_keeps_stale_listener_fenced_until_reap() {
                     tid: None,
                     policy_counters: None,
                     last_policy_export: PolicyCounterSnapshot::default(),
+                    trigger_handle: None,
                 }],
             },
         );
@@ -737,6 +832,10 @@ async fn test_shutdown_timeout_keeps_stale_listener_fenced_until_reap() {
         .await
         .unwrap_err();
     assert!(err.to_string().contains("shutdown timed out"));
+    assert!(
+        supervisor.forget_app(&app_id).await.is_err(),
+        "timed-out guests must remain tracked until their exit is reaped"
+    );
 
     assert_eq!(upstream_registry.count(&app_id).await, 0);
     assert!(service_registry
@@ -769,4 +868,73 @@ async fn test_shutdown_timeout_keeps_stale_listener_fenced_until_reap() {
         let pool = pools.get(&app_id.0).unwrap();
         assert_eq!(pool.instance_count(), 0);
     }
+}
+
+#[tokio::test]
+async fn restrictive_network_contract_is_enforced_at_supervisor_admission() {
+    let (mut supervisor, _, _, _) =
+        make_test_supervisor(IpAddr::V4(Ipv4Addr::LOCALHOST), 18080, 18090).await;
+    Arc::get_mut(&mut supervisor)
+        .unwrap()
+        .configure_network_admission(common::policy::NetworkAdmissionConfig {
+            protected_namespaces: vec!["agents".into()],
+            denied_cidrs: vec!["172.20.0.10/32".into()],
+        })
+        .unwrap();
+    let mut app = AppConfig::default_for(AppId::new_namespaced("agents", "harness", "v1"));
+    assert!(supervisor.check_resource_limits(&app).is_err());
+    app.policy = Some(common::policy::PolicyConfig {
+        network: Some(common::policy::NetworkPolicyConfig {
+            profile: Some(common::policy::NetworkProfile::Isolated),
+            ..Default::default()
+        }),
+        ..Default::default()
+    });
+    supervisor.check_resource_limits(&app).unwrap();
+    app.extended_limits = Some(
+        serde_json::from_value(serde_json::json!({
+            "max_net_egress_bytes": 1024,
+            "max_outbound_connections": 0,
+        }))
+        .unwrap(),
+    );
+    let effective = supervisor.effective_network_policy(&app).unwrap();
+    assert_eq!(effective.network.max_egress_bytes, 1024);
+    assert_eq!(effective.network.max_outbound_connections, 0);
+    assert!(supervisor
+        .effective_network_policy(&app)
+        .unwrap()
+        .network
+        .denied_cidrs
+        .contains(&"172.20.0.10/32".into()));
+}
+
+#[tokio::test]
+async fn caller_restricted_v2_target_cannot_be_reached_through_direct_port() {
+    let (store, _file) = make_supervisor_test_store();
+    let registry = Arc::new(LocalServiceRegistry::default());
+    let target = AppId::new_namespaced("agents", "broker", "v2");
+    let addr = "127.0.0.1:18105".parse().unwrap();
+    registry.register(&target, addr).await;
+    store
+        .save_gateway_config(
+            &target.0,
+            &common::types::GatewayRouteConfig {
+                allowed_callers: Some(vec!["agents/harness:v1".into()]),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let caller = crate::network_interceptor::NetworkInterceptor::new(
+        registry.clone(),
+        AppId::new_namespaced("agents", "harness", "v1"),
+    )
+    .with_store(store);
+    assert!(matches!(
+        caller
+            .check_connect("127.0.0.1:40000".parse().unwrap(), addr)
+            .await,
+        crate::network_interceptor::ConnectDecision::Deny { .. }
+    ));
+    assert_eq!(registry.resolve_app_by_port(18105).await, Some(target));
 }

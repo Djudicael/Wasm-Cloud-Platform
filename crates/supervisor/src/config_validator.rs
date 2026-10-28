@@ -31,7 +31,8 @@ impl std::fmt::Display for ConfigValidationError {
 
 /// Reserved env var names that the platform always injects.
 /// Apps must not set these in env_vars or secret_keys.
-const RESERVED_VARS: &[&str] = &["PORT", "HOST_PORT", "APP_ID", "INSTANCE_ID", "NODE_ID"];
+pub(crate) const RESERVED_VARS: &[&str] =
+    &["PORT", "HOST_PORT", "APP_ID", "INSTANCE_ID", "NODE_ID"];
 
 /// Validate the architecture-level placement contract without consulting an
 /// external secret provider. Event consumers call this too, so a direct NATS

@@ -2,11 +2,43 @@ use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use tracing::{info, warn};
 
+/// Database credentials are not ambient authority for unrelated workloads.
+pub(crate) fn default_database_env(
+    config: &common::types::AppConfig,
+    url: &str,
+) -> Option<(String, String)> {
+    (config.db_max_connections.is_some()
+        && !config.env_vars.contains_key("DATABASE_URL")
+        && !config.secret_keys.iter().any(|key| key == "DATABASE_URL"))
+    .then(|| ("DATABASE_URL".into(), url.into()))
+}
+
+#[cfg(test)]
+mod environment_tests {
+    use super::*;
+    #[test]
+    fn default_database_requires_explicit_opt_in_and_never_overrides_app_settings() {
+        let mut config =
+            common::types::AppConfig::default_for(common::types::AppId("agents/worker:v1".into()));
+        assert!(default_database_env(&config, "private-test-url").is_none());
+        config.db_max_connections = Some(2);
+        assert!(default_database_env(&config, "private-test-url").is_some());
+        config.secret_keys.push("DATABASE_URL".into());
+        assert!(default_database_env(&config, "private-test-url").is_none());
+        config.secret_keys.clear();
+        config
+            .env_vars
+            .insert("DATABASE_URL".into(), "app-url".into());
+        assert!(default_database_env(&config, "private-test-url").is_none());
+    }
+}
+
 /// Database configuration for the node.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DatabaseConfig {
     /// pgBouncer or database proxy URL that Wasm apps will connect to.
-    /// This is injected as DATABASE_URL for apps that need database access.
+    /// Injected only for apps opting in via db_max_connections and without an
+    /// explicit DATABASE_URL environment entry or declared secret.
     /// Default: "postgres://127.0.0.1:5432"
     pub default_database_url: String,
 

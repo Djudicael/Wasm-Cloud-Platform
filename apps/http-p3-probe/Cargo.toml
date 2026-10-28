@@ -1,0 +1,15 @@
+[package]
+name = "http-p3-probe"
+version = "0.1.0"
+edition = "2021"
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasip3 = { version = "0.8.0", features = ["http-compat"] }
+bytes = "1.12.1"
+http-body-util = "0.1.5"
+wasi-pg-client = "0.2.1"
+http = "1.4"

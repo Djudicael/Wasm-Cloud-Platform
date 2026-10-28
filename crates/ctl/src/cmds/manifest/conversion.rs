@@ -9,6 +9,7 @@ impl DeployManifest {
             .map_err(|e| anyhow::anyhow!("Cannot read manifest {}: {}", path, e))?;
         let manifest: DeployManifest = toml::from_str(&content)
             .map_err(|e| anyhow::anyhow!("Invalid manifest TOML: {}", e))?;
+        common::triggers::validate(&manifest.triggers).map_err(anyhow::Error::msg)?;
         Ok(manifest)
     }
 
@@ -38,6 +39,7 @@ impl DeployManifest {
             namespace: self.app.namespace.clone(),
             placement: self.placement.policy,
             local_dependencies: self.placement.local_dependencies.clone(),
+            triggers: self.triggers.clone(),
         }
     }
 
@@ -45,6 +47,7 @@ impl DeployManifest {
     pub fn to_gateway_config(&self) -> Option<common::types::GatewayRouteConfig> {
         let gw = self.gateway.as_ref()?;
         Some(common::types::GatewayRouteConfig {
+            allowed_callers: gw.allowed_callers.clone(),
             auth: gw
                 .auth
                 .as_ref()
@@ -168,6 +171,7 @@ pub fn manifest_from_config(
     };
 
     let gateway = gateway_config.map(|cfg| GatewayManifestSection {
+        allowed_callers: cfg.allowed_callers.clone(),
         host: None,
         routes: Vec::new(),
         auth: match &cfg.auth {
@@ -220,6 +224,7 @@ pub fn manifest_from_config(
     });
 
     DeployManifest {
+        triggers: app_config.triggers.clone(),
         app: AppManifestSection {
             name,
             version,

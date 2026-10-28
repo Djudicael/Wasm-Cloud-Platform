@@ -92,9 +92,17 @@ Key responsibilities include:
 | `Store::get_billing_sequence()` | Get the current billing sequence number |
 | `Store::query_billing_records()` | Query billing records |
 | `Store::db_path()` | Get the database path |
+| `Store::begin_lifecycle_event()` | Persist a per-app broker-ordering fence; allow pending retries and reject older/completed deliveries; atomically fence admissions for removals |
+| `Store::complete_lifecycle_event()` | Mark the current matching deployment/removal delivery complete |
 | `get_db_path()` | Get the database path (module-level function) |
 
 ### HTTP Artifact Server
+
+Lifecycle cursors use schema metadata without changing the schema version or
+existing event payloads. They are scoped to stream name, stream creation epoch
+and exact app ID and survive artifact GC, so delayed deployment redeliveries
+cannot resurrect a removed revision after restart. They are independent of
+periodic schedule cursors, whose GC lifecycle remains tied to the application.
 
 The crate includes an HTTP server for serving stored artifacts, enabling remote retrieval of Wasm modules and binaries.
 

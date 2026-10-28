@@ -132,7 +132,8 @@ impl ProxyHttp for WasmProxy {
         ctx: &mut Self::CTX,
     ) -> PingoraResult<()> {
         let _ = self;
-        forwarding::upstream_request_filter(session, upstream_request, ctx).await
+        let _ = session;
+        forwarding::upstream_request_filter(upstream_request, ctx)
     }
 
     /// Step 4 (optional): Modify response headers from upstream.

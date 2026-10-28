@@ -5,18 +5,29 @@
 
 use serde::{Deserialize, Serialize};
 use std::path::Path;
+mod network_profiles;
+pub use network_profiles::{
+    canonical_http_host, is_mesh_address, is_mesh_http_host, NetworkAdmissionConfig, NetworkProfile,
+};
 
 /// Network policy for a single Wasm app instance.
 /// Enforced at the WASI host layer before any network operation.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct NetworkPolicy {
+    #[serde(default)]
+    pub profile: Option<NetworkProfile>,
+    #[serde(default)]
+    pub allowed_http_hosts: Vec<String>,
+    #[serde(default)]
+    pub allowed_tcp_endpoints: Vec<std::net::SocketAddr>,
     /// Allow outbound TCP connections.
     pub allow_outbound_tcp: bool,
 
     /// Allow outbound UDP.
     pub allow_outbound_udp: bool,
 
-    /// Allow DNS resolution (IP name lookup).
+    /// Allow raw WASI DNS resolution. Restrictive profiles disable this;
+    /// egress-allowlist separately resolves only approved HTTP hostnames.
     pub allow_dns: bool,
 
     /// Allowed destination CIDRs for outbound connections.
@@ -46,6 +57,9 @@ pub struct NetworkPolicy {
 impl Default for NetworkPolicy {
     fn default() -> Self {
         NetworkPolicy {
+            profile: None,
+            allowed_http_hosts: Vec::new(),
+            allowed_tcp_endpoints: Vec::new(),
             allow_outbound_tcp: true,
             allow_outbound_udp: false,
             allow_dns: true,
@@ -118,6 +132,10 @@ pub struct PolicyConfig {
 /// All fields are optional — None means "use the platform default".
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct NetworkPolicyConfig {
+    #[serde(default)]
+    pub profile: Option<NetworkProfile>,
+    pub allowed_http_hosts: Option<Vec<String>>,
+    pub allowed_tcp_endpoints: Option<Vec<String>>,
     pub allow_outbound_tcp: Option<bool>,
     pub allow_outbound_udp: Option<bool>,
     pub allow_dns: Option<bool>,
@@ -146,10 +164,19 @@ impl PolicyConfig {
     /// Validates CIDR strings and policy constraints. Returns an error if
     /// any CIDR is malformed or if required limits are zero.
     pub fn resolve(&self, assigned_port: u16) -> Result<InstancePolicy, String> {
-        let net_default = NetworkPolicy::default();
+        let mut net_default = NetworkPolicy::default();
+        if let Some(profile) = self.network.as_ref().and_then(|net| net.profile) {
+            net_default.profile = Some(profile);
+            net_default.allow_dns = false;
+            net_default.allow_outbound_tcp = profile != NetworkProfile::Isolated;
+            net_default.max_egress_bytes = 16 * 1024 * 1024;
+            if profile == NetworkProfile::MeshOnly {
+                net_default.allowed_cidrs = vec!["127.0.0.1/32".into()];
+            }
+        }
         let fs_default = FilesystemPolicy::default();
 
-        let network = match &self.network {
+        let mut network = match &self.network {
             Some(cfg) => {
                 // Validate CIDR strings before using them
                 if let Some(ref cidrs) = cfg.allowed_cidrs {
@@ -165,6 +192,26 @@ impl PolicyConfig {
                     }
                 }
                 NetworkPolicy {
+                    profile: cfg.profile,
+                    allowed_http_hosts: cfg.allowed_http_hosts.clone().unwrap_or_default(),
+                    allowed_tcp_endpoints: cfg
+                        .allowed_tcp_endpoints
+                        .as_deref()
+                        .unwrap_or_default()
+                        .iter()
+                        .map(|endpoint| {
+                            let address: std::net::SocketAddr = endpoint.parse().map_err(|_| {
+                                format!("invalid TCP endpoint literal: {endpoint:?}")
+                            })?;
+                            if address.port() == 0 {
+                                return Err("TCP endpoint port must be nonzero".into());
+                            }
+                            Ok(std::net::SocketAddr::new(
+                                address.ip().to_canonical(),
+                                address.port(),
+                            ))
+                        })
+                        .collect::<Result<_, String>>()?,
                     allow_outbound_tcp: cfg
                         .allow_outbound_tcp
                         .unwrap_or(net_default.allow_outbound_tcp),
@@ -190,6 +237,7 @@ impl PolicyConfig {
                 ..net_default
             },
         };
+        network.validate_profile()?;
 
         let filesystem = match &self.filesystem {
             Some(cfg) => {
@@ -292,6 +340,9 @@ impl PolicyProfile {
         match self {
             PolicyProfile::HttpApi => PolicyConfig {
                 network: Some(NetworkPolicyConfig {
+                    profile: None,
+                    allowed_http_hosts: None,
+                    allowed_tcp_endpoints: None,
                     allow_outbound_tcp: Some(true),
                     allow_outbound_udp: Some(false),
                     allow_dns: Some(true),
@@ -312,6 +363,9 @@ impl PolicyProfile {
             },
             PolicyProfile::BackgroundWorker => PolicyConfig {
                 network: Some(NetworkPolicyConfig {
+                    profile: None,
+                    allowed_http_hosts: None,
+                    allowed_tcp_endpoints: None,
                     allow_outbound_tcp: Some(true),
                     allow_outbound_udp: Some(false),
                     allow_dns: Some(true),
@@ -332,6 +386,9 @@ impl PolicyProfile {
             },
             PolicyProfile::StaticSite => PolicyConfig {
                 network: Some(NetworkPolicyConfig {
+                    profile: None,
+                    allowed_http_hosts: None,
+                    allowed_tcp_endpoints: None,
                     allow_outbound_tcp: Some(false),
                     allow_outbound_udp: Some(false),
                     allow_dns: Some(false),
@@ -352,6 +409,9 @@ impl PolicyProfile {
             },
             PolicyProfile::DatabaseProxy => PolicyConfig {
                 network: Some(NetworkPolicyConfig {
+                    profile: None,
+                    allowed_http_hosts: None,
+                    allowed_tcp_endpoints: None,
                     allow_outbound_tcp: Some(true),
                     allow_outbound_udp: Some(false),
                     allow_dns: Some(true),
@@ -376,6 +436,9 @@ impl PolicyProfile {
             },
             PolicyProfile::Unrestricted => PolicyConfig {
                 network: Some(NetworkPolicyConfig {
+                    profile: None,
+                    allowed_http_hosts: None,
+                    allowed_tcp_endpoints: None,
                     allow_outbound_tcp: Some(true),
                     allow_outbound_udp: Some(true),
                     allow_dns: Some(true),
@@ -434,6 +497,9 @@ mod tests {
     fn test_resolve_rejects_zero_max_connections() {
         let config = PolicyConfig {
             network: Some(NetworkPolicyConfig {
+                profile: None,
+                allowed_http_hosts: None,
+                allowed_tcp_endpoints: None,
                 allow_outbound_tcp: Some(true),
                 allow_outbound_udp: None,
                 allow_dns: None,
@@ -474,6 +540,9 @@ mod tests {
     fn test_resolve_rejects_invalid_cidr() {
         let config = PolicyConfig {
             network: Some(NetworkPolicyConfig {
+                profile: None,
+                allowed_http_hosts: None,
+                allowed_tcp_endpoints: None,
                 allow_outbound_tcp: Some(true),
                 allow_outbound_udp: None,
                 allow_dns: None,
@@ -531,6 +600,9 @@ mod tests {
     fn test_policy_config_resolve_with_overrides() {
         let config = PolicyConfig {
             network: Some(NetworkPolicyConfig {
+                profile: None,
+                allowed_http_hosts: None,
+                allowed_tcp_endpoints: None,
                 allow_outbound_tcp: Some(false),
                 allow_outbound_udp: Some(true),
                 allow_dns: Some(false),

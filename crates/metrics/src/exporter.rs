@@ -2,8 +2,8 @@
 use axum::{response::IntoResponse, routing::get, Router};
 use prometheus::process_collector::ProcessCollector;
 use prometheus::{
-    CounterVec, GaugeVec, HistogramOpts, HistogramVec, IntCounter, IntCounterVec, IntGauge, Opts,
-    Registry,
+    CounterVec, GaugeVec, HistogramOpts, HistogramVec, IntCounter, IntCounterVec, IntGauge,
+    IntGaugeVec, Opts, Registry,
 };
 use std::sync::Arc;
 
@@ -18,6 +18,7 @@ pub struct Metrics {
     pub trap_total: IntCounterVec,
     pub platform_info: IntCounterVec,
     pub policy: PolicyMetrics,
+    pub schedule_events_total: IntCounterVec,
 }
 
 impl Metrics {
@@ -98,7 +99,19 @@ impl Metrics {
         .unwrap();
         registry.register(Box::new(platform_info.clone())).unwrap();
 
+        let schedule_events_total = IntCounterVec::new(
+            Opts::new(
+                "wasm_schedule_events_total",
+                "Node-local schedule outcomes and skipped ticks",
+            ),
+            &["outcome"],
+        )
+        .unwrap();
+        registry
+            .register(Box::new(schedule_events_total.clone()))
+            .unwrap();
         Metrics {
+            schedule_events_total,
             registry: Arc::new(registry),
             requests_total,
             fuel_consumed_total,
@@ -171,6 +184,11 @@ pub fn metrics_router(metrics: Arc<Metrics>) -> Router {
 /// These feed the alerting rules in `deploy/prometheus/wasi_policy_alerts.yml`.
 #[derive(Clone)]
 pub struct PolicyMetrics {
+    pub io_timeouts_total: IntCounterVec,
+    pub instance_egress_bytes: IntGaugeVec,
+    pub instance_outbound_connections: IntGaugeVec,
+    pub instance_network_denials: IntGaugeVec,
+    pub instance_io_timeouts: IntGaugeVec,
     /// Total outbound connections denied by policy.
     pub connection_denied_total: IntCounter,
 
@@ -210,6 +228,54 @@ pub struct PolicyMetrics {
 
 impl PolicyMetrics {
     pub fn new(registry: &Registry) -> Self {
+        let io_timeouts_total = IntCounterVec::new(
+            Opts::new(
+                "wasm_policy_io_timeouts_total",
+                "Host network I/O deadlines exceeded",
+            ),
+            &["operation"],
+        )
+        .unwrap();
+        registry
+            .register(Box::new(io_timeouts_total.clone()))
+            .unwrap();
+        let instance_egress_bytes = IntGaugeVec::new(Opts::new("wasm_policy_instance_egress_bytes", "Cumulative guest socket payload commitments and outgoing HTTP wire bytes for live instances"), &["app_id", "instance_id"]).unwrap();
+        registry
+            .register(Box::new(instance_egress_bytes.clone()))
+            .unwrap();
+        let instance_outbound_connections = IntGaugeVec::new(
+            Opts::new(
+                "wasm_policy_instance_outbound_connections",
+                "Active outbound TCP and HTTP reservations for live instances",
+            ),
+            &["app_id", "instance_id"],
+        )
+        .unwrap();
+        registry
+            .register(Box::new(instance_outbound_connections.clone()))
+            .unwrap();
+        let instance_network_denials = IntGaugeVec::new(
+            Opts::new(
+                "wasm_policy_instance_network_denials",
+                "Cumulative network policy denials for live instances",
+            ),
+            &["app_id", "instance_id", "resource"],
+        )
+        .unwrap();
+        registry
+            .register(Box::new(instance_network_denials.clone()))
+            .unwrap();
+        let instance_io_timeouts = IntGaugeVec::new(
+            Opts::new(
+                "wasm_policy_instance_io_timeouts",
+                "Cumulative host network I/O deadline expirations for live instances",
+            ),
+            &["app_id", "instance_id", "operation"],
+        )
+        .unwrap();
+        registry
+            .register(Box::new(instance_io_timeouts.clone()))
+            .unwrap();
         let connection_denied_total = IntCounter::with_opts(Opts::new(
             "wasm_policy_connection_denied_total",
             "Outbound connections denied by WASI policy",
@@ -317,6 +383,11 @@ impl PolicyMetrics {
             .unwrap();
 
         PolicyMetrics {
+            io_timeouts_total,
+            instance_egress_bytes,
+            instance_outbound_connections,
+            instance_network_denials,
+            instance_io_timeouts,
             connection_denied_total,
             egress_denied_total,
             fd_denied_total,
@@ -329,6 +400,26 @@ impl PolicyMetrics {
             open_fds,
             current_memory_bytes,
             current_table_elements,
+        }
+    }
+
+    /// Remove live-instance series on exit; aggregate counters retain history.
+    pub fn remove_instance_network(&self, app: &str, instance: &str) {
+        let _ = self
+            .instance_egress_bytes
+            .remove_label_values(&[app, instance]);
+        let _ = self
+            .instance_outbound_connections
+            .remove_label_values(&[app, instance]);
+        for resource in ["egress", "connections"] {
+            let _ = self
+                .instance_network_denials
+                .remove_label_values(&[app, instance, resource]);
+        }
+        for operation in ["connect", "read", "write", "http"] {
+            let _ = self
+                .instance_io_timeouts
+                .remove_label_values(&[app, instance, operation]);
         }
     }
 }

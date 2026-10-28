@@ -17,6 +17,7 @@ pub enum ConnectDecision {
 pub struct NetworkInterceptor {
     pub registry: Arc<super::network::NamespaceRegistry>,
     pub source_app: AppId,
+    store: Option<storage::Store>,
 }
 
 impl NetworkInterceptor {
@@ -24,7 +25,13 @@ impl NetworkInterceptor {
         NetworkInterceptor {
             registry,
             source_app,
+            store: None,
         }
+    }
+
+    pub fn with_store(mut self, store: storage::Store) -> Self {
+        self.store = Some(store);
+        self
     }
 
     /// Called for every outbound TCP connect.
@@ -40,14 +47,27 @@ impl NetworkInterceptor {
             "[INTERCEPTOR DEBUG] check_connect called"
         );
 
-        // 1. If the destination is on loopback, check if it's a known app port.
-        if !dest_addr.ip().is_loopback() {
-            tracing::info!(dest = %dest_addr, "[INTERCEPTOR DEBUG] external — allow");
-            return ConnectDecision::Allow(dest_addr);
-        }
-
-        // 2. Check if the destination port belongs to a known local app.
-        if let Some(target_app) = self.registry.resolve_app_by_port(dest_addr.port()).await {
+        let target = if dest_addr.ip().is_loopback() {
+            self.registry.resolve_app_by_port(dest_addr.port()).await
+        } else {
+            self.registry.resolve_app_by_endpoint(dest_addr).await
+        };
+        if let Some(target_app) = target {
+            if let Some(store) = &self.store {
+                match store.load_gateway_config(&target_app.0) {
+                    Ok(Some(config)) if config.requires_mesh_gateway() => {
+                        return ConnectDecision::Deny {
+                            reason: "target requires the internal gateway".into(),
+                        }
+                    }
+                    Err(_) => {
+                        return ConnectDecision::Deny {
+                            reason: "target policy unavailable".into(),
+                        }
+                    }
+                    _ => {}
+                }
+            }
             tracing::info!(
                 target_app = %target_app.0,
                 target_ns = %target_app.namespace(),

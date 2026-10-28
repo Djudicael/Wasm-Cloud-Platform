@@ -11,6 +11,7 @@ This guide covers everything you need to deploy, configure, and manage Wasm appl
 5. [Environment Variables & Secrets](#environment-variables--secrets)
 6. [Managing Deployments](#managing-deployments)
 7. [Zero-Downtime Updates](#zero-downtime-updates)
+8. [Periodic Triggers](#periodic-triggers)
 
 ---
 
@@ -578,8 +579,8 @@ DATABASE_POOL_SIZE = "10"
 
 # Secrets (references — actual values injected by platform)
 [secrets]
-DATABASE_URL = { ref = "prod-postgres-url" }
-JWT_SECRET = { ref = "api-users-jwt-secret" }
+DATABASE_URL = { ref = "DATABASE_URL" }
+JWT_SECRET = { ref = "JWT_SECRET" }
 
 # API Keys for endpoint-level auth
 [[api_keys]]
@@ -763,11 +764,49 @@ Secrets are **never** stored in the manifest. They are referenced by name and in
 
 ```toml
 [secrets]
-DATABASE_URL = { ref = "prod-postgres-url" }
-STRIPE_KEY = { ref = "stripe-live-key" }
+DATABASE_URL = { ref = "DATABASE_URL" }
+STRIPE_KEY = { ref = "STRIPE_KEY" }
 ```
 
 The actual values are stored encrypted in the platform's `redb` database and injected as environment variables when the Wasm instance starts.
+
+For restart persistence, configure a stable node seal-key source before setting
+application secrets. The default `runtime.key_source = "generate"` keeps its
+KEK only in memory: preserving redb alone cannot recover those secrets after
+the node exits. A local test node can use a private raw 32-byte file:
+
+```toml
+[runtime]
+key_source = "file"
+key_file = "/etc/wasm-node/seal.key"
+```
+
+Protect that file with mode 0600 and preserve it together with the node's redb
+state. The node persists the KEK and transport identity sealed by that source.
+Other supported sources include command, Vault and AWS KMS; choose the managed
+source appropriate to the deployment. Switching to a stable source after an
+ephemeral key has already been lost cannot decrypt the old bundles: recovery
+requires the original secret values and a controlled, backed-up reprovisioning.
+
+Only keys listed in the application's `secret_keys` are resolved, under that
+exact application identity, immediately before guest startup. A missing backend,
+missing value, invalid environment key, or reserved platform name prevents
+startup. Resolved values override a same-named static environment entry, remain
+in memory, and are not copied into the persisted or exported application config.
+Secret rotation invalidates warm instances; their replacements resolve current
+values. Environment secret names use ASCII letters, digits and underscores
+(at most 256 bytes); reserved names such as `APP_ID` and `PORT` are forbidden.
+
+The current CLI uses each `[secrets]` table key for both lookup and environment
+injection; alias remapping through a different `ref` value is not implemented.
+Keep `ref` equal to that key and provision the secret using the same name.
+
+The node's default `DATABASE_URL` is supplied only to applications explicitly
+opting into its database proxy via `db_max_connections`, when neither an app
+environment value nor a declared `DATABASE_URL` secret exists. Applications
+that previously relied on the ambient default must now declare their database
+secret, supply their own URL, or explicitly opt into the node proxy. Other
+workloads receive no node database credential automatically.
 
 **Set a secret:**
 
@@ -816,7 +855,25 @@ This reconstructs the full manifest from the live config stored in redb, includi
 wasm-ctl remove production/api-users:v2
 ```
 
-This sends a `RemoveApp` event to all nodes, which gracefully drain and delete the app's instances.
+This sends a `RemoveApp` event to all nodes. Each node persists an undeploy
+marker before waiting for cold starts already admitted, stops the resulting
+instances, and removes their routes. Both cold starts and reuse of an existing
+instance reject an undeployed revision. Instances whose shutdown times out
+remain tracked and fenced until their exit is confirmed; a failed removal can
+be retried. The CLI confirms publication, not completion on every node.
+
+Artifacts and configuration remain during the storage GC grace period; removing
+an application does not delete its external database records or object storage.
+Redeploy the intended manifest and artifact to resume that revision. Application
+checkpoints, activity leases and idempotency remain the application's responsibility.
+
+Nodes persist the broker stream sequence of deployment/removal deliveries per
+application. Older deliveries and completed duplicates are ignored, including
+after a node process restart; a pending failed delivery can retry. These
+ordering markers survive artifact GC and are scoped to the NATS stream creation
+epoch so a recreated stream can start again at sequence one. This protects
+deployment/removal ordering; it is not a transaction across independent route,
+gateway and configuration streams, nor an exactly-once business-work guarantee.
 
 ### View instances
 
@@ -862,6 +919,280 @@ This is all handled automatically by the deployment protocol. No manual interven
 
 ## Policy Profiles
 
+Outbound WASI TCP clients (including PostgreSQL clients) may bind a local
+ephemeral port (`0`) when `allow_outbound_tcp` is enabled. This does not authorize
+listening on that port: `TcpListen` remains restricted to the assigned service
+port and inbound policy. The supervisor permits an ephemeral client bind only
+on an unspecified address or the instance's own address. Destination CIDRs,
+namespace enforcement, connection limits, and any additional address checker
+still apply when the client connects.
+
+### Restrictive network profiles
+
+Applications can opt into a restrictive profile in the deployment manifest.
+This is separate from the legacy `--policy-profile http_api` presets; omitting
+`policy.network.profile` preserves the legacy defaults outside protected
+namespaces. Deploy all admitting nodes with support for these fields before
+relying on them; older nodes do not enforce the new contract.
+
+| `policy.network.profile` | Outbound authority |
+| --- | --- |
+| `isolated` | No outbound TCP, UDP, or DNS; inbound handling remains available |
+| `mesh-only` | TCP to `127.0.0.1:9080` only; no raw DNS or UDP |
+| `egress-allowlist` | HTTP to exact approved names **and** allowed resolved CIDRs; raw TCP only to explicitly listed IP/port endpoints; no raw DNS or UDP |
+
+```toml
+[policy.network]
+profile = "mesh-only"
+max_egress_bytes = 16777216
+```
+
+For restrictive profiles, literal `<app>.<namespace>.internal:9080` HTTP
+requests map directly to the local gateway without consulting DNS. They never
+resolve or forward to another node. Raw socket clients may use the literal
+`127.0.0.1:9080` address. CIDR denies and operator policy still apply. Mesh and
+egress profiles require the canonical gateway port 9080; admission rejects them
+on a node configured with another internal gateway port. These profiles remain
+subject to kernel-derived mesh caller attribution and namespace admission.
+
+An HTTP model gateway can declare:
+
+```toml
+[policy.network]
+profile = "egress-allowlist"
+allowed_http_hosts = ["models.example.com"]
+allowed_cidrs = ["203.0.113.0/24"] # illustrative; use the provider's actual ranges
+max_egress_bytes = 67108864
+```
+
+Host entries are exact ASCII DNS names (use A-label/punycode for international
+names), case-insensitive and normalized without one trailing dot. Wildcards,
+URLs, ports, IP literals, and suffix matches are rejected. Each redirect is
+checked again. DNS runs inside the HTTP transport only after hostname approval;
+the guest's raw WASI resolver remains disabled, preventing arbitrary DNS queries
+from bypassing the hostname list. A DNS result must also pass CIDR and supervisor
+checks. HTTP IP-literal URLs are denied except the authorized mesh address.
+To call the mesh from an egress profile, include `127.0.0.1/32` in allowed CIDRs;
+qualified `.internal` HTTP names remain local and need no HTTP host-list entry.
+
+A coordinator requiring PostgreSQL can instead grant an exact raw endpoint:
+
+```toml
+[policy.network]
+profile = "egress-allowlist"
+allowed_cidrs = ["172.20.0.20/32", "127.0.0.1/32"]
+allowed_tcp_endpoints = ["172.20.0.20:5432"]
+max_egress_bytes = 67108864
+```
+
+Raw endpoint entries are IP/port literals with nonzero ports, not names or
+CIDRs. They deliberately grant transport access to that exact endpoint without
+HTTP hostname binding; omit them from HTTP-only tools and gateways. An egress
+profile requires nonempty allowed CIDRs and at least one HTTP name or raw TCP
+endpoint. `/0` ranges and an unlimited egress budget are rejected. Defaults for
+restrictive profiles declare a 16 MiB budget. Raw TCP payloads now consume that
+budget, including responses written on accepted sockets by CLI services.
+
+Restrictive profiles deny loopback except the exact mesh address, link-local,
+unspecified, multicast, IPv4 `0.0.0.0/8` and `240.0.0.0/4`, and the metadata address
+`100.100.100.200`; IPv4-mapped IPv6 addresses undergo the same checks. Private
+service ranges are not universally prohibited because databases and other
+services may legitimately use them. Operators must additionally deny their
+actual control-plane/node/NATS ranges with the node policy below. Explicit app
+allows cannot override these operator denies.
+
+Configure each node before restoration or deployment:
+
+```toml
+[runtime.network_admission]
+protected_namespaces = ["agents"]
+denied_cidrs = ["172.20.0.10/32", "172.20.0.11/32", "172.20.0.12/32", "172.20.0.13/32"]
+```
+
+The addresses above are illustrative; derive them from the recorded environment
+and keep service endpoints outside control-plane deny ranges. These settings
+are startup-only. They apply on deploy/config-update admission, restoration,
+and instance creation. A configuration's `namespace` must match its qualified
+application ID; reconcile inconsistent legacy records through their manifests
+before restoring them. The default-config helper now derives the namespace
+from the ID rather than always assigning `default`. Protected namespaces require an explicit restrictive
+profile; permissive defaults and attempts to re-enable raw DNS or UDP are
+rejected. Node deny CIDRs apply to all supervised outbound TCP/UDP, including
+HTTP, even outside protected namespaces.
+
+Inspect the resolved declaration plus operator deny CIDRs through the existing
+admin read authentication:
+
+```bash
+wasm-ctl --node-api http://127.0.0.1:9090 policy explain agents/model-gateway:v1
+```
+
+This calls `GET /admin/policy/explain?app_id=agents%2Fmodel-gateway%3Av1`.
+Policy inspection uses HTTP only and does not connect to NATS. Supply the normal
+admin read token through the CLI's authentication options.
+The response reports the profile, CIDRs, hosts, raw endpoints, and remaining
+metering limitations. `allowed_bind_ports` is a declaration template; the
+supervisor substitutes the assigned instance port at spawn time.
+
+### Outbound WASI HTTP policy
+
+Both P2 `wasi:http/incoming-handler` and P3 async `wasi:http/handler` services
+can be hosted. The latter use the pinned Wasmtime experimental P3 ABI, while
+still compiling with Rust's `wasm32-wasip2` target. P3 preserves the same outgoing
+HTTP policy transport and dedicated identity thread. Its request/response
+bodies are bounded at 16 MiB and the complete handler/body execution at 30 seconds.
+Responses are buffered, so indefinite streaming is not supported. P3 native
+schedule triggers are rejected; existing P2 schedule applications keep working.
+
+P3 raw networking currently supports outbound TCP with the same destination,
+supervisor, connection-slot and byte-quota controls. Connect is bounded at
+10 seconds and pending reads/writes at 30 seconds without progress. UDP creation
+and raw TCP bind are denied; unsupported socket options fail closed. This is a
+bounded HTTP/database hosting path, not full WASI P3 conformance. See the
+[runtime implementation](../crates/runtime/README.md#p3-http-services).
+
+`wasi:http` outgoing requests use the same TCP/CIDR policy and additional
+supervisor address gate as WASI sockets. A hostname is resolved once; only an
+address that passes both checks is connected. Mixed DNS results may connect to
+an approved result, never a rejected one. IPv4-mapped IPv6 addresses use their
+canonical IPv4 address for CIDR evaluation. In legacy policies, `allow_dns = false` rejects hostname
+lookups, including `.internal` names; literal IP destinations do not need DNS.
+Restrictive profiles use the approved-name HTTP resolver and local mesh mapping
+described above; raw guest DNS stays disabled. Legacy guest resolution still
+uses the node's configured resolver for `.internal` records.
+
+HTTPS uses the original URI hostname for SNI and certificate verification and
+the WebPKI root bundle. The transport derives `Host` from that same authority.
+Redirects are returned to the guest; a subsequent hop is a new checked request.
+Policies remain explicit: permissive legacy defaults do not automatically deny
+platform NATS, metadata, private ranges, or external services. Use restrictive
+profiles and operator deny ranges for those boundaries.
+
+The HTTP transport currently has fixed host caps; a guest can shorten supported
+request-option timeouts but cannot extend them:
+
+| Limit | Host cap |
+| --- | --- |
+| DNS, policy gate, TCP connect, TLS, and HTTP handshake combined | 10 seconds |
+| Request send through response headers | 30 seconds |
+| Between consumed response-body frames | 30 seconds |
+| Entire transport lifetime, including response I/O | 120 seconds |
+| Response-body bytes, also for chunked responses | 16 MiB |
+
+These are separate from the request-store epoch/fuel budget and from gateway
+and front-door deadlines. Longer streaming or model requests require a future
+configurable transport policy; increasing a guest timeout does not bypass these
+caps.
+
+`max_outbound_connections` shares the instance's active counter between sockets
+and HTTP. Raw TCP reserves a slot at `start-connect`, releases it on failed
+completion, socket-resource destruction, or store teardown, and retains it while
+the guest holds a connected socket resource. HTTP reservations release on
+transport close, connection failure, or cancellation. Both paths are owned by
+the runtime; delayed eBPF close events do not decrement these counters again.
+This works without kernel observation. The older per-port HTTP close-token
+mechanism remains available to legacy direct counter consumers, but fresh
+platform instances use resource-lifecycle accounting and retain no such tokens.
+`max_egress_bytes` is enforced before HTTP transport writes, including HTTP
+headers and TLS wire bytes. Successful HTTP wire writes are counted; in-flight
+write reservations can conservatively deny concurrent writers. Raw P2 TCP and
+UDP socket payloads share this same budget; see the accounting details below.
+
+Explicit network fields in `[extended_limits]` add ceilings to
+`[policy.network]`; the stricter value wins. They cannot raise a policy limit.
+Omitting either field preserves its resolved network policy value, including
+for existing applications without an `extended_limits` section. The numeric
+defaults returned by `ExtendedLimitsConfig::to_limits()` do not implicitly add
+network ceilings for omitted fields.
+
+```toml
+[extended_limits]
+max_net_egress_bytes = 1048576
+max_outbound_connections = 4
+```
+
+`max_net_egress_bytes = 0` adds no byte ceiling and cannot remove a finite
+`policy.network.max_egress_bytes` limit. `max_outbound_connections = 0` denies
+all outbound TCP and HTTP connections. The byte ceiling meters HTTP/TLS wire
+writes and raw TCP/UDP payload commitments. The connection ceiling applies
+to raw TCP and HTTP using the same active counter. For a `wasi:http` adapter
+instance, counters are shared across request stores: a new request does not
+refresh the byte budget. Restarting the instance starts new counters. These
+are per-instance limits, not tenant-wide or application-wide budgets.
+
+`wasm-ctl policy explain <app>` reports these combined ceilings along with
+operator CIDR denies. This change activates previously ignored explicit
+network fields in persisted configurations: review them before rolling out
+the updated runtime. Roll out all nodes before relying on the new ceilings.
+
+#### Raw socket byte accounting
+
+The runtime wraps TCP output resources returned by `finish-connect` and
+`accept` in both its synchronous CLI and asynchronous HTTP linkers. Every
+payload write reserves budget atomically before delegation. This also covers
+blocking writes, zero-filled writes, and `splice`. Handles and socket parent
+ownership remain intact; quota failure is a WASI stream `last-operation-failed`
+error rather than an instance trap.
+
+TCP charges remain even when the delegated write fails: Wasmtime may have sent
+a prefix already or scheduled background work. They are therefore conservative
+payload reservations, not an exact measurement of bytes delivered to a peer.
+Writers competing for the remaining budget can fail while another reservation
+is in progress. UDP reserves a whole submitted batch before sending, retains
+charges for the accepted prefix, and refunds the unsent suffix. A batch that
+does not fit is rejected before any datagram is delegated, even if a smaller
+batch would fit. Quota failure returns WASI socket `access-denied`.
+
+`egress_bytes` combines these payload charges with outgoing HTTP/TLS wire
+bytes. It excludes IP/TCP/UDP packet overhead, retransmissions, host DNS traffic,
+and incoming HTTP responses served by the platform adapter. Raw TCP responses
+from CLI services are included. This is an instance guest-I/O budget, not a
+host NIC bandwidth meter.
+
+Previously HTTP-only byte ceilings now also constrain raw socket writes.
+Review finite budgets on existing CLI services and database clients before
+rollout, including the 16 MiB restrictive-profile default. The authenticated
+policy explanation reports `raw_socket_byte_metering = true`, identifies the
+accounting model, and reports `raw_socket_host_deadlines = true` with the fixed
+connect and I/O caps.
+
+#### Socket host deadlines
+
+Pending raw network I/O has host-side caps independent of Wasm fuel and epoch
+interruption:
+
+| Operation | Host cap |
+| --- | --- |
+| Raw TCP connect, including asynchronous supervisor checks | 10 seconds |
+| Raw WASI name-resolution wait | 10 seconds |
+| TCP/UDP pending read/write readiness | 30 seconds |
+| Blocking stream reads, writes, zeroes, flush and splice | 30 seconds per host call |
+| Network stream destruction waiting for outstanding I/O | 30 seconds |
+
+The same guards run in synchronous CLI and asynchronous `wasi:http` linkers.
+Pending deadlines persist when a poll is cancelled or wakes for another
+pollable. Clock polling or re-subscribing therefore cannot renew a stalled
+socket's budget. Successful readiness/progress completes the pending wait.
+An idle listening socket has no I/O deadline until it accepts a connection;
+clocks, files and standard I/O do not start network deadlines. An already
+pending network deadline also bounds subsequent waits on other resources.
+
+Expiration raises `WASI socket host <operation> deadline exceeded` as a fatal
+trap for that CLI invocation or HTTP request store. Socket resources are
+released; a timed-out HTTP request does not terminate its adapter or other
+request stores. A CLI service processes requests in one invocation, so an
+expired accepted connection terminates that CLI instance. Configure shorter
+application/protocol timeouts when it should handle a stalled peer itself.
+The host caps cannot be extended by guest timeouts. An in-flight system DNS
+resolver job can finish separately after its guest wait is cancelled; restrictive
+profiles keep raw DNS disabled.
+
+Outgoing HTTP retains the connect/first-byte/idle/total caps in the table above.
+These socket caps bound pending I/O, not the lifetime of a service or a total
+per-application execution budget. Configurable request deadlines are separate
+M8 work. The [observability manual](observability.md#network-policy-and-host-io-metrics)
+documents per-instance usage, denials and timeout metrics.
+
 The platform provides pre-defined WASI policy profiles for common use cases:
 
 | Profile | Use case | Network | Filesystem |
@@ -889,3 +1220,120 @@ wasm-ctl deploy \
   --policy-network-max-outbound-connections 100 \
   --policy-fs-max-open-fds 128
 ```
+
+
+## Periodic Triggers
+
+A `wasi:http` application can declare node-local periodic invocations. These
+are generic execution capabilities: application workflows, database leases,
+harness selection, and model access remain application responsibilities.
+
+```toml
+[[triggers]]
+kind = "schedule"
+id = "dispatch"
+every = "2s"
+route = "/_platform/triggers/dispatch"
+method = "POST"
+max_concurrency = 4
+timeout = "25s"
+```
+
+Implement this POST handler in the component, then deploy the manifest with the
+usual `wasm-ctl deploy --manifest ...` workflow. Public route bindings are not
+required. Native `wasi:cli` applications cannot declare triggers. Existing JSON
+configs without `triggers` default to an empty list; manifest export preserves
+all trigger declarations. Unknown trigger kinds and options are rejected.
+
+| Setting | Supported contract |
+| --- | --- |
+| `id` | Unique per application revision; 1-64 ASCII letters, digits, `_`, or `-` |
+| `every` | Fixed integer duration, `ms`, `s`, or `m`; 100ms-24h |
+| `route` | Exactly `/_platform/triggers/<id>` |
+| `method` | `POST`, with an empty request body |
+| `max_concurrency` | 1-32 in-flight deliveries per trigger on each node |
+| `timeout` | 10ms-5m for guest execution and response draining |
+
+There are at most eight triggers per application. Cron expressions and NATS
+message triggers are not implemented in this increment.
+
+```mermaid
+flowchart LR
+    Manifest[Persisted application config] --> Scheduler[Node scheduler and durable cursor]
+    Scheduler --> Admission[Supervisor admission and cold start]
+    Admission --> Channel[Native in-memory capability]
+    Channel --> Runtime[Dedicated wasi:http executor and fresh Store]
+    Runtime --> Handler[Reserved application handler]
+    Network[Public or mesh HTTP] --> Denied[403 on reserved trigger paths]
+```
+
+The scheduler shares the application's node rate limiter and circuit breaker,
+then uses Supervisor admission, the instance's dedicated registered thread,
+and the same fresh-Store constructor, fuel, memory, network hooks, socket
+checks, and policy counters as normal `wasi:http` execution. The egress byte
+budget is cumulative across fresh Stores in a live instance: periodic HTTP
+polling and credential renewal also consume it. Native triggers do not reset
+that budget. Size finite budgets for the rehearsal duration or explicitly
+rotate instances; exhaustion fails closed. This native
+capability does not impersonate a mesh caller or authenticated user. HTTP
+OIDC, endpoint user-authentication rules, endpoint rate buckets, distributed
+HTTP rate limits, CORS, and request transforms are not applied to native
+scheduler calls; use the application node rate limit and trigger bounds for
+this entry point. Public and mesh requests retain their ordinary gateway
+controls. Native execution timeout cancels the guest Store and drains at most
+1 MiB of response data; only 2xx responses count as success.
+
+Cold start is allowed to finish before cancellation so every started instance
+reaches Supervisor ownership. `timeout` starts after admission/cold start;
+it does not bound compilation or instance startup. The scheduler holds its
+concurrency reservation throughout startup. It admits at most 256 deliveries
+node-wide and never queues an interval when its trigger or global capacity is
+exhausted. The existing idle accounting uses request start times; set
+`idle_timeout_secs` above the longest trigger timeout to avoid reclaiming a
+long invocation. An idle instance may still be reclaimed normally; later ticks
+cold start it again. Removing a trigger, undeploying, or draining stops new delivery
+after reconciliation and cancels active native requests. Draining pauses that
+revision's triggers for the current node process; undeploy a retired revision
+so it also remains inactive after restart. Node shutdown first stops deliveries
+and finishes Supervisor ownership of cold starts, then shuts down instances.
+
+Intervals align to Unix epoch milliseconds. The scheduler reconciles every
+50ms with skipped timer ticks; this is a polling tolerance, not a latency SLO.
+A new or changed schedule first records the current bucket and starts at the
+next boundary. Its node-local high-water mark is committed in redb before
+dispatch. After a restart or stall, older buckets are counted as missed and
+only the current bucket is eligible. Clock rollback never replays an already
+committed bucket for an unchanged declaration. There is no retry queue: a crash after cursor commit can lose
+a delivery, and a partial application transaction can have side effects before
+a timeout. Use periodic database sweeps, durable application state, leases,
+and idempotency for business work. Trigger removal deletes its live cursor;
+storage GC also removes cursor metadata for purged applications.
+
+With `placement.policy = "every_node"`, **every eligible node fires**. Each
+deployed revision has independent schedules, including revisions without public
+routes. No leader election or exactly-once guarantee is provided. All replicas
+receive the same logical ID for the same application revision, trigger, and UTC
+bucket, allowing database deduplication. The platform supplies:
+
+| Header | Meaning |
+| --- | --- |
+| `X-Trigger-Id` | `<app-id>:<trigger-id>:<scheduled-at-ms>`; excludes node identity |
+| `X-Trigger-Name` | Manifest trigger `id` |
+| `X-Trigger-Scheduled-At-Ms` | UTC bucket boundary in milliseconds |
+| `X-Trigger-Node` | Origin platform node ID |
+
+The capability never crosses an HTTP listener or becomes a guest environment
+variable. The HTTP adapter returns 403 for the reserved trigger namespace,
+including encoded, dot-segment, duplicate-slash, and case variants. Ambiguous
+or excessively nested encodings fail closed. Gateways and the adapter remove
+all caller-supplied `X-Trigger-*` headers from ordinary requests. Applications
+must not expose an alternate public route to the same privileged handler.
+This reserves a previously unallocated path and header namespace; migrate any
+custom use of these names before upgrading. Upgrade every eligible platform
+node before deploying triggers; older binaries do not provide this reserved
+route and header boundary.
+
+Changes to a declaration are checked against the running instance snapshot.
+Use a new application revision for trigger changes; stale instances fail closed
+until redeployed/restarted. See [schedule telemetry](observability.md#schedule-telemetry)
+for skipped intervals, failures, and restart diagnostics.

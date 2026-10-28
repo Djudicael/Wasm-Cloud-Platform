@@ -5,6 +5,7 @@ pub mod config;
 pub mod cors;
 pub mod distributed_limiter;
 pub mod errors;
+pub mod identity;
 pub mod metrics;
 pub mod oidc;
 pub mod transform;

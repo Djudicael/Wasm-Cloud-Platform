@@ -77,7 +77,7 @@ async fn setup_gateway_with(
     namespace_map
         .register_tid(
             4242,
-            ebpf_monitor::common::TidIdentity::new("default", "caller:v1"),
+            ebpf_monitor::common::TidIdentity::new("default", "default/caller:v1"),
         )
         .unwrap();
     namespace_map.bind_port(54321, 4242);
@@ -175,6 +175,12 @@ async fn spawn_h2c_test_server() -> SocketAddr {
                     .and_then(|value| value.to_str().ok()),
                 Some("user-123")
             );
+            assert_eq!(req.headers()["x-source-app"], "default/caller:v1");
+            assert_eq!(req.headers()["x-source-namespace"], "default");
+            assert_eq!(req.headers()["x-user-roles"], "admin");
+            assert_eq!(req.headers().get_all("x-user-id").iter().count(), 1);
+            assert!(!req.headers().contains_key("x-user-email"));
+            assert!(!req.headers().contains_key("x-user-custom"));
             Ok::<_, std::convert::Infallible>(
                 Response::builder()
                     .status(StatusCode::OK)
@@ -433,6 +439,7 @@ async fn test_internal_gateway_forwards_h2c_with_identity_headers() {
         .set_route_config(
             "default/target:v1",
             common::types::GatewayRouteConfig {
+                allowed_callers: Some(vec!["default/caller:v1".into()]),
                 auth: common::types::AuthPolicy::Authenticated,
                 ..Default::default()
             },
@@ -460,6 +467,12 @@ async fn test_internal_gateway_forwards_h2c_with_identity_headers() {
         .method("GET")
         .uri("/grpc")
         .header("host", "target.default.internal")
+        .header("X-User-Id", "forged")
+        .header("x-user-id", "duplicate")
+        .header("X-User-Email", "forged@example.com")
+        .header("X-User-Custom", "forged")
+        .header("X-Source-App", "forged")
+        .header("X-Source-Namespace", "forged")
         .header("authorization", format!("Bearer {good_token}"))
         .body(Body::empty())
         .unwrap();
@@ -477,6 +490,131 @@ async fn test_internal_gateway_forwards_h2c_with_identity_headers() {
         .await
         .unwrap();
     assert_eq!(&body[..], b"ok");
+}
+
+#[tokio::test]
+async fn mesh_caller_allowlist_cannot_be_forged_or_bypassed_by_target_version() {
+    for version in ["v1", "v2"] {
+        for callers in [vec![], vec!["default/trusted:v1".to_string()]] {
+            let gateway = Arc::new(proxy::gateway::Gateway::new(None));
+            let endpoint = supervisor::network::RegisteredEndpoint {
+                addr: "127.0.0.1:9".parse().unwrap(),
+                h2c: false,
+            };
+            let (gw, original) = setup_gateway_with(gateway.clone(), endpoint).await;
+            if version != "v1" {
+                gw.registry.deregister(&original, &endpoint.addr).await;
+                gw.registry
+                    .register_endpoint(
+                        &common::types::AppId::new_namespaced("default", "target", version),
+                        endpoint,
+                    )
+                    .await;
+            }
+            gateway
+                .set_route_config(
+                    &format!("default/target:{version}"),
+                    common::types::GatewayRouteConfig {
+                        allowed_callers: Some(callers),
+                        ..Default::default()
+                    },
+                )
+                .await;
+            let request = Request::builder()
+                .uri("/")
+                .header("host", "target.default.internal")
+                .header("x-source-app", "default/trusted:v1")
+                .header("X-Source-App", "default/trusted:v1")
+                .body(Body::empty())
+                .unwrap();
+            let result = proxy_handler(
+                State(gw),
+                ConnectInfo("127.0.0.1:54321".parse().unwrap()),
+                request,
+            )
+            .await;
+            assert_eq!(
+                result.unwrap_err(),
+                StatusCode::FORBIDDEN,
+                "target revision {version}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn denied_caller_does_not_trigger_cold_start() {
+    let (base, _) = setup_gateway().await;
+    base.gateway_config
+        .set_route_config(
+            "default/cold:v3",
+            common::types::GatewayRouteConfig {
+                allowed_callers: Some(vec!["default/trusted:v1".into()]),
+                ..Default::default()
+            },
+        )
+        .await;
+    let map = Arc::new(ebpf_monitor::NamespaceMap::new_fallback());
+    map.register_tid(
+        42,
+        ebpf_monitor::common::TidIdentity::new("default", "default/untrusted:v1"),
+    )
+    .unwrap();
+    map.bind_port(54321, 42);
+    let gateway = InternalGateway::new(
+        base.registry.clone(),
+        base.rate_limiter.clone(),
+        base.circuit_breaker.clone(),
+        base.gateway_config.clone(),
+    )
+    .with_namespace_map(map)
+    .with_ebpf_active(true)
+    .with_cold_start(Arc::new(|_| {
+        Box::pin(async { panic!("denied caller must not cold start the target") })
+    }));
+    let request = Request::builder()
+        .uri("/")
+        .header("host", "cold.default.internal")
+        .body(Body::empty())
+        .unwrap();
+    let result = proxy_handler(
+        State(Arc::new(gateway)),
+        ConnectInfo("127.0.0.1:54321".parse().unwrap()),
+        request,
+    )
+    .await;
+    assert_eq!(result.unwrap_err(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn stale_endpoint_owner_in_another_namespace_fails_closed() {
+    let endpoint = supervisor::network::RegisteredEndpoint {
+        addr: "127.0.0.1:9".parse().unwrap(),
+        h2c: false,
+    };
+    let (gateway, _) =
+        setup_gateway_with(Arc::new(proxy::gateway::Gateway::new(None)), endpoint).await;
+    // The selected address remains under the old name, while ownership has
+    // changed. Do not authorize against the replacement's unrelated policy.
+    gateway
+        .registry
+        .register_endpoint(
+            &common::types::AppId::new_namespaced("other", "replacement", "v2"),
+            endpoint,
+        )
+        .await;
+    let request = Request::builder()
+        .uri("/")
+        .header("host", "target.default.internal")
+        .body(Body::empty())
+        .unwrap();
+    let result = proxy_handler(
+        State(gateway),
+        ConnectInfo("127.0.0.1:54321".parse().unwrap()),
+        request,
+    )
+    .await;
+    assert_eq!(result.unwrap_err(), StatusCode::SERVICE_UNAVAILABLE);
 }
 
 #[tokio::test]
@@ -582,4 +720,71 @@ async fn test_internal_gateway_enforces_endpoint_rate_limit() {
     .await;
 
     assert_eq!(resp2.unwrap_err(), StatusCode::TOO_MANY_REQUESTS);
+}
+
+#[tokio::test]
+async fn anonymous_mesh_request_has_only_kernel_derived_caller_identity() {
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        hyper::server::conn::http1::Builder::new()
+            .serve_connection(
+                TokioIo::new(stream),
+                service_fn(|req: Request<Incoming>| async move {
+                    assert_eq!(req.headers()["x-source-app"], "default/caller:v1");
+                    assert_eq!(req.headers()["x-source-namespace"], "default");
+                    assert_eq!(req.headers().get_all("x-source-app").iter().count(), 1);
+                    for name in [
+                        "x-user-id",
+                        "x-user-email",
+                        "x-user-roles",
+                        "x-user-custom",
+                        "x-namespace",
+                        "x-source-tid",
+                    ] {
+                        assert!(!req.headers().contains_key(name), "{name}");
+                    }
+                    Ok::<_, std::convert::Infallible>(Response::new(Body::from("verified")))
+                }),
+            )
+            .await
+            .unwrap();
+    });
+    let (gw, _) = setup_gateway_with(
+        Arc::new(proxy::gateway::Gateway::new(None)),
+        supervisor::network::RegisteredEndpoint { addr, h2c: false },
+    )
+    .await;
+    let mut req = Request::builder()
+        .uri("/")
+        .header("host", "target.default.internal")
+        .body(Body::empty())
+        .unwrap();
+    for name in [
+        "X-User-Id",
+        "X-User-Email",
+        "X-User-Roles",
+        "X-User-Custom",
+        "X-Source-App",
+        "X-Source-Namespace",
+        "X-Namespace",
+        "X-Source-Tid",
+    ] {
+        let name = http::HeaderName::from_bytes(name.as_bytes()).unwrap();
+        req.headers_mut()
+            .append(name.clone(), HeaderValue::from_static("forged"));
+        req.headers_mut()
+            .append(name, HeaderValue::from_static("duplicate"));
+    }
+    let resp = proxy_handler(
+        State(gw),
+        ConnectInfo(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 54321)),
+        req,
+    )
+    .await
+    .unwrap();
+    let body = axum::body::to_bytes(resp.into_body(), 1024).await.unwrap();
+    assert_eq!(&body[..], b"verified");
+    server.abort();
 }

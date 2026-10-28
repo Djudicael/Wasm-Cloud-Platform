@@ -208,6 +208,15 @@ The cluster state file stores:
 
 That state is what allows later commands to add nodes, remove nodes, deploy apps, or tear the lab down without keeping the original `up` process attached.
 
+`restart-node` starts from the configured base rootfs; `MicroVm::spawn` clones
+that image into the node's runtime directory. It does not preserve mutations
+in the previous runtime rootfs. For a stateful upgrade rehearsal, preserve the
+node database and seal-key source before restarting, and use a verified offline
+image copy or a separately validated persistent-data arrangement. Never modify
+or mount a running guest's filesystem for writing. The default image's generated
+in-memory secret key does not survive restart; configure a stable source before
+provisioning secrets (see [application secrets](../../docs/deploying-applications.md#secrets)).
+
 ## Common CLI Flows
 
 ### Bring up a lab

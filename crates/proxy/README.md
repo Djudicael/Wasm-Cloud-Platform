@@ -136,4 +136,4 @@ When credentials are enabled with a wildcard origin, the proxy echoes the valida
 
 ### Internal identity
 
-The proxy removes caller-supplied platform identity and trace headers before adding trusted values. Node-local `.internal` routing still depends on correct namespace-qualified application IDs and the supervisor's local placement contract.
+The proxy removes caller-supplied platform identity and trace headers before adding trusted values. All `X-User-*` claims are replaced from authenticated identity, independently of route transforms; transforms cannot inject reserved identity headers. See the [upstream identity contract](../../docs/gateway/oidc-setup.md#upstream-identity-contract) for the edge and mesh header sets and migration behavior. Node-local `.internal` routing still depends on correct namespace-qualified application IDs and the supervisor's local placement contract.

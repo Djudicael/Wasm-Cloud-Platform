@@ -7,8 +7,8 @@ edition = "2021"
 
 [dependencies]
 wasmtime = { workspace = true, features = ["component-model", "cache", "pooling-allocator"] }
-wasmtime-wasi = { workspace = true }
-wasmtime-wasi-http = { workspace = true, features = ["p2"] }
+wasmtime-wasi = { workspace = true, features = ["p3"] }
+wasmtime-wasi-http = { workspace = true, features = ["p2", "p3"] }
 tokio = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
@@ -21,6 +21,9 @@ async-trait = "0.1.92"
 ipnet = "2.12.1"
 hyper = { version = "1.11.0", features = ["server", "http1", "http2"] }
 hyper-util = { version = "0.1.20", features = ["server-auto", "http1", "http2", "tokio"] }
+rustls = "0.23.43"
+tokio-rustls = "0.26.5"
+webpki-roots = "1.0.9"
 http-body-util = "0.1.5"
 futures = "0.3.34"
 

@@ -6,6 +6,9 @@ use wasmtime::{ResourceLimiter, Store, UpdateDeadline};
 
 use crate::policy_tracker::{PolicyCounters, PolicyEnforcer};
 
+pub const RAW_SOCKET_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+pub const RAW_SOCKET_IO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// Apply resource limits to a Store before creating an Instance.
 ///
 /// The engine epoch advances every 10 ms. Production requests therefore get a

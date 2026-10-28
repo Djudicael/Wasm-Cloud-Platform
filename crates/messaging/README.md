@@ -31,6 +31,21 @@ Event flow:
 | `NatsHealthWatcher` | Background task that performs a bounded server-response health probe |
 | `run_publisher` | Spawns a background task to drain and publish events from a channel |
 | `MessageEnvelope` | Wrapper for envelope-wrapped message serialization/deserialization |
+| `DurableDelivery` | Broker stream name, stream creation epoch and stream sequence, supplied by `subscribe_durable_with_delivery()` |
+
+`subscribe_durable()` retains its event-only callback. Both durable subscription
+methods pull one message per batch and renew the active delivery with progress
+acknowledgements every third of the consumer's effective acknowledgement window
+(30 seconds for newly created production consumers). Successful handlers ACK;
+failed handlers NAK and retain the existing three-delivery quarantine policy.
+Long artifact compilation therefore does not consume retries solely because it
+exceeds the initial acknowledgement window. Handlers must yield during lengthy
+work; the node compiles artifacts with `spawn_blocking`.
+
+The node uses broker delivery metadata to persist per-application ordering
+fences for deploy/remove events. Pending work may retry; completed duplicates
+and older intents are ignored. This is a node lifecycle safeguard, not a general
+exactly-once message-processing contract.
 
 ## Known Issues & Improvements
 

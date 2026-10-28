@@ -228,6 +228,11 @@ fn test_policy_boundary_declares_runtime_socket_gate_as_authoritative_for_tcp() 
 #[test]
 fn test_policy_boundary_declares_remaining_non_authoritative_gaps_explicitly() {
     let boundary = current_policy_boundary();
+    let deadlines = boundary
+        .iter()
+        .find(|cap| cap.capability == "network_host_io_deadlines")
+        .unwrap();
+    assert!(deadlines.authoritative_enforcement && deadlines.authoritative_counters);
 
     let dns = boundary
         .iter()
@@ -248,6 +253,16 @@ fn test_policy_boundary_declares_remaining_non_authoritative_gaps_explicitly() {
     assert!(!fs_write.authoritative_enforcement);
     assert!(!fs_write.authoritative_counters);
 
+    let payload_egress = boundary
+        .iter()
+        .find(|cap| cap.capability == "socket_payload_egress_bytes")
+        .expect("socket payload accounting should be declared");
+    assert_eq!(
+        payload_egress.primary_layer,
+        PolicyEnforcementLayer::WasiSocketEgress
+    );
+    assert!(payload_egress.authoritative_enforcement);
+    assert!(payload_egress.authoritative_counters);
     let net_egress = boundary
         .iter()
         .find(|cap| cap.capability == "network_egress_bytes")
@@ -343,6 +358,30 @@ fn test_prepare_detects_wasi_http_incoming_handler_components() {
         .expect("Failed to prepare module");
     assert_eq!(
         prepared.execution_model(),
+        ComponentExecutionModel::WasiHttpIncomingHandler
+    );
+}
+
+#[test]
+fn p2_artifact_from_engine_without_component_async_still_prepares() {
+    let mut config = wasmtime::Config::new();
+    config.consume_fuel(true);
+    config.epoch_interruption(true);
+    config.cranelift_opt_level(wasmtime::OptLevel::Speed);
+    config.wasm_component_model(true);
+    let previous = wasmtime::Engine::new(&config).unwrap();
+    let component = wasmtime::component::Component::new(
+        &previous,
+        wat::parse_str(no_op_component_with_wasi_http_incoming_handler_interface()).unwrap(),
+    )
+    .unwrap();
+    let artifact = component.serialize().unwrap();
+    let runtime = WasmRuntime::new().unwrap();
+    assert_eq!(
+        runtime
+            .prepare(&artifact, base_config())
+            .unwrap()
+            .execution_model(),
         ComponentExecutionModel::WasiHttpIncomingHandler
     );
 }
@@ -444,6 +483,56 @@ fn test_socket_policy_check_separates_bind_from_outbound_tcp() {
         ),
         Err("outbound tcp disabled")
     );
+}
+
+#[tokio::test]
+async fn test_outbound_tcp_ephemeral_bind_keeps_listen_and_destination_restrictions() {
+    let mut policy = base_instance_policy();
+    policy.network.allow_inbound = false;
+    policy.network.allow_outbound_tcp = true;
+    policy.network.allowed_cidrs = vec!["127.0.0.0/8".into()];
+    let enforcer = PolicyEnforcer::new(policy.clone());
+    let check = SocketPolicyCheck::from_instance_policy(&policy);
+    assert!(check
+        .check("0.0.0.0:0".parse().unwrap(), SocketAddrUse::TcpBind)
+        .is_ok());
+    let composed = compose_socket_addr_check(check, enforcer.clone(), None);
+    assert!((composed)("0.0.0.0:0".parse().unwrap(), SocketAddrUse::TcpBind).await);
+    assert!((composed)("[::]:0".parse().unwrap(), SocketAddrUse::TcpBind).await);
+    assert!(!(composed)("0.0.0.0:0".parse().unwrap(), SocketAddrUse::TcpListen).await);
+    assert!(!(composed)("0.0.0.0:49152".parse().unwrap(), SocketAddrUse::TcpListen).await);
+    assert!(!(composed)("0.0.0.0:49152".parse().unwrap(), SocketAddrUse::TcpBind).await);
+    assert!(!(composed)("192.0.2.1:5432".parse().unwrap(), SocketAddrUse::TcpConnect).await);
+    assert_eq!(
+        enforcer
+            .counters
+            .outbound_connections_total
+            .load(Ordering::Relaxed),
+        0
+    );
+    assert!((composed)("127.0.0.1:5432".parse().unwrap(), SocketAddrUse::TcpConnect).await);
+    assert_eq!(
+        enforcer
+            .counters
+            .outbound_connections_total
+            .load(Ordering::Relaxed),
+        1
+    );
+
+    policy.network.allow_outbound_tcp = false;
+    let denied = compose_socket_addr_check(
+        SocketPolicyCheck::from_instance_policy(&policy),
+        PolicyEnforcer::new(policy.clone()),
+        None,
+    );
+    assert!(!(denied)("0.0.0.0:0".parse().unwrap(), SocketAddrUse::TcpBind).await);
+    policy.network.allow_outbound_tcp = true;
+    let denied = compose_socket_addr_check(
+        SocketPolicyCheck::from_instance_policy(&policy),
+        PolicyEnforcer::new(policy),
+        Some(Arc::new(|_, _| Box::pin(async { false }))),
+    );
+    assert!(!(denied)("0.0.0.0:0".parse().unwrap(), SocketAddrUse::TcpBind).await);
 }
 
 #[test]

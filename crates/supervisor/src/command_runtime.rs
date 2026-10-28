@@ -103,6 +103,11 @@ pub(crate) async fn release_outbound_connection(
     };
 
     if let Some(counters) = target {
+        if counters.consume_host_tcp_close(src_port, dst_port)
+            || counters.uses_host_socket_lifecycle()
+        {
+            return;
+        }
         use std::sync::atomic::Ordering;
         let _ = counters.outbound_connections_active.fetch_update(
             Ordering::AcqRel,

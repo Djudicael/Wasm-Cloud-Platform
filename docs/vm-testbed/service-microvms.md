@@ -15,6 +15,7 @@ The local topology separates three concerns:
 | Application dependency | Optional PostgreSQL microVM | The application or database operator; PostgreSQL is not required by the platform |
 | External seal-root integration | Optional Vault Transit microVM | The selected external key-management operator; Vault is one supported integration, not a bundled platform service |
 | Telemetry backends | Optional host Podman stack | Observability operators or managed services |
+| Application object storage | Optional RustFS microVM | Application/storage operators; RustFS availability, backup, TLS and upgrades are separate concerns |
 
 Consequently, the platform release pipeline must test its clients, admission
 rules, degraded behavior, and recovery against representative external
@@ -54,6 +55,46 @@ ${XDG_RUNTIME_DIR:-/tmp}/wasm-cloud-platform-vault-build-$(id -u)/bootstrap.json
 The CA certificate is not secret, but it trusts only this disposable fixture.
 Production trust roots must come from the production PKI process.
 
+## Clock alignment and preserved node restarts
+
+After a laptop/WSL suspension, compare the caller's UTC time, the node's
+`/status` timestamp, PostgreSQL `clock_timestamp()` and the RustFS HTTP `Date`
+header. A healthy HTTP endpoint alone does not establish clock alignment.
+An old node timestamp can make its authoritative registry entry appear expired
+and block canonical secret distribution; it can also invalidate JWT or signed
+storage requests. Do not bypass registry checks or extend credentials to hide
+the discrepancy.
+
+The node image builder synchronizes before startup and runs Chrony with
+`makestep 0.1 -1`, permitting correction on later updates after host suspension.
+The PostgreSQL fixture already permits such steps; inspect each VM before
+restarting unrelated services. These public time sources are local-test
+defaults, subject to the production time-source requirements below.
+
+`vm-testbed-cli restart-node` clones the configured base rootfs. It does not
+automatically preserve later mutations in the running node's rootfs. For a
+stateful rehearsal, stop the exact recorded node, preserve its current disk and
+stable seal-key source offline, and use a checked copy as the next base. Never
+write into an active guest filesystem. Resolve symlinked paths when editing an
+offline copy (`/sbin` may point to `/usr/sbin`) and validate both the resulting
+file and filesystem before booting. Keep all credential-bearing copies private.
+
+Size the disk for the deployed component set. The approval rehearsal retained
+its current state while growing a checked offline node disk from 2 to 4 GiB;
+this removed its capacity warning without deleting old application state or
+lowering health thresholds. This is local validation, not a production backup
+or upgrade guarantee.
+
+The 2026-10-30 agent ecosystem acceptance rehearsal also encountered memory
+backpressure after repeated application upgrades: the existing 2-GiB guest used
+1,408 MiB against its configured 1,536-MiB budget. Its exact recorded node was
+stopped, its current disk and stable seal-key source were preserved offline, and
+a checked private copy was restarted with 4 GiB of physical memory and a 3-GiB
+application/admission budget. The 90% health/backpressure threshold remained in
+force. This changed only that private one-node fixture, not the image-builder
+defaults or a production capacity guarantee. NATS, PostgreSQL and RustFS service
+VMs were preserved. The harness project's docs/ecosystem-acceptance.md records
+the application validation and resulting resource envelope.
 ## Attach application PostgreSQL
 
 Only add PostgreSQL when the application under test needs it:
@@ -208,3 +249,60 @@ build-time Vault bootstrap. Those retained local fixtures must be protected and
 must never be committed or promoted. Delete or rebuild them deliberately when
 the local fixture is no longer needed; never use broad process names, globs, or
 directory searches for teardown.
+
+## Attach application object storage (RustFS)
+
+The optional RustFS fixture uses a separate service microVM, normally
+`172.20.0.30:9000`. It does not increase the platform-node count. Its exact VM
+identity, PID, IP and rootfs are recorded by the existing testbed CLI in the same
+state as the PostgreSQL service. No Docker/Podman storage daemon is left running
+on the host; Podman is used only to extract an explicitly pinned OCI filesystem.
+
+```bash
+export CARGO_TARGET_DIR=/tmp/wasm-cloud-platform-target
+export OUTPUT_DIR="$HOME/.local/state/my-private-testbed/rustfs"
+export RUSTFS_IMAGE='docker.io/rustfs/rustfs@sha256:<reviewed-image-digest>'
+bash scripts/vm/build-rustfs-rootfs.sh
+bash scripts/vm/provision-rustfs-service.sh \
+  --state-file /path/to/testbed.json \
+  --rootfs "$OUTPUT_DIR/rustfs-rootfs.ext4"
+```
+
+The image must contain the Alpine RustFS binary, BusyBox and network tools.
+BusyBox must include `ntpd` and `timeout`. The guest synchronizes its clock
+before starting RustFS and keeps an NTP client running: stale guest time after
+WSL suspension can otherwise cause S3 SigV4 requests to fail despite a healthy
+TCP/HTTP endpoint. The disposable image uses public NTP peers; production time
+sources and reachability are operator responsibilities. Compare the RustFS
+HTTP `Date` header with the caller's UTC clock when diagnosing signed requests.
+The builder records the immutable image reference, creates unique root
+credentials in mode-0600 files and seals a mode-0600 rootfs on the Linux
+filesystem. It refuses to overwrite an existing image, including an offline
+image that might contain data. Reuse the recorded healthy service; inspect the
+state and logs before any replacement. WSL privilege escalation uses the WSL
+root launcher, with a noninteractive sudo fallback on other Linux hosts.
+
+Treat the generated rootfs as a credential-bearing local fixture, not a
+publishable or reusable production base. Its writable `/data` also holds
+uploaded documents. Keep both image and credential files private. The canonical
+recorded teardown stops the exact service process/network resources; retain the
+image until the user explicitly authorizes deleting its data. Do not delete it
+by filename pattern or rebuild over it while the service is live.
+
+Provision the bucket and application IAM user separately using authenticated
+RustFS administration. Reserve the root credential for bootstrap; the document
+application should get only `s3:GetObject` and `s3:PutObject` on its own object
+prefix. Check denied bucket listing, deletion and writes outside that prefix.
+Inject application credentials through platform secret references, never literal
+manifest environment values. The fixture disables the web console and uses
+HTTP on the private test network; production requires independently operated
+DNS, TLS, IAM lifecycle, backup and availability controls.
+
+The platform's restrictive HTTP profile authorizes exact DNS hostnames plus
+explicit destination CIDRs. Do not put IP literals in `allowed_http_hosts` or
+repurpose `.internal` for a remote storage service: `.internal` remains the
+node-local application mesh. The single-node document rehearsal used
+`rustfs.172.20.0.30.sslip.io` pinned by policy to `172.20.0.30/32`; this introduces
+a public DNS dependency only for that local fixture. Replace it with the
+operator's own DNS and TLS endpoint outside the rehearsal. Bucket creation,
+IAM and application migrations are provisioning work, never request-time work.

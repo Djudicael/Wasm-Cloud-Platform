@@ -252,6 +252,7 @@ pub fn build_app_config_with_namespace(
         namespace: namespace.to_string(),
         placement: common::types::PlacementPolicy::EveryNode,
         local_dependencies: Vec::new(),
+        triggers: Vec::new(),
     }
 }
 

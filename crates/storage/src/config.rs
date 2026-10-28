@@ -8,6 +8,7 @@ use redb::{ReadableDatabase, ReadableTable};
 
 impl Store {
     pub fn save_config(&self, config: &AppConfig) -> Result<(), PlatformError> {
+        common::triggers::validate(&config.triggers).map_err(PlatformError::ConfigValidation)?;
         let json = serde_json::to_string(config).map_err(PlatformError::storage_source)?;
         let tx = self
             .db

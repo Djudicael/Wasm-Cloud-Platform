@@ -550,6 +550,14 @@ impl NodeAction {
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
+    let auth_token = resolve_auth_token(cli.auth_token.as_deref());
+    let http = build_http_client(auth_token.as_deref())?;
+    // Policy inspection is HTTP-only (or local for preset listing). It must
+    // remain usable without control-plane NATS connectivity or credentials.
+    if let Commands::Policy { action } = cli.command {
+        return cmds::policy::run(action, &cli.node_api, &http).await;
+    }
+
     let nats_has_explicit_security = cli.nats_creds.is_some()
         || cli.nats_ca_cert.is_some()
         || cli.nats_client_cert.is_some()
@@ -566,9 +574,6 @@ async fn main() -> anyhow::Result<()> {
     } else {
         messaging::NatsBus::connect(&cli.nats_url).await?
     };
-    let auth_token = resolve_auth_token(cli.auth_token.as_deref());
-    let http = build_http_client(auth_token.as_deref())?;
-
     match cli.command {
         Commands::Deploy(args) => {
             cmds::deploy::run(*args, &bus, &cli.node_api, cli.deploy_api.as_deref(), &http).await?

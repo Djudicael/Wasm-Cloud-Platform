@@ -115,6 +115,7 @@ async fn build_test_dispatcher(
     bus.set_node_id("node-under-test".to_string());
 
     EventDispatcher {
+        lifecycle_gate: Mutex::new(()),
         supervisor,
         upstream,
         host_router,
@@ -140,6 +141,45 @@ async fn build_test_dispatcher(
         cluster_node_stale_after_secs: 120,
         gateway: None,
     }
+}
+
+#[tokio::test]
+async fn older_deploy_delivery_cannot_undo_completed_remove() {
+    let temp = NamedTempFile::new().unwrap();
+    let store = Store::open(temp.path()).unwrap();
+    let dispatcher = build_test_dispatcher(store.clone(), None, None).await;
+    let app = AppId::new("agents/retired", "v1");
+    let delivery = |sequence| messaging::DurableDelivery {
+        stream: "DEPLOY".into(),
+        stream_created: "test-epoch".into(),
+        sequence,
+    };
+    dispatcher
+        .handle_durable(
+            Event::RemoveApp {
+                app_id: app.clone(),
+            },
+            delivery(20),
+        )
+        .await
+        .unwrap();
+    // This would fail artifact ingestion if the stale event reached handle_deploy.
+    dispatcher
+        .handle_durable(
+            Event::DeployApp {
+                app_id: app.clone(),
+                config: AppConfig::default_for(app.clone()),
+                artifact_url: "http://127.0.0.1:1/missing.wasm".into(),
+                artifact_transfer_manifests: vec![],
+                expected_hash: None,
+                size_bytes: 0,
+            },
+            delivery(19),
+        )
+        .await
+        .unwrap();
+    assert!(store.is_undeployed(&app.0).unwrap());
+    assert!(dispatcher.supervisor.ensure_instance(&app).await.is_err());
 }
 
 #[tokio::test]
@@ -1008,6 +1048,7 @@ async fn test_handle_state_snapshot_accepts_first_matching_session_only() {
         namespace: "default".to_string(),
         placement: common::types::PlacementPolicy::EveryNode,
         local_dependencies: Vec::new(),
+        triggers: Vec::new(),
     };
     let accepted_config = common::types::AppConfig {
         id: AppId("accepted-app:v1".to_string()),

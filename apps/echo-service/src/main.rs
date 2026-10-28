@@ -6,14 +6,43 @@ fn main() {
     use std::io::{BufRead, BufReader, Write};
     use std::net::TcpListener;
 
+    if let Ok(mode) = std::env::var("RESOURCE_PROBE_IO_MODE") {
+        use std::io::Read;
+        let target = std::env::var("RESOURCE_PROBE_TCP_TARGET").expect("probe target");
+        if mode == "udp-read" {
+            let socket = std::net::UdpSocket::bind("127.0.0.1:0").expect("UDP probe bind");
+            socket.recv_from(&mut [0]).expect("UDP probe read");
+            return;
+        }
+        let mut stream = std::net::TcpStream::connect(target).expect("probe connect");
+        match mode.as_str() {
+            "connect" => {}
+            "read" => {
+                stream.read_exact(&mut [0]).expect("probe read");
+            }
+            "write" => {
+                stream
+                    .write_all(&vec![b'x'; 8 * 1024 * 1024])
+                    .expect("probe write");
+            }
+            _ => panic!("unknown probe I/O mode"),
+        }
+        return;
+    }
+
     let port = std::env::var("PORT").unwrap_or_else(|_| "8081".to_string());
     let bind_addr = std::env::var("BIND_ADDR")
         .or_else(|_| std::env::var("HOST"))
         .unwrap_or_else(|_| "127.0.0.1".to_string());
     let addr = format!("{}:{}", bind_addr, port);
     let listener = TcpListener::bind(&addr).expect("failed to bind");
+    // Optional deterministic termination for runtime integration probes.
+    let max_requests = std::env::var("RESOURCE_PROBE_MAX_REQUESTS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0);
 
-    for stream in listener.incoming() {
+    for (index, stream) in listener.incoming().enumerate() {
         let mut stream = match stream {
             Ok(s) => s,
             Err(_) => continue,
@@ -47,6 +76,9 @@ fn main() {
         );
 
         let _ = stream.write_all(response.as_bytes());
+        if max_requests.is_some_and(|limit| index + 1 >= limit) {
+            break;
+        }
     }
 }
 

@@ -1237,6 +1237,7 @@ async fn deploy_app_to_state(state: &PersistedClusterState, req: DeployRequest) 
         namespace: req.namespace.clone(),
         placement: common::types::PlacementPolicy::EveryNode,
         local_dependencies: Vec::new(),
+        triggers: Vec::new(),
     };
 
     bus.publish(&Event::DeployApp {

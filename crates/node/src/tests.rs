@@ -329,6 +329,7 @@ fn test_app_config(app_id: &str) -> AppConfig {
         namespace: "default".to_string(),
         placement: common::types::PlacementPolicy::EveryNode,
         local_dependencies: Vec::new(),
+        triggers: Vec::new(),
     }
 }
 

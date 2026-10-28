@@ -196,3 +196,39 @@ The only requirement is that the provider supports the JWKS endpoint (`/.well-kn
 4. **Rotate client secrets regularly** in Keycloak
 5. **Use short-lived access tokens** (5–15 minutes) with refresh tokens
 6. **Do not forward the raw JWT** to upstream apps unless explicitly needed
+
+## Upstream identity contract
+
+Both gateways remove all caller-provided `X-User-*` headers and reserved workload
+identity headers, including duplicate values, before writing verified identity.
+Authentication credentials such as `Authorization` and cookies remain
+forwardable under the existing request pipeline.
+
+| Header | Authoritative source |
+| --- | --- |
+| `X-User-Id` | Subject from gateway-validated user authentication |
+| `X-User-Email` | Validated identity email, only when present |
+| `X-User-Roles` | Comma-separated validated identity roles, only when nonempty |
+| `X-App-Id` | Edge gateway target application ID |
+| `X-Source-App` | Internal gateway caller application ID from workload attribution |
+| `X-Source-Namespace` | Internal gateway caller namespace from workload attribution |
+
+Unauthenticated routes receive no `X-User-*` identity. An authenticated identity
+without email or roles receives neither header. Edge user identity injection
+also works when no request transform is configured. Route transforms cannot add
+reserved identity headers or override the final authenticated user claims.
+This reserves the `X-User-*` prefix: migrate custom headers using that prefix to
+an application-owned name. Configurations that injected static identity through
+`transform.add_headers` must use actual gateway authentication instead.
+
+Workload identity and user identity are independent. The edge removes supplied
+mesh caller headers and does not invent a mesh caller. The internal gateway
+reconstructs caller identity on each hop and revalidates user authentication
+when required by the target route. See [the node-local mesh](../internal-mesh.md)
+for its attribution boundary and limitations. Trust these headers only on paths
+protected by the gateways and the platform network policy.
+
+Caller workload restrictions are configured separately with `gateway.allowed_callers`.
+They are checked in addition to user authentication. A valid user token does not
+satisfy a caller-application allowlist; such routes are reachable only through
+verified mesh callers. See [mesh caller restrictions](../internal-mesh.md).

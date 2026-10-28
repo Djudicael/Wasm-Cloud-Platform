@@ -75,6 +75,7 @@ fn test_config_roundtrip_with_secrets() {
         namespace: "default".to_string(),
         placement: common::types::PlacementPolicy::EveryNode,
         local_dependencies: Vec::new(),
+        triggers: Vec::new(),
     };
 
     store.save_config(&config).unwrap();

@@ -37,4 +37,15 @@ For a disposable production-validation rehearsal, add the state-scoped Prometheu
 
 The production-like preset is a local rehearsal, not a production deployment. It does not create production TLS certificates, a persistent external secrets backend, durable production monitoring/alerting, or a highly available NATS cluster. State these gaps rather than claiming production readiness.
 
+Application object-storage rehearsals can attach RustFS with
+`scripts/vm/build-rustfs-rootfs.sh` and `scripts/vm/provision-rustfs-service.sh`.
+Pass an immutable `RUSTFS_IMAGE` digest and keep `OUTPUT_DIR` on the private Linux
+filesystem: the generated rootfs contains credentials and later live document
+data. The builder refuses to replace an existing image. Provision using the
+same `--state-file`; RustFS is recorded as a service VM, not a platform node.
+Reuse a healthy recorded service instead of rebuilding it. Follow
+`docs/vm-testbed/service-microvms.md` for bootstrap IAM, network and retention
+boundaries. This does not qualify RustFS for production or introduce a second
+application-stack controller.
+
 Treat provisioning as successful only when every node passes the CLI health wait and `status` reports live processes with successful health responses. On failure, preserve logs and state for diagnosis; do not claim the environment is ready.
