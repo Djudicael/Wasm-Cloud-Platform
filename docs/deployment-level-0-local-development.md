@@ -71,3 +71,32 @@ Recommended choices:
 Next guide:
 
 - [`Level 1 - Single-Node Private Environment`](deployment-level-1-single-node-private.md)
+
+## Agentic ecosystem development
+
+The preferred agentic/harness feature-validation topology is a native wasm-node
+process on Linux/WSL, running the actual WASI applications. Supporting NATS,
+PostgreSQL and RustFS can run in checkout-scoped Podman containers. Preserve
+explicit secrets, migrations, deployment, route, OIDC and network-policy checks;
+changing the host topology does not bypass the platform execution path.
+
+Keep application identities and node-local .internal routing unchanged. Run the
+inference engine or compatible providers behind explicit policy-approved HTTP
+endpoints. A native application-only or standalone Wasmtime rehearsal is useful
+for narrower tests but is not the same end-to-end validation as wasm-node.
+
+The sibling `wasmcloud_platform_harness` repository owns its Rust development
+controller. Its `agentic-dev platform start|smoke|status|test|stop|logs|destroy`
+command group implements the native-node lifecycle with real WASI components
+and checkout-scoped NATS/PostgreSQL. Read that repository's
+`crates/agentic-dev/README.md` for the supported flags and fixture-only E2E
+contract. It is separate from the standalone native-app and Wasmtime modes.
+On first use or node replacement, `--grant-ebpf-capabilities` explicitly grants
+the private node copy the required monitoring capabilities. BTF, readable
+tracefs and the pinned BPF build tools are prerequisites; disabling eBPF cannot
+exercise authenticated internal mesh calls. See [eBPF](ebpf.md) and
+[mesh attribution](internal-mesh.md).
+Firecracker validation is reserved for later advanced integration rehearsals.
+Native-host tests do not establish guest-kernel, VM networking or full isolation
+behavior; retain a separate rehearsal gate for those concerns. Historical
+microVM results remain valid for their recorded artifacts and scope.

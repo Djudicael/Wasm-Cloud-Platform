@@ -103,7 +103,7 @@ fn try_inet_sock_set_state(ctx: TracePointContext) -> Result<c_long, c_long> {
     let src_port: u16 = unsafe { ctx.read_at(24)? };
     let dst_port: u16 = unsafe { ctx.read_at(26)? };
 
-    let pid_tgid = aya_ebpf::helpers::bpf_get_current_pid_tgid();
+    let pid_tgid = ebpf_monitor_bpf::current_pid_tgid();
     let pid = (pid_tgid >> 32) as u32;
     let tid = pid_tgid as u32;
     let is_monitored = unsafe { MONITORED_TIDS.get(&tid) }.is_some();
@@ -279,7 +279,7 @@ pub fn sys_exit_accept4(ctx: TracePointContext) -> c_long {
 }
 
 fn try_sys_exit_accept4(ctx: TracePointContext) -> Result<c_long, c_long> {
-    let pid_tgid = aya_ebpf::helpers::bpf_get_current_pid_tgid();
+    let pid_tgid = ebpf_monitor_bpf::current_pid_tgid();
     let pid = (pid_tgid >> 32) as u32;
     let tid = pid_tgid as u32;
     if unsafe { MONITORED_TIDS.get(&tid) }.is_none() {
@@ -338,7 +338,7 @@ pub fn sys_enter_sendto(ctx: TracePointContext) -> c_long {
 }
 
 fn try_sys_enter_sendto(ctx: TracePointContext) -> Result<c_long, c_long> {
-    let pid_tgid = aya_ebpf::helpers::bpf_get_current_pid_tgid();
+    let pid_tgid = ebpf_monitor_bpf::current_pid_tgid();
     let pid = (pid_tgid >> 32) as u32;
     let tid = pid_tgid as u32;
     if unsafe { MONITORED_TIDS.get(&tid) }.is_none() {
@@ -377,7 +377,7 @@ pub fn sys_enter_recvfrom(ctx: TracePointContext) -> c_long {
 }
 
 fn try_sys_enter_recvfrom(ctx: TracePointContext) -> Result<c_long, c_long> {
-    let tid = aya_ebpf::helpers::bpf_get_current_pid_tgid() as u32;
+    let tid = ebpf_monitor_bpf::current_pid_tgid() as u32;
     if unsafe { MONITORED_TIDS.get(&tid) }.is_none() {
         return Ok(0);
     }
@@ -395,7 +395,7 @@ pub fn sys_exit_recvfrom(ctx: TracePointContext) -> c_long {
 }
 
 fn try_sys_exit_recvfrom(ctx: TracePointContext) -> Result<c_long, c_long> {
-    let pid_tgid = aya_ebpf::helpers::bpf_get_current_pid_tgid();
+    let pid_tgid = ebpf_monitor_bpf::current_pid_tgid();
     let pid = (pid_tgid >> 32) as u32;
     let tid = pid_tgid as u32;
     let fd = match unsafe { PENDING_RECV_FD.get(&tid).copied() } {
@@ -462,7 +462,7 @@ fn try_tcp_cleanup_rbuf(ctx: ProbeContext) -> Result<c_long, c_long> {
 }
 
 fn emit_tcp_activity(event_type: EventType, bytes: u64) -> Result<c_long, c_long> {
-    let pid_tgid = aya_ebpf::helpers::bpf_get_current_pid_tgid();
+    let pid_tgid = ebpf_monitor_bpf::current_pid_tgid();
     let pid = (pid_tgid >> 32) as u32;
     let tid = pid_tgid as u32;
     if unsafe { MONITORED_TIDS.get(&tid) }.is_none() {

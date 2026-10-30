@@ -182,7 +182,7 @@ pub fn sys_enter(ctx: TracePointContext) -> c_long {
 fn try_sys_enter(ctx: TracePointContext) -> Result<c_long, c_long> {
     let config = CONFIG.get(0).ok_or(0)?;
 
-    let pid_tgid = aya_ebpf::helpers::bpf_get_current_pid_tgid();
+    let pid_tgid = ebpf_monitor_bpf::current_pid_tgid();
     let pid = (pid_tgid >> 32) as u32;
     let tid = pid_tgid as u32;
 

@@ -339,11 +339,23 @@ socket_addr_check
 
 The socket policy permits a connection to port 9080 so the internal gateway can
 make the authorization decision. This is not an authorization bypass. The eBPF
-namespace enforcer observes the established TCP connection, binds its ephemeral
+namespace enforcer observes the client socket entering `SYN_SENT` in the
+calling thread, binds its ephemeral
 source port to the registered workload TID, and the gateway resolves the caller
 identity from that kernel-derived binding. Caller-supplied `X-Namespace`,
 `X-Source-App`, `X-Source-Namespace`, `X-Source-Tid`, `X-App-Id`, and all
 `X-User-*` headers (including duplicate values) are stripped.
+
+`ESTABLISHED` is not used to infer the caller: that transition may run in
+softirq or worker context. Client-socket `CLOSE` removes the port binding even
+when it runs outside the caller thread. A kernel socket ownership map limits
+that removal to sockets initiated by registered workloads; an unrelated socket
+with the same port number cannot remove a workload binding. The loader configures each eBPF object
+with the device/inode of the node's PID namespace; kernel TIDs are translated
+into that namespace before looking up supervisor registrations. This is needed
+for nested PID namespaces such as WSL. Translation failure yields no identity,
+never a fallback to a possibly colliding host TID. Rebuild and install all eBPF
+objects together with the node; older objects without `PID_NAMESPACE` are rejected.
 
 After attribution and authorization, the gateway writes `X-Source-App` with the
 exact application ID registered for the caller, and `X-Source-Namespace` with its

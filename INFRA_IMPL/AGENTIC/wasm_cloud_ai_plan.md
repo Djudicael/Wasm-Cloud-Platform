@@ -1,3 +1,4 @@
+<!-- Current ownership: see the correction in section 5; M19 platform allocations below are superseded planning context. -->
 # Wasm Cloud AI Platform — Architecture and Implementation Plan
 
 **Date:** 2026-10-30  
@@ -10,7 +11,7 @@
 > its own gateway, orchestrator, event schema, and WIT inference imports. It was
 > revised to build on the existing harness repository, respect the recorded
 > platform/harness boundary, move inference behind an HTTP contract, and make
-> the native job runner an explicit platform dependency. The coding-agent
+> the native job runner an external harness-owned service. The coding-agent
 > detail (verification, ingestion, code intelligence, integrity, governance,
 > operations, evaluation, walking skeleton, user experience, tasks and sizes)
 > now lives in the harness repository, which owns that work. This document
@@ -36,14 +37,14 @@ Three projects, three independent tracks. Only Track A is on the critical path t
 | Track | Repository | Owns | Must not own |
 | --- | --- | --- | --- |
 | **A — Coding agent** | Harness repository | Agent API, coordinator, harnesses, broker and tools, model gateway, workspace service, code intelligence, validation, evaluation, migrations, agent rehearsal scripts | Runtime, network, or identity features; inference engines |
-| **B — Platform** | This repository | General-purpose execution capabilities: runtime limits, triggers, egress policy, gateways, isolation, service microVM patterns including the native job runner, observability | Any agent concept, agent WIT interfaces, `wasi-nn`, inference code |
+| **B — Platform** | This repository | General-purpose execution capabilities: runtime limits, triggers, egress policy, gateways, isolation, generic service microVM patterns, observability | Any agent concept, agent WIT interfaces, `wasi-nn`, inference code |
 | **C — Inference R&D** | New repository (name to be decided); described here until it exists | Tensor backends, model execution, serving scheduler, KV cache, compiler backends, inference routing, inference benchmarks | Agent logic; platform runtime changes |
 
 The tracks meet only at published contracts:
 
 - Track A runs on Track B as ordinary `wasm32-wasip2` applications.
 - Track A reaches Track C over HTTP through the harness model gateway (section 4), using an explicit external endpoint, never `.internal`.
-- Native checks run in the platform job runner (section 5, M19), reached the same way.
+- Native checks run in the external harness-owned job service (section 5; supersedes M19), reached the same way.
 
 ## 1. Goal metric
 
@@ -57,7 +58,7 @@ A verified success passes independent verification on a clean base: the patch ap
 | Track | How it moves the metric |
 | --- | --- |
 | A | Higher success and fewer tokens per task through retrieval, validation, repair, caching and cascades |
-| B | Enables verification (job runner), lower overhead (deadlines, lifecycle) and cost evidence (traces, usage reports) |
+| B | Enables external-service access, lower overhead (deadlines, lifecycle) and cost evidence (traces, usage reports) |
 | C | Lower cost per token, at matched task success, when volume justifies self-hosting (section 12) |
 
 ## 2. Architecture
@@ -72,7 +73,7 @@ User / IDE / API / optional MCP clients
         |     |-> pure WASI tools (text, validation, parsing)
         |     |-> workspace service (revisioned snapshots)        [harness, planned]
         |     |-> code intelligence (Tree-sitter, index, context) [harness, planned]
-        |     |-> check-runner adapter -------------------------> Native job runner (M19) [platform, planned]
+        |     |-> check-runner adapter -------------------------> Native job service [harness-owned, local implementation]
         |-> Model gateway (internal contract, policy, cascade)    [harness, partly exists]
               |-> OpenAI-compatible adapter -> OpenRouter / local servers   [exists]
               |-> native adapter ---------------------------------> Rust inference service [Track C]
@@ -103,7 +104,7 @@ User / IDE / API / optional MCP clients
 
 **Track A** — the existing harness crates (`agentic-core`, `agentic-repository`, `agentic-coordinator-api`, `agentic-service`, `agentic-worker-api`, `agentic-scheduler-api`, document, auth and development crates) plus planned workspace, ingestion, code-index, context, model-gateway, check-runner, integrity, evaluation and optional MCP crates. See the harness plan.
 
-**Track B** — no new crates are required by this plan. M19 adds testbed scripts and a job runner service image following the PostgreSQL and Vault service patterns.
+**Track B** — no new crates are required by this plan. The native job API, image and lifecycle belong to Track A in the harness repository; no platform job service is added.
 
 **Track C** — new inference repository:
 
@@ -148,18 +149,25 @@ Start with the OpenAI-compatible endpoint only. Add each extended field when a b
 
 ## 5. Native job runner (platform M19)
 
-The coding agent is verified only by compiling and testing patches, which needs native process execution. Neither the WASI runtime nor the current single trust domain provides it. This is the critical-path platform dependency, specified as [M19](PLATFORM_MODIFICATIONS.md#m19-native-job-runner-service-microvm-p2).
+**Ownership correction (2026-10-30).** The historical platform allocation below
+is superseded: the external native job service belongs to
+wasmcloud_platform_harness, including API, images, microVM lifecycle and adapter.
+The platform only executes WASI and supplies ordinary outbound HTTP policy.
+See [the current harness guide](../../../wasmcloud_platform_harness/docs/microvm-checks.md).
+
+
+The coding agent is verified only by compiling and testing patches, which needs native process execution. Neither the WASI runtime nor the current single trust domain provides it. This is an external harness service; the earlier platform allocation was specified as [M19](PLATFORM_MODIFICATIONS.md#m19-native-job-runner-service-microvm-p2).
 
 | Concern | Platform (this repository) | Harness |
 | --- | --- | --- |
-| Service | Job runner service microVM, testbed scripts, validation script, teardown | — |
-| Job API | Submit, status, bounded results; scoped job grants | `agentic-check-runner` broker adapter |
-| Commands | Operator-configured allowlist | Fixed set: `cargo fmt --check`, `cargo check`, `cargo clippy`, `cargo test`, rust-analyzer diagnostics, repository clone |
-| Isolation | Fresh disposable environment per job; no platform, NATS or database credentials | Never forwards coordinator or storage credentials |
-| Network | None by default; vendored sources or a pinned registry mirror; registered destinations only | Registers Git hosts for clone jobs |
-| Caches | Tenant-scoped compiled caches; shared read-only dependency sources | Chooses keys and when to run in a fresh job |
+| Service | Generic WASI execution and outbound policy | Native Linux service, image, per-job microVM lifecycle and validation |
+| Job API | No agent job API | Submit, status, bounded results, dedicated OIDC identity and `checks-run-v1` adapter |
+| Commands | No native commands | Fixed service profiles; planned broader set: `cargo fmt --check`, `cargo check`, `cargo clippy`, `cargo test`, rust-analyzer diagnostics, repository clone |
+| Isolation | Platform WASI isolation remains unchanged | Fresh job microVM; never forwards coordinator, NATS, database or storage credentials |
+| Network | Explicit external endpoint under app policy | No job NIC; vendored sources first, registry and Git access remain planned |
+| Caches | No job cache ownership | Fresh job disks first; tenant-scoped caches remain planned |
 
-The first form is a dedicated service microVM, faster to deliver than M17 isolation and keeping untrusted builds off platform nodes. Local microVM validation is not a production isolation guarantee.
+The implemented first form is an external native service launching a fresh networkless microVM per job, keeping untrusted builds off platform nodes. Local microVM validation is not a production isolation guarantee.
 
 ## 6. Track A summary
 
@@ -240,7 +248,8 @@ All routing and KV logic stays inside Track C. Agents see only the model profile
 
 | Mode | Agent and tools (WASI) | Inference | Native jobs | Data |
 | --- | --- | --- | --- | --- |
-| Developer / local rehearsal | Platform microVM testbed, `every_node` placement | Fake provider, a provider API, or a local compatible server on an explicit loopback or host endpoint | Job runner service microVM | PostgreSQL and object-storage service microVMs |
+| Developer / feature validation | Native wasm-node running real WASI components | Provider API or explicit local inference endpoint | Deferred; harness-owned disposable service when needed | Checkout-scoped Podman services when needed |
+| Advanced local rehearsal | Explicitly provisioned platform microVM testbed, `every_node` placement | Explicit external inference endpoint | Harness-owned service when in scope | Recorded service microVMs or separately approved dependencies |
 | Small production | Platform nodes, production-like preset with at least three nodes | Dedicated inference host or provider API over a private network | Dedicated job runner host | Operator-managed PostgreSQL and S3 |
 | Scale-out | Platform nodes | Track C router and GPU workers | Job runner pool | Shared storage |
 
@@ -268,7 +277,7 @@ The harness plan contains the coding agent's threat model, data classes and prov
 
 | Item | Needed by | Priority |
 | --- | --- | --- |
-| M19 native job runner service microVM | A0 full verification, A3 | High |
+| External harness-owned native job service (supersedes M19) | A0 full verification, A3 | High |
 | M15 object-storage service microVM | A-skel and A1 rehearsal | High |
 | M8 configurable request deadline | A1 import, A2 indexing, A3 | High |
 | M10 secret reference scoping | Gateway and job runner credentials | Medium |
@@ -324,7 +333,7 @@ Measure verified success, cost per verified success, tokens (including cached), 
 
 | Risk | Mitigation |
 | --- | --- |
-| No native job runner, so no verified fixes | M19 as a Track B priority; the walking skeleton and A0–A2 remain useful without it |
+| No native job runner, so no verified fixes | External job service as a Track A priority; the walking skeleton and A0–A2 remain useful without it |
 | Platform limits (memory, deadline) break code tools | Durable bounded activities; M8 |
 | Plan documents drift between repositories | Track A detail only in the harness repository; this document only summarizes and links |
 | Provider differences behind "OpenAI-compatible" | Internal gateway contract, per-provider adapter tests |
@@ -341,7 +350,7 @@ Measure verified success, cost per verified success, tokens (including cached), 
 | Repository | ADR |
 | --- | --- |
 | Harness | See the harness plan (success and cost, workspace, ingestion, tenant model, data policy, gateway contract, index format, integrity, cascade, evaluation) |
-| Platform | M19 native job runner: isolation, job API, network, caches, lifecycle |
+| Harness | External native job service: isolation, job API, network, caches, lifecycle |
 | Inference | Engine and backend interfaces; native endpoint contract; each Track C phase's goal, break-even estimate and outcome |
 
 ## 16. Platform and inference tasks
@@ -350,8 +359,8 @@ Track A tasks, with sizes and dependencies, are in the harness plan.
 
 | # | Task | Track | Size |
 | --- | --- | --- | --- |
-| 1 | M19 design ADR: runner shape, job API, isolation, caches | B | S |
-| 2 | M19 rootfs, provisioning, validation and teardown scripts | B | L |
+| 1 | External job service ADR: runner shape, job API, isolation, caches | A | S |
+| 2 | Native job image, lifecycle and validation through agentic-dev jobs | A | L |
 | 3 | M15 object-storage service microVM | B | M |
 | 4 | M8 configurable request deadline | B | M |
 | 5 | M10 secret reference scoping | B | M |

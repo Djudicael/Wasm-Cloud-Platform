@@ -129,7 +129,7 @@ fn try_try_to_free_pages(ctx: ProbeContext) -> Result<c_long, c_long> {
     if cgroup_id != config.node_cgroup_id {
         return Ok(0);
     }
-    let pid_tgid = aya_ebpf::helpers::bpf_get_current_pid_tgid();
+    let pid_tgid = ebpf_monitor_bpf::current_pid_tgid();
     let pid = (pid_tgid >> 32) as u32;
     let tid = pid_tgid as u32;
 
@@ -165,7 +165,7 @@ fn try_direct_reclaim_begin(ctx: TracePointContext) -> Result<c_long, c_long> {
     if cgroup_id != config.node_cgroup_id {
         return Ok(0);
     }
-    let pid_tgid = aya_ebpf::helpers::bpf_get_current_pid_tgid();
+    let pid_tgid = ebpf_monitor_bpf::current_pid_tgid();
     let pid = (pid_tgid >> 32) as u32;
     let tid = pid_tgid as u32;
     let now = unsafe { aya_ebpf::helpers::bpf_ktime_get_ns() };
@@ -191,12 +191,7 @@ fn emit_direct_reclaim(cgroup_id: u64, pid: u32, tid: u32, now: u64) -> bool {
 
     // Rate-limit direct reclaim without permanently suppressing later
     // pressure episodes for this cgroup.
-    let last_event_ns = unsafe {
-        LAST_RECLAIM_EVENT_NS
-            .get(&cgroup_id)
-            .copied()
-            .unwrap_or(0)
-    };
+    let last_event_ns = unsafe { LAST_RECLAIM_EVENT_NS.get(&cgroup_id).copied().unwrap_or(0) };
     if now.saturating_sub(last_event_ns) < RECLAIM_EVENT_INTERVAL_NS {
         // Skip closely spaced callbacks to avoid flooding the ring buffer.
         return false;
@@ -255,7 +250,7 @@ fn try_vmpressure(ctx: TracePointContext) -> Result<c_long, c_long> {
     if cgroup_id != config.node_cgroup_id {
         return Ok(0);
     }
-    let pid_tgid = aya_ebpf::helpers::bpf_get_current_pid_tgid();
+    let pid_tgid = ebpf_monitor_bpf::current_pid_tgid();
     let pid = (pid_tgid >> 32) as u32;
     let tid = pid_tgid as u32;
 
@@ -332,7 +327,7 @@ fn try_vmpressure(ctx: TracePointContext) -> Result<c_long, c_long> {
 ///
 /// fn try_out_of_memory(ctx: KProbeContext) -> Result<c_long, c_long> {
 ///     let cgroup_id = unsafe { aya_ebpf::helpers::bpf_get_current_cgroup_id() };
-///     let pid_tgid = unsafe { aya_ebpf::helpers::bpf_get_current_pid_tgid() };
+///     let pid_tgid = unsafe { ebpf_monitor_bpf::current_pid_tgid() };
 ///     let pid = pid_tgid as u32;
 ///
 ///     // Always emit a critical event for OOM — no deduplication

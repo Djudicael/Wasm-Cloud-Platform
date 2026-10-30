@@ -13,6 +13,21 @@
 - Build WASI applications explicitly for `wasm32-wasip2` because native workspace checks do not exercise their WASI-only dependency paths.
 - This repository currently has no JavaScript/TypeScript frontend manifest. Do not invent frontend dependency updates; only run frontend package-manager commands if a real manifest and lockfile are present.
 
+## Agentic development validation
+
+- For the agentic/harness development loop, run the native wasm-node platform
+  binary on Linux/WSL and deploy the real WASI components into it. Use Podman
+  for NATS, PostgreSQL and RustFS when needed. This is the preferred end-to-end
+  topology; running native application binaries alone does not exercise WASI
+  admission, routing, identity or egress enforcement.
+- Reserve Firecracker provisioning for an explicitly requested advanced
+  integration rehearsal, after features are sufficiently mature. Existing
+  microVM evidence remains historical evidence, not a requirement to recreate
+  those environments for every feature change.
+- The harness repository owns its Rust development CLI and agentic automation;
+  extend that controller when native-platform orchestration is implemented.
+  Do not invent an already-supported CLI mode or a second launcher.
+
 ## Local microVM test environment
 
 Repository-scoped Open Agent Skills live in `.agents/skills` and are intended for Codex, Claude Code, OpenCode, and other agents that implement or can read the Agent Skills format.

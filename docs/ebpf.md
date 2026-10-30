@@ -162,6 +162,16 @@ These events are defense-in-depth evidence. Wasmtime and WASI capability policy 
 
 The namespace object observes socket and namespace-related activity for registered runtime TIDs. Together with the userspace namespace map, it supports source-port-to-application attribution for requests arriving at the loopback internal gateway and detects selected attempts to forge internal identity headers.
 
+All seven objects receive the node PID namespace's device/inode through the
+`PID_NAMESPACE` map and use the kernel namespace-aware PID helper. This keeps
+kernel events aligned with supervisor registrations inside WSL or another
+nested PID namespace. Translation failure produces no attributable TID.
+The namespace object binds client source ports at `SYN_SENT`, before TCP
+completion can move into another kernel context, and removes bindings at
+client-socket close. See [internal mesh attribution](internal-mesh.md).
+The node and all objects must be rebuilt/deployed together; a missing namespace
+map fails object loading instead of silently using host PID attribution.
+
 The internal gateway strips caller-supplied identity headers and fails closed when required attribution is unavailable. Cross-namespace calls require an explicit allowlist. The object does not provide cross-host identity or forwarding; `<app>.<namespace>.internal` deliberately resolves to the node-local gateway.
 
 ### Program and resource metrics

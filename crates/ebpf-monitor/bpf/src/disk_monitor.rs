@@ -148,7 +148,7 @@ fn try_block_rq_issue(ctx: TracePointContext) -> Result<c_long, c_long> {
     // Record the start metadata for this I/O request. Device, sector, and
     // operation together avoid collisions that a sector-only key allowed.
     let now = unsafe { aya_ebpf::helpers::bpf_ktime_get_ns() };
-    let pid_tgid = aya_ebpf::helpers::bpf_get_current_pid_tgid();
+    let pid_tgid = ebpf_monitor_bpf::current_pid_tgid();
     let start = IoStart {
         timestamp_ns: now,
         cgroup_id,

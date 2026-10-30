@@ -48,7 +48,7 @@ pub fn monitored_tid_start(ctx: TracePointContext) -> u32 {
 }
 
 fn try_monitored_tid_start(ctx: TracePointContext) -> Result<u32, u32> {
-    let pid_tgid = aya_ebpf::helpers::bpf_get_current_pid_tgid();
+    let pid_tgid = ebpf_monitor_bpf::current_pid_tgid();
     let pid = (pid_tgid >> 32) as u32;
     let tid = pid_tgid as u32;
     let identity = match unsafe { MONITORED_TIDS.get(&tid) } {
@@ -116,8 +116,9 @@ fn try_sched_process_exec(ctx: TracePointContext) -> Result<u32, u32> {
     // We'll use bpf_get_current_pid_tgid to get the current PID (the one being executed).
     // Then we can get the parent PID from the current task's parent.
 
-    let pid = ctx.tgid();
-    let tid = ctx.pid();
+    let pid_tgid = ebpf_monitor_bpf::current_pid_tgid();
+    let pid = (pid_tgid >> 32) as u32;
+    let tid = pid_tgid as u32;
 
     // Only monitor children of the wasm-node process.
     if pid != node_pid || unsafe { MONITORED_TIDS.get(&tid) }.is_none() {
@@ -173,8 +174,9 @@ fn try_sched_process_exit(ctx: TracePointContext) -> Result<u32, u32> {
     // Alternatively, we can track the parent in a map when we see the exec.
     // For simplicity, we'll check if the current task's parent is the node_pid.
 
-    let pid = ctx.tgid();
-    let tid = ctx.pid();
+    let pid_tgid = ebpf_monitor_bpf::current_pid_tgid();
+    let pid = (pid_tgid >> 32) as u32;
+    let tid = pid_tgid as u32;
 
     // Only monitor children of the wasm-node process.
     if pid != node_pid || unsafe { MONITORED_TIDS.get(&tid) }.is_none() {

@@ -319,7 +319,8 @@ fn load_monitor_object(name: &str) -> Result<Ebpf> {
         if path.exists() {
             info!(path = %path.display(), "Loading eBPF object from file");
             let bytes = std::fs::read(path).context("failed to read eBPF object file")?;
-            let bpf = Ebpf::load(&bytes).context("failed to parse eBPF object")?;
+            let mut bpf = Ebpf::load(&bytes).context("failed to parse eBPF object")?;
+            write_pid_namespace(&mut bpf)?;
             return Ok(bpf);
         }
     }
@@ -346,8 +347,9 @@ fn load_namespace_enforcer_object() -> Result<Ebpf> {
             info!(path = %path.display(), "Loading namespace enforcer eBPF object from file");
             let bytes = std::fs::read(path)
                 .context("failed to read namespace enforcer eBPF object file")?;
-            let bpf =
+            let mut bpf =
                 Ebpf::load(&bytes).context("failed to parse namespace enforcer eBPF object")?;
+            write_pid_namespace(&mut bpf)?;
             return Ok(bpf);
         }
     }
@@ -363,6 +365,20 @@ fn load_namespace_enforcer_object() -> Result<Ebpf> {
 // ── Config Map ────────────────────────────────────────────────────────────────
 
 /// Write the configuration map that eBPF programs read at runtime.
+fn write_pid_namespace(ebpf: &mut Ebpf) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    let namespace =
+        std::fs::metadata("/proc/self/ns/pid").context("read node PID namespace metadata")?;
+    let mut map: Array<_, [u64; 2]> = ebpf
+        .map_mut("PID_NAMESPACE")
+        .ok_or_else(|| anyhow!("PID_NAMESPACE map missing; rebuild all eBPF objects"))?
+        .try_into()
+        .context("PID_NAMESPACE map has wrong type")?;
+    map.set(0, [namespace.dev(), namespace.ino()], 0)
+        .context("write node PID namespace")?;
+    Ok(())
+}
+
 fn write_config_map(ebpf: &mut Ebpf, config: &MonitorConfig, node_pid: u32) -> Result<()> {
     let mut config_map: Array<_, MonitorConfigMap> = ebpf
         .map_mut("CONFIG")

@@ -91,7 +91,7 @@ pub fn fd_install(ctx: ProbeContext) -> c_long {
 fn try_fd_install(ctx: ProbeContext) -> Result<c_long, c_long> {
     let config = CONFIG.get(0).ok_or(0)?;
 
-    let pid_tgid = aya_ebpf::helpers::bpf_get_current_pid_tgid();
+    let pid_tgid = ebpf_monitor_bpf::current_pid_tgid();
     let pid = (pid_tgid >> 32) as u32;
     let tid = pid_tgid as u32;
 
@@ -227,7 +227,7 @@ pub fn sys_enter_close(ctx: TracePointContext) -> c_long {
 
 fn try_sys_enter_close(ctx: TracePointContext) -> Result<c_long, c_long> {
     let config = CONFIG.get(0).ok_or(0)?;
-    let pid_tgid = aya_ebpf::helpers::bpf_get_current_pid_tgid();
+    let pid_tgid = ebpf_monitor_bpf::current_pid_tgid();
     let pid = (pid_tgid >> 32) as u32;
     let tid = pid_tgid as u32;
     if unsafe { MONITORED_TIDS.get(&tid) }.is_none() {

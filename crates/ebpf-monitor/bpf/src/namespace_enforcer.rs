@@ -30,6 +30,11 @@ use ebpf_monitor_bpf::{
 #[map]
 static MONITORED_TIDS: HashMap<u32, TidIdentity> = HashMap::with_max_entries(4096, 0);
 
+/// Only sockets opened by registered workloads may remove a port binding.
+/// CLOSE may run in another thread or kernel context, so retain socket ownership.
+#[map]
+static GATEWAY_SOCKETS: HashMap<u64, u16> = HashMap::with_max_entries(4096, 0);
+
 /// NS_ENFORCE_CONFIG: singleton configuration array (index 0)
 #[map]
 static NS_ENFORCE_CONFIG: Array<NsEnforceConfig> = Array::with_max_entries(1, 0);
@@ -50,12 +55,12 @@ fn record_drop() {
 
 // ── TCP State Constants ───────────────────────────────────────────────────────
 
-const TCP_ESTABLISHED: u32 = 1;
+const TCP_SYN_SENT: u32 = 2;
 const TCP_CLOSE: u32 = 7;
 
 /// Tracepoint: inet_sock_set_state
 ///
-/// Fires on every TCP state change. We monitor transitions to ESTABLISHED
+/// Fires on every TCP state change. We monitor transitions to SYN_SENT
 /// and CLOSE for connections to the internal gateway port.
 ///
 /// When a monitored TID connects to the gateway, we emit a TidConnection
@@ -70,45 +75,17 @@ pub fn ns_inet_sock_set_state(ctx: TracePointContext) -> u32 {
 }
 
 fn try_ns_inet_sock_set_state(ctx: TracePointContext) -> Result<(), u32> {
-    // Read tracepoint arguments from raw context.
-    // The inet_sock_set_state tracepoint has these arguments:
-    //   struct sock *sk, int oldstate, int newstate
-    // But the raw tracepoint context gives us the raw fields.
-    // We need to read from the tracepoint raw buffer.
-    //
-    // Layout (from kernel: include/trace/events/sock.h):
-    //   __data_loc char name[32]   // comm
-    //   const void *skaddr           // socket address
-    //   u16 sport                    // source port
-    //   u16 dport                    // destination port
-    //   u16 family                   // AF_INET / AF_INET6
-    //   __data_loc u8 *saddr         // source address
-    //   __data_loc u8 *daddr         // destination address
-    //   s32 oldstate                 // old TCP state
-    //   s32 newstate                 // new TCP state
-
+    // Raw tracepoint offsets include the 8-byte common header. Check the
+    // target kernel's events/sock/inet_sock_set_state/format when porting.
     let data = ctx.as_ptr() as *const u8;
-
-    // Offsets for inet_sock_set_state tracepoint (verified on Linux 5.4+):
-    // The exact layout depends on kernel version, but sport/dport are at
-    // well-known offsets. We use conservative offset reading.
-    //
-    // On most kernels:
-    //   offset 8:  skaddr (8 bytes)
-    //   offset 16: sport (2 bytes)
-    //   offset 18: dport (2 bytes)
-    //   offset 20: family (2 bytes)
-    //   offset 24: oldstate (4 bytes)
-    //   offset 28: newstate (4 bytes)
-
-    // Read ports
+    let socket_key = unsafe { *(data.add(8) as *const u64) };
     let _old_state = unsafe { *(data.add(16) as *const i32) as u32 };
     let new_state = unsafe { *(data.add(20) as *const i32) as u32 };
     let sport = unsafe { *(data.add(24) as *const u16) };
     let dport = unsafe { *(data.add(26) as *const u16) };
 
     // Get current TID
-    let tid = aya_ebpf::helpers::bpf_get_current_pid_tgid() as u32;
+    let tid = ebpf_monitor_bpf::current_pid_tgid() as u32;
 
     // Look up config
     let config = match NS_ENFORCE_CONFIG.get(0) {
@@ -119,18 +96,27 @@ fn try_ns_inet_sock_set_state(ctx: TracePointContext) -> Result<(), u32> {
     let gateway_port = config.gateway_port;
 
     // Check if this is a connection to/from the gateway port
-    let is_gateway_connection = sport == gateway_port || dport == gateway_port;
+    // Only the client socket carries the caller's source port. The peer
+    // socket's state changes must never create or remove that binding.
+    let is_gateway_connection = dport == gateway_port;
 
     if !is_gateway_connection {
         return Ok(());
     }
 
-    // We only care about ESTABLISHED and CLOSE transitions
-    if new_state == TCP_ESTABLISHED {
-        // Connection established — check if the TID is monitored
+    // SYN_SENT runs in connect() on the calling thread. ESTABLISHED can run
+    // later in a softirq/kworker context and cannot identify the caller.
+    if new_state == TCP_SYN_SENT {
+        // A recycled socket address must not inherit an earlier registration.
+        let _ = GATEWAY_SOCKETS.remove(&socket_key);
+        // Connection initiated — check if the TID is monitored
         let is_monitored = unsafe { MONITORED_TIDS.get(&tid) }.is_some();
 
         if is_monitored {
+            if GATEWAY_SOCKETS.insert(&socket_key, &sport, 0).is_err() {
+                record_drop();
+                return Ok(());
+            }
             // Emit TidConnection event
             let mut event = match EVENTS.reserve::<TcpEvent>(0) {
                 Some(e) => e,
@@ -145,7 +131,7 @@ fn try_ns_inet_sock_set_state(ctx: TracePointContext) -> Result<(), u32> {
                     event_type: EventType::TidConnection as u32,
                     _padding: 0,
                     timestamp_ns: unsafe { aya_ebpf::helpers::gen::bpf_ktime_get_ns() },
-                    pid: (aya_ebpf::helpers::bpf_get_current_pid_tgid() >> 32) as u32,
+                    pid: (ebpf_monitor_bpf::current_pid_tgid() >> 32) as u32,
                     tid,
                 },
                 src_addr: [0; IP_ADDR_LEN],
@@ -174,7 +160,7 @@ fn try_ns_inet_sock_set_state(ctx: TracePointContext) -> Result<(), u32> {
                 event_type: EventType::NamespaceAudit as u32,
                 _padding: 0,
                 timestamp_ns: unsafe { aya_ebpf::helpers::gen::bpf_ktime_get_ns() },
-                pid: (aya_ebpf::helpers::bpf_get_current_pid_tgid() >> 32) as u32,
+                pid: (ebpf_monitor_bpf::current_pid_tgid() >> 32) as u32,
                 tid,
             };
 
@@ -193,10 +179,13 @@ fn try_ns_inet_sock_set_state(ctx: TracePointContext) -> Result<(), u32> {
             event.submit(0);
         }
     } else if new_state == TCP_CLOSE {
-        // Connection closed — emit TidDisconnection
-        let is_monitored = unsafe { MONITORED_TIDS.get(&tid) }.is_some();
-
-        if is_monitored {
+        // Close can run outside the caller thread. Authenticate the socket,
+        // not the current TID, and also remove failed-connect bindings.
+        {
+            let Some(source_port) = (unsafe { GATEWAY_SOCKETS.get(&socket_key).copied() }) else {
+                return Ok(());
+            };
+            let _ = GATEWAY_SOCKETS.remove(&socket_key);
             let mut event = match EVENTS.reserve::<TcpEvent>(0) {
                 Some(e) => e,
                 None => {
@@ -210,11 +199,11 @@ fn try_ns_inet_sock_set_state(ctx: TracePointContext) -> Result<(), u32> {
                     event_type: EventType::TidDisconnection as u32,
                     _padding: 0,
                     timestamp_ns: unsafe { aya_ebpf::helpers::gen::bpf_ktime_get_ns() },
-                    pid: (aya_ebpf::helpers::bpf_get_current_pid_tgid() >> 32) as u32,
+                    pid: (ebpf_monitor_bpf::current_pid_tgid() >> 32) as u32,
                     tid,
                 },
                 src_addr: [0; IP_ADDR_LEN],
-                src_port: sport,
+                src_port: source_port,
                 dst_addr: [0; IP_ADDR_LEN],
                 dst_port: dport,
                 old_state: _old_state,
@@ -272,7 +261,7 @@ fn try_ns_audit_sendto(ctx: TracePointContext) -> Result<(), u32> {
     }
 
     // Get current TID
-    let tid = aya_ebpf::helpers::bpf_get_current_pid_tgid() as u32;
+    let tid = ebpf_monitor_bpf::current_pid_tgid() as u32;
 
     // Check if this TID is monitored
     let identity = match unsafe { MONITORED_TIDS.get(&tid) } {
@@ -367,7 +356,7 @@ fn try_ns_audit_sendto(ctx: TracePointContext) -> Result<(), u32> {
             event_type: EventType::NamespaceForgedHeader as u32,
             _padding: 0,
             timestamp_ns: unsafe { aya_ebpf::helpers::gen::bpf_ktime_get_ns() },
-            pid: (aya_ebpf::helpers::bpf_get_current_pid_tgid() >> 32) as u32,
+            pid: (ebpf_monitor_bpf::current_pid_tgid() >> 32) as u32,
             tid,
         };
 

@@ -27,7 +27,7 @@ immutable archive ingestion, `workspace.list`, `workspace.read`, and
 `workspace.grep`, followed by a CLI-driven read-only repository analysis.
 Bounded ustar imports, document-backed snapshots, grants, CLI commands and the three versioned workspace adapters are now implemented in the harness repository; see its `docs/repository-analysis.md` for limits and local evidence. The model-driven analysis and report-save workflow have now been validated locally after explicit payload authorization, including pending-approval worker interruption and exact RustFS byte comparison. The waves below are candidate groupings, not mandatory prerequisites for that
 slice. Reuse existing broker contracts rather than introducing a second SDK or
-orchestrator. Native checks require M19; no arbitrary native execution belongs
+orchestrator. Native checks use the external service owned by the harness repository (the platform M19 allocation is superseded); no arbitrary native execution belongs
 in a platform WASI component. Risk R alone does not make build scripts safe.
 
 ## Purpose

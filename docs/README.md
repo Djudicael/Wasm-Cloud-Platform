@@ -41,7 +41,7 @@ instructions.
 
 ## Deployment profiles
 
-- [Level 0: local development](deployment-level-0-local-development.md)
+- [Level 0: local development](deployment-level-0-local-development.md), including native-platform agentic feature validation with optional Podman services
 - [Level 1: single-node private environment](deployment-level-1-single-node-private.md)
 - [Level 2: production baseline controls](deployment-level-2-production-baseline.md)
 - [Level 3: hardened multi-node controls](deployment-level-3-hardened-production.md)

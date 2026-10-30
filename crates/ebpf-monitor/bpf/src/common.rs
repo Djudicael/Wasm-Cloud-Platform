@@ -113,7 +113,7 @@ pub struct MemPressureEvent {
     pub reclaim_pages: u64,
     pub pressure_level: u32, // 0=low, 1=medium, 2=critical
     pub _padding: u32,
-    pub anon_pages: u64,     // Anonymous (Wasm linear memory) pages
+    pub anon_pages: u64, // Anonymous (Wasm linear memory) pages
 }
 
 /// Disk I/O event.
@@ -128,7 +128,7 @@ pub struct DiskIoEvent {
     pub bytes: u32,
     pub latency_ns: u64, // Time from submit to complete
     pub cgroup_id: u64,
-    pub io_type: u32,    // 0=read, 1=write, 2=sync
+    pub io_type: u32, // 0=read, 1=write, 2=sync
     pub _padding2: u32,
 }
 
@@ -140,7 +140,7 @@ pub struct SyscallEvent {
     pub syscall_nr: u64,
     pub syscall_category: u32, // Enum: SyscallCategory
     pub _padding: u32,
-    pub count_in_window: u64,  // Count in the last sampling window
+    pub count_in_window: u64, // Count in the last sampling window
 }
 
 /// Syscall categories for policy enforcement.

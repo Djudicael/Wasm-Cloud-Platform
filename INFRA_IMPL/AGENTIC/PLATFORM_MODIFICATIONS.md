@@ -592,7 +592,7 @@ and advisory records remain unchanged.
 | M16 | Agent-system rehearsal script | testbed | P2 |
 | M17 | Process or VM isolation per trust domain | runtime, supervisor | P3 |
 | M18 | Controlled execution of generated Wasm | runtime, deploy path | P3 |
-| M19 | Native job runner service microVM | testbed, service microVMs | P2 |
+| M19 | External native job service: transferred to harness repository | no platform implementation | Superseded |
 
 Not required (see [explicitly not needed](#explicitly-not-needed)): a custom `agent:run/step` WIT interface, WASI-NN, remote-node `.internal` resolution, a singleton placement policy, or a larger memory cap.
 
@@ -893,6 +893,16 @@ Use `--preset production-like` with at least three nodes. Ask for the node count
 **Acceptance.** Components importing anything beyond the allowlist are rejected; compilation bombs hit limits; generated components run only on the isolated backend.
 
 ### M19. Native job runner service microVM (P2)
+
+**Superseded ownership decision (2026-10-30).** The following proposal is
+retained as historical design context. The user assigned the native job service,
+its API, images and lifecycle to the separate harness repository. It is not a
+platform deliverable or a prerequisite requiring platform Rust changes. The
+platform executes the WASI adapter and enforces its explicit external network
+policy. See [harness microVM checks](../../../wasmcloud_platform_harness/docs/microvm-checks.md)
+and its ADR 0010. A fresh networkless microVM per job is the implemented local
+shape; the broader capabilities below remain planning scope.
+
 
 **Current state.** The platform executes only Wasm components. Native processes (compilers, test runners, language servers, Git) have no execution path, and the single trust domain must not host them. The local testbed already provisions PostgreSQL and Vault as separate service microVMs recorded in the state file.
 
