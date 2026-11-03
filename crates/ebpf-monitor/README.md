@@ -55,6 +55,11 @@ programs, maps, and attachment links for the node lifetime. Dropping the monitor
 handle detaches them; lifecycle validation checks that repeated deploy/restart/
 remove operations do not leave stale application identities.
 
+Memory reclaim is correlated with available-memory/cgroup-limit and PSI samples
+before admission changes. Recovery requires fresh healthy evidence; it does not
+expire on a blind timer. See [memory policy](../../docs/ebpf.md#4-memory-pressure-monitor)
+and [local isolation validation](../../docs/local-memory-isolation.md).
+
 ## Availability behavior
 
 - `ebpf.enabled = false`: kernel monitoring is intentionally disabled.

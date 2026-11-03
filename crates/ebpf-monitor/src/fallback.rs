@@ -7,7 +7,7 @@
 //!
 //! # What the Fallback Can Detect
 //!
-//! - **Memory pressure**: Reads `/proc/meminfo` for available memory
+//! - **Memory pressure**: The shared one-second memory sampler handles it
 //! - **FD usage**: Counts entries in `/proc/<pid>/fd`
 //! - **Process exits**: Polls `/proc/<pid>/stat` for child process status
 //! - **Disk stats**: Reads `/proc/diskstats` for aggregate I/O stats
@@ -17,7 +17,8 @@
 //! - **Per-request disk I/O latency**: Only aggregate stats are available
 //! - **TCP retransmits**: No per-connection TCP state tracking
 //! - **Syscall anomalies**: No kernel-level syscall interception
-//! - **Sub-second response**: Polling interval is 5 seconds (vs 10ms for eBPF)
+//! - **Sub-second response**: Memory is sampled every second; other resources
+//!   use the configured sampling period (vs a 10ms kernel ring-buffer poll)
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -54,7 +55,6 @@ pub async fn run_fallback_monitor(
 
     let mut interval = time::interval(Duration::from_secs(config.sampling_period_secs));
     let mut last_fd_count: u32 = 0;
-    let mut last_pressure_level: u32 = 0;
     let mut consecutive_fd_increase: u32 = 0;
 
     loop {
@@ -69,49 +69,6 @@ pub async fn run_fallback_monitor(
         }
 
         // ── Memory Pressure ────────────────────────────────────────────
-        if let Ok(meminfo) = read_meminfo() {
-            let free_pages = meminfo.mem_available_kb * 1024 / 4096;
-            let pressure_level = if free_pages < config.mem_critical_threshold_pages {
-                2
-            } else if free_pages < config.mem_low_threshold_pages {
-                1
-            } else {
-                0
-            };
-
-            // Only dispatch if the pressure level changed
-            if pressure_level != last_pressure_level {
-                let event = MonitorEvent::MemPressure {
-                    pid: node_pid,
-                    tid: node_pid,
-                    free_pages,
-                    reclaim_pages: 0, // Not available from /proc/meminfo
-                    pressure_level,
-                    anon_pages: 0, // Not available from /proc/meminfo
-                };
-                dispatcher.dispatch(event);
-                last_pressure_level = pressure_level;
-            }
-
-            // Always update the metric
-            metrics.set_memory_pressure(pressure_level);
-
-            if pressure_level >= 2 {
-                warn!(
-                    free_pages,
-                    threshold = config.mem_critical_threshold_pages,
-                    "Memory pressure detected (userspace fallback): CRITICAL"
-                );
-            } else if pressure_level >= 1 {
-                debug!(
-                    free_pages,
-                    threshold = config.mem_low_threshold_pages,
-                    "Memory pressure detected (userspace fallback): MEDIUM"
-                );
-            }
-        }
-
-        // ── FD Usage ───────────────────────────────────────────────────
         if let Ok(fd_count) = count_fds(node_pid) {
             metrics.set_fd_usage(fd_count, config.fd_soft_limit);
 
@@ -216,6 +173,7 @@ pub async fn run_fallback_monitor(
 
 /// Memory information parsed from `/proc/meminfo`.
 #[allow(dead_code)]
+#[cfg(test)]
 struct MemInfo {
     mem_total_kb: u64,
     mem_available_kb: u64,
@@ -224,6 +182,7 @@ struct MemInfo {
 /// Read memory information from `/proc/meminfo`.
 ///
 /// Returns `Err` if the file cannot be read (e.g., not on Linux).
+#[cfg(test)]
 fn read_meminfo() -> Result<MemInfo, std::io::Error> {
     let content = std::fs::read_to_string("/proc/meminfo")?;
     let mut total = 0u64;
@@ -242,6 +201,7 @@ fn read_meminfo() -> Result<MemInfo, std::io::Error> {
 }
 
 /// Parse a "MemXXX:    12345 kB" line, returning the value in KB.
+#[cfg(test)]
 fn parse_kb(line: &str) -> u64 {
     line.split_whitespace()
         .nth(1)
@@ -510,7 +470,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_fallback_monitor_dispatches_memory_pressure() {
+    async fn test_fallback_lifecycle_keeps_kernel_monitoring_inactive() {
         let registry = Registry::new();
         let metrics = Arc::new(EbpfMetrics::new(&registry));
         let dispatcher = Arc::new(ActionDispatcher::new_noop(
@@ -523,7 +483,6 @@ mod tests {
 
         let config = MonitorConfig {
             enabled: true,
-            mem_low_threshold_pages: 999999999, // Very high to trigger pressure
             ..MonitorConfig::default()
         };
 

@@ -516,7 +516,7 @@ pub async fn run_action_dispatcher(
     info!("action dispatcher loop started");
 
     while let Some(event) = event_rx.recv().await {
-        dispatcher.dispatch(event);
+        dispatcher.dispatch_kernel(event);
     }
 
     info!("action dispatcher loop stopped (channel closed)");
@@ -975,7 +975,8 @@ mod tests {
 
         // Verify metrics were updated
         assert_eq!(metrics.events_processed.get(), 2);
-        assert_eq!(metrics.memory_pressure_level.get(), 1);
+        assert_eq!(metrics.memory_pressure_level.get(), 0);
+        assert_eq!(metrics.memory_reclaim_hints.get(), 1);
     }
 
     #[tokio::test]

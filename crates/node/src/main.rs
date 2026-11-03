@@ -983,6 +983,7 @@ impl proxy::health::DependencyChecker for EbpfDependencyChecker {
 /// avoids circular dependencies between the `ebpf_monitor` and
 /// `proxy`/`messaging` crates.
 struct NodeEbpfCallbacks {
+    runtime: tokio::runtime::Handle,
     backpressure: proxy::backpressure::BackpressureSignal,
     nats_health: Arc<NatsHealth>,
     bus: messaging::NatsBus,
@@ -992,6 +993,9 @@ struct NodeEbpfCallbacks {
     /// (kill largest instance, prune idle, remove from upstream).
     supervisor_tx: mpsc::Sender<SupervisorCommand>,
 }
+
+#[cfg(test)]
+mod ebpf_callbacks_tests;
 
 impl EventCallbacks for NodeEbpfCallbacks {
     fn activate_backpressure(&self, reason: &str) {
@@ -1015,7 +1019,7 @@ impl EventCallbacks for NodeEbpfCallbacks {
             pressure_level,
         };
         let bus = self.bus.clone();
-        tokio::spawn(async move {
+        self.runtime.spawn(async move {
             if let Err(e) = bus.publish(&event).await {
                 tracing::warn!("Failed to publish pressure event: {}", e);
             }
@@ -1027,7 +1031,7 @@ impl EventCallbacks for NodeEbpfCallbacks {
             node_id: node_id.to_string(),
         };
         let bus = self.bus.clone();
-        tokio::spawn(async move {
+        self.runtime.spawn(async move {
             if let Err(e) = bus.publish(&event).await {
                 tracing::warn!("Failed to publish pressure recovered event: {}", e);
             }
@@ -1043,7 +1047,7 @@ impl EventCallbacks for NodeEbpfCallbacks {
             category: category.to_string(),
         };
         let bus = self.bus.clone();
-        tokio::spawn(async move {
+        self.runtime.spawn(async move {
             if let Err(e) = bus.publish(&event).await {
                 tracing::warn!("Failed to publish security incident event: {}", e);
             }
@@ -1921,6 +1925,7 @@ async fn main() -> anyhow::Result<()> {
     let ebpf_config = MonitorConfig::from_ebpf_section(&config.ebpf);
     let ebpf_metrics = Arc::new(EbpfMetrics::new(&prom_metrics.registry));
     let ebpf_callbacks: Arc<dyn EventCallbacks> = Arc::new(NodeEbpfCallbacks {
+        runtime: tokio::runtime::Handle::current(),
         backpressure: backpressure.clone(),
         nats_health: nats_health.clone(),
         bus: bus.clone(),
@@ -1951,7 +1956,11 @@ async fn main() -> anyhow::Result<()> {
     if ebpf_handle.is_ebpf_active() {
         info!("eBPF monitor initialized with kernel-level monitoring");
     } else {
-        info!("eBPF monitor running in userspace fallback mode (5s polling interval)");
+        info!(
+            memory_sampling_secs = 1,
+            other_sampling_secs = config.ebpf.sampling_period_secs,
+            "eBPF monitor running in userspace fallback mode"
+        );
     }
 
     // Wire namespace_map from eBPF monitor to supervisor for TID registration.
@@ -2603,6 +2612,8 @@ async fn main() -> anyhow::Result<()> {
                         events_parse_errors: metrics.events_parse_errors.get(),
                         fd_usage_ratio: metrics.get_fd_usage_ratio(),
                         memory_pressure_level: metrics.memory_pressure_level.get(),
+                        memory_sample_available: metrics.memory_sample_available.get() == 1,
+                        memory_reclaim_hints: metrics.memory_reclaim_hints.get(),
                         tcp_connection_count: metrics.tcp_connection_count.get(),
                         fd_count: metrics.fd_count.get(),
                     };

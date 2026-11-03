@@ -30,6 +30,8 @@ instructions.
   and incident playbooks.
 - [eBPF](ebpf.md) covers activation, degraded behavior, security signals, and
   recovery actions.
+- [Local memory isolation](local-memory-isolation.md) explains the native node
+  cgroup, correlated pressure policy and bounded validation.
 - [Performance benchmarks](performance-benchmarks.md) documents reproducible
   cold-start and runtime measurements.
 

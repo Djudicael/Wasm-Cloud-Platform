@@ -133,6 +133,7 @@ required_scopes = ["admin:users"]
 fn test_manifest_to_app_config() {
     let manifest = DeployManifest {
         triggers: Vec::new(),
+        limits: None,
         app: AppManifestSection {
             name: "test".to_string(),
             version: "v1".to_string(),
@@ -173,6 +174,7 @@ fn test_manifest_to_app_config() {
 fn test_manifest_to_gateway_config() {
     let manifest = DeployManifest {
         triggers: Vec::new(),
+        limits: None,
         app: AppManifestSection::default(),
         fuel: FuelManifestSection::default(),
         policy: None,
@@ -390,4 +392,29 @@ allowed_callers = ["agents/broker:v1"]
     let decoded: DeployManifest = toml::from_str(&encoded).unwrap();
     assert_eq!(decoded.to_gateway_config(), Some(gateway));
     assert_eq!(decoded.to_app_config().policy, config.policy);
+}
+
+#[test]
+fn extended_limits_survive_manifest_config_and_export_round_trip() {
+    let manifest: DeployManifest =
+        toml::from_str("[limits]\nmax_table_elements=11000\nmax_open_fds=12\n").unwrap();
+    let config = manifest.to_app_config();
+    let limits = config.extended_limits.as_ref().unwrap();
+    assert_eq!(limits.max_table_elements, Some(11000));
+    assert_eq!(limits.max_open_fds, Some(12));
+    assert_eq!(limits.to_limits().max_outbound_connections, 16);
+    let exported = super::conversion::manifest_from_config(&config, None, &[]);
+    let encoded = toml::to_string(&exported).unwrap();
+    let decoded: DeployManifest = toml::from_str(&encoded).unwrap();
+    assert_eq!(
+        decoded.to_app_config().extended_limits,
+        config.extended_limits
+    );
+    let omitted: DeployManifest = toml::from_str("").unwrap();
+    assert!(omitted.to_app_config().extended_limits.is_none());
+    assert!(!toml::to_string(&omitted).unwrap().contains("[limits]"));
+    assert_eq!(
+        common::types::ExtendedLimits::default().max_table_elements,
+        10000
+    );
 }

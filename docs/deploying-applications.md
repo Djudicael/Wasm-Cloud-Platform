@@ -1337,3 +1337,21 @@ Changes to a declaration are checked against the running instance snapshot.
 Use a new application revision for trigger changes; stale instances fail closed
 until redeployed/restarted. See [schedule telemetry](observability.md#schedule-telemetry)
 for skipped intervals, failures, and restart diagnostics.
+
+### Optional per-application resource limits
+
+The deployment manifest accepts an optional `[limits]` section. It maps to the
+runtime's existing ExtendedLimitsConfig and survives manifest export/import:
+
+```toml
+[limits]
+max_table_elements = 11000
+```
+
+Only specified values override runtime defaults. Supported keys are
+max_open_fds, max_fs_write_bytes, max_net_egress_bytes,
+max_outbound_connections and max_table_elements. Omitting `[limits]` preserves
+all defaults, including the 10000-element table cap. This is an application
+limit, not a global runtime increase; fuel and linear-memory ceilings remain
+separate. For a large C++ WASI component, size its table cap explicitly before
+deployment rather than weakening the default for unrelated applications.

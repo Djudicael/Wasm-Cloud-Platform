@@ -100,3 +100,8 @@ Firecracker validation is reserved for later advanced integration rehearsals.
 Native-host tests do not establish guest-kernel, VM networking or full isolation
 behavior; retain a separate rehearsal gate for those concerns. Historical
 microVM results remain valid for their recorded artifacts and scope.
+
+Native-platform development now also requires an isolated per-launch node cgroup.
+Authorize its bounded helper once per checkout with --grant-node-cgroup; the
+controller records exact ownership and removes only the empty recorded cgroup
+on stop. See [memory isolation and controlled validation](local-memory-isolation.md).

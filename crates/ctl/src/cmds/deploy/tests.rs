@@ -244,6 +244,7 @@ fn test_build_deploy_payload_extracts_manifest_routes() {
     ]);
     let manifest = super::super::manifest::DeployManifest {
         triggers: Vec::new(),
+        limits: None,
         app: super::super::manifest::AppManifestSection {
             name: "api".to_string(),
             version: "v1".to_string(),

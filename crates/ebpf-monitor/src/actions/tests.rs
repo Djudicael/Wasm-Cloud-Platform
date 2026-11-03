@@ -312,6 +312,43 @@ fn test_memory_pressure_recovery() {
 }
 
 #[test]
+fn memory_recovery_does_not_release_fd_exhaustion() {
+    let callbacks = Arc::new(TestCallbacks::default());
+    let dispatcher = make_dispatcher(callbacks);
+    dispatcher.dispatch(MonitorEvent::FdLimitApproaching {
+        pid: 1,
+        tid: 1,
+        fd: 1,
+        current_fd_count: 8100,
+        fd_soft_limit: 8192,
+    });
+    dispatcher.dispatch(MonitorEvent::MemPressure {
+        pid: 1,
+        tid: 1,
+        free_pages: 10_000,
+        reclaim_pages: 0,
+        pressure_level: 2,
+        anon_pages: 0,
+    });
+    dispatcher.dispatch(MonitorEvent::MemPressure {
+        pid: 1,
+        tid: 1,
+        free_pages: 100_000,
+        reclaim_pages: 0,
+        pressure_level: 0,
+        anon_pages: 0,
+    });
+    assert!(dispatcher.is_backpressure_active());
+    dispatcher.dispatch(MonitorEvent::FdClose {
+        pid: 1,
+        tid: 1,
+        fd: 1,
+        current_fd_count: 100,
+    });
+    assert!(!dispatcher.is_backpressure_active());
+}
+
+#[test]
 fn test_slow_io_degraded_mode_recovers_after_quiet_cooldown() {
     let callbacks = Arc::new(TestCallbacks::default());
     let dispatcher = make_dispatcher(callbacks);

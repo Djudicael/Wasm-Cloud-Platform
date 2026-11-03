@@ -321,14 +321,18 @@ async fn liveness_probe(State(state): State<Arc<HealthState>>) -> Response {
 /// Checks: all liveness checks + NATS connected + not under backpressure.
 async fn readiness_probe(State(state): State<Arc<HealthState>>) -> Response {
     let mut dependencies = Vec::new();
+    let accepting = state.backpressure.is_accepting();
 
-    // Check ALL dependencies (including NATS)
-    for checker in state.dependency_checkers.iter() {
-        dependencies.push(checker.check());
+    // Rejection already establishes non-readiness. Avoid synchronous disk/database
+    // probes under pressure: they can stall the response and the async executor.
+    // Full dependency checks resume when accepting, and remain in detailed status.
+    if accepting {
+        for checker in state.dependency_checkers.iter() {
+            dependencies.push(checker.check());
+        }
     }
 
     // Add backpressure as a virtual dependency
-    let accepting = state.backpressure.is_accepting();
     dependencies.push(DependencyHealth {
         name: "backpressure".to_string(),
         status: if accepting {
@@ -489,6 +493,60 @@ pub fn compute_status_for_probe(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn rejecting_readiness_skips_dependency_io_and_resumes_checks_after_recovery() {
+        struct Counts;
+        impl InstanceCountProvider for Counts {
+            fn active_instance_count(&self) -> u32 {
+                0
+            }
+            fn deployed_app_count(&self) -> u32 {
+                0
+            }
+            fn app_health_summaries(&self) -> Vec<AppHealthSummary> {
+                vec![]
+            }
+        }
+        struct Check(Arc<std::sync::atomic::AtomicUsize>);
+        impl DependencyChecker for Check {
+            fn name(&self) -> &str {
+                "test-dependency"
+            }
+            fn check(&self) -> DependencyHealth {
+                self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                DependencyHealth {
+                    name: self.name().into(),
+                    status: common::health::DependencyStatus::Healthy,
+                    message: "checked".into(),
+                    latency_ms: None,
+                    last_check: String::new(),
+                }
+            }
+        }
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let signal = Arc::new(BackpressureSignal::new());
+        let state = Arc::new(HealthState {
+            node_id: "test".into(),
+            nats_health: Arc::new(NatsHealth::new()),
+            backpressure: signal.clone(),
+            started_at: Instant::now(),
+            startup_complete: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            instance_count_provider: Arc::new(Counts),
+            dependency_checkers: Arc::new(vec![Box::new(Check(calls.clone()))]),
+            app_health_registry: Arc::new(RwLock::new(AppHealthRegistry::new())),
+            config: HealthCheckConfig::default(),
+        });
+        signal.set_rejecting();
+        assert_eq!(
+            readiness_probe(State(state.clone())).await.status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        signal.set_accepting();
+        assert_eq!(readiness_probe(State(state)).await.status(), StatusCode::OK);
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
 
     #[test]
     fn test_compute_status_healthy() {

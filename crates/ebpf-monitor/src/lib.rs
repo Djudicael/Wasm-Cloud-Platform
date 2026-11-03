@@ -67,6 +67,7 @@ pub mod actions;
 pub mod config;
 pub mod consumer;
 pub mod fallback;
+mod memory;
 pub mod metrics;
 pub mod namespace_map;
 
@@ -169,7 +170,7 @@ pub struct MonitorStatus {
     pub backpressure_active: bool,
     /// Whether the node is in degraded mode (slow I/O recovery).
     pub degraded_mode: bool,
-    /// Last memory pressure level (0=none, 1=low, 2=medium, 3=critical).
+    /// Last memory pressure level (0=healthy, 1=medium, 2=critical).
     pub pressure_level: u32,
     /// Total OOM kills detected.
     pub oom_kills: u64,
@@ -187,6 +188,8 @@ pub struct MonitorStatus {
     pub fd_usage_ratio: f64,
     /// Current memory pressure level gauge.
     pub memory_pressure_level: i64,
+    pub memory_sample_available: bool,
+    pub memory_reclaim_hints: u64,
     /// Current TCP connection count.
     pub tcp_connection_count: i64,
     /// Current open FD count.
@@ -213,6 +216,7 @@ pub struct MonitorHandle {
     _consumer_handle: Option<tokio::task::JoinHandle<()>>,
     /// Optional join handle for the fallback task.
     _fallback_handle: Option<tokio::task::JoinHandle<()>>,
+    _memory_handle: tokio::task::JoinHandle<()>,
     /// Owns attached programs for the lifetime of the monitor handle.
     #[cfg(feature = "ebpf")]
     _loaded_ebpf: Option<loader::LoadedEbpf>,
@@ -264,6 +268,8 @@ impl MonitorHandle {
             events_parse_errors: self.metrics.events_parse_errors.get(),
             fd_usage_ratio: self.metrics.get_fd_usage_ratio(),
             memory_pressure_level: self.metrics.memory_pressure_level.get(),
+            memory_sample_available: self.metrics.memory_sample_available.get() == 1,
+            memory_reclaim_hints: self.metrics.memory_reclaim_hints.get(),
             tcp_connection_count: self.metrics.tcp_connection_count.get(),
             fd_count: self.metrics.fd_count.get(),
         }
@@ -340,6 +346,8 @@ pub async fn init(
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
     let runtime_state = MonitorRuntimeState::new(config.enabled, config.required);
     metrics.set_monitoring_required(config.required);
+    dispatcher.update_thresholds(config.clone());
+    let memory_handle = memory::spawn(dispatcher.clone(), node_pid, shutdown_rx.clone());
 
     // Validate configuration
     if let Err(e) = config.validate() {
@@ -427,6 +435,7 @@ pub async fn init(
                         runtime_state,
                         _consumer_handle: None, // watchdog manages the task
                         _fallback_handle: None,
+                        _memory_handle: memory_handle,
                         _loaded_ebpf: Some(loaded),
                         metrics: metrics.clone(),
                         dispatcher: dispatcher.clone(),
@@ -486,6 +495,7 @@ pub async fn init(
         runtime_state,
         _consumer_handle: None,
         _fallback_handle: Some(fallback_handle),
+        _memory_handle: memory_handle,
         #[cfg(feature = "ebpf")]
         _loaded_ebpf: None,
         metrics,

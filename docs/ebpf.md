@@ -40,7 +40,7 @@ On this platform, eBPF provides event-driven kernel signals. Detection latency d
 | Process lifecycle | Tracepoint/syscall events for registered runtime TIDs and the node PID | Supervisor task and health-loop state |
 | TCP activity | TID-scoped connection events with port correlation | Socket and dependency health probes |
 | File descriptors | TID-scoped open/install/close activity | Process-level polling |
-| Memory pressure | Events restricted to the dedicated `wasm-node` cgroup | `/proc/meminfo` polling |
+| Memory pressure | Cgroup-scoped kernel hints plus correlated memory sampling | Same availability/cgroup/PSI sampling without kernel hints |
 | Block I/O | Issue/completion records originating in the node cgroup | No equivalent application-attributed signal |
 | Syscalls | Counts for registered runtime TIDs | No equivalent syscall stream |
 | Namespace policy | Socket and namespace-related events for registered TIDs | Runtime socket policy remains authoritative |
@@ -142,7 +142,34 @@ The WASI `ResourceTable` limit remains the guest-facing descriptor bound. Kernel
 
 ### 4. Memory-pressure monitor
 
-The memory object observes direct-reclaim activity and restricts accepted events to the dedicated `wasm-node` cgroup. Configured low and critical page thresholds feed pressure levels into the dispatcher.
+The memory object observes direct-reclaim activity and restricts accepted events
+to the dedicated `wasm-node` cgroup. A reclaim notification is a hint, not by
+itself a decision to reject traffic. A shared cgroup with build tools or other
+services defeats this attribution; place the node in its own cgroup before
+loading eBPF.
+
+A separate one-second sampler runs in both kernel and fallback modes. It reads
+host `MemAvailable`, the node's cgroup memory events/PSI and finite ancestor
+`memory.max` limits. Effective cgroup headroom discounts inactive file cache
+from current usage; this estimate is not RSS or a guarantee that all cache is
+immediately reclaimable. `memory.high` is a throttling signal, not a hard OOM
+limit. Available-memory thresholds retain their 4-KiB units and hot reload.
+
+Three consecutive low-headroom samples, or three samples of recent reclaim/high
+events correlated with PSI some >=10% or full >=1%, classify MEDIUM. Critical
+headroom, new cgroup OOM counters and explicit kernel-critical/OOM notifications
+retain immediate protection. Kernel LOW alone does not clear a confirmed cause.
+Five fresh samples above 1.5 times the low-memory threshold with PSI some <5%
+and full <0.5% release memory pressure. Missing observations reset the healthy
+window and cannot synthesize recovery. There is no unconditional 30-second
+memory-release timer. PSI is optional on kernels without that interface;
+availability/cgroup-limit checks remain active.
+
+Memory recovery does not release an independently active FD-exhaustion cause.
+The node captures a Tokio runtime handle for control-plane publication, so a
+callback may safely originate from a standard thread. No per-reclaim recovery
+thread is created. See [local memory isolation validation](local-memory-isolation.md)
+for the owned development controller and acceptance boundary.
 
 At higher pressure the dispatcher can stop new work, prune idle instances, and invoke the configured largest-instance termination callback. These actions reduce risk but cannot guarantee that the host OOM killer never runs. Operators must still configure host and cgroup memory limits and alert on sustained pressure.
 
@@ -274,7 +301,8 @@ The node updates the userspace dispatcher and every loaded kernel CONFIG map. En
 wasm-ctl node ebpf-status
 ```
 
-The response reports whether eBPF is active, required, or degraded; the number of attached programs; the degradation reason; queue/backpressure state; event and parser counters; and resource/security totals.
+The response reports whether eBPF is active, required, or degraded; the number of attached programs; the degradation reason; queue/backpressure state; event and parser counters; resource/security totals;
+`memory_sample_available`; and the raw `memory_reclaim_hints` count.
 
 ### Manual recovery commands
 

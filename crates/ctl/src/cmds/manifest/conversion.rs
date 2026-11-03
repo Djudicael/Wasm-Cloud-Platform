@@ -30,7 +30,7 @@ impl DeployManifest {
             wasm_bind_port: self.app.wasm_bind_port,
             env_vars: self.env.clone(),
             secret_keys: self.secrets.keys().cloned().collect(),
-            extended_limits: None,
+            extended_limits: self.limits.clone(),
             health_check_path: None,
             db_max_connections: None,
             rate_limit: None,
@@ -225,6 +225,7 @@ pub fn manifest_from_config(
 
     DeployManifest {
         triggers: app_config.triggers.clone(),
+        limits: app_config.extended_limits.clone(),
         app: AppManifestSection {
             name,
             version,

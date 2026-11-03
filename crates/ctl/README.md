@@ -211,3 +211,5 @@ conversion and export preserve these declarations; invalid bounds, unsupported
 kinds, and unknown trigger options are rejected. See the canonical
 [periodic trigger contract](../../docs/deploying-applications.md#periodic-triggers)
 for the reserved POST route, interval syntax, node replication, and limits.
+
+Deployment manifests accept optional [limits] overrides for the existing runtime extended limits. Import/export preserves them; omitted values retain defaults. See [deployment guide](../../docs/deploying-applications.md#optional-per-application-resource-limits).

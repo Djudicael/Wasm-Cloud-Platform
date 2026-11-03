@@ -79,3 +79,10 @@ existing testbed state. RustFS is a separate service microVM, not a platform
 node. Keep its credential-bearing rootfs and data on the private Linux
 filesystem; never overwrite a recorded live image. Follow
 `docs/vm-testbed/service-microvms.md` for IAM and teardown/retention boundaries.
+
+Native-platform agentic development must place the node in its dedicated cgroup
+before eBPF initialization. Use the harness controller's --grant-node-cgroup
+lifecycle and platform test-memory-isolation for explicitly requested bounded
+validation; see docs/local-memory-isolation.md. Preserve critical/OOM protection,
+correlate reclaim with measured availability/PSI, require healthy recovery
+samples and never apply pressure to unrelated groups or the whole host.

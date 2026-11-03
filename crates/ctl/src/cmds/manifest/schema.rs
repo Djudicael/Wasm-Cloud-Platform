@@ -13,6 +13,10 @@ pub struct DeployManifest {
     #[serde(default)]
     pub fuel: FuelManifestSection,
 
+    /// Optional per-application resource ceilings; omitted preserves runtime defaults.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limits: Option<common::types::ExtendedLimitsConfig>,
+
     #[serde(default)]
     pub policy: Option<common::policy::PolicyConfig>,
 

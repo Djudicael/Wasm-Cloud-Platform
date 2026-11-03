@@ -163,7 +163,9 @@ the billing chain.
 | `wasm_ebpf_tcp_retransmits_total` | Counter | TCP retransmit events |
 | `wasm_ebpf_security_violations_total` | Counter | Syscall anomaly events |
 | `wasm_ebpf_fd_usage_ratio` | Gauge | FD usage as ratio |
-| `wasm_ebpf_memory_pressure_level` | Gauge | Current memory pressure level |
+| `wasm_ebpf_memory_pressure_level` | Gauge | Correlated memory pressure: 0 healthy, 1 medium, 2 critical |
+| `wasm_ebpf_memory_reclaim_hints_total` | Counter | Raw reclaim hints; a hint alone does not reject traffic |
+| `wasm_ebpf_memory_sample_available` | Gauge | 1 when fresh memory evidence is available, 0 otherwise; missing samples cannot clear pressure |
 
 ### Prometheus configuration
 
@@ -564,6 +566,12 @@ The platform exposes multiple health endpoints for orchestrators and load balanc
 | `GET /readyz` | Readiness probe | All dependencies healthy |
 | `GET /healthz` | Liveness probe | Node process is running |
 | `GET /status` | Full status | Detailed health report with dependencies |
+
+When backpressure is active, `/readyz` and its `/health` alias return 503 with
+the backpressure dependency without first probing disk/database dependencies.
+This avoids delaying an already established rejection with synchronous I/O.
+Full dependency checks resume once accepting traffic; `/status` retains the
+detailed checks, so a rejection report is not a complete dependency inventory.
 
 ### Response format
 

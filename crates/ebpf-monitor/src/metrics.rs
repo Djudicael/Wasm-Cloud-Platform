@@ -60,6 +60,10 @@ pub struct EbpfMetrics {
 
     /// Memory pressure level (0=none/low, 1=medium, 2=critical).
     pub memory_pressure_level: IntGauge,
+    /// Reclaim notifications before correlation, not admission decisions.
+    pub memory_reclaim_hints: IntCounter,
+    /// Whether a fresh memory observation is available.
+    pub memory_sample_available: IntGauge,
 
     /// Disk I/O latency histogram (seconds).
     pub disk_io_latency_seconds: Histogram,
@@ -174,6 +178,22 @@ impl EbpfMetrics {
             registry
         );
 
+        let memory_reclaim_hints = register_metric!(
+            IntCounter::new(
+                "wasm_ebpf_memory_reclaim_hints_total",
+                "Raw reclaim hints before memory correlation"
+            )
+            .unwrap(),
+            registry
+        );
+        let memory_sample_available = register_metric!(
+            IntGauge::new(
+                "wasm_ebpf_memory_sample_available",
+                "Fresh memory evidence available"
+            )
+            .unwrap(),
+            registry
+        );
         let memory_pressure_level = register_metric!(
             IntGauge::with_opts(Opts::new(
                 "wasm_ebpf_memory_pressure_level",
@@ -365,6 +385,8 @@ impl EbpfMetrics {
             nats_retransmit_events,
             fd_usage_ratio,
             memory_pressure_level,
+            memory_reclaim_hints,
+            memory_sample_available,
             disk_io_latency_seconds,
             disk_io_bytes,
             security_violations,
