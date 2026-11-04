@@ -7,6 +7,46 @@ use common::{deploy::ArtifactVerificationRecord, error::PlatformError, types::Ap
 use redb::{ReadableDatabase, ReadableTable};
 
 impl Store {
+    /// Publish all persisted deployment state and clear its undeploy fence in
+    /// one transaction. Concurrent undeploy GC cannot observe a partial redeploy.
+    pub fn persist_deployment(
+        &self,
+        id: &AppId,
+        bytes: &[u8],
+        config: &common::types::AppConfig,
+        sha256: &str,
+    ) -> Result<(), PlatformError> {
+        if id != &config.id {
+            return Err(PlatformError::ConfigValidation(
+                "deployment identity differs from config identity".into(),
+            ));
+        }
+        common::triggers::validate(&config.triggers).map_err(PlatformError::ConfigValidation)?;
+        let json = serde_json::to_string(config).map_err(PlatformError::storage_source)?;
+        let tx = self
+            .db
+            .begin_write()
+            .map_err(PlatformError::storage_source)?;
+        tx.open_table(ARTIFACTS)
+            .map_err(PlatformError::storage_source)?
+            .insert(id.0.as_str(), bytes)
+            .map_err(PlatformError::storage_source)?;
+        tx.open_table(crate::tables::CONFIGS)
+            .map_err(PlatformError::storage_source)?
+            .insert(id.0.as_str(), json.as_str())
+            .map_err(PlatformError::storage_source)?;
+        tx.open_table(ARTIFACT_HASHES)
+            .map_err(PlatformError::storage_source)?
+            .insert(id.0.as_str(), sha256)
+            .map_err(PlatformError::storage_source)?;
+        tx.open_table(crate::tables::SCHEMA_META)
+            .map_err(PlatformError::storage_source)?
+            .remove(format!("_undeploy:{}", id.0).as_str())
+            .map_err(PlatformError::storage_source)?;
+        tx.commit().map_err(PlatformError::storage_source)?;
+        tracing::info!(app=%id.0,bytes=bytes.len(),"deployment state committed atomically");
+        Ok(())
+    }
     /// Persist a compiled Wasm artifact.
     /// `bytes` is the serialized Wasmtime Engine Artifact.
     pub fn store_artifact(&self, id: &AppId, bytes: &[u8]) -> Result<(), PlatformError> {

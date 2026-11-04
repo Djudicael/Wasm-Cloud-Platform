@@ -338,24 +338,39 @@ socket_addr_check
 ```
 
 The socket policy permits a connection to port 9080 so the internal gateway can
-make the authorization decision. This is not an authorization bypass. The eBPF
-namespace enforcer observes the client socket entering `SYN_SENT` in the
-calling thread, binds its ephemeral
-source port to the registered workload TID, and the gateway resolves the caller
-identity from that kernel-derived binding. Caller-supplied `X-Namespace`,
-`X-Source-App`, `X-Source-Namespace`, `X-Source-Tid`, `X-App-Id`, and all
-`X-User-*` headers (including duplicate values) are stripped.
+make the authorization decision. The namespace enforcer records the registered
+workload at client `SYN_SENT`, before TCP completion can move into another
+kernel context. Attribution is restricted to the canonical loopback gateway
+destination: the current listener uses IPv4 `127.0.0.1`; support for an IPv6
+`::1` identity key does not add an IPv6 listener.
+
+Authorization reads kernel maps directly. `GATEWAY_PEERS` indexes the peer IP,
+address family and port to a socket identifier and connection timestamp;
+`GATEWAY_OWNERS` holds the live owner's TID and registration generation;
+`GATEWAY_SOCKETS` associates the kernel socket pointer with its owner. The
+gateway captures an opaque `ConnectionSnapshot` through `snapshot_connection`
+when accepting a connection, then uses `resolve_connection` for each request.
+It checks the captured live owner and enabled `MONITORED_TIDS` registration
+generation against the active workload registry. It does not replace an old
+snapshot by rereading a peer index that may have been reused. A missing entry,
+changed generation or lookup error fails closed. Ring-buffer events remain
+telemetry; their delivery delay or loss cannot publish an authorization identity.
+There is no 50-ms publication wait, nor fallback to an asynchronous source-port
+cache or caller headers in the kernel-authoritative gateway.
 
 `ESTABLISHED` is not used to infer the caller: that transition may run in
-softirq or worker context. Client-socket `CLOSE` removes the port binding even
-when it runs outside the caller thread. A kernel socket ownership map limits
-that removal to sockets initiated by registered workloads; an unrelated socket
-with the same port number cannot remove a workload binding. The loader configures each eBPF object
-with the device/inode of the node's PID namespace; kernel TIDs are translated
-into that namespace before looking up supervisor registrations. This is needed
-for nested PID namespaces such as WSL. Translation failure yields no identity,
-never a fallback to a possibly colliding host TID. Rebuild and install all eBPF
-objects together with the node; older objects without `PID_NAMESPACE` are rejected.
+softirq or worker context. Client-socket `CLOSE` removes only its live owner,
+not a peer index that could already belong to a recycled connection. Stale LRU
+peer indices cannot authorize requests without the matching live owner.
+The loader configures each eBPF object with the device/inode of the node's PID
+namespace; kernel TIDs are translated into that namespace before supervisor
+registration lookup. Translation failure yields no identity, never a fallback
+to a possibly colliding host TID. Rebuild and install the node and all eBPF
+objects together; required maps must be available.
+
+Caller-supplied `X-Namespace`, `X-Source-App`, `X-Source-Namespace`,
+`X-Source-Tid`, `X-App-Id`, and all `X-User-*` headers (including duplicate
+values) are stripped.
 
 After attribution and authorization, the gateway writes `X-Source-App` with the
 exact application ID registered for the caller, and `X-Source-Namespace` with its

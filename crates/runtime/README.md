@@ -54,6 +54,29 @@ The runtime is built on top of [Wasmtime](https://wasmtime.dev/) and provides se
 | `MemoryLimiter` | Limits memory allocation for Wasm instances |
 | `IoResourceTracker` | Tracks I/O resources used by Wasm instances |
 
+## HTTP request activity and idle retirement
+
+`PolicyCounters.http_activity` holds a shared
+`runtime::request_activity::RequestActivity`. Managed WASI HTTP P2/P3 adapters
+call `enable_http_serving()` and acquire a `RequestGuard` through `begin()`.
+The guard is shared between guest execution and response-body ownership:
+`ManagedOutgoingBody` retains it for P2, and `ActivityBody` wraps the P3 body.
+Headers alone do not complete activity. EOF, terminal error, cancellation and
+drop release their owners; the last clone of each request guard decrements the
+active count and updates `last_completed`.
+
+`is_idle()` is only a candidate check. `try_retire_if_idle()` shares the same
+mutex as `begin()`, atomically requiring zero active requests and sufficient
+completion-based idle time before fencing new admission. A retiring instance
+rejects new managed HTTP requests with503. Explicit `retire()` still allows
+operator/quota shutdown of active work. Supervisor removes the claimed instance
+under its pool write lock before completing shutdown.
+
+This protects managed P2/P3 handlers and scheduled invocations using their
+instance through response completion. It does not inspect arbitrary TCP
+traffic: legacy `WasiCliRun`/raw-TCP servers keep their previous activity
+accounting. Idle TTL and request execution deadlines are unchanged.
+
 ## Sustained Load Review
 
 The runtime now includes a repeatable Wasmtime load-review path for WSL/Linux:

@@ -50,7 +50,7 @@ untrusted tenants on one node.
 | `syscall_counter` | raw syscall entry | registered WASI runtime TIDs |
 | `namespace_enforcer` | socket and namespace-related syscall hooks | registered WASI runtime TIDs |
 
-Each object has its own `CONFIG` and ring-buffer maps. `LoadedEbpf` owns all
+Each object has its own `CONFIG` and ring-buffer maps. The namespace object also owns the authoritative gateway connection maps: `GATEWAY_PEERS`, `GATEWAY_OWNERS` and `GATEWAY_SOCKETS`. The gateway reads these maps directly and revalidates live connection/registration ownership per request; ring-buffer delivery supplies telemetry, never an authorization fallback. `LoadedEbpf` owns all
 programs, maps, and attachment links for the node lifetime. Dropping the monitor
 handle detaches them; lifecycle validation checks that repeated deploy/restart/
 remove operations do not leave stale application identities.
@@ -68,7 +68,7 @@ and [local isolation validation](../../docs/local-memory-isolation.md).
   and the supported userspace fallback starts.
 - enabled and required: the same condition makes readiness fail. Production
   admission requires this mode because persistent WASI CLI connection cleanup
-  and node-local mesh identity rely on kernel events.
+  relies on kernel events, while node-local mesh identity requires readable, live kernel gateway maps. A userspace monitoring fallback cannot authorize mesh callers.
 
 `/admin/ebpf/status` and Prometheus metrics distinguish application health from
 monitor availability. Alerts must likewise distinguish

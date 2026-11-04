@@ -24,9 +24,10 @@ The gateway parses incoming `Host` headers in the format `<app>.<namespace>.inte
 
 1. **Inbound Request** — An application sends an HTTP request to `127.0.0.1:9080` with a `Host` header set to `<app>.<namespace>.internal`.
 2. **Host Parsing** — `parse_internal_host()` extracts the app name and namespace from the `Host` header.
-3. **Target Resolution** — The gateway looks up the target application configuration using the parsed app ID and namespace.
-4. **Policy Application** — Route-level and endpoint-level policies are evaluated, including JWT auth, role checks, API keys, and endpoint scope checks.
-5. **Forwarding** — The request is forwarded to the resolved target application instance using HTTP/1.1 or `h2c`, depending on the target app model.
+3. **Caller Attribution** — At connection acceptance, snapshot the owner from the authoritative eBPF gateway maps; revalidate its connection and registration generation for every request. Missing or unreadable identity fails closed. Ring-buffer telemetry and caller headers cannot supply an authorization fallback.
+4. **Target Resolution** — The gateway looks up the target application configuration using the parsed app ID and namespace.
+5. **Policy Application** — Route-level and endpoint-level policies are evaluated, including JWT auth, role checks, API keys, and endpoint scope checks.
+6. **Forwarding** — The request is forwarded to the resolved target application instance using HTTP/1.1 or `h2c`, depending on the target app model.
 
 ## Public API
 
@@ -58,14 +59,14 @@ Endpoint rules may also require JWT scopes through `required_scopes`.
 
 | Issue | Severity | Description |
 |-------|----------|-------------|
-| Internal gateway requires eBPF-backed identity attribution | **High** | Requests are accepted only when caller identity resolves through the namespace map with eBPF enforcement active. If that attribution path is unavailable, the gateway fails closed. |
+| Internal gateway requires eBPF-backed identity attribution | **High** | Requests are accepted only when caller identity resolves through the live kernel gateway maps with eBPF enforcement active. If that attribution path is unavailable, the gateway fails closed. |
 | Content-Length-based body cap only | **Medium** | The gateway rejects oversized requests when `Content-Length` exceeds the configured cap. Chunked uploads without a trusted length still rely on upstream behavior, so add streaming byte accounting if you need a strict on-the-wire hard stop. |
 
 ## Security Considerations
 
 - **Service Naming Model**: Internal service discovery is intentionally app-name based inside a namespace. If you want a parallel incompatible rollout, deploy it as a separate app with a different name rather than expecting version-qualified internal hostnames.
 
-- **Namespace Isolation**: The gateway strips forged internal identity headers, resolves caller identity from the namespace map, and enforces cross-namespace deny-by-default with explicit allowlists. The gateway is intended to run only with eBPF-backed caller attribution and now fails closed when that identity path is unavailable.
+- **Namespace Isolation**: The gateway strips forged internal identity headers, resolves and revalidates caller identity from the authoritative kernel gateway maps, and enforces cross-namespace deny-by-default with explicit allowlists. The gateway is intended to run only with eBPF-backed caller attribution and now fails closed when that identity path is unavailable.
 
 - **Rate Limiting Coverage**: The gateway enforces source-app rate limiting and endpoint-rule rate limits on the slow path. If you need stricter tenant isolation or request-shape-aware throttling, add per source/target pair policies rather than relying only on global app-level limits.
 

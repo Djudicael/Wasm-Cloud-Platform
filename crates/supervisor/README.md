@@ -57,6 +57,18 @@ The supervisor operates as a long-running service that coordinates multiple subs
 
 Instance shutdown now fences the upstream, signals the runtime, waits for its join handle, records billing, deregisters service state, and releases the port. A timed-out task is reinserted in a fenced state and reaped after it exits.
 
+For managed WASI HTTP P2/P3, `ManagedInstance::is_idle_for()` uses the runtime
+request activity tracker rather than request-start age. Guest execution and
+response bodies retain shared RAII guards through completion/error/drop or
+cancellation. Scheduled deliveries using those adapters share this protection.
+`kill_idle_instance_internal()` rechecks `try_retire_if_idle()` under the pool
+write lock immediately before removal: admission and retirement use the same
+activity mutex, so an old idle candidate cannot stop newly admitted work.
+Retirement fences further managed HTTP admission. Explicit operator/undeploy
+and quota shutdown may still stop active work; this protection applies to idle
+reclamation, not every shutdown reason. Legacy CLI/raw-TCP instances retain
+previous timestamp accounting. No idle TTL increase is required by this fix.
+
 `forget_app()` rejects pools containing any tracked instance, including fenced
 instances whose shutdown timed out. Removal cannot silently discard their task
 or release ownership before exit is confirmed.

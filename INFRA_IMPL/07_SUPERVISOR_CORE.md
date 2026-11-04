@@ -1,5 +1,24 @@
 # Step 07 — Supervisor Core (Instance Lifecycle Manager)
 
+## Implementation update (2026-11-04)
+
+Managed WASI HTTP P2/P3 now uses `PolicyCounters.http_activity` and shared
+`RequestGuard` ownership for guest execution and response bodies. Idle time is
+completion-based while no request is active. The Supervisor's idle-removal path
+atomically rechecks and claims retirement under the pool write lock; concurrent
+new admission cannot slip between an idle decision and instance removal.
+Operator/undeploy/quota shutdown remains possible. Legacy CLI/raw-TCP servers
+retain their previous timestamp accounting; this is not arbitrary TCP activity
+inspection and does not change idle TTLs.
+
+The timestamp-only pool examples and original implementation checklists below
+remain historical design material. See the maintained
+[runtime lifecycle](../crates/runtime/README.md#http-request-activity-and-idle-retirement),
+[Supervisor lifecycle](../crates/supervisor/README.md#shutdown-and-accounting)
+and [application guide](../docs/deploying-applications.md) for current behavior.
+This update describes the implementation; final regression and deployed
+acceptance results are recorded separately and are not asserted here.
+
 ## Goal
 The Supervisor is the beating heart of the node. It:
 

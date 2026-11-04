@@ -1,5 +1,22 @@
 # Step 26 — Artifact Garbage Collection
 
+## Implementation update (2026-11-04)
+
+Deployment publication now uses `Store::persist_deployment()` to atomically
+write the compiled artifact, application config and artifact hash and clear the
+exact undeploy marker. Undeployed-app GC rechecks marker identity, timestamp and
+grace in its write transaction, then removes exact full-app config/artifact/hash
+keys together with associated metrics, routes and schedule cursors. Errors roll
+back; a stale candidate cannot purge a newly published deployment or a newer
+undeploy incarnation.
+
+Shared raw Wasm/verification records, secrets, API keys, gateway configuration
+and lifecycle ordering fences are retained. These operations do not imply
+external-resource deletion or a transaction across node services. See the
+[current storage contract](../crates/storage/README.md#atomic-deployment-publication-and-undeploy-cleanup).
+The original design and examples below remain historical material. Final node
+acceptance is recorded separately; this note does not assert P1C completion.
+
 ## Goal
 Implement automatic cleanup of old Wasm artifacts, configs, and metrics data. The system must:
 - Delete compiled artifacts for versions that are no longer referenced

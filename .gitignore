@@ -1,4 +1,5 @@
 /target
+/.local/
 .oidc-vm-testbed-state.json
 .oidc-vm-testbed-state.json.oidc-secrets/
 .env

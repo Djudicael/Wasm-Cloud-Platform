@@ -113,3 +113,13 @@ outcomes, and remaining risks for Rust compatibility, WASI, eBPF, TLS/crypto,
 native libraries, and integration behavior. Do not claim all dependencies are
 current unless every manifest and relevant target was checked against current
 authoritative sources.
+
+## Local storage lifecycle
+
+Read [local resource hygiene](../../references/local-resource-hygiene.md)
+before the build/validation matrix. Resolve and reuse the effective Cargo
+target path; check both Linux and the Windows backing volume before large
+writes. Do not multiply build directories, rebuild unchanged dependencies, or
+clean shared targets/toolchains to make room. Container-backed checks also need
+an exact disposable-resource ledger and verified volume teardown, including
+failure/interruption recovery. Report missing automatic guards as missing.

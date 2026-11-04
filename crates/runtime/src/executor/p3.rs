@@ -43,6 +43,7 @@ pub(super) fn spawn(
     let config = prepared.config.clone();
     let policy = resolve_instance_policy(&config, addr.port())?;
     let counters = Arc::new(PolicyCounters::new());
+    counters.http_activity.enable_http_serving();
     let task_counters = counters.clone();
     let error_config = config.clone();
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel();
@@ -67,8 +68,11 @@ pub(super) fn spawn(
                                 let (pre, engine, config, env, check, counters) =
                                     (pre.clone(), engine.clone(), config.clone(), env.clone(), check.clone(), counters.clone());
                                 async move {
+                                    let Some(activity) = counters.http_activity.begin() else {
+                                        return Ok::<_, wasmtime::Error>(hyper::Response::builder().status(503).body(crate::request_activity::ActivityBody::new(Full::new(bytes::Bytes::new()), None))?);
+                                    };
                                     if common::triggers::reserved_network_path(req.uri().path()) {
-                                        return Ok::<_, wasmtime::Error>(hyper::Response::builder().status(403).body(Full::new(bytes::Bytes::new()))?);
+                                        return Ok::<_, wasmtime::Error>(hyper::Response::builder().status(403).body(crate::request_activity::ActivityBody::new(Full::new(bytes::Bytes::new()), Some(activity)))?);
                                     }
                                     let names: Vec<_> = req.headers().keys().filter(|n| n.as_str().starts_with("x-trigger-")).cloned().collect(); for name in names { req.headers_mut().remove(name); }
                                     let state = build_store_state(&config, env, addr.port(), check, Some(counters))?;
@@ -89,7 +93,7 @@ pub(super) fn spawn(
                                         }, async { io.await.map_err(wasmtime::Error::from) })?;
                                         wasmtime::error::Ok(response)
                                     })).await???;
-                                    Ok(response)
+                                    Ok(response.map(|body| crate::request_activity::ActivityBody::new(body, Some(activity))))
                                 }
                             });
                             if let Err(error) = http2::Builder::new(TokioExecutor::new()).serve_connection(TokioIo::new(client), service).await {

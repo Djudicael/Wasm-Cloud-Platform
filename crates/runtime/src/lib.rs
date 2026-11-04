@@ -3,6 +3,7 @@ pub mod executor;
 pub mod limits;
 mod policy_boundary;
 pub mod policy_tracker;
+pub mod request_activity;
 pub mod virtual_dns;
 
 #[cfg(test)]

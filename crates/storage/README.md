@@ -73,6 +73,7 @@ Key responsibilities include:
 | Function/Method | Description |
 |-----------------|-------------|
 | `Store::open(path)` | Open or create a database at the given path |
+| `Store::persist_deployment()` | Atomically publish compiled artifact, application config and artifact hash, and clear the exact undeploy marker |
 | `Store::store_artifact()` | Store a compiled Wasm artifact |
 | `Store::get_artifact()` | Retrieve a compiled Wasm artifact |
 | `Store::store_raw_wasm()` | Store a raw (uncompiled) Wasm binary |
@@ -95,6 +96,28 @@ Key responsibilities include:
 | `Store::begin_lifecycle_event()` | Persist a per-app broker-ordering fence; allow pending retries and reject older/completed deliveries; atomically fence admissions for removals |
 | `Store::complete_lifecycle_event()` | Mark the current matching deployment/removal delivery complete |
 | `get_db_path()` | Get the database path (module-level function) |
+
+### Atomic deployment publication and undeploy cleanup
+
+`persist_deployment(&AppId, &[u8], &AppConfig, &str)` validates matching
+application identity and trigger configuration, then writes `ARTIFACTS`,
+`CONFIGS` and `ARTIFACT_HASHES` and clears `_undeploy:<fullAppId>` in one redb
+write transaction. A concurrent undeploy purge sees either the old fenced
+state or the complete replacement deployment, not a partial publication.
+
+Undeployed-app GC rechecks the selected marker value and its elapsed grace
+period inside its write transaction. A changed marker, redeployment or
+not-yet-expired grace skips the candidate. It removes the exact full application
+ID from compiled artifacts, configs and artifact hashes; metrics with that
+application prefix, routes targeting that exact app and its schedule cursors
+are removed in the same transaction. The undeploy marker is removed only with
+the successful commit. An error rolls the transaction back.
+
+Shared content-addressed raw Wasm and verification records, secrets, API keys,
+gateway configuration and lifecycle ordering fences remain intact. This
+undeployed-app purge is separate from the raw/pruning APIs and their limitations
+listed below. Node-level admission, shutdown and external resources are not
+made transactional by this storage operation.
 
 ### HTTP Artifact Server
 

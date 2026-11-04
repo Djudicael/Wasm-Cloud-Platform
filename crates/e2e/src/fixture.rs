@@ -13,7 +13,6 @@ use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 use tempfile::TempDir;
 
-use tokio::time::sleep;
 use tracing::{info, warn};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -481,192 +480,247 @@ impl Drop for NodeProcess {
 
 // ── NatsContainer ────────────────────────────────────────────────────
 
-/// A running NATS container managed via `podman run --network=host`.
-///
-/// Uses host networking directly instead of a container helper library because Podman
-/// rootless mode's `slirp4netns` port mappings are only reachable from the
-/// process that created the container. With `--network=host`, NATS binds
-/// directly to the host port and any child process (like `wasm-node`) can
-/// connect.
-enum NatsContainerBackend {
-    HostRuntime {
-        runtime: String,
-        container_id: String,
-    },
+const NATS_IMAGE: &str = "docker.io/library/nats:2.10-alpine";
+const NATS_OWNER_LABEL: &str = "dev.wasm-cloud-platform.e2e.nats";
+
+struct OwnedNatsContainer {
+    runtime: String,
+    container_id: String,
+    owner: String,
 }
 
-pub struct NatsContainer {
-    pub url: String,
-    pub port: u16,
-    backend: NatsContainerBackend,
+fn owned_nats_id(text: &str, owner: &str) -> Result<String, String> {
+    let value: serde_json::Value =
+        serde_json::from_str(text).map_err(|e| format!("invalid NATS inspection: {e}"))?;
+    let items = value.as_array().ok_or("NATS inspection must be an array")?;
+    if items.len() != 1 || items[0]["Config"]["Labels"][NATS_OWNER_LABEL].as_str() != Some(owner) {
+        return Err("refusing unowned NATS container".into());
+    }
+    let id = items[0]["Id"].as_str().ok_or("missing NATS container ID")?;
+    if id.len() != 64
+        || !id
+            .bytes()
+            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+    {
+        return Err("invalid NATS container ID".into());
+    }
+    Ok(id.into())
 }
 
-impl NatsContainer {
-    fn runtime_and_container_id(&self) -> Result<(&str, &str), String> {
-        match &self.backend {
-            NatsContainerBackend::HostRuntime {
-                runtime,
-                container_id,
-            } => Ok((runtime.as_str(), container_id.as_str())),
-        }
+fn nats_create_command(runtime: &str, owner: &str, port: u16) -> Command {
+    let mut command = Command::new(runtime);
+    command.args([
+        "create",
+        "--name",
+        &format!("wcp-e2e-nats-{owner}"),
+        "--label",
+        &format!("{NATS_OWNER_LABEL}={owner}"),
+        "--publish",
+        &format!("127.0.0.1:{port}:4222"),
+        NATS_IMAGE,
+        "-js",
+        "--port",
+        "4222",
+    ]);
+    command
+}
+
+fn nats_published_address(text: &str, expected_port: u16) -> Result<SocketAddr, String> {
+    let address: SocketAddr = text
+        .trim()
+        .parse()
+        .map_err(|e| format!("invalid NATS port publication: {e}"))?;
+    if address.ip() != std::net::Ipv4Addr::LOCALHOST
+        || address.port() == 0
+        || address.port() != expected_port
+    {
+        return Err("NATS publication differs from its requested loopback endpoint".into());
     }
+    Ok(address)
+}
 
-    fn host_for_waits(&self) -> &str {
-        self.url
-            .strip_prefix("nats://")
-            .and_then(|endpoint| endpoint.rsplit_once(':').map(|(host, _)| host))
-            .unwrap_or("127.0.0.1")
-    }
-
-    async fn start_with_host_runtime(port: u16) -> Result<Self, String> {
-        let runtime = match detect_host_container_runtime() {
-            Some(HostContainerRuntime::Podman) => "podman",
-            Some(HostContainerRuntime::Docker) => "docker",
-            None => {
-                return Err(
-                    "neither podman nor docker is available for host-network NATS fallback"
-                        .to_string(),
-                )
-            }
-        };
-
-        info!(port, runtime, "starting NATS container on host port");
-
-        let container_name = format!("nats-chaos-{port}");
-
-        let _ = Command::new(runtime)
-            .args(["rm", "-f", &container_name])
-            .output();
-
+impl OwnedNatsContainer {
+    fn inspect(runtime: &str, lookup: &str, owner: &str) -> Result<Self, String> {
         let output = Command::new(runtime)
-            .args([
-                "run",
-                "-d",
-                "--network=host",
-                "--name",
-                &container_name,
-                "docker.io/library/nats:2.10-alpine",
-                "-js",
-                "--port",
-                &port.to_string(),
-            ])
+            .args(["inspect", lookup])
             .output()
-            .map_err(|e| format!("failed to run {runtime}: {e}"))?;
-
+            .map_err(|e| format!("failed to inspect NATS container: {e}"))?;
         if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(format!("{runtime} run failed: {stderr}"));
+            return Err(format!(
+                "{runtime} could not inspect owned NATS container {lookup}"
+            ));
         }
-
-        let container_id = String::from_utf8_lossy(&output.stdout).trim().to_string();
-
-        info!(port, %container_id, runtime, "NATS container started, waiting for readiness");
-
-        sleep(Duration::from_secs(2)).await;
-
-        crate::helpers::wait_for_tcp("127.0.0.1", port, Duration::from_secs(10))
-            .await
-            .map_err(|e| format!("NATS not reachable on port {port}: {e}"))?;
-
-        sleep(Duration::from_millis(500)).await;
-        if let Err(e) =
-            crate::helpers::wait_for_tcp("127.0.0.1", port, Duration::from_secs(5)).await
-        {
-            warn!(port, error = %e, "NATS port became unreachable shortly after startup — container may have crashed");
-        }
-
-        let url = format!("nats://127.0.0.1:{port}");
-
-        info!(
-            port,
-            url, runtime, "NATS container ready via host-network fallback"
-        );
-
-        Ok(NatsContainer {
-            url,
-            port,
-            backend: NatsContainerBackend::HostRuntime {
-                runtime: runtime.to_string(),
-                container_id,
-            },
+        let container_id = owned_nats_id(&String::from_utf8_lossy(&output.stdout), owner)?;
+        Ok(Self {
+            runtime: runtime.into(),
+            container_id,
+            owner: owner.into(),
         })
     }
 
-    /// Start a NATS container with JetStream enabled on the given host port.
+    fn verify(&self) -> Result<(), String> {
+        let output = Command::new(&self.runtime)
+            .args(["inspect", &self.container_id])
+            .output()
+            .map_err(|e| format!("failed to inspect NATS ownership: {e}"))?;
+        if !output.status.success()
+            || owned_nats_id(&String::from_utf8_lossy(&output.stdout), &self.owner)?
+                != self.container_id
+        {
+            return Err("NATS container identity changed or disappeared".into());
+        }
+        Ok(())
+    }
+
+    fn action(&self, action: &str) -> Result<(), String> {
+        self.verify()?;
+        let output = Command::new(&self.runtime)
+            .args([action, &self.container_id])
+            .output()
+            .map_err(|e| format!("failed to {action} owned NATS container: {e}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "{} {action} {} failed: {}",
+                self.runtime,
+                self.container_id,
+                String::from_utf8_lossy(&output.stderr)
+            ));
+        }
+        Ok(())
+    }
+
+    fn address(&self, expected_port: u16) -> Result<SocketAddr, String> {
+        self.verify()?;
+        let output = Command::new(&self.runtime)
+            .args(["port", &self.container_id, "4222/tcp"])
+            .output()
+            .map_err(|e| format!("failed to inspect NATS publication: {e}"))?;
+        if !output.status.success() {
+            return Err("cannot inspect owned NATS port publication".into());
+        }
+        nats_published_address(&String::from_utf8_lossy(&output.stdout), expected_port)
+    }
+}
+
+impl Drop for OwnedNatsContainer {
+    fn drop(&mut self) {
+        if let Err(error) = self.verify() {
+            warn!(container_id = %self.container_id, %error, "NATS cleanup refused or already absent");
+            return;
+        }
+        match Command::new(&self.runtime)
+            .args(["rm", "-f", &self.container_id])
+            .output()
+        {
+            Ok(output) if output.status.success() => {
+                info!(container_id = %self.container_id, "owned NATS container removed");
+            }
+            Ok(_) => warn!(container_id = %self.container_id, "owned NATS removal failed"),
+            Err(error) => {
+                warn!(container_id = %self.container_id, %error, "owned NATS removal failed")
+            }
+        }
+    }
+}
+
+/// A running NATS container with a verified loopback-published port.
+///
+/// Host networking can refer to a rootless runtime's own network namespace in
+/// WSL. Explicit publication is reachable by native test/node processes. Every
+/// fixture has a unique owner label and is operated on only by its exact ID.
+pub struct NatsContainer {
+    pub url: String,
+    pub port: u16,
+    container: OwnedNatsContainer,
+}
+
+impl NatsContainer {
+    async fn start_with_runtime(runtime: &str, requested_port: u16) -> Result<Self, String> {
+        // Choose a fixed publication even for port=0 so stop/resume preserves
+        // the endpoint. A publication race fails closed; no resource is replaced.
+        let port = if requested_port == 0 {
+            std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+                .and_then(|listener| listener.local_addr())
+                .map_err(|e| format!("cannot allocate local NATS port: {e}"))?
+                .port()
+        } else {
+            requested_port
+        };
+        let owner = uuid::Uuid::new_v4().simple().to_string();
+        let name = format!("wcp-e2e-nats-{owner}");
+        let output = nats_create_command(runtime, &owner, port)
+            .output()
+            .map_err(|e| format!("failed to create NATS container via {runtime}: {e}"))?;
+        // Establish exact ownership before checking create/start outcomes. This
+        // guard also removes a partially created fixture if starting it fails.
+        let container = OwnedNatsContainer::inspect(runtime, &name, &owner)
+            .map_err(|e| format!("NATS creation could not establish ownership ({name}): {e}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "{runtime} create failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ));
+        }
+        container.action("start")?;
+        let address = container.address(port)?;
+        crate::helpers::wait_for_tcp(
+            &address.ip().to_string(),
+            address.port(),
+            Duration::from_secs(15),
+        )
+        .await
+        .map_err(|e| format!("owned NATS publication {address} not reachable: {e}"))?;
+        let fixture = Self {
+            url: format!("nats://{address}"),
+            port: address.port(),
+            container,
+        };
+        // Verify protocol and JetStream initialization, not just an open socket.
+        let _bus = fixture.connect().await?;
+        info!(%address, runtime, "NATS fixture ready through verified publication");
+        Ok(fixture)
+    }
+
+    /// Start isolated JetStream NATS at the requested loopback port, or choose
+    /// an available fixed port when zero is supplied. The port survives resume.
     pub async fn start(port: u16) -> Result<Self, String> {
         setup_container_runtime();
-        Self::start_with_host_runtime(port).await
+        let runtime = match detect_host_container_runtime() {
+            Some(HostContainerRuntime::Podman) => "podman",
+            Some(HostContainerRuntime::Docker) => "docker",
+            None => return Err("neither podman nor docker is available for NATS".into()),
+        };
+        Self::start_with_runtime(runtime, port).await
     }
 
     /// Connect to this NATS instance and return a `NatsBus`.
     pub async fn connect(&self) -> Result<NatsBus, String> {
-        let bus = NatsBus::connect(&self.url)
+        NatsBus::connect(&self.url)
             .await
-            .map_err(|e| format!("failed to connect to NATS: {e}"))?;
-        Ok(bus)
+            .map_err(|e| format!("failed to connect to NATS: {e}"))
     }
 
     pub fn stop(&self) -> Result<(), String> {
-        let (runtime, container_id) = self.runtime_and_container_id()?;
-        let output = Command::new(runtime)
-            .args(["stop", container_id])
-            .output()
-            .map_err(|e| format!("failed to stop NATS container via {runtime}: {e}"))?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(format!("{runtime} stop {container_id} failed: {stderr}"));
-        }
-
-        Ok(())
+        self.container.action("stop")
     }
 
     pub async fn resume(&self) -> Result<(), String> {
-        let (runtime, container_id) = self.runtime_and_container_id()?;
-        let output = Command::new(runtime)
-            .args(["start", container_id])
-            .output()
-            .map_err(|e| format!("failed to start NATS container via {runtime}: {e}"))?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(format!("{runtime} start {container_id} failed: {stderr}"));
+        self.container.action("start")?;
+        let address = self.container.address(self.port)?;
+        if self.url != format!("nats://{address}") {
+            return Err("resumed NATS publication changed".into());
         }
-
-        crate::helpers::wait_for_tcp(self.host_for_waits(), self.port, Duration::from_secs(10))
-            .await
-            .map_err(|e| {
-                format!(
-                    "resumed NATS not reachable on {}:{}: {e}",
-                    self.host_for_waits(),
-                    self.port
-                )
-            })?;
-
+        crate::helpers::wait_for_tcp(
+            &address.ip().to_string(),
+            address.port(),
+            Duration::from_secs(15),
+        )
+        .await
+        .map_err(|e| format!("resumed NATS publication {address} not reachable: {e}"))?;
+        let _bus = self.connect().await?;
         Ok(())
     }
 }
-
-impl Drop for NatsContainer {
-    fn drop(&mut self) {
-        match &self.backend {
-            NatsContainerBackend::HostRuntime {
-                runtime,
-                container_id,
-            } => match Command::new(runtime)
-                .args(["rm", "-f", container_id])
-                .output()
-            {
-                Ok(_) => info!(%container_id, runtime, "NATS container removed"),
-                Err(e) => {
-                    warn!(%container_id, runtime, error = %e, "failed to remove NATS container")
-                }
-            },
-        }
-    }
-}
-
-// ── ClusterFixture ───────────────────────────────────────────────────
 
 /// A complete test cluster with NATS and one or more wasm-node instances.
 ///
@@ -949,6 +1003,145 @@ fn cargo_target_dir(workspace_root: &Path) -> PathBuf {
 mod tests {
     use super::{select_host_container_runtime, HostContainerRuntime};
 
+    #[test]
+    fn nats_publication_must_be_one_exact_nonzero_loopback_endpoint() {
+        assert_eq!(
+            super::nats_published_address("127.0.0.1:42461\n", 42461).unwrap(),
+            "127.0.0.1:42461".parse().unwrap()
+        );
+        for mapping in [
+            "0.0.0.0:42461",
+            "172.18.0.1:42461",
+            "[::1]:42461",
+            "127.0.0.1:4222",
+            "127.0.0.1:42461\n127.0.0.1:42462",
+            "invalid",
+        ] {
+            assert!(super::nats_published_address(mapping, 42461).is_err());
+        }
+        assert!(super::nats_published_address("127.0.0.1:0", 0).is_err());
+    }
+
+    #[test]
+    fn nats_ownership_requires_exact_label_and_full_container_id() {
+        let owner = "fixture-owner";
+        let id = "ab".repeat(32);
+        let inspected = serde_json::json!([{
+            "Id":id,
+            "Config":{"Labels":{(super::NATS_OWNER_LABEL):owner}}
+        }]);
+        assert_eq!(
+            super::owned_nats_id(&inspected.to_string(), owner).unwrap(),
+            id
+        );
+        assert!(super::owned_nats_id(&inspected.to_string(), "foreign-owner").is_err());
+        let mut bad_id = inspected.clone();
+        bad_id[0]["Id"] = serde_json::json!("abc123");
+        assert!(super::owned_nats_id(&bad_id.to_string(), owner).is_err());
+        bad_id[0]["Id"] = serde_json::json!("../container");
+        assert!(super::owned_nats_id(&bad_id.to_string(), owner).is_err());
+        assert!(super::owned_nats_id("[]", owner).is_err());
+        assert!(super::owned_nats_id(
+            &serde_json::json!([inspected[0], inspected[0]]).to_string(),
+            owner
+        )
+        .is_err());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn failed_nats_start_removes_only_the_exact_created_container() {
+        use std::os::unix::fs::PermissionsExt;
+        for failure in ["create", "start", "publication"] {
+            let dir = tempfile::tempdir().unwrap();
+            let executable = dir.path().join("fake-runtime");
+            std::fs::write(dir.path().join("failure"), failure).unwrap();
+            std::fs::write(&executable, r#"#!/bin/sh
+set -eu
+cd -- "$(dirname "$0")"
+printf '%s\n' "$*" >> commands
+id=abababababababababababababababababababababababababababababababab
+mode=$(cat failure)
+case "$1" in
+ create)
+  shift
+  while [ "$#" -gt 0 ]; do
+    if [ "$1" = --label ]; then shift; printf '%s' "${1#*=}" > owner; fi
+    shift
+  done
+  printf '%s\n' "$id"
+  if [ "$mode" = create ]; then exit 17; fi
+  ;;
+ inspect)
+  test ! -f removed
+  printf '{"Id":"%s","Config":{"Labels":{"dev.wasm-cloud-platform.e2e.nats":"%s"}}}\n' "$id" "$(cat owner)" | sed 's/^/[/;s/$/]/'
+  ;;
+ start)
+  if [ "$mode" = start ]; then exit 19; fi
+  ;;
+ port)
+  printf '0.0.0.0:42461\n'
+  ;;
+ rm)
+  test "$2" = -f
+  test "$3" = "$id"
+  touch removed
+  ;;
+ *) exit 21 ;;
+esac
+"#).unwrap();
+            std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let result =
+                super::NatsContainer::start_with_runtime(executable.to_str().unwrap(), 42461).await;
+            assert!(result.is_err(), "{failure} must fail");
+            assert!(
+                dir.path().join("removed").exists(),
+                "{failure} must clean its created container"
+            );
+            let commands = std::fs::read_to_string(dir.path().join("commands")).unwrap();
+            assert!(commands.contains("--publish 127.0.0.1:42461:4222"));
+            assert!(!commands.contains("--network=host"));
+            let removals: Vec<_> = commands
+                .lines()
+                .filter(|line| line.starts_with("rm "))
+                .collect();
+            assert_eq!(
+                removals,
+                ["rm -f abababababababababababababababababababababababababababababababab"]
+            );
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires local Podman/Docker; owns one UUID-labelled NATS container"]
+    async fn published_nats_lifecycle_preserves_endpoint_and_removes_exact_container() {
+        let fixture = super::NatsContainer::start(0)
+            .await
+            .expect("start isolated NATS");
+        assert!(fixture.port > 0);
+        assert_eq!(fixture.url, format!("nats://127.0.0.1:{}", fixture.port));
+        let url = fixture.url.clone();
+        let runtime = fixture.container.runtime.clone();
+        let id = fixture.container.container_id.clone();
+        let bus = fixture.connect().await.expect("NATS protocol before stop");
+        bus.client().flush().await.expect("flush before stop");
+        drop(bus);
+        fixture.stop().expect("stop exact fixture");
+        fixture.resume().await.expect("resume exact fixture");
+        assert_eq!(fixture.url, url);
+        let bus = fixture.connect().await.expect("NATS protocol after resume");
+        bus.client().flush().await.expect("flush after resume");
+        drop(bus);
+        drop(fixture);
+        let inspection = std::process::Command::new(runtime)
+            .args(["inspect", &id])
+            .output()
+            .unwrap();
+        assert!(
+            !inspection.status.success(),
+            "dropped fixture container still exists"
+        );
+    }
     #[test]
     fn test_select_host_container_runtime_prefers_podman_socket_hint() {
         assert_eq!(

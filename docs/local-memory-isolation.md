@@ -113,6 +113,13 @@ the rerun filtered out only that test. This is retained as a failed fixture,
 not counted as a passed test or confused with the separately passed actual
 owned-NATS callback test.
 
+On 2026-11-04 the NATS fixture was changed to explicit loopback port publication
+with unique labelled ownership and exact-ID cleanup, including startup failure.
+Its live start/stop/resume/removal test and the previously failing proxy
+`test_health_transition_retries_after_publish_failure` both passed. This
+supersedes the fixture limitation above without changing the earlier recorded
+test outcome or the separate owned-NATS callback evidence.
+
 This acceptance uses the explicit workflow model fixture and **zero paid model
 calls**. It verifies native-platform WASI execution, identity, isolation and
 admission/recovery behavior; it does not revalidate real-model semantics,

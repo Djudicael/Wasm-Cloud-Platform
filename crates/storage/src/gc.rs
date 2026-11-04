@@ -321,232 +321,156 @@ impl Store {
             .collect()
     }
 
-    /// Purge all state for apps whose undeploy grace period has expired.
+    /// Purge complete application IDs after their undeploy grace period.
     pub fn gc_undeployed_apps(&self, grace_secs: u64) -> Result<u64, PlatformError> {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-
-        // Find all apps with expired grace periods
-        let tx = self
-            .db
-            .begin_read()
-            .map_err(PlatformError::storage_source)?;
-        let table = tx
-            .open_table(SCHEMA_META)
-            .map_err(PlatformError::storage_source)?;
-
-        let expired_apps: Vec<String> = table
-            .iter()
             .map_err(PlatformError::storage_source)?
-            .filter_map(|e| match e {
-                Ok(v) => Some(v),
-                Err(err) => {
-                    warn!(error = %err, "GC: error iterating schema_meta table entry, skipping");
-                    None
+            .as_secs();
+        let candidates = {
+            let tx = self
+                .db
+                .begin_read()
+                .map_err(PlatformError::storage_source)?;
+            let table = tx
+                .open_table(SCHEMA_META)
+                .map_err(PlatformError::storage_source)?;
+            let mut candidates = Vec::new();
+            for entry in table.iter().map_err(PlatformError::storage_source)? {
+                let (key, value) = entry.map_err(PlatformError::storage_source)?;
+                if let Some(app) = key.value().strip_prefix("_undeploy:") {
+                    let timestamp = value
+                        .value()
+                        .parse::<u64>()
+                        .map_err(PlatformError::storage_source)?;
+                    if now
+                        .checked_sub(timestamp)
+                        .is_some_and(|age| age > grace_secs)
+                    {
+                        candidates.push((app.to_owned(), value.value().to_owned()));
+                    }
                 }
-            })
-            .filter_map(|(k, v)| {
-                let key = k.value().to_string();
-                if !key.starts_with("_undeploy:") {
-                    return None;
-                }
-                let ts: u64 = v.value().parse().unwrap_or(0);
-                if now - ts > grace_secs {
-                    Some(key.strip_prefix("_undeploy:").unwrap().to_string())
-                } else {
-                    None
-                }
-            })
-            .collect();
-
-        drop(table);
-        drop(tx);
-
-        let mut purged = 0u64;
-        for app_name in &expired_apps {
-            self.purge_app_state(app_name)?;
-            purged += 1;
-            info!(app = %app_name, "GC: purged all state for undeployed app");
+            }
+            candidates
+        };
+        let mut purged = 0;
+        for (app, marker) in candidates {
+            if self.purge_undeployed_candidate(&app, &marker, now, grace_secs)? {
+                purged += 1;
+                info!(app=%app,"GC: purged artifact/config state; credentials, gateway policies and shared blobs retained");
+            }
         }
-
         Ok(purged)
     }
 
-    /// Delete ALL data for an app across all redb tables (except secrets).
-    fn purge_app_state(&self, app_name: &str) -> Result<(), PlatformError> {
-        self.delete_trigger_cursors_for_app(app_name)?;
-        use redb::ReadableTable;
-
-        let prefix = format!("{}:", app_name);
-
-        // Delete from artifacts table (byte values)
+    /// Recheck the selection fence and remove one incarnation in one transaction.
+    /// A deployment commit either runs before this transaction (clearing its
+    /// marker) or afterwards (writing all replacement state together).
+    fn purge_undeployed_candidate(
+        &self,
+        app: &str,
+        expected_marker: &str,
+        now: u64,
+        grace_secs: u64,
+    ) -> Result<bool, PlatformError> {
         let tx = self
             .db
             .begin_write()
             .map_err(PlatformError::storage_source)?;
-        {
-            let mut table = tx
-                .open_table(ARTIFACTS)
-                .map_err(PlatformError::storage_source)?;
-            let keys: Vec<String> = table
-                .iter()
-                .map_err(PlatformError::storage_source)?
-                .filter_map(|e| match e {
-                    Ok(v) => Some(v),
-                    Err(err) => {
-                        warn!(error = %err, "GC: error iterating artifacts table entry, skipping");
-                        None
-                    }
-                })
-                .filter_map(|(k, _)| {
-                    let key = k.value().to_string();
-                    if key.starts_with(&prefix) {
-                        Some(key)
-                    } else {
-                        None
-                    }
-                })
-                .collect();
-            for key in keys {
-                table.remove(key.as_str()).ok();
-            }
+        let marker_key = format!("_undeploy:{app}");
+        let mut meta = tx
+            .open_table(SCHEMA_META)
+            .map_err(PlatformError::storage_source)?;
+        let marker = meta
+            .get(marker_key.as_str())
+            .map_err(PlatformError::storage_source)?
+            .map(|v| v.value().to_owned());
+        if marker.as_deref() != Some(expected_marker) {
+            return Ok(false);
         }
-        tx.commit().map_err(PlatformError::storage_source)?;
-
-        // Delete from raw_wasm table (byte values)
-        let tx = self
-            .db
-            .begin_write()
+        let timestamp = expected_marker
+            .parse::<u64>()
             .map_err(PlatformError::storage_source)?;
+        if !now
+            .checked_sub(timestamp)
+            .is_some_and(|age| age > grace_secs)
         {
-            let mut table = tx
-                .open_table(RAW_WASM)
-                .map_err(PlatformError::storage_source)?;
-            let keys: Vec<String> = table
-                .iter()
-                .map_err(PlatformError::storage_source)?
-                .filter_map(|e| match e {
-                    Ok(v) => Some(v),
-                    Err(err) => {
-                        warn!(error = %err, "GC: error iterating raw_wasm table entry, skipping");
-                        None
-                    }
-                })
-                .filter_map(|(k, _)| {
-                    let key = k.value().to_string();
-                    if key.starts_with(&prefix) {
-                        Some(key)
-                    } else {
-                        None
-                    }
-                })
-                .collect();
-            for key in keys {
-                table.remove(key.as_str()).ok();
-            }
+            return Ok(false);
         }
-        tx.commit().map_err(PlatformError::storage_source)?;
 
-        // Delete from configs table (string values)
-        let tx = self
-            .db
-            .begin_write()
+        tx.open_table(ARTIFACTS)
+            .map_err(PlatformError::storage_source)?
+            .remove(app)
+            .map_err(PlatformError::storage_source)?;
+        tx.open_table(CONFIGS)
+            .map_err(PlatformError::storage_source)?
+            .remove(app)
+            .map_err(PlatformError::storage_source)?;
+        tx.open_table(ARTIFACT_HASHES)
+            .map_err(PlatformError::storage_source)?
+            .remove(app)
             .map_err(PlatformError::storage_source)?;
         {
-            let mut table = tx
-                .open_table(CONFIGS)
-                .map_err(PlatformError::storage_source)?;
-            let keys: Vec<String> = table
-                .iter()
-                .map_err(PlatformError::storage_source)?
-                .filter_map(|e| match e {
-                    Ok(v) => Some(v),
-                    Err(err) => {
-                        warn!(error = %err, "GC: error iterating configs table entry, skipping");
-                        None
-                    }
-                })
-                .filter_map(|(k, _)| {
-                    let key = k.value().to_string();
-                    if key.starts_with(&prefix) {
-                        Some(key)
-                    } else {
-                        None
-                    }
-                })
-                .collect();
-            for key in keys {
-                table.remove(key.as_str()).ok();
-            }
-        }
-        tx.commit().map_err(PlatformError::storage_source)?;
-
-        // Delete from metrics table (string values)
-        let tx = self
-            .db
-            .begin_write()
-            .map_err(PlatformError::storage_source)?;
-        {
-            let mut table = tx
+            let mut metrics = tx
                 .open_table(METRICS)
                 .map_err(PlatformError::storage_source)?;
-            let keys: Vec<String> = table
-                .iter()
-                .map_err(PlatformError::storage_source)?
-                .filter_map(|e| match e {
-                    Ok(v) => Some(v),
-                    Err(err) => {
-                        warn!(error = %err, "GC: error iterating metrics table entry, skipping");
-                        None
-                    }
-                })
-                .filter_map(|(k, _)| {
-                    let key = k.value().to_string();
-                    if key.starts_with(&prefix) {
-                        Some(key)
-                    } else {
-                        None
-                    }
-                })
-                .collect();
+            let prefix = format!("{app}:");
+            let mut keys = Vec::new();
+            for entry in metrics.iter().map_err(PlatformError::storage_source)? {
+                let (key, _) = entry.map_err(PlatformError::storage_source)?;
+                if key.value().starts_with(&prefix) {
+                    keys.push(key.value().to_owned());
+                }
+            }
             for key in keys {
-                table.remove(key.as_str()).ok();
+                metrics
+                    .remove(key.as_str())
+                    .map_err(PlatformError::storage_source)?;
             }
         }
-        tx.commit().map_err(PlatformError::storage_source)?;
-
-        // Delete routes for this app
-        let routes_to_delete = self.list_routes_for_app(app_name)?;
-        for route in routes_to_delete {
-            self.delete_route(&route.host)?;
-        }
-
-        // Remove the undeploy marker
-        let meta_key = format!("_undeploy:{}", app_name);
-        let tx = self
-            .db
-            .begin_write()
-            .map_err(PlatformError::storage_source)?;
         {
-            let mut table = tx
-                .open_table(SCHEMA_META)
+            let mut routes = tx
+                .open_table(ROUTES)
                 .map_err(PlatformError::storage_source)?;
-            table.remove(meta_key.as_str()).ok();
+            let mut keys = Vec::new();
+            for entry in routes.iter().map_err(PlatformError::storage_source)? {
+                let (key, value) = entry.map_err(PlatformError::storage_source)?;
+                let route: common::types::Route =
+                    serde_json::from_str(value.value()).map_err(PlatformError::storage_source)?;
+                if route.app_id.0 == app {
+                    keys.push(key.value().to_owned());
+                }
+            }
+            for key in keys {
+                routes
+                    .remove(key.as_str())
+                    .map_err(PlatformError::storage_source)?;
+            }
         }
+        let mut cursors = Vec::new();
+        for entry in meta.iter().map_err(PlatformError::storage_source)? {
+            let (key, _) = entry.map_err(PlatformError::storage_source)?;
+            if let Some(value) = key.value().strip_prefix("schedule_cursor:") {
+                let (_, id, _): (String, String, String) =
+                    serde_json::from_str(value).map_err(PlatformError::storage_source)?;
+                if id == app {
+                    cursors.push(key.value().to_owned());
+                }
+            }
+        }
+        for key in cursors {
+            meta.remove(key.as_str())
+                .map_err(PlatformError::storage_source)?;
+        }
+        // RAW_WASM/verification records are keyed by content hash, potentially
+        // shared by other applications. Secrets, API keys, gateway policies and lifecycle ordering fences
+        // are retained; neither is an application artifact GC target.
+        meta.remove(marker_key.as_str())
+            .map_err(PlatformError::storage_source)?;
+        drop(meta);
         tx.commit().map_err(PlatformError::storage_source)?;
-
-        // NOTE: Secrets are NOT deleted here. They must be explicitly removed
-        // via `wasm-ctl secret delete --app <name>` to prevent accidental loss.
-        warn!(
-            app = %app_name,
-            "secrets were NOT deleted — use `wasm-ctl secret delete` to remove them"
-        );
-
-        Ok(())
+        Ok(true)
     }
-
     pub fn list_routes_for_app(
         &self,
         app_name: &str,
@@ -801,5 +725,256 @@ mod tests {
         let mut versions = vec!["v10", "v1", "v2", "v100"];
         versions.sort_by_key(|a| version_sort_key(a));
         assert_eq!(versions, vec!["v1", "v2", "v10", "v100"]);
+    }
+}
+
+#[cfg(test)]
+mod undeploy_regressions {
+    use super::*;
+    use common::types::{AppConfig, AppId, Route};
+    fn fixture() -> (Store, tempfile::NamedTempFile) {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        (Store::open(file.path()).unwrap(), file)
+    }
+    fn marker(store: &Store, app: &AppId, value: &str) {
+        let tx = store.db.begin_write().unwrap();
+        tx.open_table(SCHEMA_META)
+            .unwrap()
+            .insert(format!("_undeploy:{}", app.0).as_str(), value)
+            .unwrap();
+        tx.commit().unwrap();
+    }
+    fn seeded(store: &Store, id: &AppId, bytes: &[u8]) {
+        store
+            .persist_deployment(id, bytes, &AppConfig::default_for(id.clone()), "shared-sha")
+            .unwrap();
+    }
+    #[test]
+    fn exact_undeploy_gc_survives_reopen_preserves_neighbours_secrets_and_shared_blobs() {
+        let (store, file) = fixture();
+        let ids: [AppId; 5] = [
+            "agents/tool:v1",
+            "agents/tool:v2",
+            "other/tool:v1",
+            "agents/toolbox:v1",
+            "agents/tool:v10",
+        ]
+        .map(|s| AppId(s.into()));
+        for id in &ids {
+            seeded(&store, id, b"compiled");
+            store.save_secrets(id, b"encrypted-secret").unwrap();
+        }
+        store
+            .save_raw_wasm("shared-sha", b"shared-raw-wasm")
+            .unwrap();
+        let tx = store.db.begin_write().unwrap();
+        for id in &ids {
+            tx.open_table(GATEWAY_CONFIGS)
+                .unwrap()
+                .insert(id.0.as_str(), "{}")
+                .unwrap();
+            tx.open_table(API_KEYS)
+                .unwrap()
+                .insert(id.0.as_str(), "[]")
+                .unwrap();
+            tx.open_table(METRICS)
+                .unwrap()
+                .insert(format!("{}:100", id.0).as_str(), "{}")
+                .unwrap();
+            let route = Route {
+                host: format!("{}.local", id.0.replace(['/', ':'], "-")),
+                app_id: id.clone(),
+                path_prefix: "/".into(),
+                strip_prefix: false,
+                created_at: 1,
+                updated_at: 1,
+            };
+            let json = serde_json::to_string(&route).unwrap();
+            tx.open_table(ROUTES)
+                .unwrap()
+                .insert(route.host.as_str(), json.as_str())
+                .unwrap();
+            tx.open_table(SCHEMA_META)
+                .unwrap()
+                .insert(
+                    crate::triggers::cursor_key("node", id, "tick").as_str(),
+                    "{}",
+                )
+                .unwrap();
+        }
+        tx.commit().unwrap();
+        let target = &ids[0];
+        store
+            .begin_lifecycle_event("stream", "epoch", 99, target, true)
+            .unwrap();
+        store.mark_undeployed(&target.0).unwrap();
+        marker(&store, target, "1");
+        assert_eq!(store.gc_undeployed_apps(0).unwrap(), 1);
+        drop(store);
+        let store = Store::open(file.path()).unwrap();
+        assert!(store.load_config(target).unwrap().is_none());
+        assert!(store.load_artifact(target).unwrap().is_none());
+        assert!(store.get_artifact_sha256(target).unwrap().is_none());
+        assert!(!store.list_deployed_apps().unwrap().contains(target));
+        assert!(!store.is_undeployed(&target.0).unwrap());
+        assert_eq!(
+            store.load_secrets(target).unwrap().unwrap(),
+            b"encrypted-secret"
+        );
+        let tx = store.db.begin_read().unwrap();
+        assert_eq!(
+            tx.open_table(RAW_WASM)
+                .unwrap()
+                .get("shared-sha")
+                .unwrap()
+                .unwrap()
+                .value(),
+            b"shared-raw-wasm"
+        );
+        assert!(tx
+            .open_table(GATEWAY_CONFIGS)
+            .unwrap()
+            .get(target.0.as_str())
+            .unwrap()
+            .is_some());
+        assert!(tx
+            .open_table(API_KEYS)
+            .unwrap()
+            .get(target.0.as_str())
+            .unwrap()
+            .is_some());
+        assert!(tx
+            .open_table(METRICS)
+            .unwrap()
+            .get(format!("{}:100", target.0).as_str())
+            .unwrap()
+            .is_none());
+        assert!(tx
+            .open_table(SCHEMA_META)
+            .unwrap()
+            .get(crate::triggers::cursor_key("node", target, "tick").as_str())
+            .unwrap()
+            .is_none());
+        for id in &ids[1..] {
+            assert_eq!(store.load_artifact(id).unwrap().unwrap(), b"compiled");
+            assert!(store.load_config(id).unwrap().is_some());
+            assert_eq!(
+                store.get_artifact_sha256(id).unwrap().as_deref(),
+                Some("shared-sha")
+            );
+            assert!(tx
+                .open_table(GATEWAY_CONFIGS)
+                .unwrap()
+                .get(id.0.as_str())
+                .unwrap()
+                .is_some());
+            assert!(tx
+                .open_table(API_KEYS)
+                .unwrap()
+                .get(id.0.as_str())
+                .unwrap()
+                .is_some());
+            assert!(tx
+                .open_table(METRICS)
+                .unwrap()
+                .get(format!("{}:100", id.0).as_str())
+                .unwrap()
+                .is_some());
+            assert!(tx
+                .open_table(SCHEMA_META)
+                .unwrap()
+                .get(crate::triggers::cursor_key("node", id, "tick").as_str())
+                .unwrap()
+                .is_some());
+            assert_eq!(store.list_routes_for_app(&id.0).unwrap().len(), 1);
+        }
+        assert!(store.list_routes_for_app(&target.0).unwrap().is_empty());
+        // Artifact GC must not erase the broker ordering fence.
+        assert!(!store
+            .begin_lifecycle_event("stream", "epoch", 98, target, false)
+            .unwrap());
+    }
+    #[test]
+    fn stale_candidate_cannot_purge_redeployment_or_a_new_undeploy_marker() {
+        let (store, _file) = fixture();
+        let id = AppId("agents/redeploy:v1".into());
+        seeded(&store, &id, b"old");
+        marker(&store, &id, "1");
+        seeded(&store, &id, b"new");
+        assert!(!store
+            .purge_undeployed_candidate(&id.0, "1", 100, 0)
+            .unwrap());
+        marker(&store, &id, "2");
+        assert!(!store
+            .purge_undeployed_candidate(&id.0, "1", 100, 0)
+            .unwrap());
+        assert!(!store.purge_undeployed_candidate(&id.0, "2", 2, 0).unwrap());
+        assert_eq!(store.load_artifact(&id).unwrap().unwrap(), b"new");
+        assert!(store.is_undeployed(&id.0).unwrap());
+    }
+    #[test]
+    fn purge_failure_rolls_back_every_deletion_and_retains_marker() {
+        let (store, _file) = fixture();
+        let id = AppId("agents/rollback:v1".into());
+        seeded(&store, &id, b"old");
+        marker(&store, &id, "1");
+        let tx = store.db.begin_write().unwrap();
+        tx.open_table(ROUTES)
+            .unwrap()
+            .insert("invalid.local", "invalid-json")
+            .unwrap();
+        tx.commit().unwrap();
+        assert!(store
+            .purge_undeployed_candidate(&id.0, "1", 100, 0)
+            .is_err());
+        assert_eq!(store.load_artifact(&id).unwrap().unwrap(), b"old");
+        assert!(store.load_config(&id).unwrap().is_some());
+        assert_eq!(
+            store.get_artifact_sha256(&id).unwrap().as_deref(),
+            Some("shared-sha")
+        );
+        assert!(store.is_undeployed(&id.0).unwrap());
+    }
+    #[test]
+    fn concurrent_gc_and_atomic_redeploy_leave_complete_new_deployment() {
+        let (store, _file) = fixture();
+        let id = AppId("agents/race:v1".into());
+        seeded(&store, &id, b"old");
+        marker(&store, &id, "1");
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let (gc, app, gate) = (store.clone(), id.clone(), barrier.clone());
+        let task = std::thread::spawn(move || {
+            gate.wait();
+            gc.purge_undeployed_candidate(&app.0, "1", 100, 0).unwrap()
+        });
+        barrier.wait();
+        store
+            .persist_deployment(&id, b"new", &AppConfig::default_for(id.clone()), "new-sha")
+            .unwrap();
+        task.join().unwrap();
+        assert_eq!(store.load_artifact(&id).unwrap().unwrap(), b"new");
+        assert!(store.load_config(&id).unwrap().is_some());
+        assert_eq!(
+            store.get_artifact_sha256(&id).unwrap().as_deref(),
+            Some("new-sha")
+        );
+        assert!(!store.is_undeployed(&id.0).unwrap());
+    }
+    #[test]
+    fn atomic_deployment_rejects_mismatched_identity_without_changing_state() {
+        let (store, _file) = fixture();
+        let id = AppId("agents/identity:v1".into());
+        seeded(&store, &id, b"old");
+        marker(&store, &id, "1");
+        assert!(store
+            .persist_deployment(
+                &id,
+                b"new",
+                &AppConfig::default_for(AppId("other/identity:v1".into())),
+                "new-sha"
+            )
+            .is_err());
+        assert_eq!(store.load_artifact(&id).unwrap().unwrap(), b"old");
+        assert!(store.is_undeployed(&id.0).unwrap());
     }
 }

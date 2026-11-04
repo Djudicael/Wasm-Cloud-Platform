@@ -1,4 +1,17 @@
 use super::*;
+
+fn test_connect_info(
+    gateway: &InternalGateway,
+    peer: SocketAddr,
+) -> ConnectInfo<GatewayConnectInfo> {
+    ConnectInfo(GatewayConnectInfo {
+        peer,
+        snapshot: gateway
+            .namespace_map
+            .as_ref()
+            .and_then(|map| map.snapshot_connection(peer)),
+    })
+}
 use axum::body::Body;
 use http::HeaderValue;
 use hyper::service::service_fn;
@@ -6,6 +19,68 @@ use jsonwebtoken::{DecodingKey, EncodingKey};
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
 use tokio::net::TcpListener;
+
+#[tokio::test]
+async fn accept_captures_connection_proof_once() {
+    let map = Arc::new(ebpf_monitor::NamespaceMap::new_fallback());
+    map.register_tid(
+        42,
+        ebpf_monitor::common::TidIdentity::new("default", "caller:v1"),
+    )
+    .unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let target = listener.local_addr().unwrap();
+    let mut listener = IdentityListener {
+        listener,
+        namespace_map: Some(map.clone()),
+    };
+    let socket = tokio::net::TcpSocket::new_v4().unwrap();
+    socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    let peer = socket.local_addr().unwrap();
+    map.bind_port(peer.port(), 42);
+    let _client = socket.connect(target).await.unwrap();
+    let (_server, captured) = axum::serve::Listener::accept(&mut listener).await;
+    assert_eq!(captured.peer, peer);
+    let proof = captured.snapshot.as_ref().unwrap();
+    assert!(map.resolve_connection(proof).is_some());
+    map.bind_port(peer.port(), 42);
+    assert!(map.resolve_connection(proof).is_none());
+
+    let client = tokio::net::TcpStream::connect(target).await.unwrap();
+    let (_server, absent) = axum::serve::Listener::accept(&mut listener).await;
+    assert!(absent.snapshot.is_none());
+    map.bind_port(client.local_addr().unwrap().port(), 42);
+    assert!(
+        absent.snapshot.is_none(),
+        "late binding must not change accepted proof"
+    );
+}
+
+#[tokio::test]
+async fn handler_rejects_retired_connection_even_if_port_is_rebound() {
+    let (gw, _) = setup_gateway_with(
+        Arc::new(proxy::gateway::Gateway::new(None)),
+        supervisor::network::RegisteredEndpoint {
+            addr: "127.0.0.1:9".parse().unwrap(),
+            h2c: false,
+        },
+    )
+    .await;
+    let connection = test_connect_info(&gw, "127.0.0.1:54321".parse().unwrap());
+    assert!(connection.0.snapshot.is_some());
+    gw.namespace_map.as_ref().unwrap().bind_port(54321, 42);
+    let request = Request::builder()
+        .uri("/")
+        .header("host", "target.default.internal")
+        .body(Body::empty())
+        .unwrap();
+    assert_eq!(
+        proxy_handler(State(gw), connection, request)
+            .await
+            .unwrap_err(),
+        StatusCode::UNAUTHORIZED
+    );
+}
 
 #[path = "../../proxy/testdata/jwt_test_key.rs"]
 mod jwt_test_key;
@@ -31,38 +106,6 @@ async fn setup_gateway() -> (Arc<InternalGateway>, common::types::AppId) {
     ));
 
     (gw, app_id)
-}
-
-#[tokio::test]
-async fn test_caller_identity_waits_for_asynchronous_ebpf_binding() {
-    let namespace_map = Arc::new(ebpf_monitor::NamespaceMap::new_fallback());
-    namespace_map
-        .register_tid(
-            4242,
-            ebpf_monitor::common::TidIdentity::new("default", "caller:v1"),
-        )
-        .unwrap();
-
-    let delayed_map = namespace_map.clone();
-    tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(5)).await;
-        delayed_map.bind_port(54321, 4242);
-    });
-
-    let identity = resolve_caller_identity(&namespace_map, 54321)
-        .await
-        .expect("identity should resolve after the asynchronous binding arrives");
-    assert_eq!(identity.namespace, "default");
-    assert_eq!(identity.app_id, "caller:v1");
-    assert_eq!(identity.tid, 4242);
-}
-
-#[tokio::test]
-async fn test_caller_identity_wait_remains_fail_closed() {
-    let namespace_map = ebpf_monitor::NamespaceMap::new_fallback();
-    assert!(resolve_caller_identity(&namespace_map, 54321)
-        .await
-        .is_none());
 }
 
 async fn setup_gateway_with(
@@ -323,8 +366,8 @@ async fn test_proxy_handler_rejects_forged_internal_identity_headers() {
         .unwrap();
 
     let result = proxy_handler(
-        State(gw),
-        ConnectInfo(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 54321)),
+        State(gw.clone()),
+        test_connect_info(&gw, SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 54321)),
         req,
     )
     .await;
@@ -373,8 +416,8 @@ async fn test_internal_gateway_rejects_missing_bearer_token_for_route_auth() {
         .unwrap();
 
     let result = proxy_handler(
-        State(gw),
-        ConnectInfo(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 54321)),
+        State(gw.clone()),
+        test_connect_info(&gw, SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 54321)),
         req,
     )
     .await;
@@ -422,8 +465,8 @@ async fn test_internal_gateway_enforces_endpoint_scopes() {
         .unwrap();
 
     let result = proxy_handler(
-        State(gw),
-        ConnectInfo(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 54321)),
+        State(gw.clone()),
+        test_connect_info(&gw, SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 54321)),
         req,
     )
     .await;
@@ -478,8 +521,8 @@ async fn test_internal_gateway_forwards_h2c_with_identity_headers() {
         .unwrap();
 
     let resp = proxy_handler(
-        State(gw),
-        ConnectInfo(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 54321)),
+        State(gw.clone()),
+        test_connect_info(&gw, SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 54321)),
         req,
     )
     .await
@@ -528,8 +571,8 @@ async fn mesh_caller_allowlist_cannot_be_forged_or_bypassed_by_target_version() 
                 .body(Body::empty())
                 .unwrap();
             let result = proxy_handler(
-                State(gw),
-                ConnectInfo("127.0.0.1:54321".parse().unwrap()),
+                State(gw.clone()),
+                test_connect_info(&gw, "127.0.0.1:54321".parse().unwrap()),
                 request,
             )
             .await;
@@ -577,12 +620,8 @@ async fn denied_caller_does_not_trigger_cold_start() {
         .header("host", "cold.default.internal")
         .body(Body::empty())
         .unwrap();
-    let result = proxy_handler(
-        State(Arc::new(gateway)),
-        ConnectInfo("127.0.0.1:54321".parse().unwrap()),
-        request,
-    )
-    .await;
+    let connection = test_connect_info(&gateway, "127.0.0.1:54321".parse().unwrap());
+    let result = proxy_handler(State(Arc::new(gateway)), connection, request).await;
     assert_eq!(result.unwrap_err(), StatusCode::FORBIDDEN);
 }
 
@@ -609,8 +648,8 @@ async fn stale_endpoint_owner_in_another_namespace_fails_closed() {
         .body(Body::empty())
         .unwrap();
     let result = proxy_handler(
-        State(gateway),
-        ConnectInfo("127.0.0.1:54321".parse().unwrap()),
+        State(gateway.clone()),
+        test_connect_info(&gateway, "127.0.0.1:54321".parse().unwrap()),
         request,
     )
     .await;
@@ -649,8 +688,8 @@ async fn test_internal_gateway_rejects_oversized_request_body_from_content_lengt
         .unwrap();
 
     let result = proxy_handler(
-        State(gw),
-        ConnectInfo(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 54321)),
+        State(gw.clone()),
+        test_connect_info(&gw, SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 54321)),
         req,
     )
     .await;
@@ -699,7 +738,7 @@ async fn test_internal_gateway_enforces_endpoint_rate_limit() {
         .unwrap();
     let resp1 = proxy_handler(
         State(gw.clone()),
-        ConnectInfo(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 54321)),
+        test_connect_info(&gw, SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 54321)),
         req1,
     )
     .await
@@ -713,8 +752,8 @@ async fn test_internal_gateway_enforces_endpoint_rate_limit() {
         .body(Body::empty())
         .unwrap();
     let resp2 = proxy_handler(
-        State(gw),
-        ConnectInfo(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 54321)),
+        State(gw.clone()),
+        test_connect_info(&gw, SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 54321)),
         req2,
     )
     .await;
@@ -778,8 +817,8 @@ async fn anonymous_mesh_request_has_only_kernel_derived_caller_identity() {
             .append(name, HeaderValue::from_static("duplicate"));
     }
     let resp = proxy_handler(
-        State(gw),
-        ConnectInfo(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 54321)),
+        State(gw.clone()),
+        test_connect_info(&gw, SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 54321)),
         req,
     )
     .await

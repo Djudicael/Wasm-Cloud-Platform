@@ -67,7 +67,7 @@ impl Supervisor {
         }
 
         let health_checks: Vec<(String, InstanceId, SocketAddr)>;
-        let idle_by_app: Vec<(String, AppId, Vec<InstanceId>)>;
+        let idle_by_app: Vec<(String, AppId, u64, Vec<InstanceId>)>;
 
         {
             let pools = self.pools.read().await;
@@ -89,6 +89,7 @@ impl Supervisor {
                     (
                         app_id_str.clone(),
                         AppId(app_id_str.clone()),
+                        pool.config.idle_timeout_secs,
                         pool.idle_instance_ids(pool.config.idle_timeout_secs),
                     )
                 })
@@ -107,7 +108,7 @@ impl Supervisor {
             }
         }
 
-        for (app_id_str, app_id, idle_ids) in idle_by_app {
+        for (app_id_str, app_id, idle_timeout_secs, idle_ids) in idle_by_app {
             if let Some(dead_ids) = dead_by_app.remove(&app_id_str) {
                 for id in dead_ids {
                     self.kill_instance_internal(&app_id, &id).await;
@@ -115,7 +116,12 @@ impl Supervisor {
             }
 
             for id in idle_ids {
-                self.kill_instance_internal(&app_id, &id).await;
+                self.kill_idle_instance_internal(
+                    &app_id,
+                    &id,
+                    Duration::from_secs(idle_timeout_secs),
+                )
+                .await;
             }
         }
 

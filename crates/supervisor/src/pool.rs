@@ -3,7 +3,7 @@ use common::types::{AppConfig, InstanceId, InstanceState};
 use runtime::executor::PreparedModule;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::Duration;
 
 pub struct InstancePool {
     pub(crate) config: AppConfig,
@@ -30,13 +30,9 @@ impl InstancePool {
     }
 
     pub fn idle_instance_ids(&self, idle_secs: u64) -> Vec<InstanceId> {
-        let now = Instant::now();
         self.instances
             .iter()
-            .filter(|i| {
-                matches!(i.state, InstanceState::Ready { .. })
-                    && now.duration_since(i.last_request_at).as_secs() > idle_secs
-            })
+            .filter(|i| i.is_idle_for(Duration::from_secs(idle_secs)))
             .map(|i| i.id.clone())
             .collect()
     }

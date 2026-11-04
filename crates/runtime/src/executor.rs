@@ -290,6 +290,7 @@ pub struct PreparedModule {
 struct ManagedOutgoingBody {
     inner: Pin<Box<HyperOutgoingBody>>,
     completion_tx: Option<tokio::sync::oneshot::Sender<()>>,
+    activity: Option<crate::request_activity::RequestGuard>,
 }
 
 impl ManagedOutgoingBody {
@@ -297,13 +298,20 @@ impl ManagedOutgoingBody {
         Self {
             inner: Box::pin(inner),
             completion_tx: Some(completion_tx),
+            activity: None,
         }
     }
 
     fn signal_complete(&mut self) {
+        self.activity.take();
         if let Some(tx) = self.completion_tx.take() {
             let _ = tx.send(());
         }
+    }
+
+    fn with_activity(mut self, activity: crate::request_activity::RequestGuard) -> Self {
+        self.activity = Some(activity);
+        self
     }
 }
 
@@ -326,6 +334,10 @@ impl HyperBodyTrait for ManagedOutgoingBody {
                 self.signal_complete();
                 Poll::Ready(None)
             }
+            Poll::Ready(Some(Err(error))) => {
+                self.signal_complete();
+                Poll::Ready(Some(Err(error)))
+            }
             other => other,
         }
     }
@@ -336,6 +348,46 @@ impl HyperBodyTrait for ManagedOutgoingBody {
 
     fn size_hint(&self) -> SizeHint {
         self.inner.size_hint()
+    }
+}
+
+#[cfg(test)]
+mod http_activity_tests {
+    use super::*;
+    use http_body_util::{BodyExt, Full};
+
+    #[tokio::test]
+    async fn p2_body_and_guest_keep_lease_until_both_complete() {
+        let activity = Arc::new(crate::request_activity::RequestActivity::default());
+        let handler = activity.begin().unwrap();
+        let (complete, completed) = tokio::sync::oneshot::channel();
+        let body = Full::new(bytes::Bytes::from_static(b"result"))
+            .map_err(|never| match never {})
+            .boxed_unsync();
+        let body = ManagedOutgoingBody::new(body, complete).with_activity(handler.clone());
+        assert!(!activity.try_retire_if_idle(std::time::Duration::ZERO));
+        drop(body);
+        completed.await.unwrap();
+        assert!(
+            !activity.try_retire_if_idle(std::time::Duration::ZERO),
+            "guest may still execute after response drop"
+        );
+        drop(handler);
+        assert!(activity.try_retire_if_idle(std::time::Duration::ZERO));
+    }
+
+    #[tokio::test]
+    async fn p2_body_eof_releases_activity_and_completion_signal() {
+        let activity = Arc::new(crate::request_activity::RequestActivity::default());
+        let (complete, completed) = tokio::sync::oneshot::channel();
+        let body = Full::new(bytes::Bytes::from_static(b"result"))
+            .map_err(|never| match never {})
+            .boxed_unsync();
+        let body =
+            ManagedOutgoingBody::new(body, complete).with_activity(activity.begin().unwrap());
+        assert_eq!(body.collect().await.unwrap().to_bytes(), "result");
+        completed.await.unwrap();
+        assert!(activity.try_retire_if_idle(std::time::Duration::ZERO));
     }
 }
 
@@ -456,6 +508,7 @@ impl PreparedModule {
         let socket_addr_check = socket_addr_check.clone();
         let policy = resolve_instance_policy(&self.config, addr.port())?;
         let policy_counters = Arc::new(PolicyCounters::new());
+        policy_counters.http_activity.enable_http_serving();
         let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel::<()>();
         let task_policy_counters = policy_counters.clone();
         let (trigger_tx, mut trigger_rx) = tokio::sync::mpsc::channel::<triggers::Invocation>(32);
@@ -599,9 +652,14 @@ impl PreparedModule {
                                             let request_policy_counters = request_policy_counters.clone();
                                             let app_id_for_request = app_id.clone();
                                             async move {
+                                                let Some(activity) = request_policy_counters.http_activity.begin() else {
+                                                    let mut response = triggers::denied_response();
+                                                    *response.status_mut() = hyper::StatusCode::SERVICE_UNAVAILABLE;
+                                                    return Ok(response);
+                                                };
                                                 let mut req = req;
                                                 if common::triggers::reserved_network_path(req.uri().path()) {
-                                                    return Ok(triggers::denied_response());
+                                                    return Ok(triggers::denied_response().map(|body| body.with_activity(activity)));
                                                 }
                                                 let names: Vec<_> = req.headers().keys().filter(|n| n.as_str().starts_with("x-trigger-")).cloned().collect();
                                                 for name in names { req.headers_mut().remove(name); }
@@ -614,7 +672,9 @@ impl PreparedModule {
                                                 let app_id_for_handle = app_id_for_request.clone();
                                                 let request_error_counters =
                                                     request_policy_counters.clone();
+                                                let handler_activity = activity.clone();
                                                 let handle = tokio::spawn(async move {
+                                                    let _handler_activity = handler_activity;
                                                     let result = async {
                                                         let state = build_store_state(
                                                             &config,
@@ -683,7 +743,7 @@ impl PreparedModule {
                                                             let (parts, body) = resp.into_parts();
                                                             Ok(hyper::Response::from_parts(
                                                                 parts,
-                                                                ManagedOutgoingBody::new(body, body_complete_tx),
+                                                                ManagedOutgoingBody::new(body, body_complete_tx).with_activity(activity),
                                                             ))
                                                         }
                                                         Ok(Err(err)) => {

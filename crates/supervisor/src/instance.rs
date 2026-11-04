@@ -106,6 +106,36 @@ pub struct ManagedInstance {
 }
 
 impl ManagedInstance {
+    pub(crate) fn is_idle_for(&self, timeout: Duration) -> bool {
+        if !matches!(self.state, InstanceState::Ready { .. }) {
+            return false;
+        }
+        if let Some(counters) = self
+            .policy_counters
+            .as_ref()
+            .filter(|counters| counters.http_activity.is_http_serving())
+        {
+            return counters.http_activity.is_idle(timeout);
+        }
+        self.last_request_at.elapsed() > timeout
+    }
+
+    /// Called under the pool write lock immediately before removing the
+    /// candidate. Runtime admission shares the activity lock with this claim.
+    pub(crate) fn try_retire_if_idle(&self, timeout: Duration) -> bool {
+        if !matches!(self.state, InstanceState::Ready { .. }) {
+            return false;
+        }
+        if let Some(counters) = self
+            .policy_counters
+            .as_ref()
+            .filter(|counters| counters.http_activity.is_http_serving())
+        {
+            return counters.http_activity.try_retire_if_idle(timeout);
+        }
+        self.last_request_at.elapsed() > timeout
+    }
+
     /// Initiate graceful shutdown by sending HTTP request to /_platform/shutdown endpoint
     /// and the internal shutdown signal channel.
     pub async fn begin_shutdown(&mut self) {

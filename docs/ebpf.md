@@ -187,17 +187,29 @@ These events are defense-in-depth evidence. Wasmtime and WASI capability policy 
 
 ### 7. Namespace enforcer
 
-The namespace object observes socket and namespace-related activity for registered runtime TIDs. Together with the userspace namespace map, it supports source-port-to-application attribution for requests arriving at the loopback internal gateway and detects selected attempts to forge internal identity headers.
+The namespace object observes socket and namespace-related activity for
+registered runtime TIDs and detects selected attempts to forge internal identity
+headers. Gateway authorization reads its kernel maps directly, independently of
+ring-buffer telemetry delivery. `GATEWAY_PEERS` indexes peer address/family/port
+to connection identity, `GATEWAY_OWNERS` holds live TID/registration ownership,
+and `GATEWAY_SOCKETS` supports socket-specific cleanup. The gateway captures the
+owner at accept in a `ConnectionSnapshot`; `resolve_connection` revalidates
+that captured live owner, enabled kernel TID generation and active workload
+registration per request. The old 50-ms ring publication wait is removed. Missing, changed or unreadable identity fails closed; a stale peer
+index without a matching live owner grants no access.
 
 All seven objects receive the node PID namespace's device/inode through the
 `PID_NAMESPACE` map and use the kernel namespace-aware PID helper. This keeps
-kernel events aligned with supervisor registrations inside WSL or another
+kernel identity aligned with supervisor registrations inside WSL or another
 nested PID namespace. Translation failure produces no attributable TID.
-The namespace object binds client source ports at `SYN_SENT`, before TCP
-completion can move into another kernel context, and removes bindings at
-client-socket close. See [internal mesh attribution](internal-mesh.md).
-The node and all objects must be rebuilt/deployed together; a missing namespace
-map fails object loading instead of silently using host PID attribution.
+The namespace object records the canonical loopback gateway connection at
+`SYN_SENT`, before TCP completion can move into another kernel context.
+Client-socket close removes only its live owner, preserving a peer index that
+may have been recycled. The current listener remains IPv4 `127.0.0.1`; an IPv6
+`::1` map key does not imply an IPv6 listener. See
+[internal mesh attribution](internal-mesh.md).
+The node and all objects must be rebuilt/deployed together; required maps must
+load instead of silently using host PID attribution or a userspace cache.
 
 The internal gateway strips caller-supplied identity headers and fails closed when required attribution is unavailable. Cross-namespace calls require an explicit allowlist. The object does not provide cross-host identity or forwarding; `<app>.<namespace>.internal` deliberately resolves to the node-local gateway.
 

@@ -16,6 +16,7 @@ const MAX_PENDING_HOST_TCP_CLOSES: usize = 65_536;
 /// Shared between the WASI host functions and the metrics exporter.
 #[derive(Debug)]
 pub struct PolicyCounters {
+    pub http_activity: std::sync::Arc<crate::request_activity::RequestActivity>,
     host_socket_lifecycle: AtomicBool,
     host_tcp_closes: Mutex<HostManagedTcpCloses>,
     // Network counters
@@ -64,6 +65,7 @@ impl Default for PolicyCounters {
 impl PolicyCounters {
     pub fn new() -> Self {
         PolicyCounters {
+            http_activity: std::sync::Arc::default(),
             host_socket_lifecycle: AtomicBool::new(false),
             host_tcp_closes: Mutex::new(HostManagedTcpCloses::default()),
             outbound_connections_active: AtomicU32::new(0),

@@ -349,6 +349,7 @@ fn load_namespace_enforcer_object() -> Result<Ebpf> {
                 .context("failed to read namespace enforcer eBPF object file")?;
             let mut bpf =
                 Ebpf::load(&bytes).context("failed to parse namespace enforcer eBPF object")?;
+            validate_gateway_identity_maps(&bpf)?;
             write_pid_namespace(&mut bpf)?;
             return Ok(bpf);
         }
@@ -363,6 +364,50 @@ fn load_namespace_enforcer_object() -> Result<Ebpf> {
 }
 
 // ── Config Map ────────────────────────────────────────────────────────────────
+
+/// Reject older or incompatible enforcers before any program is attached.
+/// Authorization must never fall back to the telemetry port cache.
+fn validate_gateway_identity_maps(ebpf: &Ebpf) -> Result<()> {
+    use crate::common::{GatewayOwnerIdentity, GatewayOwnerRef, GatewayPeerKey, TidIdentity};
+    use aya::maps::{HashMap, Map};
+
+    let map = ebpf
+        .map("MONITORED_TIDS")
+        .context("MONITORED_TIDS missing")?;
+    anyhow::ensure!(
+        matches!(map, Map::HashMap(_)),
+        "MONITORED_TIDS must be a hash map"
+    );
+    HashMap::<_, u32, TidIdentity>::try_from(map).context("MONITORED_TIDS incompatible ABI")?;
+    let map = ebpf
+        .map("GATEWAY_PEERS")
+        .context("GATEWAY_PEERS missing; rebuild namespace enforcer")?;
+    anyhow::ensure!(
+        matches!(map, Map::LruHashMap(_)),
+        "GATEWAY_PEERS must be an LRU hash map"
+    );
+    HashMap::<_, GatewayPeerKey, GatewayOwnerRef>::try_from(map)
+        .context("GATEWAY_PEERS incompatible ABI")?;
+    let map = ebpf
+        .map("GATEWAY_OWNERS")
+        .context("GATEWAY_OWNERS missing; rebuild namespace enforcer")?;
+    anyhow::ensure!(
+        matches!(map, Map::HashMap(_)),
+        "GATEWAY_OWNERS must be a hash map"
+    );
+    HashMap::<_, GatewayOwnerRef, GatewayOwnerIdentity>::try_from(map)
+        .context("GATEWAY_OWNERS incompatible ABI")?;
+    let map = ebpf
+        .map("GATEWAY_SOCKETS")
+        .context("GATEWAY_SOCKETS missing; rebuild namespace enforcer")?;
+    anyhow::ensure!(
+        matches!(map, Map::HashMap(_)),
+        "GATEWAY_SOCKETS must be a hash map"
+    );
+    HashMap::<_, u64, GatewayOwnerRef>::try_from(map)
+        .context("GATEWAY_SOCKETS incompatible ABI")?;
+    Ok(())
+}
 
 /// Write the configuration map that eBPF programs read at runtime.
 fn write_pid_namespace(ebpf: &mut Ebpf) -> Result<()> {

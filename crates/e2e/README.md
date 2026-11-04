@@ -181,6 +181,17 @@ To run these tests in CI:
 4. Mark only the heavier live multi-node regressions with `#[ignore]`
 5. Document what the test verifies
 
+`NatsContainer` publishes its container port explicitly on loopback; it does not
+require the test process to share the container runtime's host network namespace.
+`start(0)` chooses an available local port, and stop/resume retains that endpoint.
+Every fixture has a unique name, ownership label and full container ID. Startup
+failure and teardown remove only that verified container, without replacing a
+pre-existing container by a guessed port-based name.
+
+The opt-in lifecycle gate is
+`cargo test --locked -p e2e --lib fixture::tests::published_nats_lifecycle_preserves_endpoint_and_removes_exact_container -- --ignored --exact`.
+Run it in Linux/WSL with the local container runtime available.
+
 Example:
 ```rust
 mod harness;

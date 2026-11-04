@@ -442,12 +442,11 @@ impl EventDispatcher {
             .map_err(|e| PlatformError::runtime(format!("spawn_blocking panic: {e}")))?;
         let artifact_bytes = artifact?;
 
-        // 6. Store compiled artifact, config, and hash
-        self.store.store_artifact(&app_id, &artifact_bytes)?;
-        self.store.save_config(&config)?;
+        // Publish one complete deployment atomically with its undeploy fence.
+        // GC must never observe a new artifact under an older undeploy marker.
+        self.store
+            .persist_deployment(&app_id, &artifact_bytes, &config, &sha256)?;
         self.apply_rate_limit(&app_id, &config);
-        self.store.save_artifact_hash(&app_id, &sha256)?;
-        self.store.mark_deployed(&app_id.0)?;
         info!(
             app = %app_id.0,
             "deploy complete, waiting for first request"

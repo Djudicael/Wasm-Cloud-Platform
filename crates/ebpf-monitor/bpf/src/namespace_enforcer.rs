@@ -15,13 +15,14 @@
 
 use aya_ebpf::{
     macros::{map, tracepoint},
-    maps::{Array, HashMap, PerCpuArray, RingBuf},
+    maps::{Array, HashMap, LruHashMap, PerCpuArray, RingBuf},
     programs::TracePointContext,
     EbpfContext,
 };
 use ebpf_monitor_bpf::{
-    EventHeader, EventType, NamespaceAuditEvent, NamespaceAuditType, NsEnforceConfig, TcpEvent,
-    TidIdentity, IP_ADDR_LEN,
+    EventHeader, EventType, GatewayOwnerIdentity, GatewayOwnerRef, GatewayPeerKey,
+    NamespaceAuditEvent, NamespaceAuditType, NsEnforceConfig, TcpEvent, TidFlags, TidIdentity,
+    IP_ADDR_LEN,
 };
 
 /// MONITORED_TIDS: u32 (TID) → TidIdentity
@@ -33,7 +34,17 @@ static MONITORED_TIDS: HashMap<u32, TidIdentity> = HashMap::with_max_entries(409
 /// Only sockets opened by registered workloads may remove a port binding.
 /// CLOSE may run in another thread or kernel context, so retain socket ownership.
 #[map]
-static GATEWAY_SOCKETS: HashMap<u64, u16> = HashMap::with_max_entries(4096, 0);
+static GATEWAY_SOCKETS: HashMap<u64, GatewayOwnerRef> = HashMap::with_max_entries(65536, 0);
+
+/// Peer index is bounded and may retain an inactive owner reference. Only a
+/// matching live GATEWAY_OWNERS record can authorize it.
+#[map]
+static GATEWAY_PEERS: LruHashMap<GatewayPeerKey, GatewayOwnerRef> =
+    LruHashMap::with_max_entries(65536, 0);
+
+#[map]
+static GATEWAY_OWNERS: HashMap<GatewayOwnerRef, GatewayOwnerIdentity> =
+    HashMap::with_max_entries(65536, 0);
 
 /// NS_ENFORCE_CONFIG: singleton configuration array (index 0)
 #[map]
@@ -58,14 +69,71 @@ fn record_drop() {
 const TCP_SYN_SENT: u32 = 2;
 const TCP_CLOSE: u32 = 7;
 
+/// Match the gateway's fixed loopback listener, not arbitrary sockets using
+/// the same destination port on another local address.
+#[inline(always)]
+unsafe fn gateway_peer(data: *const u8, source_port: u16) -> Option<GatewayPeerKey> {
+    let family = *(data.add(28) as *const u16);
+    let mut address = [0u8; 16];
+    if family == 2 {
+        let destination = *(data.add(36) as *const [u8; 4]);
+        if destination != [127, 0, 0, 1] {
+            return None;
+        }
+        let source = *(data.add(32) as *const [u8; 4]);
+        address[..4].copy_from_slice(&source);
+    } else if family == 10 {
+        // Fixed-offset scalar reads avoid LLVM lowering an array slice copy
+        // into a loop dereferencing a modified tracepoint context pointer.
+        let d0 = *(data.add(56) as *const u32);
+        let d1 = *(data.add(60) as *const u32);
+        let d2 = *(data.add(64) as *const u32);
+        let d3 = *(data.add(68) as *const u32);
+        let is_loopback = d0 == 0 && d1 == 0 && d2 == 0 && d3 == u32::from_ne_bytes([0, 0, 0, 1]);
+        let is_mapped = d0 == 0
+            && d1 == 0
+            && d2 == u32::from_ne_bytes([0, 0, 255, 255])
+            && d3 == u32::from_ne_bytes([127, 0, 0, 1]);
+        if !is_loopback && !is_mapped {
+            return None;
+        }
+        let s0 = *(data.add(40) as *const u32);
+        let s1 = *(data.add(44) as *const u32);
+        let s2 = *(data.add(48) as *const u32);
+        let s3 = *(data.add(52) as *const u32);
+        let a = s0.to_ne_bytes();
+        let b = s1.to_ne_bytes();
+        let c = s2.to_ne_bytes();
+        let d = s3.to_ne_bytes();
+        if s0 == 0 && s1 == 0 && s2 == u32::from_ne_bytes([0, 0, 255, 255]) {
+            address = [d[0], d[1], d[2], d[3], 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+            return Some(GatewayPeerKey {
+                address,
+                source_port,
+                family: 2,
+            });
+        }
+        address = [
+            a[0], a[1], a[2], a[3], b[0], b[1], b[2], b[3], c[0], c[1], c[2], c[3], d[0], d[1],
+            d[2], d[3],
+        ];
+    } else {
+        return None;
+    }
+    Some(GatewayPeerKey {
+        address,
+        source_port,
+        family,
+    })
+}
+
 /// Tracepoint: inet_sock_set_state
 ///
 /// Fires on every TCP state change. We monitor transitions to SYN_SENT
 /// and CLOSE for connections to the internal gateway port.
 ///
-/// When a monitored TID connects to the gateway, we emit a TidConnection
-/// event with the source port so the userspace consumer can update
-/// the port_to_tid map.
+/// Publish live connection ownership directly before emitting TidConnection
+/// telemetry. Gateway authorization does not depend on event delivery.
 #[tracepoint]
 pub fn ns_inet_sock_set_state(ctx: TracePointContext) -> u32 {
     match try_ns_inet_sock_set_state(ctx) {
@@ -83,6 +151,10 @@ fn try_ns_inet_sock_set_state(ctx: TracePointContext) -> Result<(), u32> {
     let new_state = unsafe { *(data.add(20) as *const i32) as u32 };
     let sport = unsafe { *(data.add(24) as *const u16) };
     let dport = unsafe { *(data.add(26) as *const u16) };
+    let protocol = unsafe { *(data.add(30) as *const u16) };
+    if protocol != 6 {
+        return Ok(());
+    }
 
     // Get current TID
     let tid = ebpf_monitor_bpf::current_pid_tgid() as u32;
@@ -108,15 +180,47 @@ fn try_ns_inet_sock_set_state(ctx: TracePointContext) -> Result<(), u32> {
     // later in a softirq/kworker context and cannot identify the caller.
     if new_state == TCP_SYN_SENT {
         // A recycled socket address must not inherit an earlier registration.
+        if let Some(previous) = unsafe { GATEWAY_SOCKETS.get(&socket_key).copied() } {
+            let _ = GATEWAY_OWNERS.remove(&previous);
+        }
         let _ = GATEWAY_SOCKETS.remove(&socket_key);
+        let Some(peer) = (unsafe { gateway_peer(data, sport) }) else {
+            return Ok(());
+        };
+        // Even an unregistered new connection invalidates an older peer index.
+        let _ = GATEWAY_PEERS.remove(&peer);
         // Connection initiated — check if the TID is monitored
-        let is_monitored = unsafe { MONITORED_TIDS.get(&tid) }.is_some();
+        let generation = unsafe { MONITORED_TIDS.get(&tid) }
+            .filter(|identity| identity.flags & TidFlags::Enabled as u32 != 0)
+            .map(|identity| identity.registered_at_ns);
 
-        if is_monitored {
-            if GATEWAY_SOCKETS.insert(&socket_key, &sport, 0).is_err() {
+        if let Some(registered_at_ns) = generation {
+            let owner = GatewayOwnerRef {
+                socket_id: socket_key,
+                connected_at_ns: unsafe { aya_ebpf::helpers::gen::bpf_ktime_get_ns() },
+            };
+            let identity = GatewayOwnerIdentity {
+                registered_at_ns,
+                tid,
+                _padding: 0,
+            };
+            if sport == 0
+                || registered_at_ns == 0
+                || GATEWAY_OWNERS.insert(&owner, &identity, 0).is_err()
+            {
                 record_drop();
                 return Ok(());
             }
+            if GATEWAY_SOCKETS.insert(&socket_key, &owner, 0).is_err()
+                || GATEWAY_PEERS.insert(&peer, &owner, 0).is_err()
+            {
+                let _ = GATEWAY_OWNERS.remove(&owner);
+                let _ = GATEWAY_SOCKETS.remove(&socket_key);
+                record_drop();
+                return Ok(());
+            }
+            // Authorization is already published. Lost/late telemetry cannot
+            // prevent a gateway from resolving this connection's identity.
             // Emit TidConnection event
             let mut event = match EVENTS.reserve::<TcpEvent>(0) {
                 Some(e) => e,
@@ -182,10 +286,13 @@ fn try_ns_inet_sock_set_state(ctx: TracePointContext) -> Result<(), u32> {
         // Close can run outside the caller thread. Authenticate the socket,
         // not the current TID, and also remove failed-connect bindings.
         {
-            let Some(source_port) = (unsafe { GATEWAY_SOCKETS.get(&socket_key).copied() }) else {
+            let Some(owner) = (unsafe { GATEWAY_SOCKETS.get(&socket_key).copied() }) else {
                 return Ok(());
             };
             let _ = GATEWAY_SOCKETS.remove(&socket_key);
+            // Never delete the peer index here: a later connection may already
+            // own it. An index without its exact live owner cannot authorize.
+            let _ = GATEWAY_OWNERS.remove(&owner);
             let mut event = match EVENTS.reserve::<TcpEvent>(0) {
                 Some(e) => e,
                 None => {
@@ -203,7 +310,7 @@ fn try_ns_inet_sock_set_state(ctx: TracePointContext) -> Result<(), u32> {
                     tid,
                 },
                 src_addr: [0; IP_ADDR_LEN],
-                src_port: source_port,
+                src_port: sport,
                 dst_addr: [0; IP_ADDR_LEN],
                 dst_port: dport,
                 old_state: _old_state,

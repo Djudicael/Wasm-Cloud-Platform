@@ -326,6 +326,68 @@ pub enum TidFlags {
     AuditOnly = 2,
 }
 
+/// Kernel connection index key. Addresses use network byte order; IPv4 is
+/// stored in the first four bytes, with the remaining bytes zeroed.
+#[repr(C)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+pub struct GatewayPeerKey {
+    pub address: [u8; 16],
+    pub source_port: u16,
+    pub family: u16,
+}
+
+impl GatewayPeerKey {
+    pub fn from_peer(peer: std::net::SocketAddr) -> Self {
+        let mut address = [0; 16];
+        let ip = match peer.ip() {
+            std::net::IpAddr::V6(ip) => ip
+                .to_ipv4_mapped()
+                .map(std::net::IpAddr::V4)
+                .unwrap_or(std::net::IpAddr::V6(ip)),
+            ip => ip,
+        };
+        let family = match ip {
+            std::net::IpAddr::V4(ip) => {
+                address[..4].copy_from_slice(&ip.octets());
+                2
+            }
+            std::net::IpAddr::V6(ip) => {
+                address = ip.octets();
+                10
+            }
+        };
+        Self {
+            address,
+            source_port: peer.port(),
+            family,
+        }
+    }
+}
+
+/// Opaque connection owner, unique even when a kernel socket address is reused.
+#[repr(C)]
+#[derive(Copy, Clone, PartialEq, Eq, Hash)]
+pub struct GatewayOwnerRef {
+    pub socket_id: u64,
+    pub connected_at_ns: u64,
+}
+
+/// TID registration generation captured synchronously by the SYN tracepoint.
+#[repr(C)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub struct GatewayOwnerIdentity {
+    pub registered_at_ns: u64,
+    pub tid: u32,
+    pub _padding: u32,
+}
+
+#[cfg(feature = "ebpf")]
+unsafe impl aya::Pod for GatewayPeerKey {}
+#[cfg(feature = "ebpf")]
+unsafe impl aya::Pod for GatewayOwnerRef {}
+#[cfg(feature = "ebpf")]
+unsafe impl aya::Pod for GatewayOwnerIdentity {}
+
 /// Namespace enforcement configuration (singleton in NS_ENFORCE_CONFIG map).
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
@@ -465,6 +527,26 @@ pub fn read_struct_at<T: Copy>(bytes: &[u8], offset: usize) -> Option<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gateway_connection_abi_and_address_normalization() {
+        assert_eq!(std::mem::size_of::<GatewayPeerKey>(), 20);
+        assert_eq!(std::mem::size_of::<GatewayOwnerRef>(), 16);
+        assert_eq!(std::mem::size_of::<GatewayOwnerIdentity>(), 16);
+        let v4 = GatewayPeerKey::from_peer("127.0.0.1:1234".parse().unwrap());
+        let mapped = GatewayPeerKey::from_peer("[::ffff:127.0.0.1]:1234".parse().unwrap());
+        assert_eq!(v4, mapped);
+        assert_eq!(v4.family, 2);
+        assert_eq!(&v4.address[..4], &[127, 0, 0, 1]);
+        let v6 = GatewayPeerKey::from_peer("[::1]:1234".parse().unwrap());
+        assert_eq!(v6.family, 10);
+        assert_eq!(v6.address[15], 1);
+        assert_ne!(v4, v6);
+        assert_ne!(
+            v4,
+            GatewayPeerKey::from_peer("127.0.0.2:1234".parse().unwrap())
+        );
+    }
 
     #[test]
     fn test_event_type_roundtrip() {

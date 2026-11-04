@@ -15,3 +15,13 @@ description: Build, deploy, and verify a Wasm application in an existing local W
 The shared default state path is `.vm-testbed-state.json`. Override it consistently across provision, deploy, and destroy commands when concurrent testbeds are intentionally used.
 
 For OpenID-Connect-WASI-Hub, use `bash scripts/vm/deploy-oidc-hub-test.sh --state-file PATH --app-dir PATH`. It builds the locked frontend and both `wasm32-wasip2` components, applies migrations, seeds local test data, deploys the two WASI apps under separate internal hosts, assigns the backend enough Wasm fuel for Argon2 password verification, and configures the recorded HAProxy with same-origin routing plus separate application-aware health pools. Treat the printed browser URL as ready only after frontend, database readiness, discovery issuer, SPA-route, and seeded-realm login checks all pass. Do not assume every platform proxy serves every scheduled application; use application-level health checks when placing a load balancer in front of multiple nodes.
+
+## Local storage lifecycle
+
+Read [local resource hygiene](../../references/local-resource-hygiene.md)
+before the build/validation matrix. Resolve and reuse the effective Cargo
+target path; check both Linux and the Windows backing volume before large
+writes. Do not multiply build directories, rebuild unchanged dependencies, or
+clean shared targets/toolchains to make room. Container-backed checks also need
+an exact disposable-resource ledger and verified volume teardown, including
+failure/interruption recovery. Report missing automatic guards as missing.

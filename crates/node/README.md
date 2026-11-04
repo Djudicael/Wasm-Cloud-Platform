@@ -99,7 +99,19 @@ The upgrade handler records `WaitForPredecessor` and relies on subsequent contro
 
 Node drain delegates to the supervisor's fenced, joined shutdown path. The administrative rebuild endpoint quarantines the local database and requires a restart to rebuild from cluster state. It is an authenticated write operation but has no additional interactive confirmation, so write-token custody is critical.
 
-Forced GC purges undeployed applications and kills instances only for applications without active routes. This route-based definition means operators should remove stale routes before expecting GC to reclaim an undeployed workload.
+Deployment publication uses `Store::persist_deployment()` to commit the
+compiled artifact, config and artifact hash together while clearing its exact
+undeploy marker. Undeployed-app GC rechecks the selected marker timestamp and
+grace period inside one transaction before removing exact application state,
+associated routes, metrics and schedule cursors. A concurrent redeployment or
+replacement marker invalidates a stale GC candidate; failed transactions keep
+the previous state. Shared raw content/verification records, secrets, API keys,
+gateway policies and lifecycle ordering fences are retained. See the
+[storage contract](../storage/README.md#atomic-deployment-publication-and-undeploy-cleanup).
+
+Forced GC also kills instances only for applications without active routes.
+This route-based definition means operators should remove stale routes before
+expecting the instance-cleanup portion of forced GC to stop a workload.
 
 ### Internal DNS and mesh
 

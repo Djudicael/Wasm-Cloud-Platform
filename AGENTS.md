@@ -86,3 +86,12 @@ lifecycle and platform test-memory-isolation for explicitly requested bounded
 validation; see docs/local-memory-isolation.md. Preserve critical/OOM protection,
 correlate reclaim with measured availability/PSI, require healthy recovery
 samples and never apply pressure to unrelated groups or the whole host.
+
+## Local storage lifecycle
+
+Before substantial builds, container-backed tests, model downloads, or local
+lifecycle changes, follow [.agents/references/local-resource-hygiene.md](.agents/references/local-resource-hygiene.md).
+Track disposable test containers AND volumes, prove cleanup after failures and
+interruptions, preserve persistent stack data, and budget the actual Cargo
+target filesystem plus the Windows volume backing WSL. These instructions do
+not imply that missing controller guards or cleanup mechanisms are implemented.

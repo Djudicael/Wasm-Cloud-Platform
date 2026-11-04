@@ -1,6 +1,22 @@
 # Step 41 — eBPF Namespace Enforcement for Internal Mesh Gateway
 
-## Current implementation status (2026-08-30)
+## Current implementation update (2026-11-04)
+
+The gateway now obtains authorization identity directly from `GATEWAY_PEERS`,
+`GATEWAY_OWNERS` and `GATEWAY_SOCKETS`, snapshots ownership at accept and
+revalidates the connection and workload registration generation per request.
+Ring-buffer events are telemetry, not identity publication. Missing or
+unreadable live ownership fails closed; close removes only its owner and does
+not delete a peer index that may have been recycled. The current canonical
+listener remains IPv4 loopback. See the maintained
+[mesh manual](../docs/internal-mesh.md) and [eBPF manual](../docs/ebpf.md).
+
+The 2026-08-30 status and design below describe the earlier asynchronous
+publication path and remain historical evidence, including its 50-ms wait.
+The 2026-11-04 change does not retroactively change those results. Its real-node
+acceptance is still pending; no new deployed validation is claimed here.
+
+## Historical implementation status (2026-08-30)
 
 The source-port lookup is synchronous once published, but publication is not:
 `inet_sock_set_state` writes a `TidConnection` event to a ring buffer and the

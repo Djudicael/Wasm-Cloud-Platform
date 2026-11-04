@@ -49,3 +49,13 @@ boundaries. This does not qualify RustFS for production or introduce a second
 application-stack controller.
 
 Treat provisioning as successful only when every node passes the CLI health wait and `status` reports live processes with successful health responses. On failure, preserve logs and state for diagnosis; do not claim the environment is ready.
+
+## Local storage lifecycle
+
+Read [local resource hygiene](../../references/local-resource-hygiene.md)
+before the build/validation matrix. Resolve and reuse the effective Cargo
+target path; check both Linux and the Windows backing volume before large
+writes. Do not multiply build directories, rebuild unchanged dependencies, or
+clean shared targets/toolchains to make room. Container-backed checks also need
+an exact disposable-resource ledger and verified volume teardown, including
+failure/interruption recovery. Report missing automatic guards as missing.

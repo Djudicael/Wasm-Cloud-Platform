@@ -24,37 +24,6 @@ pub fn cursor_key(node: &str, app: &AppId, id: &str) -> String {
 }
 
 impl Store {
-    pub(crate) fn delete_trigger_cursors_for_app(
-        &self,
-        app_name: &str,
-    ) -> Result<(), PlatformError> {
-        let tx = self
-            .db
-            .begin_write()
-            .map_err(PlatformError::storage_source)?;
-        {
-            let mut table = tx
-                .open_table(SCHEMA_META)
-                .map_err(PlatformError::storage_source)?;
-            let mut keys = Vec::new();
-            for entry in table.iter().map_err(PlatformError::storage_source)? {
-                let (key, _) = entry.map_err(PlatformError::storage_source)?;
-                if let Some(value) = key.value().strip_prefix("schedule_cursor:") {
-                    let (_, app, _): (String, String, String) =
-                        serde_json::from_str(value).map_err(PlatformError::storage_source)?;
-                    if app == app_name || app.starts_with(&format!("{app_name}:")) {
-                        keys.push(key.value().to_string());
-                    }
-                }
-            }
-            for key in keys {
-                table
-                    .remove(key.as_str())
-                    .map_err(PlatformError::storage_source)?;
-            }
-        }
-        tx.commit().map_err(PlatformError::storage_source)
-    }
     /// Commit before dispatch: a crash can lose a tick but cannot replay a bucket.
     pub fn advance_trigger_cursor(
         &self,
@@ -160,7 +129,14 @@ mod tests {
                 .missed,
             0
         );
-        store.delete_trigger_cursors_for_app(&app.0).unwrap();
+        store.mark_undeployed(&app.0).unwrap();
+        let tx = store.db.begin_write().unwrap();
+        tx.open_table(SCHEMA_META)
+            .unwrap()
+            .insert(format!("_undeploy:{}", app.0).as_str(), "1")
+            .unwrap();
+        tx.commit().unwrap();
+        assert_eq!(store.gc_undeployed_apps(0).unwrap(), 1);
         assert_eq!(
             store.advance_trigger_cursor("n1", &app, &s, 8_100).unwrap(),
             None

@@ -203,6 +203,37 @@ pub struct TidIdentity {
     pub _padding: u32,
 }
 
+/// Canonical client peer key used by the gateway authorization maps.
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct GatewayPeerKey {
+    pub address: [u8; 16],
+    pub source_port: u16,
+    pub family: u16,
+}
+
+/// A single socket incarnation; closing it cannot remove a newer peer binding.
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct GatewayOwnerRef {
+    pub socket_id: u64,
+    pub connected_at_ns: u64,
+}
+
+/// Registered workload generation that opened a live gateway connection.
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct GatewayOwnerIdentity {
+    pub registered_at_ns: u64,
+    pub tid: u32,
+    pub _padding: u32,
+}
+
+// Keep these map layouts identical to the userspace ABI.
+const _: [(); 20] = [(); core::mem::size_of::<GatewayPeerKey>()];
+const _: [(); 16] = [(); core::mem::size_of::<GatewayOwnerRef>()];
+const _: [(); 16] = [(); core::mem::size_of::<GatewayOwnerIdentity>()];
+
 /// Flags for TidIdentity.
 #[repr(u32)]
 #[derive(Copy, Clone)]

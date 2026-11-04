@@ -14,3 +14,12 @@ Do not destroy a test environment merely because deployment checks completed. If
 5. The script delegates VM teardown to `vm-testbed-cli down`, which only targets the recorded NATS, platform-node, and application-service VM PIDs and their recorded network.
 6. Locally generated OIDC signing keys and credentials live on the Linux runtime filesystem rather than a `/mnt/*` checkout, because mounted Windows filesystems may not enforce requested Unix modes. The canonical script derives one exact directory from the absolute state-file path and removes only that directory.
 7. Confirm that the VM and companion state files are gone and the recorded processes are no longer alive. Report any cleanup failure with retained state so an operator can retry safely.
+
+## Local storage lifecycle
+
+Follow [local resource hygiene](../../references/local-resource-hygiene.md).
+Before canonical teardown, retain the exact non-secret disposable resource IDs
+needed to verify removal, including any Podman volumes. Afterwards distinguish
+removed resources from intentionally retained persistent data and report cleanup
+failures with recoverable ownership evidence. Never substitute a global prune
+or WSL shutdown/compaction for the state-scoped teardown script.

@@ -867,6 +867,21 @@ an application does not delete its external database records or object storage.
 Redeploy the intended manifest and artifact to resume that revision. Application
 checkpoints, activity leases and idempotency remain the application's responsibility.
 
+After the grace period, undeploy GC removes that exact application revision's
+compiled artifact, configuration and artifact-hash reference, plus its metrics,
+routes and schedule cursors. It rechecks the selected undeploy marker and expiry
+inside the same write transaction; a stale GC candidate cannot erase a completed
+redeployment or a newer undeploy marker. Any read/delete/commit error leaves the
+purge uncommitted, including its marker. Other namespaces, versions and names
+with a common prefix remain intact.
+
+This purge retains encrypted secrets, API keys, gateway policies, broker ordering
+fences and content-addressed raw Wasm/verification records that may be shared by
+other applications. Credential deletion remains an explicit operator action.
+Gateway policies are retained because their independent update can precede the
+artifact deployment. Deployment publishes the compiled artifact, configuration,
+artifact hash and removal of the undeploy marker in one storage transaction, so
+GC cannot interleave between those writes and delete a partially saved redeploy.
 Nodes persist the broker stream sequence of deployment/removal deliveries per
 application. Older deliveries and completed duplicates are ignored, including
 after a node process restart; a pending failed delivery can retry. These
@@ -1288,10 +1303,17 @@ reaches Supervisor ownership. `timeout` starts after admission/cold start;
 it does not bound compilation or instance startup. The scheduler holds its
 concurrency reservation throughout startup. It admits at most 256 deliveries
 node-wide and never queues an interval when its trigger or global capacity is
-exhausted. The existing idle accounting uses request start times; set
-`idle_timeout_secs` above the longest trigger timeout to avoid reclaiming a
-long invocation. An idle instance may still be reclaimed normally; later ticks
-cold start it again. Removing a trigger, undeploying, or draining stops new delivery
+exhausted. Managed WASI HTTP P2/P3 instances track request activity through
+both guest execution and the response body, including scheduled deliveries
+using those adapters. Idle retirement requires no active request and an elapsed
+`idle_timeout_secs` since completion; EOF, terminal error, cancellation or body
+drop releases the corresponding activity ownership. The final retirement check
+is atomic with new admission, so a stale idle candidate cannot stop a request
+that has just begun. This does not extend execution deadlines or prevent
+explicit operator/quota shutdown. Legacy CLI/raw-TCP applications retain their
+existing timestamp accounting; arbitrary TCP traffic is not inspected as HTTP.
+An idle instance may still be reclaimed normally; later ticks cold start it
+again. Removing a trigger, undeploying, or draining stops new delivery
 after reconciliation and cancels active native requests. Draining pauses that
 revision's triggers for the current node process; undeploy a retired revision
 so it also remains inactive after restart. Node shutdown first stops deliveries

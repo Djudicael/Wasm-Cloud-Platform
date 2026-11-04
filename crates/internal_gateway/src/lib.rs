@@ -26,11 +26,55 @@ mod tests;
 /// Default request timeout for forwarded requests (30 seconds).
 const FORWARDING_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// The kernel emits the TCP identity event before the request is accepted, but
-/// the userspace ring-buffer consumer runs asynchronously. Give it a small,
-/// bounded window to publish the source-port binding before failing closed.
-const CALLER_IDENTITY_WAIT_TIMEOUT: Duration = Duration::from_millis(50);
-const CALLER_IDENTITY_POLL_INTERVAL: Duration = Duration::from_millis(1);
+#[derive(Clone)]
+struct GatewayConnectInfo {
+    peer: SocketAddr,
+    snapshot: Option<ebpf_monitor::namespace_map::ConnectionSnapshot>,
+}
+
+impl std::fmt::Debug for GatewayConnectInfo {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("GatewayConnectInfo")
+            .field("peer", &self.peer)
+            .field("identified", &self.snapshot.is_some())
+            .finish()
+    }
+}
+
+struct IdentityListener {
+    listener: TcpListener,
+    namespace_map: Option<Arc<ebpf_monitor::NamespaceMap>>,
+}
+
+impl axum::serve::Listener for IdentityListener {
+    type Io = tokio::net::TcpStream;
+    type Addr = GatewayConnectInfo;
+
+    async fn accept(&mut self) -> (Self::Io, Self::Addr) {
+        let (stream, peer) = axum::serve::Listener::accept(&mut self.listener).await;
+        let snapshot = self
+            .namespace_map
+            .as_ref()
+            .and_then(|map| map.snapshot_connection(peer));
+        (stream, GatewayConnectInfo { peer, snapshot })
+    }
+
+    fn local_addr(&self) -> std::io::Result<Self::Addr> {
+        Ok(GatewayConnectInfo {
+            peer: self.listener.local_addr()?,
+            snapshot: None,
+        })
+    }
+}
+
+impl axum::extract::connect_info::Connected<axum::serve::IncomingStream<'_, IdentityListener>>
+    for GatewayConnectInfo
+{
+    fn connect_info(stream: axum::serve::IncomingStream<'_, IdentityListener>) -> Self {
+        stream.remote_addr().clone()
+    }
+}
 
 type ColdStartFn =
     dyn Fn(common::types::AppId) -> BoxFuture<'static, Option<SocketAddr>> + Send + Sync;
@@ -83,19 +127,10 @@ struct CallerIdentity {
 /// apps on the same node. Applies policies (rate limiting, circuit breaker,
 /// auth) and forwards requests to the target app.
 ///
-/// Namespace enforcement: The gateway resolves caller identity via
-/// `namespace_map.resolve_identity(source_port)` - a synchronous in-process
-/// lookup. Cross-namespace calls are denied by default. Identity headers
-/// are stripped to prevent forgery.
-///
-/// Flow:
-/// 1. Supervisor spawns an app in namespace "staging"
-/// 2. Supervisor sets service URL to `http://target.staging.internal:9080`
-/// 3. App makes a plain HTTP request - no identity headers
-/// 4. eBPF detects connection, consumer binds source_port to TID
-/// 5. Gateway parses Host header - target is "staging/target"
-/// 6. Gateway calls resolve_identity(source_port) - {ns, app_id, tid}
-/// 7. Gateway enforces namespace policy, then forwards.
+/// Namespace enforcement snapshots the kernel socket owner at TCP accept and
+/// revalidates its live connection and registered TID generation per request.
+/// Ring-buffer telemetry is not an authorization source. Cross-namespace calls
+/// are denied by default, and caller identity headers are stripped.
 pub struct InternalGateway {
     /// Registry for namespace-scoped app resolution.
     pub registry: Arc<supervisor::network::NamespaceRegistry>,
@@ -105,7 +140,7 @@ pub struct InternalGateway {
     pub circuit_breaker: Arc<proxy::gateway::circuit_breaker::CircuitBreakerManager>,
     pub gateway_config: Arc<proxy::gateway::Gateway>,
 
-    /// Namespace identity map - gateway calls resolve_identity(source_port).
+    /// Trusted connection ownership and registered TID generations.
     pub namespace_map: Option<Arc<ebpf_monitor::NamespaceMap>>,
 
     /// Whether eBPF namespace enforcement is active.
@@ -197,8 +232,11 @@ impl InternalGateway {
         );
 
         axum::serve(
-            listener,
-            app.into_make_service_with_connect_info::<SocketAddr>(),
+            IdentityListener {
+                listener,
+                namespace_map: state.namespace_map.clone(),
+            },
+            app.into_make_service_with_connect_info::<GatewayConnectInfo>(),
         )
         .await?;
 
@@ -377,28 +415,13 @@ fn parse_internal_host(host: &str) -> Option<(&str, &str)> {
     }
 }
 
-async fn resolve_caller_identity(
-    namespace_map: &ebpf_monitor::NamespaceMap,
-    source_port: u16,
-) -> Option<ebpf_monitor::CallerIdentity> {
-    let deadline = tokio::time::Instant::now() + CALLER_IDENTITY_WAIT_TIMEOUT;
-    loop {
-        if let Some(identity) = namespace_map.resolve_identity(source_port) {
-            return Some(identity);
-        }
-        if tokio::time::Instant::now() >= deadline {
-            return None;
-        }
-        tokio::time::sleep(CALLER_IDENTITY_POLL_INTERVAL).await;
-    }
-}
-
 async fn proxy_handler(
     State(gw): State<Arc<InternalGateway>>,
-    ConnectInfo(peer_addr): ConnectInfo<SocketAddr>,
+    ConnectInfo(connection): ConnectInfo<GatewayConnectInfo>,
     req: Request<axum::body::Body>,
 ) -> Result<Response<axum::body::Body>, StatusCode> {
     let start_time = std::time::Instant::now();
+    let peer_addr = connection.peer;
     let method = req.method().clone();
     let path = req.uri().path().to_string();
     let req_method_str = method.as_str().to_string();
@@ -439,7 +462,11 @@ async fn proxy_handler(
             return Err(StatusCode::UNAUTHORIZED);
         };
 
-        match resolve_caller_identity(ns_map, peer_addr.port()).await {
+        match connection
+            .snapshot
+            .as_ref()
+            .and_then(|snapshot| ns_map.resolve_connection(snapshot))
+        {
             Some(identity) => {
                 tracing::info!(
                     source_port = peer_addr.port(),

@@ -67,6 +67,11 @@ pub(super) async fn invoke(context: Arc<Context>, invocation: Invocation) {
         mut reply,
     } = invocation;
     let result = async {
+        let _activity = context
+            .counters
+            .http_activity
+            .begin()
+            .ok_or("trigger instance retiring")?;
         let index = context
             .config
             .triggers

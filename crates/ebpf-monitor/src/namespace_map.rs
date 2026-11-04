@@ -5,8 +5,12 @@
 //! Also provides the `resolve_identity` method that the gateway calls
 //! to answer "who is calling from source port X?"
 
-use crate::common::{TidFlags, TidIdentity};
+#[cfg(feature = "ebpf")]
+use crate::common::GatewayPeerKey;
+use crate::common::{GatewayOwnerIdentity, GatewayOwnerRef, TidFlags, TidIdentity};
 use std::collections::HashMap;
+use std::net::SocketAddr;
+use std::sync::atomic::{AtomicU64, Ordering};
 #[cfg(feature = "ebpf")]
 use std::sync::Mutex;
 use std::sync::RwLock;
@@ -209,22 +213,51 @@ pub struct CallerIdentity {
 struct PortBinding {
     tid: u32,
     created_at: Instant,
+    epoch: u64,
 }
 
-/// Handle to the MONITORED_TIDS eBPF map + in-process identity tables.
-///
-/// This is the single source of truth for identity resolution. The gateway
-/// calls `resolve_identity(source_port)` and gets back a `CallerIdentity`.
-///
-/// Two maps are maintained:
-/// - `tid_to_identity`: TID → {namespace, app_id} (populated by register_tid)
-/// - `port_to_tid`: source_port → TID (populated when connections are tracked)
-///
-/// When the `ebpf` feature is not enabled, all operations use in-process
-/// fallback maps. The gateway reads from the same maps for identity resolution.
+/// Opaque proof captured when the gateway accepts a connection. It cannot be
+/// transferred to a later connection that reuses the same source port.
+#[derive(Clone)]
+pub struct ConnectionSnapshot {
+    peer: SocketAddr,
+    owner: GatewayOwnerRef,
+    identity: GatewayOwnerIdentity,
+    kernel: bool,
+}
+
+#[cfg(any(feature = "ebpf", test))]
+fn validate_kernel_owner(
+    snapshot: &ConnectionSnapshot,
+    live_owner: Option<GatewayOwnerIdentity>,
+    current_identity: Option<TidIdentity>,
+) -> Option<TidIdentity> {
+    let owner = live_owner?;
+    let identity = current_identity?;
+    (owner == snapshot.identity
+        && identity.registered_at_ns == owner.registered_at_ns
+        && identity.flags == TidFlags::Enabled as u32)
+        .then_some(identity)
+}
+
+#[cfg(feature = "ebpf")]
+struct KernelConnections {
+    peers: aya::maps::HashMap<aya::maps::MapData, GatewayPeerKey, GatewayOwnerRef>,
+    owners: aya::maps::HashMap<aya::maps::MapData, GatewayOwnerRef, GatewayOwnerIdentity>,
+    identity_map_index: usize,
+}
+
+/// Registered identities and authoritative kernel connection ownership.
+/// Gateway proofs bind a socket owner to its TID registration generation.
+/// Telemetry port bindings are retained for explicit fallback tests and metrics;
+/// they never authorize callers in a map created by `from_ebpf`.
 pub struct NamespaceMap {
     #[cfg(feature = "ebpf")]
     inner: Mutex<Vec<aya::maps::HashMap<aya::maps::MapData, u32, TidIdentity>>>,
+    #[cfg(feature = "ebpf")]
+    connections: Option<Mutex<KernelConnections>>,
+    kernel_authority: bool,
+    binding_epoch: AtomicU64,
     /// TID → TidIdentity. Always maintained. Primary identity store.
     tid_to_identity: RwLock<HashMap<u32, TidIdentity>>,
     /// Recently removed identities retained only for asynchronous event labeling.
@@ -240,17 +273,27 @@ impl NamespaceMap {
     /// Create from a loaded eBPF object.
     ///
     /// The `MONITORED_TIDS` map is expected in the namespace enforcer eBPF
-    /// object (`ns_ebpf`). If not available, falls back to in-process maps.
+    /// object (`ns_ebpf`). Missing connection maps fail closed for gateway
+    /// authorization; only `new_fallback` enables in-process test bindings.
     // TODO: When aya supports BPF_F_RDONLY_PROG, load the MONITORED_TIDS map
     // with read-only program access to prevent eBPF programs from mutating
     // the identity table. This is defense-in-depth — the eBPF programs
     // should never need to write to this map.
     #[cfg(feature = "ebpf")]
     pub fn from_ebpf(
-        ns_ebpf: Option<&mut aya::Ebpf>,
+        mut ns_ebpf: Option<&mut aya::Ebpf>,
         monitors: &mut [crate::loader::LoadedMonitor],
     ) -> Self {
         let mut inner = Vec::new();
+        let peers = ns_ebpf
+            .as_mut()
+            .and_then(|bpf| bpf.take_map("GATEWAY_PEERS"))
+            .and_then(|map| aya::maps::HashMap::try_from(map).ok());
+        let owners = ns_ebpf
+            .as_mut()
+            .and_then(|bpf| bpf.take_map("GATEWAY_OWNERS"))
+            .and_then(|map| aya::maps::HashMap::try_from(map).ok());
+        let mut identity_map_index = None;
 
         for (owner, ebpf) in monitors
             .iter_mut()
@@ -269,6 +312,9 @@ impl NamespaceMap {
             };
             match aya::maps::HashMap::<aya::maps::MapData, u32, TidIdentity>::try_from(map) {
                 Ok(hash_map) => {
+                    if owner == "namespace_enforcer" {
+                        identity_map_index = Some(inner.len());
+                    }
                     info!(owner, "MONITORED_TIDS eBPF map opened");
                     inner.push(hash_map);
                 }
@@ -277,11 +323,22 @@ impl NamespaceMap {
         }
 
         if inner.is_empty() {
-            warn!("No MONITORED_TIDS eBPF maps opened — using in-process identity only");
+            warn!("No MONITORED_TIDS eBPF maps opened; kernel gateway authorization unavailable");
         }
 
         NamespaceMap {
             inner: Mutex::new(inner),
+            connections: peers.zip(owners).zip(identity_map_index).map(
+                |((peers, owners), identity_map_index)| {
+                    Mutex::new(KernelConnections {
+                        peers,
+                        owners,
+                        identity_map_index,
+                    })
+                },
+            ),
+            kernel_authority: true,
+            binding_epoch: AtomicU64::new(1),
             tid_to_identity: RwLock::new(HashMap::new()),
             recent_tid_identities: RwLock::new(HashMap::new()),
             port_to_tid: RwLock::new(HashMap::new()),
@@ -294,6 +351,10 @@ impl NamespaceMap {
         NamespaceMap {
             #[cfg(feature = "ebpf")]
             inner: Mutex::new(Vec::new()),
+            #[cfg(feature = "ebpf")]
+            connections: None,
+            kernel_authority: false,
+            binding_epoch: AtomicU64::new(1),
             tid_to_identity: RwLock::new(HashMap::new()),
             recent_tid_identities: RwLock::new(HashMap::new()),
             port_to_tid: RwLock::new(HashMap::new()),
@@ -381,6 +442,7 @@ impl NamespaceMap {
             PortBinding {
                 tid,
                 created_at: Instant::now(),
+                epoch: self.binding_epoch.fetch_add(1, Ordering::Relaxed),
             },
         );
         tracing::debug!(source_port, tid, "Port bound to TID");
@@ -400,30 +462,110 @@ impl NamespaceMap {
     /// Returns `None` if the source port is not bound or the TID is not
     /// registered (unregistered connection — deny by default).
     pub fn resolve_identity(&self, source_port: u16) -> Option<CallerIdentity> {
-        let mut port_map = self.port_to_tid.write().unwrap();
-        let binding = port_map.get(&source_port)?;
+        let snapshot = self.snapshot_connection(SocketAddr::from(([127, 0, 0, 1], source_port)))?;
+        self.resolve_connection(&snapshot)
+    }
 
-        // Check TTL
-        if binding.created_at.elapsed() > self.port_ttl {
-            tracing::warn!(
-                source_port,
-                tid = binding.tid,
-                "Port binding expired — removing"
-            );
-            port_map.remove(&source_port);
+    /// Capture the current kernel-owned connection, independently of telemetry.
+    pub fn snapshot_connection(&self, peer: SocketAddr) -> Option<ConnectionSnapshot> {
+        let loopback = match peer.ip() {
+            std::net::IpAddr::V4(ip) => ip.is_loopback(),
+            std::net::IpAddr::V6(ip) => {
+                ip.is_loopback() || ip.to_ipv4_mapped().is_some_and(|ip| ip.is_loopback())
+            }
+        };
+        if !loopback {
             return None;
         }
+        if self.kernel_authority {
+            #[cfg(feature = "ebpf")]
+            {
+                let maps = self.connections.as_ref()?.lock().ok()?;
+                let owner = maps.peers.get(&GatewayPeerKey::from_peer(peer), 0).ok()?;
+                if owner.socket_id == 0 || owner.connected_at_ns == 0 {
+                    return None;
+                }
+                let identity = maps.owners.get(&owner, 0).ok()?;
+                let snapshot = ConnectionSnapshot {
+                    peer,
+                    owner,
+                    identity,
+                    kernel: true,
+                };
+                drop(maps);
+                self.resolve_connection(&snapshot)?;
+                return Some(snapshot);
+            }
+            #[cfg(not(feature = "ebpf"))]
+            return None;
+        }
+        let mut ports = self.port_to_tid.write().ok()?;
+        let binding = ports.get(&peer.port())?;
+        if binding.created_at.elapsed() > self.port_ttl {
+            ports.remove(&peer.port());
+            return None;
+        }
+        let identity = self.lookup_tid(binding.tid)?;
+        Some(ConnectionSnapshot {
+            peer,
+            owner: GatewayOwnerRef {
+                socket_id: binding.epoch,
+                connected_at_ns: 0,
+            },
+            identity: GatewayOwnerIdentity {
+                registered_at_ns: identity.registered_at_ns,
+                tid: binding.tid,
+                _padding: 0,
+            },
+            kernel: false,
+        })
+    }
 
-        let tid = binding.tid;
-        drop(port_map);
-
-        let tid_map = self.tid_to_identity.read().unwrap();
-        let identity = tid_map.get(&tid)?;
-
+    /// Revalidate the accepted socket and TID generation for every request.
+    pub fn resolve_connection(&self, snapshot: &ConnectionSnapshot) -> Option<CallerIdentity> {
+        if snapshot.identity.tid == 0 || snapshot.identity.registered_at_ns == 0 {
+            return None;
+        }
+        if snapshot.kernel != self.kernel_authority {
+            return None;
+        }
+        if self.kernel_authority {
+            #[cfg(feature = "ebpf")]
+            {
+                let maps = self.connections.as_ref()?.lock().ok()?;
+                let owner = maps.owners.get(&snapshot.owner, 0).ok()?;
+                if owner != snapshot.identity {
+                    return None;
+                }
+                let identities = self.inner.lock().ok()?;
+                let identity = identities
+                    .get(maps.identity_map_index)?
+                    .get(&owner.tid, 0)
+                    .ok()?;
+                validate_kernel_owner(snapshot, Some(owner), Some(identity))?;
+            }
+            #[cfg(not(feature = "ebpf"))]
+            return None;
+        } else {
+            let ports = self.port_to_tid.read().ok()?;
+            let binding = ports.get(&snapshot.peer.port())?;
+            if binding.epoch != snapshot.owner.socket_id
+                || binding.tid != snapshot.identity.tid
+                || binding.created_at.elapsed() > self.port_ttl
+            {
+                return None;
+            }
+        }
+        let identity = self.lookup_tid(snapshot.identity.tid)?;
+        if identity.registered_at_ns != snapshot.identity.registered_at_ns
+            || identity.flags != TidFlags::Enabled as u32
+        {
+            return None;
+        }
         Some(CallerIdentity {
-            namespace: identity.namespace_str().to_string(),
-            app_id: identity.app_id_str().to_string(),
-            tid,
+            namespace: identity.namespace_str().to_owned(),
+            app_id: identity.app_id_str().to_owned(),
+            tid: snapshot.identity.tid,
         })
     }
 
@@ -576,6 +718,74 @@ impl NamespaceMap {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn snapshot_does_not_inherit_rebound_port_or_tid_generation() {
+        let map = NamespaceMap::new_fallback();
+        map.register_tid(42, TidIdentity::new("a", "caller:v1"))
+            .unwrap();
+        let peer = "127.0.0.1:54321".parse().unwrap();
+        map.bind_port(54321, 42);
+        let old = map.snapshot_connection(peer).unwrap();
+        assert!(map.resolve_connection(&old).is_some());
+        map.bind_port(54321, 42);
+        assert!(map.resolve_connection(&old).is_none());
+        let next = map.snapshot_connection(peer).unwrap();
+        map.deregister_tid(42).unwrap();
+        map.register_tid(42, TidIdentity::new("b", "replacement:v1"))
+            .unwrap();
+        map.bind_port(54321, 42);
+        assert!(map.resolve_connection(&next).is_none());
+        assert_eq!(map.resolve_identity(54321).unwrap().namespace, "b");
+    }
+
+    #[test]
+    fn kernel_mode_never_authorizes_telemetry_only_binding() {
+        let mut map = NamespaceMap::new_fallback();
+        map.register_tid(42, TidIdentity::new("a", "caller:v1"))
+            .unwrap();
+        map.bind_port(54321, 42);
+        let fallback = map
+            .snapshot_connection("127.0.0.1:54321".parse().unwrap())
+            .unwrap();
+        map.kernel_authority = true;
+        assert!(map
+            .snapshot_connection("127.0.0.1:54321".parse().unwrap())
+            .is_none());
+        assert!(map.resolve_connection(&fallback).is_none());
+    }
+
+    #[test]
+    fn kernel_live_owner_and_registration_are_both_required() {
+        let mut current = TidIdentity::new("a", "caller:v1");
+        current.flags = TidFlags::Enabled as u32;
+        current.registered_at_ns = 123;
+        let owner = GatewayOwnerIdentity {
+            registered_at_ns: 123,
+            tid: 42,
+            _padding: 0,
+        };
+        let snapshot = ConnectionSnapshot {
+            peer: "127.0.0.1:54321".parse().unwrap(),
+            owner: GatewayOwnerRef {
+                socket_id: 99,
+                connected_at_ns: 456,
+            },
+            identity: owner,
+            kernel: true,
+        };
+        assert!(validate_kernel_owner(&snapshot, Some(owner), Some(current)).is_some());
+        // Close removes this unique owner; a new peer-index value cannot revive it.
+        assert!(validate_kernel_owner(&snapshot, None, Some(current)).is_none());
+        let replacement = GatewayOwnerIdentity {
+            registered_at_ns: 124,
+            ..owner
+        };
+        assert!(validate_kernel_owner(&snapshot, Some(replacement), Some(current)).is_none());
+        current.registered_at_ns = 124;
+        assert!(validate_kernel_owner(&snapshot, Some(owner), Some(current)).is_none());
+        assert!(validate_kernel_owner(&snapshot, Some(owner), None).is_none());
+    }
 
     #[test]
     fn test_register_and_resolve() {

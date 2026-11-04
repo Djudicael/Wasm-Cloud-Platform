@@ -214,14 +214,14 @@ pub(crate) async fn prune_idle_instances(supervisor: &Supervisor, idle_threshold
                 idle_threshold_secs,
                 "pruning idle instance (FD pressure recovery)"
             );
-            if let Err(e) = supervisor.kill_instance(&app_id, &instance_id).await {
-                warn!(
-                    app = %app_id.0,
-                    instance = %instance_id.0,
-                    error = %e,
-                    "failed to prune idle instance"
-                );
-            } else {
+            if supervisor
+                .kill_idle_instance_internal(
+                    &app_id,
+                    &instance_id,
+                    std::time::Duration::from_secs(idle_threshold_secs),
+                )
+                .await
+            {
                 total_pruned += 1;
             }
         }

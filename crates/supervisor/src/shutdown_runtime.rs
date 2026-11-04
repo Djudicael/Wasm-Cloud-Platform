@@ -31,7 +31,11 @@ impl Supervisor {
                 .position(|i| i.id == *id)
                 .ok_or_else(|| PlatformError::runtime(format!("instance {} not found", id.0)))?;
 
-            pool.instances.remove(pos)
+            let instance = pool.instances.remove(pos);
+            if let Some(counters) = &instance.policy_counters {
+                counters.http_activity.retire();
+            }
+            instance
         };
 
         self.upstream_registry.remove(app_id, &instance.addr).await;
@@ -239,7 +243,7 @@ impl Supervisor {
     }
 
     pub(crate) async fn kill_instance_internal(&self, app_id: &AppId, id: &InstanceId) {
-        let mut instance = match self.take_instance_for_shutdown(app_id, id).await {
+        let instance = match self.take_instance_for_shutdown(app_id, id).await {
             Ok(instance) => instance,
             Err(e) => {
                 tracing::warn!(
@@ -252,6 +256,49 @@ impl Supervisor {
             }
         };
 
+        self.finish_internal_shutdown(app_id, id, instance).await;
+    }
+
+    /// Rechecks and claims idle retirement atomically with HTTP admission.
+    /// A stale health-loop candidate must never kill newly active work.
+    pub(crate) async fn kill_idle_instance_internal(
+        &self,
+        app_id: &AppId,
+        id: &InstanceId,
+        timeout: Duration,
+    ) -> bool {
+        let instance = {
+            let mut pools = self.pools.write().await;
+            let Some(pool) = pools.get_mut(&app_id.0) else {
+                return false;
+            };
+            let Some(pos) = pool
+                .instances
+                .iter()
+                .position(|instance| instance.id == *id)
+            else {
+                return false;
+            };
+            if !pool.instances[pos].try_retire_if_idle(timeout) {
+                return false;
+            }
+            pool.instances.remove(pos)
+        };
+        self.upstream_registry.remove(app_id, &instance.addr).await;
+        self.service_registry
+            .deregister(app_id, &instance.addr)
+            .await;
+        tracing::info!(app = %app_id.0, instance = %id.0, "retiring idle instance");
+        self.finish_internal_shutdown(app_id, id, instance).await;
+        true
+    }
+
+    async fn finish_internal_shutdown(
+        &self,
+        app_id: &AppId,
+        id: &InstanceId,
+        mut instance: ManagedInstance,
+    ) {
         instance.state = InstanceState::Stopping {
             addr: instance.addr,
         };

@@ -400,6 +400,90 @@ fn dummy_managed_instance_with_counters(counters: Arc<PolicyCounters>) -> Manage
 }
 
 #[tokio::test]
+async fn idle_reaper_rechecks_stale_candidate_and_preserves_active_http() {
+    let (supervisor, _, _, _) =
+        make_test_supervisor(IpAddr::V4(Ipv4Addr::LOCALHOST), 18101, 18110).await;
+    let app_id = AppId::new("idle-http", "v1");
+    let counters = Arc::new(PolicyCounters::new());
+    counters.http_activity.enable_http_serving();
+    let mut instance = dummy_managed_instance_with_counters(counters.clone());
+    instance.app_id = app_id.clone();
+    instance.addr = "127.0.0.1:9".parse().unwrap();
+    instance.last_request_at = Instant::now() - Duration::from_secs(3600);
+    let id = instance.id.clone();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    instance.shutdown_tx = Some(shutdown_tx);
+    instance.task = Some(tokio::spawn(async move {
+        let _ = shutdown_rx.await;
+        dummy_stats()
+    }));
+    let runtime = runtime::WasmRuntime::new().unwrap();
+    supervisor.pools.write().await.insert(
+        app_id.0.clone(),
+        InstancePool {
+            config: AppConfig::default_for(app_id.clone()),
+            prepared: minimal_prepared_module(&runtime, &app_id),
+            instances: vec![instance],
+        },
+    );
+    let candidates = supervisor
+        .pools
+        .read()
+        .await
+        .get(&app_id.0)
+        .unwrap()
+        .idle_instance_ids(0);
+    assert_eq!(candidates, vec![id.clone()]);
+    // A request admitted after the health-loop snapshot wins over retirement.
+    let handler = counters.http_activity.begin().unwrap();
+    let response_body = handler.clone();
+    assert!(
+        !supervisor
+            .kill_idle_instance_internal(&app_id, &id, Duration::ZERO)
+            .await
+    );
+    supervisor.prune_idle_instances(0).await;
+    assert_eq!(
+        supervisor
+            .pools
+            .read()
+            .await
+            .get(&app_id.0)
+            .unwrap()
+            .instances
+            .len(),
+        1
+    );
+    drop(handler);
+    assert!(
+        !supervisor
+            .kill_idle_instance_internal(&app_id, &id, Duration::ZERO)
+            .await
+    );
+    drop(response_body);
+    // The timeout starts at completion, rather than the instance creation time.
+    assert!(
+        !supervisor
+            .kill_idle_instance_internal(&app_id, &id, Duration::from_secs(60))
+            .await
+    );
+    assert!(
+        supervisor
+            .kill_idle_instance_internal(&app_id, &id, Duration::ZERO)
+            .await
+    );
+    assert!(counters.http_activity.begin().is_none());
+    assert!(supervisor
+        .pools
+        .read()
+        .await
+        .get(&app_id.0)
+        .unwrap()
+        .instances
+        .is_empty());
+}
+
+#[tokio::test]
 async fn ebpf_tcp_close_releases_only_outbound_connection_reservations() {
     let (supervisor, _, _, _) =
         make_test_supervisor(IpAddr::V4(Ipv4Addr::LOCALHOST), 18101, 18110).await;
