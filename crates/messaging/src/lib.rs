@@ -1,6 +1,7 @@
 pub mod events;
 pub mod publisher;
 pub mod reconnect;
+mod url_auth;
 
 #[cfg(test)]
 mod tests;
@@ -112,14 +113,7 @@ impl NatsBus {
 
     /// Connect to the NATS server.
     pub async fn connect(url: &str) -> Result<Self, PlatformError> {
-        let client = async_nats::connect(url)
-            .await
-            .map_err(|e| PlatformError::messaging(format!("NATS connect: {e}")))?;
-        tracing::info!("connected to NATS");
-        Ok(NatsBus {
-            client,
-            node_id: "unknown".to_string(),
-        })
+        Self::connect_with_tls(url, None, None, None, None).await
     }
 
     /// Connect to the NATS server securely using a credentials file.
@@ -135,11 +129,12 @@ impl NatsBus {
         client_cert: Option<&str>,
         client_key: Option<&str>,
     ) -> Result<Self, PlatformError> {
+        let (address, url_options) = url_auth::options(url, creds_path.is_some())?;
         let mut options = match creds_path {
             Some(path) => async_nats::ConnectOptions::with_credentials_file(path)
                 .await
-                .map_err(|e| PlatformError::messaging(format!("failed to load creds: {e}")))?,
-            None => async_nats::ConnectOptions::new(),
+                .map_err(|_| PlatformError::messaging("failed to load NATS credentials file"))?,
+            None => url_options,
         };
         if let Some(path) = ca_cert {
             options = options.add_root_certificates(std::path::PathBuf::from(path));
@@ -156,9 +151,9 @@ impl NatsBus {
             }
         }
         let client = options
-            .connect(url)
+            .connect(address)
             .await
-            .map_err(|e| PlatformError::messaging(format!("NATS TLS connect: {e}")))?;
+            .map_err(|e| PlatformError::messaging(format!("NATS connect failed: {}", e.kind())))?;
         tracing::info!(
             private_ca = ca_cert.is_some(),
             mutual_tls = client_cert.is_some(),

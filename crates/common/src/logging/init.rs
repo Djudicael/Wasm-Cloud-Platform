@@ -159,6 +159,7 @@ pub fn init_logging(config: &LoggingConfig) -> LogReloadHandle {
 
             Registry::default()
                 .with(filter_layer)
+                .with(tracing_subscriber::filter::filter_fn(super::safe_sdk_event))
                 .with(fmt_layer)
                 .with(sampling_layer)
                 .init();
@@ -181,6 +182,7 @@ pub fn init_logging(config: &LoggingConfig) -> LogReloadHandle {
 
             Registry::default()
                 .with(filter_layer)
+                .with(tracing_subscriber::filter::filter_fn(super::safe_sdk_event))
                 .with(fmt_layer)
                 .with(sampling_layer)
                 .init();

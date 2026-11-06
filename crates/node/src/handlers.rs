@@ -118,7 +118,24 @@ impl EventDispatcher {
         let (app, remove) = match &event {
             Event::DeployApp { app_id, .. } => (app_id.clone(), false),
             Event::RemoveApp { app_id } => (app_id.clone(), true),
-            _ => return self.handle(event).await,
+            _ => {
+                let mutates = matches!(
+                    &event,
+                    Event::RouteAdd { .. }
+                        | Event::RouteRemove { .. }
+                        | Event::ConfigUpdate { .. }
+                        | Event::GatewayConfigUpdate { .. }
+                        | Event::GatewayConfigRemove { .. }
+                        | Event::SecretUpdate { .. }
+                        | Event::SecretDelete { .. }
+                );
+                let _guard = if mutates {
+                    Some(self.lifecycle_gate.lock().await)
+                } else {
+                    None
+                };
+                return self.handle(event).await;
+            }
         };
         let _guard = self.lifecycle_gate.lock().await;
         if !self.store.begin_lifecycle_event(
@@ -787,7 +804,7 @@ impl EventDispatcher {
         Ok(())
     }
 
-    fn validate_local_placement(
+    pub(crate) fn validate_local_placement(
         &self,
         config: &common::types::AppConfig,
     ) -> Result<(), PlatformError> {
@@ -806,7 +823,7 @@ impl EventDispatcher {
         Ok(())
     }
 
-    fn apply_rate_limit(&self, app_id: &AppId, config: &common::types::AppConfig) {
+    pub(crate) fn apply_rate_limit(&self, app_id: &AppId, config: &common::types::AppConfig) {
         if let Some(limit) = &config.rate_limit {
             self.rate_limiter.set_app_config(
                 &app_id.0,

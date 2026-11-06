@@ -20,6 +20,7 @@ tracing-core = "0.1.36"
 tracing-subscriber = { workspace = true }
 tokio       = { workspace = true }
 async-nats  = { workspace = true }
+url         = { workspace = true }
 flate2      = "1.1.9"
 
 [dev-dependencies]

@@ -20,6 +20,10 @@ instructions.
 
 ## Operate the platform
 
+- [Scoped application control](scoped-application-control.md) describes the
+  opt-in listener, application-limited service credentials, safe snapshots and
+  conditional restart receipts.
+
 - [NATS setup](nats-setup.md) covers JetStream, authentication, TLS, monitoring,
   backup, and recovery.
 - [Deploy ingress operations](deploy-ingress-operations.md) covers the separate

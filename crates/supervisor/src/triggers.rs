@@ -50,6 +50,15 @@ impl Supervisor {
         app: &AppId,
         schedule: &ScheduleTrigger,
     ) -> Result<(), String> {
+        if self
+            .store
+            .load_meta("control-node-draining")
+            .map_err(|e| e.to_string())?
+            .as_deref()
+            == Some("true")
+        {
+            return Err("node draining".into());
+        }
         if *self.trigger_stop.borrow()
             || self.paused_triggers.read().await.contains(&app.0)
             || self
@@ -58,6 +67,15 @@ impl Supervisor {
                 .map_err(|e| e.to_string())?
         {
             return Err("application undeployed or draining".into());
+        }
+        if self
+            .store
+            .load_meta(&format!("control-trigger-paused:{}|{}", app.0, schedule.id))
+            .map_err(|e| e.to_string())?
+            .as_deref()
+            == Some("true")
+        {
+            return Err("schedule paused by operator".into());
         }
         let config = self
             .store
@@ -103,6 +121,16 @@ impl Supervisor {
 
 impl Scheduler {
     fn record(&self, app: &AppId, trigger: &str, outcome: &str, count: u64, scheduled_at_ms: u64) {
+        if let Err(error) = self.supervisor.store.record_trigger_outcome(
+            &self.supervisor.node_id,
+            app,
+            trigger,
+            outcome,
+            count,
+            scheduled_at_ms,
+        ) {
+            tracing::warn!(app=%app.0,trigger,%error,"schedule statistics persistence failed");
+        }
         self.metrics
             .schedule_events_total
             .with_label_values(&[outcome])
@@ -164,6 +192,16 @@ impl Scheduler {
         jobs: &mut JoinSet<()>,
         global: &Arc<Semaphore>,
     ) -> Result<(), String> {
+        if self
+            .supervisor
+            .store
+            .load_meta("control-node-draining")
+            .map_err(|e| e.to_string())?
+            .as_deref()
+            == Some("true")
+        {
+            return Ok(());
+        }
         let now = now_ms();
         let apps = self
             .supervisor
@@ -190,6 +228,16 @@ impl Scheduler {
             common::triggers::validate(&config.triggers)?;
             for trigger in &config.triggers {
                 let schedule = trigger.schedule();
+                if self
+                    .supervisor
+                    .store
+                    .load_meta(&format!("control-trigger-paused:{}|{}", app.0, schedule.id))
+                    .map_err(|e| e.to_string())?
+                    .as_deref()
+                    == Some("true")
+                {
+                    continue;
+                }
                 let key = (app.clone(), schedule.id.clone());
                 present.insert(key.clone());
                 if entries

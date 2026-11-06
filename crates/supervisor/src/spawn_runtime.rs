@@ -96,6 +96,7 @@ impl Supervisor {
 
     /// Ensure at least one instance is available for the given app.
     pub async fn ensure_instance(&self, app_id: &AppId) -> Result<SocketAddr, PlatformError> {
+        let _node_guard = self.node_control_gate.read().await;
         let gate = self.spawn_gate(app_id).await;
         let _guard = gate.lock().await;
         if self.store.is_undeployed(&app_id.0)? {
@@ -121,12 +122,55 @@ impl Supervisor {
     /// Spawn a new instance for the given app.
     /// Returns the SocketAddr where the instance is listening.
     pub async fn spawn(&self, app_id: &AppId) -> Result<SocketAddr, PlatformError> {
+        let _node_guard = self.node_control_gate.read().await;
         let gate = self.spawn_gate(app_id).await;
         let _guard = gate.lock().await;
         self.spawn_inner(app_id).await
     }
+    pub async fn reconcile_desired_instances(
+        &self,
+        app: &AppId,
+        desired: u32,
+    ) -> Result<(), PlatformError> {
+        let _node_guard = self.node_control_gate.read().await;
+        let gate = self.spawn_gate(app).await;
+        let _guard = gate.lock().await;
+        let config = self
+            .store
+            .load_config(app)?
+            .ok_or_else(|| PlatformError::AppNotFound(app.0.clone()))?;
+        if desired > config.max_instances {
+            return Err(PlatformError::runtime(
+                "desired instances exceed application ceiling",
+            ));
+        }
+        let count = self
+            .pools
+            .read()
+            .await
+            .get(&app.0)
+            .map(|p| p.instances.len())
+            .unwrap_or(0);
+        for _ in count..desired as usize {
+            self.spawn_inner(app).await?;
+        }
+        Ok(())
+    }
 
     async fn spawn_inner(&self, app_id: &AppId) -> Result<SocketAddr, PlatformError> {
+        for key in ["control-node-cordoned", "control-node-draining"] {
+            if self
+                .store
+                .load_meta(key)
+                .map_err(PlatformError::storage_source)?
+                .as_deref()
+                == Some("true")
+            {
+                return Err(PlatformError::runtime(
+                    "node is fenced against new execution",
+                ));
+            }
+        }
         if self.store.is_undeployed(&app_id.0)? {
             return Err(PlatformError::AppNotFound(format!(
                 "{} is undeployed",
@@ -134,6 +178,17 @@ impl Supervisor {
             )));
         }
 
+        if self
+            .store
+            .load_meta(&format!("control-desired-instances:{}", app_id.0))
+            .map_err(PlatformError::storage_source)?
+            .as_deref()
+            == Some("0")
+        {
+            return Err(PlatformError::runtime(
+                "application admission paused at zero replicas",
+            ));
+        }
         let (config, prepared) = {
             let pools = self.pools.read().await;
             if let Some(pool) = pools.get(&app_id.0) {
@@ -159,6 +214,18 @@ impl Supervisor {
         // Re-check at the execution boundary so legacy persisted state or a
         // future ingestion path cannot bypass admission policy.
         self.check_resource_limits(&config)?;
+        let current = self
+            .pools
+            .read()
+            .await
+            .get(&app_id.0)
+            .map(|p| p.instances.len())
+            .unwrap_or(0);
+        if current >= config.max_instances as usize {
+            return Err(PlatformError::runtime(
+                "application instance admission ceiling reached",
+            ));
+        }
 
         for dependency in &config.local_dependencies {
             let dependency_is_available = !self.store.is_undeployed(&dependency.0)?
@@ -553,11 +620,38 @@ impl Supervisor {
                         let _ = registration_rx.recv();
                     });
 
-                    let http_server = match prepared.spawn_http_server(
+                    let observer = self
+                        .execution_metrics
+                        .read()
+                        .ok()
+                        .and_then(|m| m.clone())
+                        .map(|metrics| {
+                            let app_id = qualified_app_id.0.clone();
+                            let instance_id = instance_id.0.to_string();
+                            Arc::new(move |sample: runtime::executor::HttpExecution| {
+                                metrics.record_execution(&metrics::ExecutionSample {
+                                    app_id: app_id.clone(),
+                                    instance_id: instance_id.clone(),
+                                    timestamp_ms: chrono::Utc::now().timestamp_millis().max(0)
+                                        as u64,
+                                    fuel_consumed: sample.fuel_consumed,
+                                    fuel_limit: sample.fuel_limit,
+                                    ram_bytes: sample.ram_bytes,
+                                    wall_clock_ms: sample.wall_clock_ms,
+                                    status_code: sample.status_code,
+                                    is_trap: sample.is_trap,
+                                    trap_reason: sample.error.map(str::to_owned),
+                                    trace_id: None,
+                                });
+                            })
+                                as runtime::executor::HttpExecutionObserver
+                        });
+                    let http_server = match prepared.spawn_http_server_observed(
                         env_vars,
                         addr,
                         Some(socket_addr_check),
                         Some(thread_start_hook),
+                        observer,
                     ) {
                         Ok(server) => server,
                         Err(e) => {

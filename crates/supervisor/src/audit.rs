@@ -1,6 +1,64 @@
 use serde::{Deserialize, Serialize};
 use std::fs::OpenOptions;
 use std::io::Write;
+struct AuditOutput {
+    path: std::path::PathBuf,
+    file: std::sync::Mutex<std::fs::File>,
+}
+static AUDIT_OUTPUT: std::sync::OnceLock<AuditOutput> = std::sync::OnceLock::new();
+
+/// Operator-selected local audit file, distinct from application log sinks.
+/// The default remains unchanged. Private development nodes need not write
+/// into the host's system-wide /var/log hierarchy.
+pub fn configure_output(path: &str) -> std::io::Result<()> {
+    let file = private_output(path)?;
+    AUDIT_OUTPUT
+        .set(AuditOutput {
+            path: path.into(),
+            file: std::sync::Mutex::new(file),
+        })
+        .map_err(|_| std::io::Error::other("audit file already configured"))
+}
+fn private_output(path: &str) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+    let file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(path)?;
+    let meta = file.metadata()?;
+    let uid = std::fs::metadata("/proc/self")?.uid();
+    if !meta.is_file() || meta.uid() != uid || meta.permissions().mode() & 0o777 != 0o600 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "audit file must be owned regular 0600 file",
+        ));
+    }
+    Ok(file)
+}
+
+#[cfg(test)]
+mod output_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+    #[test]
+    fn private_audit_sink_refuses_symlinks_and_public_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("audit.jsonl");
+        let target = path.to_str().unwrap();
+        assert!(private_output(target).is_ok());
+        assert_eq!(
+            std::fs::metadata(target).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&path, &link).unwrap();
+        assert!(private_output(link.to_str().unwrap()).is_err());
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(private_output(target).is_err());
+    }
+}
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct AuditEvent {
@@ -34,14 +92,28 @@ pub enum AuditEventType {
 }
 
 pub fn write_audit_event(path: &str, event: &AuditEvent) {
+    let configured = AUDIT_OUTPUT
+        .get()
+        .filter(|_| path == "/var/log/wasm-node/audit.jsonl");
+    let path = configured
+        .map(|p| p.path.as_path())
+        .unwrap_or_else(|| std::path::Path::new(path));
     if let Ok(line) = serde_json::to_string(event) {
-        if let Err(e) = OpenOptions::new()
-            .append(true)
-            .create(true)
-            .open(path)
-            .and_then(|mut f| f.write_all(format!("{}\n", line).as_bytes()))
-        {
-            tracing::warn!(error = %e, path = path, "failed to write audit event");
+        let write = if let Some(output) = configured {
+            output
+                .file
+                .lock()
+                .map_err(|_| std::io::Error::other("audit writer poisoned"))
+                .and_then(|mut f| f.write_all(format!("{line}\n").as_bytes()))
+        } else {
+            OpenOptions::new()
+                .append(true)
+                .create(true)
+                .open(path)
+                .and_then(|mut f| f.write_all(format!("{}\n", line).as_bytes()))
+        };
+        if let Err(e) = write {
+            tracing::warn!(error = %e, path = %path.display(), "failed to write audit event");
             return;
         }
 

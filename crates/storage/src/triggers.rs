@@ -22,8 +22,57 @@ pub fn cursor_key(node: &str, app: &AppId, id: &str) -> String {
         serde_json::to_string(&(node, &app.0, id)).expect("string tuple serializes")
     )
 }
+pub fn stats_key(node: &str, app: &AppId, id: &str) -> String {
+    format!(
+        "schedule-stats:{}",
+        serde_json::to_string(&(node, &app.0, id)).expect("string tuple serializes")
+    )
+}
 
 impl Store {
+    pub fn record_trigger_outcome(
+        &self,
+        node: &str,
+        app: &AppId,
+        id: &str,
+        outcome: &str,
+        count: u64,
+        scheduled_at_ms: u64,
+    ) -> Result<(), PlatformError> {
+        let key = stats_key(node, app, id);
+        let tx = self
+            .db
+            .begin_write()
+            .map_err(PlatformError::storage_source)?;
+        {
+            let mut table = tx
+                .open_table(SCHEMA_META)
+                .map_err(PlatformError::storage_source)?;
+            let mut value:serde_json::Value=table.get(key.as_str()).map_err(PlatformError::storage_source)?.map(|v|serde_json::from_str(v.value())).transpose().map_err(PlatformError::storage_source)?.unwrap_or_else(||serde_json::json!({"node":node,"app":app.0,"trigger":id,"counts":{},"lastFireAtMs":null,"lastCompletedAtMs":null}));
+            let n = value["counts"][outcome]
+                .as_u64()
+                .unwrap_or(0)
+                .checked_add(count)
+                .ok_or_else(|| PlatformError::storage("trigger counter exhausted"))?;
+            value["counts"][outcome] = serde_json::json!(n);
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_err(PlatformError::storage_source)?
+                .as_millis() as u64;
+            value["lastEventAtMs"] = serde_json::json!(now);
+            value["lastOutcome"] = serde_json::json!(outcome);
+            if outcome == "invoked" {
+                value["lastFireAtMs"] = serde_json::json!(scheduled_at_ms);
+            }
+            if matches!(outcome, "success" | "failure" | "timeout" | "cancelled") {
+                value["lastCompletedAtMs"] = serde_json::json!(now);
+            }
+            table
+                .insert(key.as_str(), value.to_string().as_str())
+                .map_err(PlatformError::storage_source)?;
+        }
+        tx.commit().map_err(PlatformError::storage_source)
+    }
     /// Commit before dispatch: a crash can lose a tick but cannot replay a bucket.
     pub fn advance_trigger_cursor(
         &self,

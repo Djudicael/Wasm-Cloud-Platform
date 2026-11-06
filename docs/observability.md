@@ -113,7 +113,7 @@ sum by (operation) (rate(wasm_policy_io_timeouts_total[5m]))
 | `wasm_requests_total` | Counter | Completed executions by app and status |
 | `wasm_request_duration_seconds` | Histogram | Request wall-clock duration by app |
 | `wasm_fuel_consumed_total` | Counter | Fuel consumed by app |
-| `wasm_ram_usage_bytes` | Gauge | Current reported linear-memory use by app |
+| `wasm_ram_usage_bytes` | Gauge | Linear-memory bytes of the last measured request Store by app |
 | `wasm_active_instances` | Gauge | Running instances by app |
 | `wasm_trap_total` | Counter | Wasm traps by app and reason |
 
@@ -135,6 +135,36 @@ sum by (operation) (rate(wasm_policy_io_timeouts_total[5m]))
 | `wasm_gateway_circuit_breaker_rejected_total` | Counter | Circuit breaker rejections |
 | `wasm_gateway_cors_preflight_total` | Counter | CORS preflight requests handled |
 | `wasm_gateway_circuits_open` | Gauge | Number of open circuits |
+
+#### HTTP execution measurements
+
+The native node connects the P2/P3 HTTP runtime's execution observer to the
+Prometheus exporter. Each guest request Store produces one measurement using
+its actual remaining fuel, linear-memory limiter and monotonic elapsed time.
+P2 native schedule invocations use the same measurement path. Traps before a
+guest response use `status="0"` (no HTTP response), rather than inventing a
+500 response. Host cancellations/timeouts retain measured fuel and memory;
+they are not classified as Wasmtime traps. Trap reason labels are bounded
+classifications, never arbitrary guest error strings.
+
+Proxy rejections, reserved-trigger network denials and retirement admission
+failures never enter a guest Store and do not increment `wasm_requests_total`.
+Use the proxy/gateway counters for those events. `wasm_ram_usage_bytes` is the
+last measured request's linear memory, not process RSS or aggregate concurrent
+memory. The runtime also accumulates measured HTTP fuel for the instance's
+existing shutdown billing record; it does not create additional per-request
+billing records. These counters remain local process telemetry, not durable
+billing evidence.
+
+The non-ignored real-component regression suite requires explicit fixtures:
+
+```bash
+cargo build --locked --target wasm32-wasip2 -p http-hello-component -p http-p3-probe
+cargo test --locked -p runtime --test http_observations -- --test-threads=1
+```
+
+Set `CARGO_TARGET_DIR` to the same Linux target directory for both commands.
+The suite fails when a required fixture is missing; it does not silently skip.
 
 #### Node health metrics
 
@@ -389,6 +419,13 @@ execution. Application logs created while handling that request inherit the
 same trace context. Child spans for database queries or internal calls exist
 only when the application or its client library explicitly instruments them;
 the platform does not invent those spans.
+
+The proxy exports `http.response.status_code` as an OTLP integer, including
+responses rejected before WASI execution (for example 429). Numeric TraceQL
+filters must compare it with an integer, not a quoted string. When no response
+was written the span attribute remains unset; the existing request log event
+continues to use status zero for that absence. This differs from the runtime
+execution counter's documented `status="0"` label.
 
 ### OTLP export
 

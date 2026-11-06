@@ -95,6 +95,48 @@ fn test_dispatcher_resolves_registered_application_identity_by_tid() {
 }
 
 #[test]
+fn observed_connections_are_exact_app_scoped_and_preserve_real_address_bytes() {
+    let dispatcher = make_dispatcher(Arc::new(TestCallbacks::default()));
+    let map = Arc::new(NamespaceMap::new_fallback());
+    map.register_tid(420, crate::common::TidIdentity::new("test", "test/app:v1"))
+        .unwrap();
+    dispatcher.set_namespace_map(map);
+    dispatcher.dispatch(MonitorEvent::TcpConnect {
+        pid: 1,
+        tid: 420,
+        src_addr: std::net::Ipv4Addr::LOCALHOST.to_ipv6_mapped().octets(),
+        dst_addr: std::net::Ipv4Addr::new(192, 0, 2, 1)
+            .to_ipv6_mapped()
+            .octets(),
+        src_port: 42000,
+        dst_port: 8080,
+        old_state: 2,
+        new_state: 1,
+    });
+    dispatcher.dispatch(MonitorEvent::TcpConnect {
+        pid: 1,
+        tid: 999,
+        src_addr: [0; 16],
+        dst_addr: [0; 16],
+        src_port: 42001,
+        dst_port: 443,
+        old_state: 2,
+        new_state: 1,
+    });
+    let v = dispatcher.observed_connections("test/app:v1", 0, 32);
+    assert_eq!(v["flows"].as_array().unwrap().len(), 1);
+    assert_eq!(v["flows"][0]["destinationAddress"], "192.0.2.1");
+    assert_eq!(v["flows"][0]["sourceAddress"], "127.0.0.1");
+    assert_eq!(v["flows"][0]["policyVerdict"], "connection_established");
+    assert!(
+        dispatcher.observed_connections("foreign/app:v1", 0, 32)["flows"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
 fn test_oom_kill_triggers_backpressure_and_removal() {
     let callbacks = Arc::new(TestCallbacks::default());
     let dispatcher = make_dispatcher(callbacks.clone());
@@ -532,6 +574,8 @@ fn test_tcp_connect_close_updates_connection_count() {
     dispatcher.dispatch(MonitorEvent::TcpConnect {
         pid: 1,
         tid: 1,
+        src_addr: [0; 16],
+        dst_addr: [0; 16],
         src_port: 8080,
         dst_port: 443,
         old_state: 0,
@@ -563,6 +607,8 @@ fn test_events_processed_counter() {
     dispatcher.dispatch(MonitorEvent::TcpConnect {
         pid: 1,
         tid: 1,
+        src_addr: [0; 16],
+        dst_addr: [0; 16],
         src_port: 80,
         dst_port: 443,
         old_state: 0,
@@ -618,6 +664,8 @@ fn test_monitor_event_type_mapping() {
         MonitorEvent::TcpConnect {
             pid: 0,
             tid: 0,
+            src_addr: [0; 16],
+            dst_addr: [0; 16],
             src_port: 0,
             dst_port: 0,
             old_state: 0,

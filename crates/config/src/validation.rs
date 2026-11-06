@@ -225,7 +225,9 @@ fn validate_production_secret_policy(config: &NodeConfig, errors: &mut Vec<Strin
     {
         errors.push("production requires nats.creds_file".to_string());
     }
-    if !config.nats.url.trim().starts_with("tls://") {
+    if !config.nats.url.split(',').all(|entry| {
+        Url::parse(entry.trim()).is_ok_and(|url| url.scheme() == "tls" && url.host_str().is_some())
+    }) {
         errors.push("production requires a tls:// NATS URL".to_string());
     }
     if config.runtime.isolation_mode.as_deref() != Some("single-trust-domain") {

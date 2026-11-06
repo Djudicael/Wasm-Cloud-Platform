@@ -400,6 +400,224 @@ fn dummy_managed_instance_with_counters(counters: Arc<PolicyCounters>) -> Manage
 }
 
 #[tokio::test]
+async fn conditional_eviction_fences_spawn_drift_and_never_kills_replacement_instances() {
+    use std::collections::BTreeSet;
+    use std::sync::atomic::AtomicUsize;
+    let (supervisor, _, _, _) =
+        make_test_supervisor(IpAddr::V4(Ipv4Addr::LOCALHOST), 18201, 18210).await;
+    let app = AppId::new_namespaced("test", "conditional", "v1");
+    let exited = Arc::new(AtomicUsize::new(0));
+    let make_instance = || {
+        let mut instance = dummy_managed_instance_with_counters(Arc::new(PolicyCounters::new()));
+        instance.app_id = app.clone();
+        let (tx, rx) = oneshot::channel();
+        let exited = exited.clone();
+        instance.shutdown_tx = Some(tx);
+        instance.task = Some(tokio::spawn(async move {
+            let _ = rx.await;
+            exited.fetch_add(1, Ordering::SeqCst);
+            dummy_stats()
+        }));
+        instance
+    };
+    let first = make_instance();
+    let old = BTreeSet::from([first.id.0.to_string()]);
+    let runtime = runtime::WasmRuntime::new().unwrap();
+    supervisor.pools.write().await.insert(
+        app.0.clone(),
+        InstancePool {
+            config: AppConfig::default_for(app.clone()),
+            prepared: minimal_prepared_module(&runtime, &app),
+            instances: vec![first],
+        },
+    );
+    let spawn_gate = supervisor.spawn_gate(&app).await;
+    let spawn_guard = spawn_gate.lock().await;
+    let s = supervisor.clone();
+    let a = app.clone();
+    let expected = old.clone();
+    let mut eviction = tokio::spawn(async move { s.evict_instances_if(&a, &expected).await });
+    assert!(
+        tokio::time::timeout(Duration::from_millis(30), &mut eviction)
+            .await
+            .is_err()
+    );
+    // The in-flight spawn completes before relinquishing its gate.
+    supervisor
+        .pools
+        .write()
+        .await
+        .get_mut(&app.0)
+        .unwrap()
+        .instances
+        .push(make_instance());
+    drop(spawn_guard);
+    assert!(!eviction.await.unwrap().unwrap());
+    assert_eq!(exited.load(Ordering::SeqCst), 0);
+    assert_eq!(supervisor.list_instances(&app).await.len(), 2);
+    let current = supervisor
+        .list_instances(&app)
+        .await
+        .into_iter()
+        .map(|id| id.0.to_string())
+        .collect();
+    assert!(supervisor.evict_instances_if(&app, &current).await.unwrap());
+    assert_eq!(exited.load(Ordering::SeqCst), 2);
+    assert!(supervisor.list_instances(&app).await.is_empty());
+    supervisor
+        .pools
+        .write()
+        .await
+        .get_mut(&app.0)
+        .unwrap()
+        .instances
+        .push(make_instance());
+    assert!(!supervisor.evict_instances_if(&app, &current).await.unwrap());
+    assert_eq!(exited.load(Ordering::SeqCst), 2);
+    assert_eq!(supervisor.list_instances(&app).await.len(), 1);
+    let current = supervisor
+        .list_instances(&app)
+        .await
+        .into_iter()
+        .map(|id| id.0.to_string())
+        .collect();
+    assert!(supervisor.evict_instances_if(&app, &current).await.unwrap());
+    assert_eq!(exited.load(Ordering::SeqCst), 3);
+}
+
+#[tokio::test]
+async fn zero_desired_and_node_admission_fences_block_real_spawn_paths() {
+    let (supervisor, _, _, _) =
+        make_test_supervisor(IpAddr::V4(Ipv4Addr::LOCALHOST), 18401, 18410).await;
+    let app = AppId::new_namespaced("test", "paused", "v1");
+    let mut config = AppConfig::default_for(app.clone());
+    config.max_instances = 1;
+    supervisor.store.save_config(&config).unwrap();
+    supervisor
+        .store
+        .save_meta(&format!("control-desired-instances:{}", app.0), "0")
+        .unwrap();
+    assert!(supervisor
+        .spawn(&app)
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("paused"));
+    supervisor
+        .store
+        .save_meta(&format!("control-desired-instances:{}", app.0), "1")
+        .unwrap();
+    let signal = proxy::backpressure::BackpressureSignal::new();
+    let expected = supervisor.node_execution_fence().await;
+    assert!(supervisor
+        .change_node_admission_if(&expected, Some(true), Some(true), &signal)
+        .await
+        .unwrap());
+    assert!(!signal.is_accepting());
+    assert!(supervisor.spawn(&app).await.is_err());
+    signal.set_rejecting();
+    assert!(supervisor
+        .change_node_admission_if(&expected, Some(false), Some(false), &signal)
+        .await
+        .unwrap());
+    assert!(
+        !signal.is_accepting(),
+        "operator resume must preserve active memory rejection"
+    );
+}
+
+#[tokio::test]
+async fn persisted_operator_fences_restore_without_changing_memory_protection() {
+    let (supervisor, _, _, _) =
+        make_test_supervisor(IpAddr::V4(Ipv4Addr::LOCALHOST), 18411, 18420).await;
+    for (cordoned, draining) in [(true, false), (false, true), (true, true), (false, false)] {
+        supervisor
+            .store
+            .save_meta(
+                "control-node-cordoned",
+                if cordoned { "true" } else { "false" },
+            )
+            .unwrap();
+        supervisor
+            .store
+            .save_meta(
+                "control-node-draining",
+                if draining { "true" } else { "false" },
+            )
+            .unwrap();
+        let signal = proxy::backpressure::BackpressureSignal::new();
+        supervisor.restore_node_admission(&signal).unwrap();
+        assert_eq!(signal.is_accepting(), !draining);
+        assert_eq!(signal.can_cold_start(), !draining && !cordoned);
+        signal.set_rejecting();
+        supervisor.restore_node_admission(&signal).unwrap();
+        assert!(!signal.is_accepting());
+        assert!(!signal.can_cold_start());
+    }
+}
+
+#[tokio::test]
+async fn cancelling_control_waiter_does_not_drop_detached_shutdown_handles() {
+    use std::collections::BTreeSet;
+    let (supervisor, _, _, _) =
+        make_test_supervisor(IpAddr::V4(Ipv4Addr::LOCALHOST), 18501, 18510).await;
+    let app = AppId::new_namespaced("test", "cancelled-control", "v1");
+    let mut instance = dummy_managed_instance_with_counters(Arc::new(PolicyCounters::new()));
+    instance.app_id = app.clone();
+    let (tx, rx) = oneshot::channel();
+    let (finished_tx, finished_rx) = oneshot::channel();
+    let (release_tx, release_rx) = oneshot::channel();
+    instance.shutdown_tx = Some(tx);
+    instance.task = Some(tokio::spawn(async move {
+        let _ = rx.await;
+        let _ = release_rx.await;
+        let _ = finished_tx.send(());
+        dummy_stats()
+    }));
+    let expected = BTreeSet::from([instance.id.0.to_string()]);
+    let runtime = runtime::WasmRuntime::new().unwrap();
+    supervisor.pools.write().await.insert(
+        app.0.clone(),
+        InstancePool {
+            config: AppConfig::default_for(app.clone()),
+            prepared: minimal_prepared_module(&runtime, &app),
+            instances: vec![instance],
+        },
+    );
+    let owner = supervisor.clone();
+    let target = app.clone();
+    let waiter = tokio::spawn(async move { owner.evict_instances_if(&target, &expected).await });
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while !supervisor.list_instances(&app).await.is_empty() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    waiter.abort();
+    let _ = waiter.await;
+    let contender = supervisor.clone();
+    let target = app.clone();
+    let mut spawn = tokio::spawn(async move { contender.spawn(&target).await });
+    assert!(
+        tokio::time::timeout(Duration::from_millis(30), &mut spawn)
+            .await
+            .is_err(),
+        "cancelled control waiter must not admit a replacement while old guests retain capacity"
+    );
+    release_tx.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(1), finished_rx)
+        .await
+        .unwrap()
+        .unwrap();
+    let _ = tokio::time::timeout(Duration::from_secs(1), spawn)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(supervisor.list_instances(&app).await.is_empty());
+}
+
+#[tokio::test]
 async fn idle_reaper_rechecks_stale_candidate_and_preserves_active_http() {
     let (supervisor, _, _, _) =
         make_test_supervisor(IpAddr::V4(Ipv4Addr::LOCALHOST), 18101, 18110).await;

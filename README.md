@@ -81,6 +81,9 @@ The index routes to one operator guide per level, so each audience gets a concre
 
 ## Documentation
 
+- [Scoped application control](docs/scoped-application-control.md) for the
+  optional least-privilege application-control listener and restart fences
+
 - [`docs/README.md`](docs/README.md) is the complete user and operator manual index
 - [`docs/performance-benchmarks.md`](docs/performance-benchmarks.md) for the supported measurement paths, including the real platform cold-start benchmark
 

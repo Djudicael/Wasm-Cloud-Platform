@@ -146,6 +146,8 @@ impl Gateway {
 
     /// Set the gateway config for a route.
     pub async fn set_route_config(&self, app_id: &str, config: GatewayRouteConfig) {
+        self.circuit_breaker
+            .configure(app_id, config.circuit_breaker.clone());
         self.route_configs
             .write()
             .await
@@ -154,6 +156,7 @@ impl Gateway {
 
     /// Remove the gateway config for a route.
     pub async fn remove_route_config(&self, app_id: &str) {
+        self.circuit_breaker.configure(app_id, None);
         self.route_configs.write().await.remove(app_id);
     }
 

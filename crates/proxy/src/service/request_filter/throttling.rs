@@ -40,10 +40,27 @@ pub(super) async fn apply_rate_limits(
     }
 
     if let Some(ref route_rl) = effective_rate_limit {
+        if !route_rl.distributed
+            && !proxy.rate_limiter.check_route_request(
+                &app_id.0,
+                route_rl.requests_per_second,
+                route_rl.burst_capacity,
+            )
+        {
+            if let Some(ref metrics) = proxy.metrics {
+                metrics.record_rejection(&app_id.0, "route_limit");
+            }
+            session.set_keepalive(None);
+            session.respond_error(429).await?;
+            return Ok(true);
+        }
         if route_rl.distributed {
             let limiters = proxy.gateway.distributed_limiters.read().await;
             if let Some(limiter) = limiters.get(&app_id.0) {
                 if !limiter.check_request().await {
+                    proxy
+                        .rate_limiter
+                        .record_rejection(&app_id.0, "distributed_limit");
                     proxy.gateway.metrics.rate_limit_denied_total.inc();
                     crate::gateway::errors::send_gateway_error(
                         session,

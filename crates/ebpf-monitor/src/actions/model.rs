@@ -63,6 +63,8 @@ pub enum MonitorEvent {
     TcpConnect {
         pid: u32,
         tid: u32,
+        src_addr: [u8; 16],
+        dst_addr: [u8; 16],
         src_port: u16,
         dst_port: u16,
         old_state: u32,

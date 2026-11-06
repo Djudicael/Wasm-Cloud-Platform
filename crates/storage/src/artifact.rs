@@ -43,6 +43,7 @@ impl Store {
             .map_err(PlatformError::storage_source)?
             .remove(format!("_undeploy:{}", id.0).as_str())
             .map_err(PlatformError::storage_source)?;
+        crate::deployment_history::record(&tx, config, sha256)?;
         tx.commit().map_err(PlatformError::storage_source)?;
         tracing::info!(app=%id.0,bytes=bytes.len(),"deployment state committed atomically");
         Ok(())

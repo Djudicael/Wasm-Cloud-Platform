@@ -92,6 +92,9 @@ pub fn init_tracing(
                 .with_writer(writer);
             Registry::default()
                 .with(filter_layer)
+                .with(tracing_subscriber::filter::filter_fn(
+                    common::logging::safe_sdk_event,
+                ))
                 .with(telemetry)
                 .with(format)
                 .with(sampling)
@@ -105,6 +108,9 @@ pub fn init_tracing(
                 .with_writer(writer);
             Registry::default()
                 .with(filter_layer)
+                .with(tracing_subscriber::filter::filter_fn(
+                    common::logging::safe_sdk_event,
+                ))
                 .with(telemetry)
                 .with(format)
                 .with(sampling)
@@ -120,3 +126,6 @@ pub fn init_tracing(
         },
     ))
 }
+
+#[cfg(test)]
+mod tests;

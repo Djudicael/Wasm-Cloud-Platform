@@ -8,12 +8,18 @@ use common::types::AppId;
 
 use super::{WasmProxy, REMOTE_STEER_FUEL_THRESHOLD_PERCENT};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum SelectionError {
+    AdmissionFenced,
+    NoUpstream,
+}
+
 pub(super) async fn select_upstream(
     proxy: &WasmProxy,
     app_id: &AppId,
-) -> Option<crate::upstream::UpstreamEndpoint> {
+) -> Result<crate::upstream::UpstreamEndpoint, SelectionError> {
     if let Some(endpoint) = proxy.upstream.next(app_id).await {
-        return Some(endpoint);
+        return Ok(endpoint);
     }
 
     if node_is_overloaded(proxy).await {
@@ -25,7 +31,7 @@ pub(super) async fn select_upstream(
             match tokio::net::lookup_host(&node.proxy_address).await {
                 Ok(mut addrs) => {
                     if let Some(addr) = addrs.next() {
-                        return Some(crate::upstream::UpstreamEndpoint { addr, h2c: false });
+                        return Ok(crate::upstream::UpstreamEndpoint { addr, h2c: false });
                     }
                     tracing::warn!(
                         node = %node.node_id,
@@ -45,11 +51,21 @@ pub(super) async fn select_upstream(
         }
     }
 
+    if !proxy.backpressure.can_cold_start() {
+        return Err(SelectionError::AdmissionFenced);
+    }
     tracing::info!(app_id = %app_id.0, "cold start on local node");
-    (proxy.cold_start)(app_id.clone()).await?;
-    proxy.upstream.next(app_id).await.or_else(|| {
+    let started = (proxy.cold_start)(app_id.clone()).await;
+    if started.is_none() {
+        return Err(if proxy.backpressure.can_cold_start() {
+            SelectionError::NoUpstream
+        } else {
+            SelectionError::AdmissionFenced
+        });
+    }
+    proxy.upstream.next(app_id).await.ok_or_else(|| {
         tracing::warn!(app_id = %app_id.0, "cold start returned no registered upstream");
-        None
+        SelectionError::NoUpstream
     })
 }
 

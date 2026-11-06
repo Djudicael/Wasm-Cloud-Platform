@@ -42,6 +42,32 @@ fn test_default_config_valid() {
 }
 
 #[test]
+fn nats_csv_survives_toml_and_cli_configuration_and_preserves_production_tls_policy() {
+    let csv = "nats://user:password@127.0.0.1:4222,nats://user:password@127.0.0.1:4223";
+    let mut config: NodeConfig = toml::from_str(&format!("[nats]\nurl={csv:?}\n")).unwrap();
+    assert_eq!(config.nats.url, csv);
+    assert!(validate_config(&config).is_ok());
+    let override_csv = "tls://node-a:4222,tls://node-b:4222";
+    config = apply_cli_overrides(
+        config,
+        &CliOverrides {
+            nats_url: Some(override_csv.into()),
+            ..Default::default()
+        },
+    );
+    assert_eq!(config.nats.url, override_csv);
+    assert!(validate_config(&config).is_ok());
+    let mut production = production_config_with_non_exportable_key();
+    production.nats.url = override_csv.into();
+    assert!(validate_config(&production).is_ok());
+    production.nats.url = "tls://node-a:4222,nats://node-b:4222".into();
+    assert!(validate_config(&production)
+        .unwrap_err()
+        .to_string()
+        .contains("tls:// NATS URL"));
+}
+
+#[test]
 fn resource_budget_rejects_zero_reserves_and_oversized_default_pool() {
     let mut config = NodeConfig::default();
     config.health.min_disk_free_bytes = 0;

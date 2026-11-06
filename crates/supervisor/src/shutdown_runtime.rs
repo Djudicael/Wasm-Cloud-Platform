@@ -117,7 +117,7 @@ impl Supervisor {
         self.refresh_policy_metric_gauges().await;
     }
 
-    async fn handle_shutdown_outcome(
+    pub(crate) async fn handle_shutdown_outcome(
         &self,
         app_id: &AppId,
         id: &InstanceId,
@@ -334,6 +334,42 @@ impl Supervisor {
 
         tokio::time::sleep(timeout).await;
         Ok(())
+    }
+
+    /// Evict exactly a reviewed instance set. The spawn gate prevents an
+    /// in-flight cold start from entering the pool between comparison and take.
+    /// A mismatch has no side effects. Successful eviction permits lazy restart
+    /// on the next request; it does not promise a newly running instance.
+    pub async fn evict_instances_if(
+        self: &std::sync::Arc<Self>,
+        app_id: &AppId,
+        expected: &std::collections::BTreeSet<String>,
+    ) -> Result<bool, PlatformError> {
+        if expected.is_empty() || expected.len() > 128 {
+            return Ok(false);
+        }
+        let gate = self.spawn_gate(app_id).await;
+        let guard = gate.lock_owned().await;
+        let instances = {
+            let mut pools = self.pools.write().await;
+            let Some(pool) = pools.get_mut(&app_id.0) else {
+                return Ok(false);
+            };
+            let actual: std::collections::BTreeSet<_> =
+                pool.instances.iter().map(|i| i.id.0.to_string()).collect();
+            if &actual != expected {
+                return Ok(false);
+            }
+            for instance in &pool.instances {
+                if let Some(counters) = &instance.policy_counters {
+                    counters.http_activity.retire();
+                }
+            }
+            std::mem::take(&mut pool.instances)
+        };
+        self.finish_control_shutdown(app_id, instances, guard)
+            .await?;
+        Ok(true)
     }
 
     /// Kill every currently tracked instance for the target app.

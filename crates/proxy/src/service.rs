@@ -82,7 +82,10 @@ pub struct WasmProxy {
 }
 
 impl WasmProxy {
-    async fn select_upstream(&self, app_id: &AppId) -> Option<crate::upstream::UpstreamEndpoint> {
+    async fn select_upstream(
+        &self,
+        app_id: &AppId,
+    ) -> Result<crate::upstream::UpstreamEndpoint, upstream_selection::SelectionError> {
         upstream_selection::select_upstream(self, app_id).await
     }
 }

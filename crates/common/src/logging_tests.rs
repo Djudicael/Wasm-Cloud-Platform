@@ -3,6 +3,42 @@ use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 
 #[test]
+fn trace_sdk_connect_payload_is_excluded_before_log_fanout() {
+    use std::sync::{Arc, Mutex};
+    use tracing_subscriber::{
+        layer::{Context, SubscriberExt},
+        registry::LookupSpan,
+        Layer,
+    };
+    #[derive(Clone)]
+    struct Sink(Arc<Mutex<Vec<String>>>);
+    impl<S: tracing::Subscriber + for<'lookup> LookupSpan<'lookup>> Layer<S> for Sink {
+        fn on_event(&self, event: &tracing::Event<'_>, _: Context<'_, S>) {
+            let mut fields = FieldCollector::default();
+            event.record(&mut fields);
+            self.0
+                .lock()
+                .unwrap()
+                .push(serde_json::to_string(&fields.fields).unwrap());
+        }
+    }
+    let records = Arc::new(Mutex::new(Vec::new()));
+    let subscriber = tracing_subscriber::Registry::default()
+        .with(Sink(records.clone()))
+        .with(tracing_subscriber::filter::filter_fn(safe_sdk_event));
+    tracing::subscriber::with_default(subscriber, || {
+        tracing::trace!(target:"async_nats::connection",connect_info=?"password-canary token-canary jwt-canary","write operation: CONNECT");
+        tracing::trace!(target:"async_nats::connection","read operation: PONG");
+        tracing::debug!(target:"async_nats::connector",attempt=1,"safe connection diagnostic");
+    });
+    let records = records.lock().unwrap();
+    assert_eq!(records.len(), 2);
+    let output = records.join("\n");
+    assert!(output.contains("PONG") && output.contains("safe connection diagnostic"));
+    assert!(!output.contains("canary"));
+}
+
+#[test]
 fn test_logging_config_default() {
     let config = LoggingConfig::default();
     assert_eq!(config.format, LogFormat::Json);

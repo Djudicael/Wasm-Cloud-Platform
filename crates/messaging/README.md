@@ -33,6 +33,16 @@ Event flow:
 | `MessageEnvelope` | Wrapper for envelope-wrapped message serialization/deserialization |
 | `DurableDelivery` | Broker stream name, stream creation epoch and stream sequence, supplied by `subscribe_durable_with_delivery()` |
 
+Connection methods apply explicit URL user/password or token authentication and
+accept at most 16 comma-separated server addresses with one identical decoded
+authentication identity. Mixed or divergent identities and URL credentials
+combined with a credentials file fail before connecting. Addresses passed to
+the SDK omit authentication userinfo. See [NATS setup](../../docs/nats-setup.md)
+for percent-encoding, TLS and configuration details.
+The platform subscriber filters the SDK's credential-bearing CONNECT event
+before log/OTLP fanout, including at TRACE. A custom subscriber must reuse
+`common::logging::safe_sdk_event` to retain that protection.
+
 `subscribe_durable()` retains its event-only callback. Both durable subscription
 methods pull one message per batch and renew the active delivery with progress
 acknowledgements every third of the consumer's effective acknowledgement window

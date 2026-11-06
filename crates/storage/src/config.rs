@@ -22,6 +22,15 @@ impl Store {
                 .insert(config.id.0.as_str(), json.as_str())
                 .map_err(PlatformError::storage_source)?;
         }
+        let artifact = tx
+            .open_table(crate::tables::ARTIFACT_HASHES)
+            .map_err(PlatformError::storage_source)?
+            .get(config.id.0.as_str())
+            .map_err(PlatformError::storage_source)?
+            .map(|v| v.value().to_owned());
+        if let Some(artifact) = artifact {
+            crate::deployment_history::record(&tx, config, &artifact)?;
+        }
         tx.commit().map_err(PlatformError::storage_source)
     }
 

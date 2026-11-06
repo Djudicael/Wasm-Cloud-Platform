@@ -51,7 +51,7 @@ pub(super) async fn upstream_peer(
     let endpoint = proxy
         .select_upstream(app_id)
         .await
-        .ok_or_else(|| pingora_core::Error::new_str("failed to select upstream"))?;
+        .map_err(selection_error)?;
 
     ctx.upstream_addr = Some(endpoint.addr);
     let mut peer = HttpPeer::new(endpoint.addr, false, app_id.0.clone());
@@ -59,6 +59,17 @@ pub(super) async fn upstream_peer(
         peer.options.set_http_version(2, 2);
     }
     Ok(Box::new(peer))
+}
+
+fn selection_error(error: super::upstream_selection::SelectionError) -> Box<pingora_core::Error> {
+    match error {
+        super::upstream_selection::SelectionError::AdmissionFenced => {
+            pingora_core::Error::new(pingora_core::ErrorType::HTTPStatus(503))
+        }
+        super::upstream_selection::SelectionError::NoUpstream => {
+            pingora_core::Error::new_str("failed to select upstream")
+        }
+    }
 }
 
 pub(super) fn upstream_request_filter(
@@ -142,11 +153,10 @@ pub(super) async fn upstream_response_filter(
 
     if let Some(ref app_id) = ctx.app_id {
         let status = upstream_response.status.as_u16();
-        if (500..600).contains(&status) {
-            proxy.gateway.circuit_breaker.record_failure(&app_id.0);
-        } else {
-            proxy.gateway.circuit_breaker.record_success(&app_id.0);
-        }
+        proxy
+            .gateway
+            .circuit_breaker
+            .record_response(&app_id.0, status);
     }
 
     Ok(())
@@ -158,7 +168,7 @@ pub(super) async fn logging(proxy: &WasmProxy, session: &mut Session, ctx: &mut 
         .response_written()
         .map(|r| r.status.as_u16())
         .unwrap_or(0);
-    ctx.request_span.record("http.response.status_code", status);
+    common::logging::record_http_response_status(&ctx.request_span, status);
 
     proxy
         .gateway
@@ -179,4 +189,20 @@ pub(super) async fn logging(proxy: &WasmProxy, session: &mut Session, ctx: &mut 
             "request completed"
         );
     });
+}
+
+#[cfg(test)]
+mod admission_error_tests {
+    use super::*;
+    #[test]
+    fn known_admission_fence_has_503_but_unknown_failure_retains_internal_error() {
+        let fenced =
+            selection_error(super::super::upstream_selection::SelectionError::AdmissionFenced);
+        assert_eq!(fenced.etype, pingora_core::ErrorType::HTTPStatus(503));
+        let unknown = selection_error(super::super::upstream_selection::SelectionError::NoUpstream);
+        assert_eq!(
+            unknown.etype,
+            pingora_core::ErrorType::Custom("failed to select upstream")
+        );
+    }
 }

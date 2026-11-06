@@ -28,6 +28,7 @@ pub(super) fn spawn(
     addr: SocketAddr,
     check: Option<SocketAddrCheckFn>,
     hook: Option<HttpServerThreadStartHook>,
+    observer: Option<HttpExecutionObserver>,
 ) -> Result<HttpServerInstance, PlatformError> {
     if !prepared.config.triggers.is_empty() {
         return Err(PlatformError::ConfigValidation(
@@ -44,6 +45,7 @@ pub(super) fn spawn(
     let policy = resolve_instance_policy(&config, addr.port())?;
     let counters = Arc::new(PolicyCounters::new());
     counters.http_activity.enable_http_serving();
+    let observer = Some(observations::accounting(observer, counters.clone()));
     let task_counters = counters.clone();
     let error_config = config.clone();
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel();
@@ -63,10 +65,12 @@ pub(super) fn spawn(
                         let (client, _) = accepted?;
                         let (pre, engine, config, env, check, counters) =
                             (pre.clone(), engine.clone(), config.clone(), env.clone(), check.clone(), task_counters.clone());
+                        let observer = observer.clone();
                         connections.spawn(async move {
                             let service = service_fn(move |mut req: hyper::Request<hyper::body::Incoming>| {
                                 let (pre, engine, config, env, check, counters) =
                                     (pre.clone(), engine.clone(), config.clone(), env.clone(), check.clone(), counters.clone());
+                                let observer = observer.clone();
                                 async move {
                                     let Some(activity) = counters.http_activity.begin() else {
                                         return Ok::<_, wasmtime::Error>(hyper::Response::builder().status(503).body(crate::request_activity::ActivityBody::new(Full::new(bytes::Bytes::new()), None))?);
@@ -79,6 +83,9 @@ pub(super) fn spawn(
                                     let mut store = Store::new(&engine, state);
                                     store.limiter(|s| &mut s.limiter);
                                     configure_store(&mut store, config.fuel_quota)?;
+                                    let mut store = observations::ObservedStore::new(store, observer, config.fuel_quota.0);
+                                    let response_status = store.status.clone();
+                                    let result = async {
                                     let service = pre.instantiate_async(&mut store).await?;
                                     let req = req.map(|b| Limited::new(b, MAX_BODY).map_err(|_| wasmtime_wasi_http::Error::HttpRequestBodySize(None)));
                                     let (req, io) = Request::from_http(&mut store.data_mut().http_hooks, req);
@@ -87,13 +94,17 @@ pub(super) fn spawn(
                                             let response = service.handle(accessor, req).await?
                                                 .map_err(|e| wasmtime::format_err!("P3 HTTP handler failed: {e:?}"))?;
                                             let response = accessor.with(|s| response.into_http(s, async { Ok(()) }))?;
+                                            response_status.store(response.status().as_u16(), std::sync::atomic::Ordering::Relaxed);
                                             let (parts, body) = response.into_parts();
                                             let body = Limited::new(body, MAX_BODY).collect().await.map_err(|e| wasmtime::format_err!("P3 response body error: {e}"))?.to_bytes();
                                             wasmtime::error::Ok(hyper::Response::from_parts(parts, Full::new(body)))
                                         }, async { io.await.map_err(wasmtime::Error::from) })?;
                                         wasmtime::error::Ok(response)
                                     })).await???;
-                                    Ok(response.map(|body| crate::request_activity::ActivityBody::new(body, Some(activity))))
+                                    Ok::<_, wasmtime::Error>(response)
+                                    }.await;
+                                    store.finish(result.is_err(), result.as_ref().err().is_some_and(|e| e.downcast_ref::<wasmtime::Trap>().is_some()));
+                                    result.map(|response| response.map(|body| crate::request_activity::ActivityBody::new(body, Some(activity))))
                                 }
                             });
                             if let Err(error) = http2::Builder::new(TokioExecutor::new()).serve_connection(TokioIo::new(client), service).await {
@@ -141,7 +152,9 @@ fn stats(
     ExecutionStats {
         instance_id: InstanceId::new(),
         fuel_limit: config.fuel_quota.0,
-        fuel_consumed: 0,
+        fuel_consumed: counters
+            .http_fuel_consumed
+            .load(std::sync::atomic::Ordering::Relaxed),
         ram_bytes: counters
             .current_memory_bytes
             .load(std::sync::atomic::Ordering::Relaxed) as usize,

@@ -9,6 +9,7 @@ pub mod artifact_server;
 pub mod billing;
 pub mod config;
 mod core;
+pub mod deployment_history;
 pub mod gc;
 pub mod gc_metrics;
 pub mod health;

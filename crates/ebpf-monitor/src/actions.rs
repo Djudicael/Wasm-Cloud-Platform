@@ -55,6 +55,7 @@ pub struct ActionDispatcher {
     config: std::sync::RwLock<MonitorConfig>,
     /// Namespace identity map for updating port-to-TID bindings from eBPF events.
     namespace_map: std::sync::RwLock<Option<Arc<NamespaceMap>>>,
+    observed_connections: std::sync::Mutex<std::collections::VecDeque<serde_json::Value>>,
 }
 
 impl ActionDispatcher {
@@ -77,6 +78,7 @@ impl ActionDispatcher {
             memory_state: std::sync::Mutex::new(crate::memory::State::default()),
             config: std::sync::RwLock::new(MonitorConfig::default()),
             namespace_map: std::sync::RwLock::new(None),
+            observed_connections: std::sync::Mutex::new(std::collections::VecDeque::new()),
         }
     }
 
@@ -110,6 +112,7 @@ impl ActionDispatcher {
             memory_state: std::sync::Mutex::new(crate::memory::State::default()),
             config: std::sync::RwLock::new(config),
             namespace_map: std::sync::RwLock::new(None),
+            observed_connections: std::sync::Mutex::new(std::collections::VecDeque::new()),
         }
     }
 
@@ -230,12 +233,40 @@ impl ActionDispatcher {
             MonitorEvent::TcpConnect {
                 pid,
                 tid,
+                src_addr,
+                dst_addr,
                 src_port,
                 dst_port,
                 old_state: _,
                 new_state: _,
             } => {
                 let (namespace, app_id) = self.identity_for_tid(tid);
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as u64;
+                let address = |bytes: [u8; 16]| -> Option<String> {
+                    if bytes == [0; 16] {
+                        None
+                    } else {
+                        let ip = std::net::Ipv6Addr::from(bytes);
+                        Some(
+                            ip.to_ipv4_mapped()
+                                .map(|a| a.to_string())
+                                .unwrap_or_else(|| ip.to_string()),
+                        )
+                    }
+                };
+                let row = serde_json::json!({"timestampMs":now,"app":app_id,"node":self.node_id,"namespace":namespace,"tid":tid,"sourceAddress":address(src_addr),"destinationAddress":address(dst_addr),"sourcePort":src_port,"destinationPort":dst_port,"protocol":"tcp","kernelEvent":"tcp_connect","policyVerdict":"connection_established"});
+                let mut rows = self
+                    .observed_connections
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                if rows.len() >= 1024 {
+                    rows.pop_front();
+                }
+                rows.push_back(row);
+                drop(rows);
                 debug!(pid, tid, namespace = %namespace, app_id = %app_id, src_port, dst_port, "TCP connection opened");
                 self.metrics.tcp_connection_count.inc();
             }
@@ -618,6 +649,28 @@ impl ActionDispatcher {
                 self.metrics.security_violations.inc();
             }
         }
+    }
+
+    /// Real parsed TCP connect events only. Unattributed kernel tasks never
+    /// become another application's flow records. Retention is bounded.
+    pub fn observed_connections(
+        &self,
+        app: &str,
+        since_ms: u64,
+        limit: usize,
+    ) -> serde_json::Value {
+        let rows = self
+            .observed_connections
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let selected: Vec<_> = rows
+            .iter()
+            .rev()
+            .filter(|v| v["app"] == app && v["timestampMs"].as_u64().is_some_and(|t| t >= since_ms))
+            .take(limit.min(128) + 1)
+            .cloned()
+            .collect();
+        serde_json::json!({"flows":selected.iter().take(limit.min(128)).collect::<Vec<_>>(),"truncated":selected.len()>limit.min(128),"retentionRecords":1024,"oldestRetainedAtMs":rows.front().and_then(|r|r["timestampMs"].as_u64()),"source":"ebpf-tcp-state-events","policyEvidence":"kernel observed an established connection; rejected pre-connect attempts have no TCP state event"})
     }
 
     fn identity_for_tid(&self, tid: u32) -> (String, String) {

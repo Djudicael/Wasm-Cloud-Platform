@@ -86,13 +86,22 @@ jobs:
         run: cargo test -p storage --tests
         timeout-minutes: 6
 
+      - name: Build real HTTP execution test fixtures
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target
+        run: cargo build --locked --target wasm32-wasip2 -p http-hello-component -p http-p3-probe
+        timeout-minutes: 10
+
       - name: Run runtime integration tests
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target
         run: cargo test -p runtime --tests
         timeout-minutes: 6
 
-      - name: Build and exercise the P3 HTTP service boundary
+      - name: Exercise the P3 HTTP service boundary
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target
         run: |
-          cargo build --locked --target wasm32-wasip2 -p http-p3-probe
           cargo test --locked -p runtime --test p3_service -- --ignored --skip p3_postgres
         timeout-minutes: 10
 

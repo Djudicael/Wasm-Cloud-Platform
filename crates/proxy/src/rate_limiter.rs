@@ -75,6 +75,20 @@ struct TokenBucket {
     last_refill: Instant,
 }
 
+#[cfg(test)]
+mod scoped_route_tests {
+    use super::*;
+    #[test]
+    fn closed_route_records_real_rejections_and_reconfiguration_recovers() {
+        let limiter = RateLimiter::new(RateLimitConfig::default());
+        assert!(!limiter.check_route_request("a", 0, 0));
+        assert!(!limiter.check_route_request("a", 0, 0));
+        assert_eq!(limiter.rejection_snapshot("a")["total"], 2);
+        assert!(limiter.check_route_request("a", 10, 10));
+        assert_eq!(limiter.rejection_snapshot("b")["total"], 0);
+    }
+}
+
 impl TokenBucket {
     fn new(rate_per_second: u32, burst: u32) -> Self {
         TokenBucket {
@@ -121,6 +135,8 @@ pub struct RateLimiter {
     default_config: std::sync::RwLock<RateLimitConfig>,
     /// Per-app success counters for metrics and adaptive limiting.
     success_counters: DashMap<String, SuccessCounter>,
+    route_buckets: DashMap<(String, u32, u32), TokenBucket>,
+    rejected: DashMap<(String, &'static str), u64>,
 }
 
 impl RateLimiter {
@@ -131,6 +147,8 @@ impl RateLimiter {
             configs: DashMap::new(),
             default_config: std::sync::RwLock::new(default_config),
             success_counters: DashMap::new(),
+            route_buckets: DashMap::new(),
+            rejected: DashMap::new(),
         }
     }
 
@@ -201,6 +219,7 @@ impl RateLimiter {
                     TokenBucket::new(config.requests_per_second, config.burst_capacity)
                 });
             if !bucket.try_acquire() {
+                self.record_rejection(app_id, "app_limit");
                 return Err(RateLimitDenied::AppLimitExceeded {
                     app_id: app_id.to_string(),
                     limit: config.requests_per_second,
@@ -215,6 +234,7 @@ impl RateLimiter {
                 .entry((app_id.to_string(), source_ip))
                 .or_insert_with(|| TokenBucket::new(config.per_ip_limit, config.per_ip_limit));
             if !bucket.try_acquire() {
+                self.record_rejection(app_id, "ip_limit");
                 return Err(RateLimitDenied::IpLimitExceeded {
                     ip: source_ip,
                     limit: config.per_ip_limit,
@@ -223,6 +243,31 @@ impl RateLimiter {
         }
 
         Ok(())
+    }
+    pub fn record_rejection(&self, app: &str, reason: &'static str) {
+        let mut n = self.rejected.entry((app.into(), reason)).or_insert(0);
+        *n = n.saturating_add(1);
+    }
+    pub fn rejection_snapshot(&self, app: &str) -> serde_json::Value {
+        let counts: std::collections::BTreeMap<_, _> = self
+            .rejected
+            .iter()
+            .filter(|r| r.key().0 == app)
+            .map(|r| (r.key().1, *r.value()))
+            .collect();
+        serde_json::json!({"since":"node-start","counts":counts,"total":counts.values().copied().sum::<u64>()})
+    }
+    pub fn check_route_request(&self, app: &str, rate: u32, burst: u32) -> bool {
+        let mut bucket = self
+            .route_buckets
+            .entry((app.into(), rate, burst))
+            .or_insert_with(|| TokenBucket::new(rate, burst));
+        if bucket.try_acquire() {
+            true
+        } else {
+            self.record_rejection(app, "route_limit");
+            false
+        }
     }
 
     /// Record a successful request for metrics and adaptive rate limiting.
@@ -263,6 +308,8 @@ impl RateLimiter {
         let now = Instant::now();
         let before = self.ip_buckets.len();
         self.ip_buckets
+            .retain(|_, bucket| now.duration_since(bucket.last_refill) < max_age);
+        self.route_buckets
             .retain(|_, bucket| now.duration_since(bucket.last_refill) < max_age);
         let pruned = before - self.ip_buckets.len();
         if pruned > 0 {

@@ -8,6 +8,23 @@ pub(crate) struct Args {
     /// defaults; CLI flags and environment variables take precedence.
     #[arg(long)]
     pub(crate) config: Option<String>,
+    /// Private owned 0600 audit file. Omitted preserves the system audit path.
+    #[arg(long)]
+    pub(crate) audit_log_file: Option<String>,
+
+    /// Private 0600 JSON grants for the scoped application control API.
+    /// Omitted disables that API; legacy administration is unchanged.
+    #[arg(long)]
+    pub(crate) control_grants_file: Option<String>,
+
+    /// Separate listener exposing only the scoped control routes.
+    #[arg(long)]
+    pub(crate) control_port: Option<u16>,
+    #[arg(long, default_value = "127.0.0.1")]
+    pub(crate) control_bind_address: String,
+    /// Explicit local-development exception; never accepted in production.
+    #[arg(long)]
+    pub(crate) control_allow_http: bool,
 
     #[arg(long, default_value = "/tmp/wasm-node/state.redb")]
     pub(crate) db_path: String,

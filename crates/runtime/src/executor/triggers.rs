@@ -49,6 +49,7 @@ impl TriggerHandle {
 }
 
 pub(super) struct Context {
+    pub observer: Option<HttpExecutionObserver>,
     pub config: AppConfig,
     pub engine: Arc<Engine>,
     pub pre: Arc<ProxyPre<StoreState>>,
@@ -116,62 +117,81 @@ async fn execute(
     let mut store = Store::new(&context.engine, state);
     store.limiter(|s| &mut s.limiter);
     configure_store(&mut store, context.config.fuel_quota).map_err(|e| e.to_string())?;
-    let request = hyper::Request::builder()
-        .method(s.method.as_str())
-        .uri(format!("http://localhost{}", s.route))
-        .header(
-            "x-trigger-id",
-            format!("{}:{}:{}", context.config.id.0, s.id, scheduled_at_ms),
-        )
-        .header("x-trigger-name", &s.id)
-        .header("x-trigger-scheduled-at-ms", scheduled_at_ms.to_string())
-        .header("x-trigger-node", node)
-        .body(Empty::<bytes::Bytes>::new())
-        .map_err(|e| e.to_string())?;
-    let request = store
-        .data_mut()
-        .http()
-        .new_incoming_request(Scheme::Http, request)
-        .map_err(|e| e.to_string())?;
-    let (sender, receiver) = oneshot::channel();
-    let out = store
-        .data_mut()
-        .http()
-        .new_response_outparam(sender)
-        .map_err(|e| e.to_string())?;
-    let proxy = context
-        .pre
-        .instantiate_async(&mut store)
-        .await
-        .map_err(|e| e.to_string())?;
-    // Drain concurrently: a streaming guest can wait for its response body to be read.
-    // Both futures and the Store are dropped on deadline; no detached guest task.
-    let handle = async {
-        proxy
-            .wasi_http_incoming_handler()
-            .call_handle(&mut store, request, out)
-            .await
-            .map_err(|e| format!("{e:#}"))
-    };
-    let response = async {
-        let response = receiver
-            .await
-            .map_err(|_| "trigger did not produce a response".to_string())?
+    let mut store = observations::ObservedStore::new(
+        store,
+        context.observer.clone(),
+        context.config.fuel_quota.0,
+    );
+    let response_status = store.status.clone();
+    let mut is_trap = false;
+    let result = async {
+        let request = hyper::Request::builder()
+            .method(s.method.as_str())
+            .uri(format!("http://localhost{}", s.route))
+            .header(
+                "x-trigger-id",
+                format!("{}:{}:{}", context.config.id.0, s.id, scheduled_at_ms),
+            )
+            .header("x-trigger-name", &s.id)
+            .header("x-trigger-scheduled-at-ms", scheduled_at_ms.to_string())
+            .header("x-trigger-node", node)
+            .body(Empty::<bytes::Bytes>::new())
             .map_err(|e| e.to_string())?;
-        let status = response.status().as_u16();
-        let mut body = response.into_body();
-        let mut bytes = 0_usize;
-        while let Some(frame) = body.frame().await {
-            let frame = frame.map_err(|e| e.to_string())?;
-            if let Some(data) = frame.data_ref() {
-                bytes = bytes.saturating_add(data.len());
-                if bytes > 1_048_576 {
-                    return Err("trigger response exceeds 1 MiB".to_string());
+        let request = store
+            .data_mut()
+            .http()
+            .new_incoming_request(Scheme::Http, request)
+            .map_err(|e| e.to_string())?;
+        let (sender, receiver) = oneshot::channel();
+        let out = store
+            .data_mut()
+            .http()
+            .new_response_outparam(sender)
+            .map_err(|e| e.to_string())?;
+        let proxy = context
+            .pre
+            .instantiate_async(&mut store)
+            .await
+            .map_err(|e| {
+                is_trap = e.downcast_ref::<wasmtime::Trap>().is_some();
+                e.to_string()
+            })?;
+        // Drain concurrently: a streaming guest can wait for its response body to be read.
+        // Both futures and the Store are dropped on deadline; no detached guest task.
+        let handle = async {
+            proxy
+                .wasi_http_incoming_handler()
+                .call_handle(&mut store, request, out)
+                .await
+                .map_err(|e| {
+                    is_trap = e.downcast_ref::<wasmtime::Trap>().is_some();
+                    format!("{e:#}")
+                })
+        };
+        let response = async {
+            let response = receiver
+                .await
+                .map_err(|_| "trigger did not produce a response".to_string())?
+                .map_err(|e| e.to_string())?;
+            let status = response.status().as_u16();
+            response_status.store(status, std::sync::atomic::Ordering::Relaxed);
+            let mut body = response.into_body();
+            let mut bytes = 0_usize;
+            while let Some(frame) = body.frame().await {
+                let frame = frame.map_err(|e| e.to_string())?;
+                if let Some(data) = frame.data_ref() {
+                    bytes = bytes.saturating_add(data.len());
+                    if bytes > 1_048_576 {
+                        return Err("trigger response exceeds 1 MiB".to_string());
+                    }
                 }
             }
-        }
+            Ok(status)
+        };
+        let (_, status) = tokio::try_join!(handle, response)?;
         Ok(status)
-    };
-    let (_, status) = tokio::try_join!(handle, response)?;
-    Ok(status)
+    }
+    .await;
+    store.finish(result.is_err(), is_trap);
+    result
 }

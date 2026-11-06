@@ -116,6 +116,15 @@ impl Supervisor {
             }
 
             for id in idle_ids {
+                if self
+                    .store
+                    .load_meta(&format!("control-desired-instances:{}", app_id.0))
+                    .map_err(PlatformError::storage_source)?
+                    .and_then(|s| s.parse::<u32>().ok())
+                    .is_some_and(|n| n > 0)
+                {
+                    break;
+                }
                 self.kill_idle_instance_internal(
                     &app_id,
                     &id,
@@ -126,6 +135,23 @@ impl Supervisor {
         }
 
         self.reap_finished_shutdowns().await;
+        for app in self.store.list_deployed_apps()? {
+            if let Some(desired) = self
+                .store
+                .load_meta(&format!("control-desired-instances:{}", app.0))
+                .map_err(PlatformError::storage_source)?
+                .and_then(|s| s.parse::<u32>().ok())
+            {
+                if let Some(c) = self.store.load_config(&app)? {
+                    if let Err(e) = self
+                        .reconcile_desired_instances(&app, desired.min(c.max_instances))
+                        .await
+                    {
+                        tracing::warn!(app=%app.0,error=%e,"desired instance reconciliation failed");
+                    }
+                }
+            }
+        }
 
         Ok(())
     }

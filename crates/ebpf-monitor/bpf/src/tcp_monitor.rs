@@ -94,14 +94,36 @@ fn try_inet_sock_set_state(ctx: TracePointContext) -> Result<c_long, c_long> {
     //   field:int newstate;            offset:20; size:4;  signed:1;
     //   field:u16 sport;               offset:24; size:2;  signed:0;
     //   field:u16 dport;               offset:26; size:2;  signed:0;
-    // Note: The first 8 bytes are the common tracepoint header.
-    // In aya-ebpf, the TracePointContext already skips the common header,
-    // so we read from offset 0 of the args area.
+    // TracePointContext::read_at uses the complete raw tracepoint record,
+    // including its first eight common-header bytes. These absolute offsets
+    // match the kernel format; no additional header subtraction is required.
 
     let old_state: u32 = unsafe { ctx.read_at(16)? };
     let new_state: u32 = unsafe { ctx.read_at(20)? };
     let src_port: u16 = unsafe { ctx.read_at(24)? };
     let dst_port: u16 = unsafe { ctx.read_at(26)? };
+    // The fixed tracepoint layout already used above also carries family and
+    // address bytes. Preserve the event ABI; populate its reserved address arrays.
+    let family: u16 = unsafe { ctx.read_at(28)? };
+    let (src_addr, dst_addr) = match family {
+        2 => {
+            let source: [u8; 4] = unsafe { ctx.read_at(32)? };
+            let destination: [u8; 4] = unsafe { ctx.read_at(36)? };
+            let mut source_full = [0u8; IP_ADDR_LEN];
+            let mut destination_full = [0u8; IP_ADDR_LEN];
+            source_full[10] = 0xff;
+            source_full[11] = 0xff;
+            source_full[12..].copy_from_slice(&source);
+            destination_full[10] = 0xff;
+            destination_full[11] = 0xff;
+            destination_full[12..].copy_from_slice(&destination);
+            (source_full, destination_full)
+        }
+        10 => (unsafe { ctx.read_at::<[u8; IP_ADDR_LEN]>(40)? }, unsafe {
+            ctx.read_at::<[u8; IP_ADDR_LEN]>(56)?
+        }),
+        _ => ([0u8; IP_ADDR_LEN], [0u8; IP_ADDR_LEN]),
+    };
 
     let pid_tgid = ebpf_monitor_bpf::current_pid_tgid();
     let pid = (pid_tgid >> 32) as u32;
@@ -140,9 +162,9 @@ fn try_inet_sock_set_state(ctx: TracePointContext) -> Result<c_long, c_long> {
                     pid,
                     tid,
                 },
-                src_addr: [0u8; IP_ADDR_LEN],
+                src_addr,
                 src_port,
-                dst_addr: [0u8; IP_ADDR_LEN],
+                dst_addr,
                 dst_port,
                 old_state,
                 new_state,
@@ -162,9 +184,9 @@ fn try_inet_sock_set_state(ctx: TracePointContext) -> Result<c_long, c_long> {
                     pid,
                     tid,
                 },
-                src_addr: [0u8; IP_ADDR_LEN],
+                src_addr,
                 src_port,
-                dst_addr: [0u8; IP_ADDR_LEN],
+                dst_addr,
                 dst_port,
                 old_state,
                 new_state,
@@ -192,9 +214,9 @@ fn try_inet_sock_set_state(ctx: TracePointContext) -> Result<c_long, c_long> {
                     pid,
                     tid,
                 },
-                src_addr: [0u8; IP_ADDR_LEN],
+                src_addr,
                 src_port,
-                dst_addr: [0u8; IP_ADDR_LEN],
+                dst_addr,
                 dst_port,
                 old_state,
                 new_state,
@@ -233,9 +255,9 @@ fn try_inet_sock_set_state(ctx: TracePointContext) -> Result<c_long, c_long> {
                     pid,
                     tid,
                 },
-                src_addr: [0u8; IP_ADDR_LEN],
+                src_addr,
                 src_port,
-                dst_addr: [0u8; IP_ADDR_LEN],
+                dst_addr,
                 dst_port,
                 old_state,
                 new_state,
@@ -253,9 +275,9 @@ fn try_inet_sock_set_state(ctx: TracePointContext) -> Result<c_long, c_long> {
                     pid,
                     tid,
                 },
-                src_addr: [0u8; IP_ADDR_LEN],
+                src_addr,
                 src_port,
-                dst_addr: [0u8; IP_ADDR_LEN],
+                dst_addr,
                 dst_port,
                 old_state,
                 new_state,

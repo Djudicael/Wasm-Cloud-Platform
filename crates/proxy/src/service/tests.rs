@@ -2,6 +2,70 @@ use super::*;
 use crate::rate_limiter::RateLimiter;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+fn admission_proxy(called: Arc<AtomicBool>, fence_during_start: bool) -> WasmProxy {
+    let signal = crate::backpressure::BackpressureSignal::new();
+    let cold_signal = signal.clone();
+    WasmProxy {
+        router: Arc::new(HostRouter::default()),
+        upstream: Arc::new(UpstreamRegistry::default()),
+        rate_limiter: Arc::new(RateLimiter::new(Default::default())),
+        backpressure: signal,
+        node_table: Arc::new(NodeLoadTable::default()),
+        local_node_id: "admission-test".into(),
+        metrics: None,
+        gateway: Arc::new(Gateway::new(None)),
+        cold_start: Arc::new(move |_| {
+            let called = called.clone();
+            let signal = cold_signal.clone();
+            Box::pin(async move {
+                called.store(true, Ordering::SeqCst);
+                if fence_during_start {
+                    signal.set_operator_cordoned(true);
+                }
+                None
+            })
+        }),
+        max_body_size_bytes: DEFAULT_MAX_BODY_SIZE_BYTES,
+    }
+}
+
+#[tokio::test]
+async fn cordon_preserves_warm_upstream_but_blocks_cold_admission() {
+    let called = Arc::new(AtomicBool::new(false));
+    let proxy = admission_proxy(called.clone(), false);
+    proxy.backpressure.set_operator_cordoned(true);
+    let app = AppId("agents/probe:v1".into());
+    assert_eq!(
+        proxy.select_upstream(&app).await.unwrap_err(),
+        upstream_selection::SelectionError::AdmissionFenced
+    );
+    assert!(!called.load(Ordering::SeqCst));
+    let endpoint = crate::upstream::UpstreamEndpoint {
+        addr: "127.0.0.1:18001".parse().unwrap(),
+        h2c: false,
+    };
+    proxy.upstream.add(&app, endpoint).await;
+    assert_eq!(proxy.select_upstream(&app).await.unwrap(), endpoint);
+    assert!(!called.load(Ordering::SeqCst));
+}
+
+#[tokio::test]
+async fn unknown_cold_failure_and_concurrent_cordon_remain_distinct() {
+    let app = AppId("agents/probe:v1".into());
+    let called = Arc::new(AtomicBool::new(false));
+    let proxy = admission_proxy(called.clone(), false);
+    assert_eq!(
+        proxy.select_upstream(&app).await.unwrap_err(),
+        upstream_selection::SelectionError::NoUpstream
+    );
+    assert!(called.load(Ordering::SeqCst));
+    let proxy = admission_proxy(Arc::new(AtomicBool::new(false)), true);
+    assert_eq!(
+        proxy.select_upstream(&app).await.unwrap_err(),
+        upstream_selection::SelectionError::AdmissionFenced
+    );
+}
+
 #[test]
 fn strip_uri_prefix_handles_path_and_query_independently() {
     let cases = [

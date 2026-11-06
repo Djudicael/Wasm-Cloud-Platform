@@ -2,9 +2,43 @@ use crate::tables::BILLING;
 use crate::Store;
 use common::billing::BillingRecord;
 use common::error::PlatformError;
-use redb::{ReadableDatabase, ReadableTable};
+use redb::{ReadableDatabase, ReadableTable, ReadableTableMetadata};
 
 impl Store {
+    /// Bounded source scan under one read transaction. Refuse a larger source
+    /// instead of returning incomplete usage/cost totals as complete.
+    pub fn scoped_billing_window(
+        &self,
+        apps: &std::collections::BTreeSet<String>,
+        start: u64,
+        end: u64,
+    ) -> Result<Vec<BillingRecord>, PlatformError> {
+        let tx = self
+            .db
+            .begin_read()
+            .map_err(PlatformError::storage_source)?;
+        let table = tx
+            .open_table(BILLING)
+            .map_err(PlatformError::storage_source)?;
+        if table.len().map_err(PlatformError::storage_source)? > 4096 {
+            return Err(PlatformError::ConfigValidation(
+                "billing source exceeds bounded scan budget".into(),
+            ));
+        }
+        let mut out = Vec::new();
+        for row in table.iter().map_err(PlatformError::storage_source)? {
+            let (_, raw) = row.map_err(PlatformError::storage_source)?;
+            let record: BillingRecord =
+                serde_json::from_str(raw.value()).map_err(PlatformError::storage_source)?;
+            if apps.contains(&record.app_id)
+                && record.timestamp_ms >= start
+                && record.timestamp_ms < end
+            {
+                out.push(record);
+            }
+        }
+        Ok(out)
+    }
     fn parse_billing_key(key: &str) -> Option<(&str, u64)> {
         let (node_id, seq_str) = key.rsplit_once(':')?;
         let seq = seq_str.parse::<u64>().ok()?;

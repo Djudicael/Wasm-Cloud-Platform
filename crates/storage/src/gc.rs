@@ -539,6 +539,7 @@ pub fn start_gc_loop(
             }
 
             debug!("GC tick starting");
+            let mut successful = true;
 
             // 1. Garbage collect old artifact versions
             match store.gc_artifacts(config.artifact_keep_versions) {
@@ -557,7 +558,10 @@ pub fn start_gc_loop(
                         }
                     }
                 }
-                Err(e) => warn!(error = %e, "GC: artifact cleanup failed"),
+                Err(e) => {
+                    successful = false;
+                    warn!(error = %e, "GC: artifact cleanup failed");
+                }
             }
 
             // 2. Garbage collect old metric buckets
@@ -572,7 +576,10 @@ pub fn start_gc_loop(
                         }
                     }
                 }
-                Err(e) => warn!(error = %e, "GC: metrics cleanup failed"),
+                Err(e) => {
+                    successful = false;
+                    warn!(error = %e, "GC: metrics cleanup failed");
+                }
             }
 
             // 3. Purge fully undeployed apps past grace period
@@ -587,13 +594,22 @@ pub fn start_gc_loop(
                         }
                     }
                 }
-                Err(e) => warn!(error = %e, "GC: undeploy cleanup failed"),
+                Err(e) => {
+                    successful = false;
+                    warn!(error = %e, "GC: undeploy cleanup failed");
+                }
             }
 
             // 4. Check disk usage and update metrics
             if let Err(e) = check_disk_usage(&store, &config, metrics.as_deref()) {
+                successful = false;
                 warn!(error = %e, "GC: disk check failed");
             }
+            let completed = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64;
+            if let Err(e)=store.save_meta("gc-last-observation",&serde_json::json!({"completedAtMs":completed,"successful":successful,"intervalSecs":config.gc_interval_secs,"keepVersions":config.artifact_keep_versions,"undeployGraceSecs":config.undeploy_grace_secs}).to_string()){warn!(error=%e,"GC: observation persistence failed");}
         }
     });
 }
@@ -640,7 +656,7 @@ fn check_disk_usage(
 
 /// Get available disk space for the filesystem containing the given path.
 #[cfg(unix)]
-fn get_available_disk_space(path: &std::path::Path) -> Result<u64, PlatformError> {
+pub fn get_available_disk_space(path: &std::path::Path) -> Result<u64, PlatformError> {
     use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt;
 
@@ -662,7 +678,7 @@ fn get_available_disk_space(path: &std::path::Path) -> Result<u64, PlatformError
 }
 
 #[cfg(windows)]
-fn get_available_disk_space(path: &std::path::Path) -> Result<u64, PlatformError> {
+pub fn get_available_disk_space(path: &std::path::Path) -> Result<u64, PlatformError> {
     use std::os::windows::ffi::OsStrExt;
 
     // Convert path to wide string
@@ -696,7 +712,7 @@ fn get_available_disk_space(path: &std::path::Path) -> Result<u64, PlatformError
 }
 
 #[cfg(not(any(unix, windows)))]
-fn get_available_disk_space(_path: &std::path::Path) -> Result<u64, PlatformError> {
+pub fn get_available_disk_space(_path: &std::path::Path) -> Result<u64, PlatformError> {
     // Fallback for other platforms - return a large value to avoid false warnings
     Ok(1_000_000_000_000) // 1 TB
 }

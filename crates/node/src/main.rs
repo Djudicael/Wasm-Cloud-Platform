@@ -1136,6 +1136,7 @@ pub mod db_config;
 pub mod handlers;
 pub mod log_reload;
 pub mod recovery;
+mod scoped_control;
 #[cfg(test)]
 mod tests;
 pub mod upgrade;
@@ -1165,6 +1166,14 @@ async fn main() -> anyhow::Result<()> {
             .map_err(|_| anyhow::anyhow!("failed to install the rustls AWS-LC crypto provider"))?;
     }
     let args = Args::parse();
+    if let Some(path) = args.audit_log_file.as_deref() {
+        supervisor::audit::configure_output(path)?;
+    }
+    let scoped_grants = args
+        .control_grants_file
+        .as_deref()
+        .map(scoped_control::load_grants)
+        .transpose()?;
 
     // --generate-config: print a default TOML config to stdout and exit
     if args.generate_config {
@@ -1763,6 +1772,7 @@ async fn main() -> anyhow::Result<()> {
     drop(initial_hot);
     let rate_limiter = Arc::new(proxy::rate_limiter::RateLimiter::new(default_rate_config));
     let backpressure = proxy::backpressure::BackpressureSignal::new();
+    supervisor.restore_node_admission(&backpressure)?;
 
     // -- Embedded DNS Stub (resolves *.internal without external DNS) --
     let _dns_stub_addr = if config.dns.stub_enabled {
@@ -1895,6 +1905,7 @@ async fn main() -> anyhow::Result<()> {
     // Initialize Prometheus metrics
     let prom_metrics = Arc::new(metrics::exporter::Metrics::new());
     supervisor.set_policy_metrics(Arc::new(prom_metrics.policy.clone()));
+    supervisor.set_execution_metrics(prom_metrics.clone());
     prom_metrics.set_platform_info(
         &config.node.node_id,
         common::protocol::BINARY_VERSION,
@@ -1942,11 +1953,13 @@ async fn main() -> anyhow::Result<()> {
     // Clone metrics and dispatcher for admin API before moving into init()
     let ebpf_metrics_admin = ebpf_metrics.clone();
     let ebpf_dispatcher_admin = ebpf_dispatcher.clone();
+    let ebpf_dispatcher_control = ebpf_dispatcher.clone();
     let ebpf_dispatcher_sync = ebpf_dispatcher.clone();
     let ebpf_handle =
         ebpf_monitor::init(ebpf_config, ebpf_metrics, ebpf_dispatcher, node_pid).await;
     let ebpf_runtime_state = ebpf_handle.runtime_state();
     let ebpf_runtime_state_admin = ebpf_runtime_state.clone();
+    let ebpf_runtime_state_control = ebpf_runtime_state.clone();
     let ebpf_namespace_map_admin = ebpf_handle.namespace_map.clone();
     let ebpf_startup = ebpf_runtime_state.snapshot();
     if config.ebpf.required && (!ebpf_startup.ebpf_active || ebpf_startup.monitoring_degraded) {
@@ -3000,10 +3013,17 @@ async fn main() -> anyhow::Result<()> {
                                 for app_id in app_ids {
                                     if app_id.namespace() == namespace {
                                         let instances = supervisor.list_instances(&app_id).await.len() as u64;
+                                        let artifact_sha256 = match store.get_artifact_sha256(&app_id) {
+                                            Ok(hash) => hash,
+                                            Err(e) => return axum::Json(serde_json::json!({
+                                                "error": format!("{e}"),
+                                            })),
+                                        };
                                         apps.push(serde_json::json!({
                                             "id": app_id.0,
                                             "namespace": app_id.namespace(),
                                             "instances": instances,
+                                            "artifactSha256": artifact_sha256,
                                         }));
                                     }
                                 }
@@ -3292,14 +3312,14 @@ async fn main() -> anyhow::Result<()> {
                         axum::Json(serde_json::json!({
                             "cold": {
                                 "node_id": cold.node.node_id,
-                                "nats_url": cold.nats.url,
+                                "nats_url": common::diagnostics::connection_urls(&cold.nats.url),
                                 "proxy_http_port": cold.proxy.http_port,
                                 "proxy_https_port": cold.proxy.https_port,
                                 "admin_port": cold.admin.port,
                                 "artifact_port": cold.admin.artifact_port,
                                 "db_path": cold.storage.db_path.to_string_lossy(),
                                 "port_range": format!("{}-{}", cold.runtime.port_start, cold.runtime.port_end),
-                                "database_url": cold.database.default_url,
+                                "database_url": common::diagnostics::connection_url(&cold.database.default_url),
                                 "key_source": cold.runtime.key_source,
                             },
                             "hot": {
@@ -3634,6 +3654,53 @@ async fn main() -> anyhow::Result<()> {
             auth_state.clone(),
             proxy::auth_middleware::auth_middleware,
         ));
+
+    if scoped_grants.is_some() != args.control_port.is_some() {
+        anyhow::bail!("--control-grants-file and --control-port must be configured together");
+    }
+    if let Some(grants) = scoped_grants {
+        let tls = admin_tls_material(&config);
+        let bind_ip: IpAddr = args.control_bind_address.parse()?;
+        let private = match bind_ip {
+            IpAddr::V4(ip) => ip.is_loopback() || ip.is_private(),
+            IpAddr::V6(ip) => ip.is_loopback() || ip.is_unique_local(),
+        };
+        if tls.is_none() && (production_environment || !args.control_allow_http || !private) {
+            anyhow::bail!("scoped control requires TLS; explicit HTTP is limited to private local development");
+        }
+        let port = args.control_port.expect("validated control port");
+        if port == 0 {
+            anyhow::bail!("control port must be nonzero");
+        }
+        let listener =
+            tokio::net::TcpListener::bind(std::net::SocketAddr::new(bind_ip, port)).await?;
+        let binary_hash =
+            tokio::task::spawn_blocking(scoped_control::running_binary_sha256).await??;
+        store.save_meta("running-binary-sha256", &binary_hash)?;
+        let app = scoped_control::router(
+            grants,
+            dispatcher.clone(),
+            ebpf_dispatcher_control,
+            ebpf_runtime_state_control,
+            health_state.clone(),
+        );
+        if let Some((cert, key)) = tls {
+            let tls = axum_server::tls_rustls::RustlsConfig::from_pem_file(cert, key).await?;
+            let listener = listener.into_std()?;
+            let server = axum_server::from_tcp_rustls(listener, tls)?;
+            tokio::spawn(async move {
+                if let Err(error) = server.serve(app.into_make_service()).await {
+                    tracing::error!(%error,"scoped control TLS listener failed");
+                }
+            });
+        } else {
+            tokio::spawn(async move {
+                if let Err(error) = axum::serve(listener, app).await {
+                    tracing::error!(%error,"scoped control listener failed");
+                }
+            });
+        }
+    }
 
     let deploy_ingress_app = axum::Router::new()
         .route(

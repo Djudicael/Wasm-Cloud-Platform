@@ -12,6 +12,49 @@ fn make_store() -> (Store, NamedTempFile) {
 }
 
 #[test]
+fn deployment_history_is_atomic_scoped_paginated_and_durable() {
+    let (store, file) = make_store();
+    let id = AppId::new("history", "v1");
+    let mut c = AppConfig::default_for(id.clone());
+    store
+        .persist_deployment(&id, b"compiled", &c, "artifact")
+        .unwrap();
+    c.fuel_quota = FuelQuota(c.fuel_quota.0 + 1);
+    store.save_config(&c).unwrap();
+    let latest = store.deployment_history_before(&id.0, None, 1).unwrap();
+    assert_eq!(latest.len(), 1);
+    assert_eq!(latest[0].config.fuel_quota.0, c.fuel_quota.0);
+    let old = store
+        .deployment_history_before(&id.0, Some(latest[0].sequence), 1)
+        .unwrap();
+    assert_eq!(old.len(), 1);
+    assert_ne!(old[0].revision, latest[0].revision);
+    assert!(store
+        .deployment_history(&format!("{}|foreign", id.0), 10)
+        .unwrap()
+        .is_empty());
+    let mut invalid = c.clone();
+    invalid.id = AppId::new("foreign", "v1");
+    assert!(store
+        .persist_deployment(&id, b"bad", &invalid, "bad")
+        .is_err());
+    assert_eq!(store.deployment_history(&id.0, 10).unwrap().len(), 2);
+    let revision = latest[0].revision.clone();
+    drop(store);
+    let reopened = Store::open(file.path()).unwrap();
+    assert_eq!(
+        reopened
+            .deployment_revision(&id.0, &revision)
+            .unwrap()
+            .unwrap()
+            .config
+            .fuel_quota
+            .0,
+        c.fuel_quota.0
+    );
+}
+
+#[test]
 fn test_store_open_fresh_and_idempotent() {
     let f = NamedTempFile::new().unwrap();
     let store = Store::open(f.path()).expect("First open creates tables");

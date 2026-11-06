@@ -92,6 +92,36 @@ Or in `config.toml`:
 url = "nats://dev:dev@127.0.0.1:4222"
 ```
 
+The shared native NATS client used by `wasm-node` and `wasm-ctl` explicitly
+applies URL user/password authentication. A username without a password
+(`nats://token@host:4222`) denotes NATS token authentication. Percent-encode
+reserved credential characters (for example `%40` for `@`, `%3A` for `:` and
+`%25` for `%`); decoding happens once and a literal `+` stays a plus. Malformed
+escapes, invalid UTF-8 and control characters are rejected. Embedded URL
+credentials cannot be combined with `creds_file`: use an address without
+userinfo for a credentials-file/NKey/JWT connection. Private CA and paired
+client certificate/key options still apply independently. Authentication
+userinfo is removed from server addresses before SDK diagnostics/reconnects;
+connection errors do not echo the input URL or credential material.
+Comma-separated server lists accept at most 16 addresses and 16 KiB total.
+Every address must specify the same decoded user/password or token, or every
+address must omit URL authentication. Mixed anonymous/authenticated entries,
+different credentials and empty entries are rejected before connection; a
+credentials file requires every address to omit userinfo. Percent-encode a
+comma inside credentials as `%2C`, since an unescaped comma separates servers.
+Plain `nats://` and `tls://` entries retain their individual transport schemes.
+Production validation requires every entry to use `tls://`; a TLS first entry
+does not permit a later plaintext fallback. The list is retained unchanged by
+normal TOML loading and `--nats-url` overrides before NATS connection validation.
+The existing read-authorized `GET /admin/config` diagnostic projects NATS and
+database URLs without userinfo, query or fragment. Invalid values become
+`[redacted]`; diagnostic failures never fall back to displaying the raw DSN.
+The native node's shared JSON/text/OTLP subscriber also excludes the SDK's
+credential-bearing `async_nats::connection` event with field `connect_info`.
+This exclusion remains active at TRACE and after log-level reload; other NATS
+events remain observable. Custom subscribers used by a direct `NatsBus`
+consumer must apply `common::logging::safe_sdk_event` before their output layers.
+
 ---
 
 ## Production Cluster Setup

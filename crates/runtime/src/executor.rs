@@ -4,8 +4,10 @@ use crate::limits::{
 };
 use crate::policy_tracker::{PolicyCounters, PolicyEnforcer};
 mod http_policy;
+mod observations;
 mod p3;
 mod triggers;
+pub use observations::{HttpExecution, HttpExecutionObserver};
 pub use triggers::TriggerHandle;
 mod socket_deadlines;
 mod socket_egress;
@@ -489,8 +491,27 @@ impl PreparedModule {
         socket_addr_check: Option<SocketAddrCheckFn>,
         thread_start_hook: Option<HttpServerThreadStartHook>,
     ) -> Result<HttpServerInstance, PlatformError> {
+        self.spawn_http_server_observed(env_vars, addr, socket_addr_check, thread_start_hook, None)
+    }
+
+    /// Observe actual guest executions; admission rejections do not emit samples.
+    pub fn spawn_http_server_observed(
+        &self,
+        env_vars: Vec<(String, String)>,
+        addr: SocketAddr,
+        socket_addr_check: Option<SocketAddrCheckFn>,
+        thread_start_hook: Option<HttpServerThreadStartHook>,
+        observer: Option<HttpExecutionObserver>,
+    ) -> Result<HttpServerInstance, PlatformError> {
         if p3::is_service(&self.engine, &self.module) {
-            return p3::spawn(self, env_vars, addr, socket_addr_check, thread_start_hook);
+            return p3::spawn(
+                self,
+                env_vars,
+                addr,
+                socket_addr_check,
+                thread_start_hook,
+                observer,
+            );
         }
         common::triggers::validate(&self.config.triggers)
             .map_err(PlatformError::ConfigValidation)?;
@@ -509,6 +530,7 @@ impl PreparedModule {
         let policy = resolve_instance_policy(&self.config, addr.port())?;
         let policy_counters = Arc::new(PolicyCounters::new());
         policy_counters.http_activity.enable_http_serving();
+        let observer = Some(observations::accounting(observer, policy_counters.clone()));
         let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel::<()>();
         let task_policy_counters = policy_counters.clone();
         let (trigger_tx, mut trigger_rx) = tokio::sync::mpsc::channel::<triggers::Invocation>(32);
@@ -602,6 +624,7 @@ impl PreparedModule {
                 };
                 let pre = Arc::new(pre);
                 let trigger_context = Arc::new(triggers::Context {
+                    observer: observer.clone(),
                     config: config.clone(),
                     engine: engine.clone(),
                     pre: pre.clone(),
@@ -620,6 +643,8 @@ impl PreparedModule {
                         .collect(),
                 });
                 let mut trigger_tasks = tokio::task::JoinSet::new();
+                let request_tasks: observations::RequestTasks =
+                    Arc::new(std::sync::Mutex::new(Some(tokio::task::JoinSet::new())));
                 let mut trap: Option<String> = None;
 
                 loop {
@@ -641,6 +666,8 @@ impl PreparedModule {
                                     let socket_addr_check = socket_addr_check.clone();
                                     let request_policy_counters = task_policy_counters.clone();
                                     let app_id = app_id.clone();
+                                    let observer = observer.clone();
+                                    let request_tasks = request_tasks.clone();
                                     tokio::spawn(async move {
                                         let app_id_for_service = app_id.clone();
                                         let service = service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
@@ -651,6 +678,8 @@ impl PreparedModule {
                                             let socket_addr_check = socket_addr_check.clone();
                                             let request_policy_counters = request_policy_counters.clone();
                                             let app_id_for_request = app_id.clone();
+                                            let observer = observer.clone();
+                                            let request_tasks = request_tasks.clone();
                                             async move {
                                                 let Some(activity) = request_policy_counters.http_activity.begin() else {
                                                     let mut response = triggers::denied_response();
@@ -665,17 +694,19 @@ impl PreparedModule {
                                                 for name in names { req.headers_mut().remove(name); }
                                                 let (sender, receiver) = tokio::sync::oneshot::channel();
                                                 let (response_started_tx, response_started_rx) =
-                                                    tokio::sync::oneshot::channel::<bool>();
+                                                    tokio::sync::oneshot::channel::<Option<u16>>();
                                                 let (body_complete_tx, body_complete_rx) =
                                                     tokio::sync::oneshot::channel::<()>();
+                                                let response_status = Arc::new(std::sync::atomic::AtomicU16::new(0));
+                                                let handler_status = response_status.clone();
 
                                                 let app_id_for_handle = app_id_for_request.clone();
                                                 let request_error_counters =
                                                     request_policy_counters.clone();
                                                 let handler_activity = activity.clone();
-                                                let handle = tokio::spawn(async move {
+                                                let handle = observations::spawn_request(&request_tasks, async move {
                                                     let _handler_activity = handler_activity;
-                                                    let result = async {
+                                                    let mut report = observations::DeferredReport::new(observer, handler_status);
                                                         let state = build_store_state(
                                                             &config,
                                                             env_vars.as_ref().clone(),
@@ -688,7 +719,10 @@ impl PreparedModule {
                                                         store.limiter(|s| &mut s.limiter);
                                                         configure_store(&mut store, config.fuel_quota)
                                                             .map_err(|e| std::io::Error::other(e.to_string()))?;
+                                                    let mut store = observations::ObservedStore::new(store, Some(report.capture()), config.fuel_quota.0);
 
+                                                    let mut is_trap = false;
+                                                    let result = async {
                                                         let req = req;
                                                         let req = store
                                                             .data_mut()
@@ -704,12 +738,13 @@ impl PreparedModule {
                                                         let proxy = pre
                                                             .instantiate_async(&mut store)
                                                             .await
-                                                            .map_err(|e| std::io::Error::other(e.to_string()))?;
+                                                            .map_err(|e| { is_trap = e.downcast_ref::<wasmtime::Trap>().is_some(); std::io::Error::other(e.to_string()) })?;
                                                         proxy
                                                             .wasi_http_incoming_handler()
                                                             .call_handle(&mut store, req, out)
                                                             .await
                                                             .map_err(|e| {
+                                                                is_trap = e.downcast_ref::<wasmtime::Trap>().is_some();
                                                                 let message = format!("{e:#}");
                                                                 record_resource_table_capacity_denial(
                                                                     &message,
@@ -722,9 +757,13 @@ impl PreparedModule {
                                                     }
                                                     .await;
 
-                                                    if let Ok(true) = response_started_rx.await {
+                                                    store.finish(result.is_err(), is_trap);
+                                                    drop(store);
+                                                    let status = response_started_rx.await.ok().flatten();
+                                                    if status.is_some() {
                                                         let _ = body_complete_rx.await;
                                                     }
+                                                    report.finish();
 
                                                     if let Err(err) = &result {
                                                         tracing::warn!(
@@ -739,7 +778,8 @@ impl PreparedModule {
                                                 let response =
                                                     match receiver.await {
                                                         Ok(Ok(resp)) => {
-                                                            let _ = response_started_tx.send(true);
+                                                            response_status.store(resp.status().as_u16(), std::sync::atomic::Ordering::Relaxed);
+                                                            let _ = response_started_tx.send(Some(resp.status().as_u16()));
                                                             let (parts, body) = resp.into_parts();
                                                             Ok(hyper::Response::from_parts(
                                                                 parts,
@@ -747,11 +787,11 @@ impl PreparedModule {
                                                             ))
                                                         }
                                                         Ok(Err(err)) => {
-                                                            let _ = response_started_tx.send(false);
+                                                            let _ = response_started_tx.send(None);
                                                             Err(std::io::Error::other(err.to_string()))
                                                         }
                                                         Err(_) => {
-                                                            let _ = response_started_tx.send(false);
+                                                            let _ = response_started_tx.send(None);
                                                             match handle.await {
                                                                 Ok(Ok(())) => Err(std::io::Error::other(
                                                                     "guest never invoked response-outparam::set",
@@ -793,10 +833,15 @@ impl PreparedModule {
                     }
                 }
 
+                trigger_tasks.abort_all();
+                while trigger_tasks.join_next().await.is_some() {}
+                observations::stop_requests(&request_tasks).await;
                 ExecutionStats {
                     instance_id: InstanceId::new(),
                     fuel_limit: config.fuel_quota.0,
-                    fuel_consumed: 0,
+                    fuel_consumed: task_policy_counters
+                        .http_fuel_consumed
+                        .load(std::sync::atomic::Ordering::Relaxed),
                     ram_bytes: task_policy_counters
                         .current_memory_bytes
                         .load(std::sync::atomic::Ordering::Relaxed)

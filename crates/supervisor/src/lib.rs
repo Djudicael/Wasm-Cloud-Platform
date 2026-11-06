@@ -10,6 +10,7 @@ mod health_provider;
 mod health_runtime;
 pub mod triggers;
 
+mod control;
 pub mod instance;
 pub mod instance_manager;
 pub mod network;
@@ -132,6 +133,7 @@ pub struct Supervisor {
     pools: Arc<RwLock<HashMap<String, InstancePool>>>,
     spawn_gates: tokio::sync::Mutex<HashMap<String, std::sync::Weak<tokio::sync::Mutex<()>>>>,
     paused_triggers: RwLock<std::collections::HashSet<String>>,
+    node_control_gate: tokio::sync::RwLock<()>,
     trigger_stop: tokio::sync::watch::Sender<bool>,
     trigger_idle: tokio::sync::watch::Sender<bool>,
 
@@ -143,6 +145,7 @@ pub struct Supervisor {
 
     /// Prometheus policy metrics sink. Set after Metrics initialization in node startup.
     policy_metrics: std::sync::RwLock<Option<Arc<metrics::exporter::PolicyMetrics>>>,
+    execution_metrics: std::sync::RwLock<Option<Arc<metrics::exporter::Metrics>>>,
 
     /// Channel to send billing records
     billing_tx: Option<mpsc::Sender<billing::BillingInput>>,
@@ -218,11 +221,13 @@ impl Supervisor {
             pools: Arc::new(RwLock::new(HashMap::new())),
             spawn_gates: tokio::sync::Mutex::new(HashMap::new()),
             paused_triggers: RwLock::new(std::collections::HashSet::new()),
+            node_control_gate: tokio::sync::RwLock::new(()),
             trigger_stop: tokio::sync::watch::channel(false).0,
             trigger_idle: tokio::sync::watch::channel(true).0,
             event_tx,
             log_tx: None,
             policy_metrics: std::sync::RwLock::new(None),
+            execution_metrics: std::sync::RwLock::new(None),
             billing_tx,
             command_rx: std::sync::Mutex::new(Some(command_rx)),
             command_tx,
@@ -276,6 +281,12 @@ impl Supervisor {
         }
     }
 
+    pub fn set_execution_metrics(&self, metrics: Arc<metrics::exporter::Metrics>) {
+        if let Ok(mut slot) = self.execution_metrics.write() {
+            *slot = Some(metrics);
+        }
+    }
+
     /// Get a sender for the supervisor command channel.
     ///
     /// This can be used by the eBPF monitor callbacks, admin API handlers,
@@ -299,6 +310,9 @@ impl Supervisor {
 
     pub fn store(&self) -> &Store {
         &self.store
+    }
+    pub fn configured_memory_budget_bytes(&self) -> u64 {
+        self.node_memory_budget_bytes
     }
 
     pub fn upstream(&self) -> &Arc<UpstreamRegistry> {

@@ -47,7 +47,10 @@ impl Metrics {
             .unwrap();
 
         let ram_usage_bytes = GaugeVec::new(
-            Opts::new("wasm_ram_usage_bytes", "Current linear memory usage"),
+            Opts::new(
+                "wasm_ram_usage_bytes",
+                "Linear memory bytes of the last measured execution",
+            ),
             &["app"],
         )
         .unwrap();

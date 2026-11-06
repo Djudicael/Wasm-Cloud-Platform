@@ -24,6 +24,12 @@ cargo test -p messaging
 
 ## Tests Included
 
+The focused `cargo test -p messaging url_auth --lib` tests do not start a
+container. They cover percent-decoding, credential-free SDK diagnostics,
+credentials-file conflicts, token/user-password URL forms, bounded server lists
+and refusal of mixed/divergent authentication. The config crate additionally
+checks TOML/CLI list preservation and all-server production TLS enforcement.
+
 - **test_pub_sub_deploy_app**: Tests basic pub/sub functionality with NATS
 - **test_jetstream_durable_replay**: Tests JetStream durable consumer and message replay
 
@@ -33,11 +39,10 @@ cargo test -p messaging
 
 If you get "port already in use" errors:
 
-```bash
-# Stop and remove existing NATS containers
-podman stop $(podman ps -a | grep nats | awk '{print $1}')
-podman rm $(podman ps -a | grep nats | awk '{print $1}')
-```
+Use an available ephemeral port or the owning fixture's exact recorded cleanup
+path. Never stop/remove brokers by matching `nats` in a global container list:
+other development stacks can be using them. Preserve unrelated containers and
+volumes; verify cleanup against the fixture's actual recorded identities.
 
 ### Podman Socket Not Found
 

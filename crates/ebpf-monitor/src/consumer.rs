@@ -117,6 +117,8 @@ pub fn parse_event(bytes: &[u8]) -> Result<MonitorEvent, ParseError> {
                 EventType::TcpConnect => Ok(MonitorEvent::TcpConnect {
                     pid: event.header.pid,
                     tid: event.header.tid,
+                    src_addr: event.src_addr,
+                    dst_addr: event.dst_addr,
                     src_port: event.src_port,
                     dst_port: event.dst_port,
                     old_state: event.old_state,

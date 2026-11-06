@@ -173,6 +173,17 @@ For the database/quota test, set `WCP_P3_DATABASE_FILE` to a private file contai
 an explicitly selected disposable PostgreSQL URL and run the same test binary
 with the `p3_postgres` filter and `--ignored`. Credentials are not printed.
 
+`PreparedModule::spawn_http_server_observed` additionally accepts an optional
+backend-independent execution observer. P2/P3 requests and native P2 triggers
+report actual Store fuel, limiter memory, elapsed time and guest response
+status once; cancellation preserves measurements before Store destruction.
+Status zero means the guest produced no HTTP response. Admission rejections
+produce no execution sample. The node's supervisor connects this observer to
+Prometheus. HTTP instance exit statistics accumulate the same measured fuel
+for the existing instance billing path, without extra per-request billing.
+The original `spawn_http_server` API remains available without an external sink.
+See [HTTP measurement semantics and required real-component tests](../../docs/observability.md#http-execution-measurements).
+
 ### Shared outgoing transport
 
 The `WasiHttpHooks` implementation in `executor/http_policy.rs` resolves a

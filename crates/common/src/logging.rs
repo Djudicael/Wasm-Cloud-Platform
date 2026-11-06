@@ -30,6 +30,24 @@ pub use init::{build_log_writer, init_logging, LogReloadHandle, LogWriter};
 pub use rotation::{LogRotationConfig, RotatingFileWriter};
 pub use sampling::SamplingLayer;
 
+/// async-nats 0.50 traces the complete CONNECT structure, including password,
+/// token and JWT. Exclude that one credential-bearing event before any log or
+/// telemetry layer sees its fields, even when runtime logging changes to TRACE.
+pub fn safe_sdk_event(metadata: &tracing::Metadata<'_>) -> bool {
+    !(metadata.target() == "async_nats::connection"
+        && metadata.fields().field("connect_info").is_some())
+}
+
+/// Record the HTTP semantic-convention attribute as an OTLP integer.
+/// The pinned tracing-opentelemetry SpanVisitor routes unsigned values through
+/// debug formatting, producing strings. Zero denotes no written response and
+/// must leave the HTTP status attribute unset.
+pub fn record_http_response_status(span: &tracing::Span, status: u16) {
+    if status != 0 {
+        span.record("http.response.status_code", i64::from(status));
+    }
+}
+
 #[cfg(test)]
 pub(crate) use format::FieldCollector;
 

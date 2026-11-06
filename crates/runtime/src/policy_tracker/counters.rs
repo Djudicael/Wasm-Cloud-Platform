@@ -17,6 +17,8 @@ const MAX_PENDING_HOST_TCP_CLOSES: usize = 65_536;
 #[derive(Debug)]
 pub struct PolicyCounters {
     pub http_activity: std::sync::Arc<crate::request_activity::RequestActivity>,
+    /// Sum of measured fuel from completed/cancelled HTTP request Stores.
+    pub http_fuel_consumed: AtomicU64,
     host_socket_lifecycle: AtomicBool,
     host_tcp_closes: Mutex<HostManagedTcpCloses>,
     // Network counters
@@ -66,6 +68,7 @@ impl PolicyCounters {
     pub fn new() -> Self {
         PolicyCounters {
             http_activity: std::sync::Arc::default(),
+            http_fuel_consumed: AtomicU64::new(0),
             host_socket_lifecycle: AtomicBool::new(false),
             host_tcp_closes: Mutex::new(HostManagedTcpCloses::default()),
             outbound_connections_active: AtomicU32::new(0),
