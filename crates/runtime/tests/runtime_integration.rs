@@ -109,6 +109,7 @@ fn test_multiple_instances_with_real_component() {
     let config = AppConfig {
         id: AppId::new("multi", "v1"),
         fuel_quota: FuelQuota(500_000_000),
+        request_timeout_ms: None,
         memory_limit: MemoryPages(2048),
         max_instances: 5,
         idle_timeout_secs: 300,
@@ -149,6 +150,7 @@ fn test_memory_limit_config() {
     let config = AppConfig {
         id: AppId::new("memtest", "v1"),
         fuel_quota: FuelQuota(10_000_000),
+        request_timeout_ms: None,
         memory_limit: MemoryPages(10), // Very small: 640 KB
         max_instances: 1,
         idle_timeout_secs: 60,
@@ -177,6 +179,7 @@ fn test_fuel_quota_config() {
     let high_fuel = AppConfig {
         id: AppId::new("high", "v1"),
         fuel_quota: FuelQuota(10_000_000),
+        request_timeout_ms: None,
         memory_limit: MemoryPages(256),
         max_instances: 1,
         idle_timeout_secs: 60,
@@ -198,6 +201,7 @@ fn test_fuel_quota_config() {
     let low_fuel = AppConfig {
         id: AppId::new("low", "v1"),
         fuel_quota: FuelQuota(100),
+        request_timeout_ms: None,
         memory_limit: MemoryPages(256),
         max_instances: 1,
         idle_timeout_secs: 60,

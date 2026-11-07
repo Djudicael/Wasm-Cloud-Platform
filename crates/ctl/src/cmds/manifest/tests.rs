@@ -2,6 +2,19 @@ use super::*;
 use std::collections::HashMap;
 
 #[test]
+fn optional_request_budget_survives_manifest_config_export_roundtrip() {
+    let mut manifest: DeployManifest = toml::from_str("").unwrap();
+    assert_eq!(manifest.fuel.request_timeout_ms, None);
+    manifest.fuel.request_timeout_ms = Some(180000);
+    let config = manifest.to_app_config();
+    assert_eq!(config.request_timeout_ms, Some(180000));
+    let restored = super::conversion::manifest_from_config(&config, None, &[]);
+    let encoded = toml::to_string(&restored).unwrap();
+    let decoded: DeployManifest = toml::from_str(&encoded).unwrap();
+    assert_eq!(decoded.to_app_config().request_timeout_ms, Some(180000));
+}
+
+#[test]
 fn schedules_round_trip_and_reject_unsupported_or_unbounded_options() {
     let input = r#"
 [[triggers]]
@@ -143,6 +156,7 @@ fn test_manifest_to_app_config() {
             wasm_bind_port: 8080,
         },
         fuel: FuelManifestSection {
+            request_timeout_ms: None,
             quota: 1000000,
             memory_pages: 1024,
             max_instances: 3,

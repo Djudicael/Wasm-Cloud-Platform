@@ -42,6 +42,7 @@ fn create_test_config(app_id: AppId) -> AppConfig {
     AppConfig {
         id: app_id,
         fuel_quota: FuelQuota(500_000_000),
+        request_timeout_ms: None,
         memory_limit: MemoryPages(2048),
         max_instances: 3,
         idle_timeout_secs: 300,

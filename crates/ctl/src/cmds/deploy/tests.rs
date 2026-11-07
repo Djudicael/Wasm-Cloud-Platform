@@ -302,8 +302,21 @@ async fn test_registry_backed_manifest_fanout_uses_exact_active_peers() {
     };
 
     async fn cluster_nodes(State(state): State<TestState>) -> Json<serde_json::Value> {
+        // Client/TLS initialization can be slow on a cold runner. Heartbeats
+        // describe response-time liveness, not the fixture setup timestamp.
+        let now = now_secs();
+        let nodes: Vec<_> = state
+            .nodes
+            .into_iter()
+            .map(|node| match node.node_id.as_str() {
+                "node-1" => active_node("node-1", now),
+                "node-2" => active_node("node-2", now),
+                "node-3" => active_node("node-3", now.saturating_sub(10_000)),
+                _ => node,
+            })
+            .collect();
         Json(serde_json::json!({
-            "nodes": state.nodes,
+            "nodes": nodes,
             "active_staleness_secs": 60,
         }))
     }

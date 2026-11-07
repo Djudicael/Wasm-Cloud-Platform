@@ -1,6 +1,6 @@
 // crates/runtime/src/executor.rs
 use crate::limits::{
-    configure_service_store, configure_store, read_fuel_remaining, IoStats, MemoryLimiter,
+    configure_request_store, configure_service_store, read_fuel_remaining, IoStats, MemoryLimiter,
 };
 use crate::policy_tracker::{PolicyCounters, PolicyEnforcer};
 mod http_policy;
@@ -138,7 +138,8 @@ fn build_store_state(
     // teardown; share aggregate counters with sockets but not reservation ownership.
     let http_enforcer =
         PolicyEnforcer::with_counters(policy.clone(), policy_enforcer.counters.clone());
-    let http_hooks = http_policy::PolicyHttpHooks::new(http_enforcer, socket_addr_check.clone());
+    let http_hooks = http_policy::PolicyHttpHooks::new(http_enforcer, socket_addr_check.clone())
+        .with_request_timeout(config.request_timeout_ms)?;
     let combined_socket_check = socket_policy::compose_resource_socket_addr_check(
         policy_socket_check,
         policy_enforcer.clone(),
@@ -717,12 +718,14 @@ impl PreparedModule {
                                                         .map_err(|e| std::io::Error::other(e.to_string()))?;
                                                         let mut store = Store::new(&engine, state);
                                                         store.limiter(|s| &mut s.limiter);
-                                                        configure_store(&mut store, config.fuel_quota)
+                                                        configure_request_store(&mut store, config.fuel_quota, config.request_timeout_ms)
                                                             .map_err(|e| std::io::Error::other(e.to_string()))?;
                                                     let mut store = observations::ObservedStore::new(store, Some(report.capture()), config.fuel_quota.0);
 
                                                     let mut is_trap = false;
-                                                    let result = async {
+                                                    let request_timeout = common::types::request_timeout_duration(config.request_timeout_ms)
+                                                        .map_err(std::io::Error::other)?;
+                                                    let result = tokio::time::timeout(request_timeout, async {
                                                         let req = req;
                                                         let req = store
                                                             .data_mut()
@@ -754,8 +757,8 @@ impl PreparedModule {
                                                             })?;
 
                                                         Ok::<(), std::io::Error>(())
-                                                    }
-                                                    .await;
+                                                    })
+                                                    .await.unwrap_or_else(|_| Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "application request deadline exceeded")));
 
                                                     store.finish(result.is_err(), is_trap);
                                                     drop(store);
@@ -1047,7 +1050,7 @@ fn detect_component_execution_model(
     let state = build_store_state(config, Vec::new(), config.wasm_bind_port, None, None)?;
     let mut store = Store::new(engine, state);
     store.limiter(|s| &mut s.limiter);
-    configure_store(&mut store, config.fuel_quota)?;
+    configure_request_store(&mut store, config.fuel_quota, config.request_timeout_ms)?;
     let linker = build_runtime_linker(engine)?;
     let instance = linker.instantiate(&mut store, module).map_err(|e| {
         PlatformError::runtime(format!("instantiation error during model detection: {e}"))

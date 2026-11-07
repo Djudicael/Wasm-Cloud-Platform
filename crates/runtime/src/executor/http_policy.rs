@@ -76,6 +76,21 @@ pub(super) struct PolicyHttpHooks {
 }
 
 impl PolicyHttpHooks {
+    pub(super) fn with_request_timeout(
+        mut self,
+        timeout_ms: Option<u32>,
+    ) -> Result<Self, common::error::PlatformError> {
+        let duration = common::types::request_timeout_duration(timeout_ms)
+            .map_err(|message| common::error::PlatformError::ConfigValidation(message.into()))?;
+        if timeout_ms.is_some() {
+            self.limits.first_byte = duration;
+            self.limits.total = duration;
+            self.limits.connect = self.limits.connect.min(duration);
+            self.limits.between_bytes = self.limits.between_bytes.min(duration);
+        }
+        Ok(self)
+    }
+
     pub(super) fn new(enforcer: PolicyEnforcer, extra: Option<SocketAddrCheckFn>) -> Self {
         let check = compose_http_addr_check(
             SocketPolicyCheck::from_instance_policy(&enforcer.policy),

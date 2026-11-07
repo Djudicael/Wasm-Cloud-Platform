@@ -152,8 +152,19 @@ flowchart LR
 ```
 
 P3 responses are buffered up to 16 MiB; incoming bodies are limited to 16 MiB.
-The whole handler/body operation has a 30-second host deadline, in addition to
-fuel, memory and resource-table limits. This path is for bounded service APIs,
+The whole operation has a 30-second default host deadline, in addition to fuel,
+memory and resource-table limits. P2 and P3 enforce a single asynchronous
+envelope including component instantiation, handler execution and host I/O
+waits; P3 buffered body collection consumes the same budget. An operator can
+set `[fuel].request_timeout_ms` to 1000..300000 ms for a different finite budget.
+The default value remains 30 seconds, but enforcement is stronger than the
+former epoch-only waiting behavior: an I/O-stalled invocation can now terminate
+earlier. Nested calls do not renew the envelope. The epoch CPU guard remains
+active with its 10 ms tick resolution, alongside the independent fuel limit.
+
+Rust `AppConfig` struct literals must include the new optional
+`request_timeout_ms` member. Omitted JSON fields retain `None`, and `None` is
+omitted when serializing legacy configs. This path is for bounded service APIs,
 not indefinite streaming. Native schedule triggers remain P2-only and are
 rejected for P3 services. Reserved trigger routes and caller-supplied trigger
 headers retain the ordinary-network boundary.

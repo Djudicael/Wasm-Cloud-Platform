@@ -43,6 +43,7 @@ async fn test_database_url_injection() {
     let config = AppConfig {
         id: app_id.clone(),
         fuel_quota: FuelQuota(1_000_000),
+        request_timeout_ms: None,
         memory_limit: MemoryPages(64),
         max_instances: 1,
         idle_timeout_secs: 60,

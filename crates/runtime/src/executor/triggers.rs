@@ -116,7 +116,12 @@ async fn execute(
     .map_err(|e| e.to_string())?;
     let mut store = Store::new(&context.engine, state);
     store.limiter(|s| &mut s.limiter);
-    configure_store(&mut store, context.config.fuel_quota).map_err(|e| e.to_string())?;
+    configure_request_store(
+        &mut store,
+        context.config.fuel_quota,
+        context.config.request_timeout_ms,
+    )
+    .map_err(|e| e.to_string())?;
     let mut store = observations::ObservedStore::new(
         store,
         context.observer.clone(),

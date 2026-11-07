@@ -314,6 +314,7 @@ fn test_app_config(app_id: &str) -> AppConfig {
     AppConfig {
         id: AppId(app_id.to_string()),
         fuel_quota: FuelQuota(1_000_000),
+        request_timeout_ms: None,
         memory_limit: MemoryPages(4),
         max_instances: 1,
         idle_timeout_secs: 30,

@@ -56,6 +56,7 @@ fn test_config_roundtrip_with_secrets() {
     let config = AppConfig {
         id: AppId::new("my-app", "v2"),
         fuel_quota: FuelQuota(1_000_000),
+        request_timeout_ms: None,
         memory_limit: MemoryPages(512),
         max_instances: 5,
         idle_timeout_secs: 60,

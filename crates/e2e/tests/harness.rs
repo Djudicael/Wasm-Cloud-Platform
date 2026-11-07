@@ -947,6 +947,7 @@ pub fn build_app_config(
     common::types::AppConfig {
         id: common::types::AppId(app_id.to_string()),
         fuel_quota: common::types::FuelQuota(fuel_quota),
+        request_timeout_ms: None,
         memory_limit: common::types::MemoryPages(memory_pages),
         max_instances,
         idle_timeout_secs: 300,

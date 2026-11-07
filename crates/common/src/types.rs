@@ -212,6 +212,10 @@ pub struct AppConfig {
     /// Maximum Fuel units per execution.
     pub fuel_quota: FuelQuota,
 
+    /// Optional per-request wall-clock budget. Omitted applications retain 30s.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_timeout_ms: Option<u32>,
+
     /// Maximum linear memory pages (1 page = 64 KiB).
     pub memory_limit: MemoryPages,
 
@@ -278,6 +282,45 @@ fn default_namespace() -> String {
     "default".to_string()
 }
 
+/// Shared admission/runtime validation. This budget never replaces CPU, memory
+/// or network policy and cannot disable a deadline.
+pub fn request_timeout_duration(value: Option<u32>) -> Result<std::time::Duration, &'static str> {
+    match value {
+        None => Ok(std::time::Duration::from_secs(30)),
+        Some(ms) if (1_000..=300_000).contains(&ms) => {
+            Ok(std::time::Duration::from_millis(u64::from(ms)))
+        }
+        Some(_) => Err("request_timeout_ms must be 1000..=300000"),
+    }
+}
+
+#[cfg(test)]
+mod request_timeout_tests {
+    use super::*;
+    #[test]
+    fn budgets_are_finite_bounded_and_legacy_serialization_is_unchanged() {
+        assert_eq!(request_timeout_duration(None).unwrap().as_millis(), 30_000);
+        for value in [1_000, 30_000, 180_000, 300_000] {
+            assert_eq!(
+                request_timeout_duration(Some(value)).unwrap().as_millis(),
+                u128::from(value)
+            );
+        }
+        for value in [0, 999, 300_001, u32::MAX] {
+            assert!(request_timeout_duration(Some(value)).is_err());
+        }
+        let mut config = AppConfig::default_for(AppId::new("budget", "v1"));
+        let legacy = serde_json::to_value(&config).unwrap();
+        assert!(legacy.get("request_timeout_ms").is_none());
+        let restored: AppConfig = serde_json::from_value(legacy).unwrap();
+        assert_eq!(restored.request_timeout_ms, None);
+        config.request_timeout_ms = Some(180_000);
+        let restored: AppConfig =
+            serde_json::from_value(serde_json::to_value(&config).unwrap()).unwrap();
+        assert_eq!(restored.request_timeout_ms, Some(180_000));
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum PlacementPolicy {
@@ -341,7 +384,8 @@ impl AppConfig {
         AppConfig {
             id: app_id,
             fuel_quota: FuelQuota(500_000_000), // ~500ms of compute
-            memory_limit: MemoryPages(2048),    // 128 MB
+            request_timeout_ms: None,
+            memory_limit: MemoryPages(2048), // 128 MB
             max_instances: 10,
             idle_timeout_secs: 300,
             wasm_bind_port: 8080,

@@ -64,6 +64,37 @@ Endpoint rules may also require JWT scopes through `required_scopes`.
 
 ## Security Considerations
 
+### Bounded forwarding
+
+The supervisor registers each local endpoint with the target application's
+operator-admitted `request_timeout_ms`. The gateway uses that value, or the
+legacy 30-second default when it is omitted. Explicit values must be
+1000..300000 ms; invalid registry metadata fails closed before a connection is
+attempted. Caller headers never select or enlarge this budget.
+
+One absolute deadline covers TCP connection, HTTP/1 or HTTP/2 handshake and
+response headers, without resetting the budget between phases. TCP connect is
+also capped at 30 seconds or the smaller remaining target budget. A failure or
+cancellation before headers aborts the owned connection driver. After headers,
+the existing streamed-body contract remains unchanged; the caller's HTTP
+transport and the target HTTP Store retain their independent bounded deadlines.
+The default value remains 30 seconds, while its scope is now global. Requests
+that previously accumulated separate phase waits can therefore time out sooner
+without an explicit override. This is a change in enforcement, not a claim of
+identical timing behavior for existing deployments.
+
+Cold start must return an address already registered by the supervisor. The
+gateway re-reads the exact local endpoint, preserving its budget and protocol;
+missing or mismatched registration fails closed rather than fabricating
+default metadata. This is node-local only and does not introduce cross-host
+service discovery. Kernel-derived identity, namespace checks, allowlists,
+authentication and rate limiting remain unchanged.
+Rust `RegisteredEndpoint` literals must include `request_timeout_ms`; legacy
+registration supplies `None`. Application JSON remains compatible through the
+optional `AppConfig` member: missing fields use `None`, which is omitted on
+serialization. Endpoint budgets are internal trusted metadata, not a new
+caller-visible header or guest-controlled value.
+
 - **Service Naming Model**: Internal service discovery is intentionally app-name based inside a namespace. If you want a parallel incompatible rollout, deploy it as a separate app with a different name rather than expecting version-qualified internal hostnames.
 
 - **Namespace Isolation**: The gateway strips forged internal identity headers, resolves and revalidates caller identity from the authoritative kernel gateway maps, and enforces cross-namespace deny-by-default with explicit allowlists. The gateway is intended to run only with eBPF-backed caller attribution and now fails closed when that identity path is unavailable.

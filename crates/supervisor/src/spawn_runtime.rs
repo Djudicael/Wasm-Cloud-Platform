@@ -41,6 +41,8 @@ impl Supervisor {
 
     /// Enforce node-local ceilings before an app can be admitted to a pool.
     pub fn check_resource_limits(&self, config: &AppConfig) -> Result<(), PlatformError> {
+        common::types::request_timeout_duration(config.request_timeout_ms)
+            .map_err(|message| PlatformError::ConfigValidation(message.into()))?;
         common::triggers::validate(&config.triggers).map_err(PlatformError::ConfigValidation)?;
         self.network_admission
             .validate_app(config)
@@ -718,6 +720,7 @@ impl Supervisor {
                         prepared.execution_model(),
                         ComponentExecutionModel::WasiHttpIncomingHandler
                     ),
+                    request_timeout_ms: config.request_timeout_ms,
                 },
             )
             .await;

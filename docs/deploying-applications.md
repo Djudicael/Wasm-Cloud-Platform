@@ -1055,7 +1055,8 @@ Both P2 `wasi:http/incoming-handler` and P3 async `wasi:http/handler` services
 can be hosted. The latter use the pinned Wasmtime experimental P3 ABI, while
 still compiling with Rust's `wasm32-wasip2` target. P3 preserves the same outgoing
 HTTP policy transport and dedicated identity thread. Its request/response
-bodies are bounded at 16 MiB and the complete handler/body execution at 30 seconds.
+bodies are bounded at 16 MiB and the complete handler/body execution at 30 seconds
+by default, or the explicitly configured per-application request budget below.
 Responses are buffered, so indefinite streaming is not supported. P3 native
 schedule triggers are rejected; existing P2 schedule applications keep working.
 
@@ -1083,8 +1084,8 @@ Policies remain explicit: permissive legacy defaults do not automatically deny
 platform NATS, metadata, private ranges, or external services. Use restrictive
 profiles and operator deny ranges for those boundaries.
 
-The HTTP transport currently has fixed host caps; a guest can shorten supported
-request-option timeouts but cannot extend them:
+The HTTP transport has the following default host caps; a guest can shorten
+supported request-option timeouts but cannot extend the application's host caps:
 
 | Limit | Host cap |
 | --- | --- |
@@ -1094,10 +1095,54 @@ request-option timeouts but cannot extend them:
 | Entire transport lifetime, including response I/O | 120 seconds |
 | Response-body bytes, also for chunked responses | 16 MiB |
 
-These are separate from the request-store epoch/fuel budget and from gateway
-and front-door deadlines. Longer streaming or model requests require a future
-configurable transport policy; increasing a guest timeout does not bypass these
-caps.
+An operator can opt an application into a finite request budget:
+
+```toml
+[fuel]
+request_timeout_ms = 180000
+```
+
+The optional value must be 1000..300000 milliseconds. Admission and runtime
+both reject values outside this range, including zero. Omission preserves the
+30-second P2/P3 request-store budget value and all default transport-cap values.
+P2 and P3 now enforce one global asynchronous envelope covering component
+instantiation and handler execution, including host I/O waits. P3 buffered body
+collection is inside that same envelope. The 30-second default is therefore
+enforced across the whole operation; calls that previously outlasted a coarse
+epoch check while waiting for I/O can now time out earlier. The explicit budget
+also controls the HTTP request Store's epoch deadline
+(rounded up to the 10 ms engine tick), the global request envelope,
+and outgoing HTTP first-byte and total-lifetime ceilings. Connect and
+between-frame progress caps stay at 10/30 seconds, or the smaller application
+budget. Guest request options still select the stricter deadline. The total
+Store budget covers all nested calls; a new outgoing call does not renew it.
+
+The node-local internal gateway also receives the target application's admitted
+budget through the supervisor's endpoint registry. Its single forwarding
+deadline covers connect, protocol handshake and response headers. It defaults
+to 30 seconds, caps connect at the smaller of 30 seconds and the target budget,
+and never trusts caller timeout headers. Cold start reuses the registered target
+metadata; missing or changed registration fails closed. The caller and each
+target application must opt in separately when an entire call chain needs more
+than the default budget. Response-body streaming keeps its existing contract.
+This forwarding budget is consumed continuously across all phases. Previously
+separate connect/header waits could together exceed the nominal 30-second
+default; such requests can now receive a timeout even when the field is omitted.
+
+Fuel, memory, body/connection/egress limits, DNS/TLS and network authorization
+remain independently enforced. This option neither disables interruption nor
+imposes a fixed lifetime on CLI-style long-lived services; their service Store
+continues using its existing fuel and supervisor lifecycle. External gateways,
+clients and front doors need their own compatible bounded deadlines. The
+current Pingora peer has no default read timeout; its behavior is preserved,
+while the receiving HTTP Store supplies the application deadline. This field
+is preserved by manifest/config/export round trips and old stored configs
+deserialize as the legacy default. Schedule trigger declarations keep their
+separate explicit trigger timeout, with the request Store's budget also active.
+Rust integrations constructing `AppConfig` literals must supply the new
+`request_timeout_ms` member, using `None` for the default. JSON compatibility is
+preserved: omitted fields deserialize as `None`, and `None` is omitted from
+serialization. Applying the new option requires the updated node and CLI.
 
 `max_outbound_connections` shares the instance's active counter between sockets
 and HTTP. Raw TCP reserves a slot at `start-connect`, releases it on failed

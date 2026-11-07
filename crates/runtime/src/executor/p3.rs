@@ -82,14 +82,15 @@ pub(super) fn spawn(
                                     let state = build_store_state(&config, env, addr.port(), check, Some(counters))?;
                                     let mut store = Store::new(&engine, state);
                                     store.limiter(|s| &mut s.limiter);
-                                    configure_store(&mut store, config.fuel_quota)?;
+                                    configure_request_store(&mut store, config.fuel_quota, config.request_timeout_ms)?;
                                     let mut store = observations::ObservedStore::new(store, observer, config.fuel_quota.0);
                                     let response_status = store.status.clone();
-                                    let result = async {
+                                    let request_timeout = common::types::request_timeout_duration(config.request_timeout_ms).map_err(wasmtime::Error::msg)?;
+                                    let result = tokio::time::timeout(request_timeout, async {
                                     let service = pre.instantiate_async(&mut store).await?;
                                     let req = req.map(|b| Limited::new(b, MAX_BODY).map_err(|_| wasmtime_wasi_http::Error::HttpRequestBodySize(None)));
                                     let (req, io) = Request::from_http(&mut store.data_mut().http_hooks, req);
-                                    let response = tokio::time::timeout(std::time::Duration::from_secs(30), store.run_concurrent(async |accessor| {
+                                    let response = store.run_concurrent(async |accessor| {
                                         let (response, ()) = tokio::try_join!(async {
                                             let response = service.handle(accessor, req).await?
                                                 .map_err(|e| wasmtime::format_err!("P3 HTTP handler failed: {e:?}"))?;
@@ -100,9 +101,9 @@ pub(super) fn spawn(
                                             wasmtime::error::Ok(hyper::Response::from_parts(parts, Full::new(body)))
                                         }, async { io.await.map_err(wasmtime::Error::from) })?;
                                         wasmtime::error::Ok(response)
-                                    })).await???;
+                                    }).await??;
                                     Ok::<_, wasmtime::Error>(response)
-                                    }.await;
+                                    }).await.unwrap_or_else(|_| Err(wasmtime::format_err!("application request deadline exceeded")));
                                     store.finish(result.is_err(), result.as_ref().err().is_some_and(|e| e.downcast_ref::<wasmtime::Trap>().is_some()));
                                     result.map(|response| response.map(|body| crate::request_activity::ActivityBody::new(body, Some(activity))))
                                 }

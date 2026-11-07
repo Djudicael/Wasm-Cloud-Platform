@@ -124,3 +124,18 @@ This acceptance uses the explicit workflow model fixture and **zero paid model
 calls**. It verifies native-platform WASI execution, identity, isolation and
 admission/recovery behavior; it does not revalidate real-model semantics,
 throughput across hardware, or production host failure behavior.
+
+## Disk maintenance for the native development stack
+
+The harness controller now provides `agentic-dev platform clean` (preview) and
+`agentic-dev platform clean --yes` (apply) for its recorded stopped checkout.
+The mutation lock, saved checkout ownership and PID/start-time checks guard the
+operation. It removes the regenerable Wasmtime code cache and losslessly archives
+known large logs; successful teardown also archives large node logs after node
+exit. This does not purge `node.redb`, document objects, keys, audit history,
+models or persistent Podman volumes, and does not compact the database or WSL.
+A long running campaign can still grow its current log until stopped. Retained
+archives and historical validation files have no automatic deletion policy.
+See the sibling harness `crates/agentic-dev/README.md`, section **Offline storage
+maintenance**, for the command contract and partial-archive recovery behavior.
+Platform artifact GC remains separate from this local controller maintenance.

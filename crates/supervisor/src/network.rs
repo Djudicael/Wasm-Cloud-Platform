@@ -8,6 +8,8 @@ use tokio::sync::RwLock;
 pub struct RegisteredEndpoint {
     pub addr: SocketAddr,
     pub h2c: bool,
+    /// Operator-admitted target application budget, never a caller/header value.
+    pub request_timeout_ms: Option<u32>,
 }
 
 type AppInstanceMap = HashMap<String, Vec<RegisteredEndpoint>>;
@@ -31,8 +33,15 @@ pub struct NamespaceRegistry {
 impl NamespaceRegistry {
     /// Register an instance address for an app.
     pub async fn register(&self, app_id: &AppId, addr: SocketAddr) {
-        self.register_endpoint(app_id, RegisteredEndpoint { addr, h2c: false })
-            .await;
+        self.register_endpoint(
+            app_id,
+            RegisteredEndpoint {
+                addr,
+                h2c: false,
+                request_timeout_ms: None,
+            },
+        )
+        .await;
     }
 
     /// Register an instance endpoint for an app.

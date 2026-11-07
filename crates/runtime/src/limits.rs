@@ -12,7 +12,7 @@ pub const RAW_SOCKET_IO_TIMEOUT: std::time::Duration = std::time::Duration::from
 /// Apply resource limits to a Store before creating an Instance.
 ///
 /// The engine epoch advances every 10 ms. Production requests therefore get a
-/// 30-second coarse wall-clock ceiling while fuel remains the fine-grained CPU
+/// 30-second default coarse wall-clock ceiling while fuel remains the fine-grained CPU
 /// limit. A 100 ms deadline interrupted legitimate CPU-heavy work such as
 /// Argon2 password verification.
 #[cfg(not(test))]
@@ -23,20 +23,108 @@ pub const EPOCH_DEADLINE_TICKS: u64 = 3_000;
 pub const EPOCH_DEADLINE_TICKS: u64 = 10;
 
 pub fn configure_store<T>(store: &mut Store<T>, fuel: FuelQuota) -> Result<(), PlatformError> {
+    configure_request_store(store, fuel, None)
+}
+
+fn request_epoch_ticks(timeout_ms: Option<u32>) -> Result<u64, PlatformError> {
+    let duration = common::types::request_timeout_duration(timeout_ms)
+        .map_err(|message| PlatformError::ConfigValidation(message.into()))?;
+    Ok(if timeout_ms.is_none() {
+        EPOCH_DEADLINE_TICKS
+    } else {
+        // The shared ticker advances every 10ms. Never round below the budget.
+        u64::try_from(duration.as_millis())
+            .unwrap_or(u64::MAX)
+            .div_ceil(10)
+    })
+}
+
+pub fn configure_request_store<T>(
+    store: &mut Store<T>,
+    fuel: FuelQuota,
+    timeout_ms: Option<u32>,
+) -> Result<(), PlatformError> {
+    let ticks = request_epoch_ticks(timeout_ms)?;
     configure_fuel(store, fuel)?;
 
     // Per-request WASI HTTP stores have a finite wall-clock budget.
     // CLI-style HTTP servers must use `configure_service_store` instead: their
     // entry point intentionally remains active for the service lifetime.
     store.epoch_deadline_trap();
-    store.set_epoch_deadline(EPOCH_DEADLINE_TICKS);
+    store.set_epoch_deadline(ticks);
 
     tracing::debug!(
         fuel = fuel.0,
-        epoch_deadline_ticks = EPOCH_DEADLINE_TICKS,
+        epoch_deadline_ticks = ticks,
         "request store fuel and epoch limits configured"
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod request_budget_tests {
+    use super::*;
+    #[test]
+    fn optional_budget_rounds_up_and_cannot_disable_interrupts() {
+        assert_eq!(request_epoch_ticks(None).unwrap(), EPOCH_DEADLINE_TICKS);
+        assert_eq!(request_epoch_ticks(Some(1000)).unwrap(), 100);
+        assert_eq!(request_epoch_ticks(Some(1001)).unwrap(), 101);
+        assert_eq!(request_epoch_ticks(Some(180000)).unwrap(), 18000);
+        assert!(request_epoch_ticks(Some(0)).is_err());
+        assert!(request_epoch_ticks(Some(300001)).is_err());
+    }
+    fn engine() -> wasmtime::Engine {
+        let mut config = wasmtime::Config::new();
+        config.consume_fuel(true).epoch_interruption(true);
+        wasmtime::Engine::new(&config).unwrap()
+    }
+    #[test]
+    fn opted_in_deadline_still_traps_at_its_exact_epoch_budget() {
+        let engine = engine();
+        let module = wasmtime::Module::new(
+            &engine,
+            wat::parse_str("(module (func (export \"run\")))").unwrap(),
+        )
+        .unwrap();
+        let mut store = Store::new(&engine, ());
+        configure_request_store(&mut store, FuelQuota(10000), Some(1000)).unwrap();
+        let instance = wasmtime::Instance::new(&mut store, &module, &[]).unwrap();
+        let run = instance
+            .get_typed_func::<(), ()>(&mut store, "run")
+            .unwrap();
+        for _ in 0..99 {
+            engine.increment_epoch();
+        }
+        run.call(&mut store, ()).unwrap();
+        engine.increment_epoch();
+        assert_eq!(
+            run.call(&mut store, ())
+                .unwrap_err()
+                .downcast_ref::<wasmtime::Trap>(),
+            Some(&wasmtime::Trap::Interrupt)
+        );
+    }
+    #[test]
+    fn longer_wall_budget_does_not_bypass_fuel() {
+        let engine = engine();
+        let module = wasmtime::Module::new(
+            &engine,
+            wat::parse_str("(module (func (export \"run\") (loop br 0)))").unwrap(),
+        )
+        .unwrap();
+        let mut store = Store::new(&engine, ());
+        configure_request_store(&mut store, FuelQuota(100), Some(300000)).unwrap();
+        let instance = wasmtime::Instance::new(&mut store, &module, &[]).unwrap();
+        let run = instance
+            .get_typed_func::<(), ()>(&mut store, "run")
+            .unwrap();
+        assert_eq!(
+            run.call(&mut store, ())
+                .unwrap_err()
+                .downcast_ref::<wasmtime::Trap>(),
+            Some(&wasmtime::Trap::OutOfFuel)
+        );
+    }
 }
 
 /// Apply limits to a long-lived CLI-style service store.

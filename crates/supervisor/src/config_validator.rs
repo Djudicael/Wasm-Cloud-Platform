@@ -34,11 +34,34 @@ impl std::fmt::Display for ConfigValidationError {
 pub(crate) const RESERVED_VARS: &[&str] =
     &["PORT", "HOST_PORT", "APP_ID", "INSTANCE_ID", "NODE_ID"];
 
+#[cfg(test)]
+mod request_timeout_admission_tests {
+    use super::*;
+    #[test]
+    fn direct_deployments_cannot_admit_unbounded_request_budgets() {
+        let mut config = AppConfig::default_for(common::types::AppId::new("budget", "v1"));
+        for value in [Some(0), Some(999), Some(300001), Some(u32::MAX)] {
+            config.request_timeout_ms = value;
+            assert!(validate_placement_contract(&config)
+                .unwrap_err()
+                .to_string()
+                .contains("request_timeout_ms"));
+        }
+        for value in [None, Some(1000), Some(180000), Some(300000)] {
+            config.request_timeout_ms = value;
+            assert!(validate_placement_contract(&config).is_ok());
+        }
+    }
+}
+
 /// Validate the architecture-level placement contract without consulting an
 /// external secret provider. Event consumers call this too, so a direct NATS
 /// deployment cannot bypass the node-local mesh invariants enforced by ctl.
 pub fn validate_placement_contract(config: &AppConfig) -> Result<(), PlatformError> {
     let mut invalid_fields = Vec::new();
+    if let Err(message) = common::types::request_timeout_duration(config.request_timeout_ms) {
+        invalid_fields.push(message.to_string());
+    }
     let mut dependencies = std::collections::HashSet::new();
     for dependency in &config.local_dependencies {
         if dependency == &config.id {

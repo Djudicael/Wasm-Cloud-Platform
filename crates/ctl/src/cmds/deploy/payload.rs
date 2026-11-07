@@ -65,6 +65,7 @@ pub(super) fn build_deploy_payload(
         let config = AppConfig {
             id: app_id.clone(),
             fuel_quota: FuelQuota(args.fuel),
+            request_timeout_ms: None,
             memory_limit: MemoryPages(args.memory_mb * 16),
             max_instances: args.max_instances,
             idle_timeout_secs: args.idle_timeout,

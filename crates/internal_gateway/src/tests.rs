@@ -63,6 +63,7 @@ async fn handler_rejects_retired_connection_even_if_port_is_rebound() {
         supervisor::network::RegisteredEndpoint {
             addr: "127.0.0.1:9".parse().unwrap(),
             h2c: false,
+            request_timeout_ms: None,
         },
     )
     .await;
@@ -404,6 +405,7 @@ async fn test_internal_gateway_rejects_missing_bearer_token_for_route_auth() {
         supervisor::network::RegisteredEndpoint {
             addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 10101),
             h2c: false,
+            request_timeout_ms: None,
         },
     )
     .await;
@@ -452,6 +454,7 @@ async fn test_internal_gateway_enforces_endpoint_scopes() {
         supervisor::network::RegisteredEndpoint {
             addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 10101),
             h2c: false,
+            request_timeout_ms: None,
         },
     )
     .await;
@@ -494,6 +497,7 @@ async fn test_internal_gateway_forwards_h2c_with_identity_headers() {
         supervisor::network::RegisteredEndpoint {
             addr: upstream_addr,
             h2c: true,
+            request_timeout_ms: None,
         },
     )
     .await;
@@ -543,6 +547,7 @@ async fn mesh_caller_allowlist_cannot_be_forged_or_bypassed_by_target_version() 
             let endpoint = supervisor::network::RegisteredEndpoint {
                 addr: "127.0.0.1:9".parse().unwrap(),
                 h2c: false,
+                request_timeout_ms: None,
             };
             let (gw, original) = setup_gateway_with(gateway.clone(), endpoint).await;
             if version != "v1" {
@@ -630,6 +635,7 @@ async fn stale_endpoint_owner_in_another_namespace_fails_closed() {
     let endpoint = supervisor::network::RegisteredEndpoint {
         addr: "127.0.0.1:9".parse().unwrap(),
         h2c: false,
+        request_timeout_ms: None,
     };
     let (gateway, _) =
         setup_gateway_with(Arc::new(proxy::gateway::Gateway::new(None)), endpoint).await;
@@ -726,6 +732,7 @@ async fn test_internal_gateway_enforces_endpoint_rate_limit() {
         supervisor::network::RegisteredEndpoint {
             addr: upstream_addr,
             h2c: false,
+            request_timeout_ms: None,
         },
     )
     .await;
@@ -792,7 +799,11 @@ async fn anonymous_mesh_request_has_only_kernel_derived_caller_identity() {
     });
     let (gw, _) = setup_gateway_with(
         Arc::new(proxy::gateway::Gateway::new(None)),
-        supervisor::network::RegisteredEndpoint { addr, h2c: false },
+        supervisor::network::RegisteredEndpoint {
+            addr,
+            h2c: false,
+            request_timeout_ms: None,
+        },
     )
     .await;
     let mut req = Request::builder()

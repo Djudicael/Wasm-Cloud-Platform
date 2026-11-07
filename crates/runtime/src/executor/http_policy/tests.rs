@@ -7,6 +7,57 @@ fn hooks() -> PolicyHttpHooks {
     PolicyHttpHooks::new(PolicyEnforcer::new(InstancePolicy::default()), None)
 }
 
+#[test]
+fn per_application_http_budgets_preserve_defaults_and_guest_reductions() {
+    let legacy = hooks().with_request_timeout(None).unwrap();
+    assert_eq!(legacy.limits.first_byte, Duration::from_secs(30));
+    assert_eq!(legacy.limits.total, Duration::from_secs(120));
+    let longer = hooks().with_request_timeout(Some(180_000)).unwrap();
+    assert_eq!(longer.limits.first_byte, Duration::from_secs(180));
+    assert_eq!(longer.limits.total, Duration::from_secs(180));
+    assert_eq!(longer.limits.connect, Duration::from_secs(10));
+    assert_eq!(longer.limits.between_bytes, Duration::from_secs(30));
+    // RequestOptions continues to use min(app ceiling, guest deadline).
+    assert_eq!(
+        Duration::from_secs(7).min(longer.limits.first_byte),
+        Duration::from_secs(7)
+    );
+    let shorter = hooks().with_request_timeout(Some(1000)).unwrap();
+    assert_eq!(shorter.limits.first_byte, Duration::from_secs(1));
+    assert_eq!(shorter.limits.total, Duration::from_secs(1));
+    assert_eq!(shorter.limits.connect, Duration::from_secs(1));
+    assert_eq!(shorter.limits.between_bytes, Duration::from_secs(1));
+    assert!(hooks().with_request_timeout(Some(0)).is_err());
+    assert!(hooks().with_request_timeout(Some(300001)).is_err());
+}
+
+#[tokio::test]
+async fn opted_in_request_budget_keeps_the_guest_shorter_first_byte_deadline() {
+    let server = spawn_server(OK, Duration::from_millis(100), false).await;
+    let mut hooks = hooks().with_request_timeout(Some(180000)).unwrap();
+    let options = RequestOptions {
+        first_byte_timeout: Some(Duration::from_millis(20)),
+        ..Default::default()
+    };
+    let future = hooks.send_request(
+        request(&format!("http://{}/", server.addr)),
+        Some(options),
+        Box::new(async { Ok(()) }),
+    );
+    assert!(matches!(
+        Pin::from(future).await,
+        Err(Error::ConnectionReadTimeout)
+    ));
+    assert_eq!(
+        hooks
+            .enforcer
+            .counters
+            .outbound_connections_active
+            .load(Ordering::Relaxed),
+        0
+    );
+}
+
 #[tokio::test]
 async fn store_extended_limits_bound_http_wire_writes_and_raw_connects() {
     use common::types::{AppConfig, AppId, ExtendedLimitsConfig};

@@ -1033,6 +1033,7 @@ async fn test_handle_state_snapshot_accepts_first_matching_session_only() {
     let stale_config = common::types::AppConfig {
         id: AppId("stale-app:v1".to_string()),
         fuel_quota: common::types::FuelQuota(1000),
+        request_timeout_ms: None,
         memory_limit: common::types::MemoryPages(4),
         max_instances: 1,
         idle_timeout_secs: 30,

@@ -21,6 +21,8 @@ use tower::ServiceBuilder;
 use tower_http::trace::TraceLayer;
 
 #[cfg(test)]
+mod budget_tests;
+#[cfg(test)]
 mod tests;
 
 /// Default request timeout for forwarded requests (30 seconds).
@@ -301,6 +303,45 @@ fn endpoint_auth_policy(
     }
 }
 
+async fn registered_after_cold_start(
+    registry: &supervisor::network::NamespaceRegistry,
+    namespace: &str,
+    name: &str,
+    returned_addr: SocketAddr,
+) -> Result<supervisor::network::RegisteredEndpoint, StatusCode> {
+    // The successful spawn registers trusted metadata before returning. Never
+    // synthesize a default budget when the registration is absent or changed.
+    registry
+        .resolve_endpoint(namespace, name)
+        .await
+        .filter(|endpoint| endpoint.addr == returned_addr)
+        .ok_or(StatusCode::SERVICE_UNAVAILABLE)
+}
+
+fn forwarding_budget(
+    endpoint: &supervisor::network::RegisteredEndpoint,
+) -> Result<Duration, StatusCode> {
+    common::types::request_timeout_duration(endpoint.request_timeout_ms)
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)
+}
+
+/// Abort a connection driver if forwarding fails before response headers. Once
+/// headers are accepted the existing response body owns its transport lifetime.
+struct PendingForwardConnection(Option<tokio::task::JoinHandle<()>>);
+impl Drop for PendingForwardConnection {
+    fn drop(&mut self) {
+        if let Some(task) = self.0.take() {
+            task.abort();
+        }
+    }
+}
+impl PendingForwardConnection {
+    fn keep_for_response_body(&mut self) {
+        // Dropping a JoinHandle detaches it, preserving the streaming body path.
+        let _ = self.0.take();
+    }
+}
+
 async fn forward_request(
     endpoint: supervisor::network::RegisteredEndpoint,
     method: http::Method,
@@ -309,66 +350,73 @@ async fn forward_request(
     body: axum::body::Body,
     target_app_name: &str,
 ) -> Result<Response<axum::body::Body>, StatusCode> {
-    let stream = tokio::time::timeout(
-        FORWARDING_TIMEOUT,
-        tokio::net::TcpStream::connect(endpoint.addr),
+    // Only supervisor-registered target metadata can select a larger budget.
+    let budget = forwarding_budget(&endpoint)?;
+    forward_with_budget(
+        endpoint,
+        method,
+        path_and_query,
+        headers,
+        body,
+        target_app_name,
+        budget,
     )
     .await
-    .map_err(|_| StatusCode::GATEWAY_TIMEOUT)?
-    .map_err(|_| StatusCode::BAD_GATEWAY)?;
-    let io = TokioIo::new(stream);
+}
 
-    let mut req_builder = Request::builder().method(method).uri(
-        path_and_query
-            .parse::<Uri>()
-            .map_err(|_| StatusCode::BAD_REQUEST)?,
-    );
-
-    for (k, v) in &headers {
-        let name = k.as_str();
-        if name != "host" {
-            req_builder = req_builder.header(k, v);
+#[allow(clippy::too_many_arguments)]
+async fn forward_with_budget(
+    endpoint: supervisor::network::RegisteredEndpoint,
+    method: http::Method,
+    path_and_query: String,
+    headers: HeaderMap,
+    body: axum::body::Body,
+    target_app_name: &str,
+    budget: Duration,
+) -> Result<Response<axum::body::Body>, StatusCode> {
+    // One absolute deadline spans connect, handshake, request and first response
+    // headers. It is never reset between phases. The caller can cancel earlier.
+    let deadline = tokio::time::Instant::now() + budget;
+    tokio::time::timeout_at(deadline, async {
+        let connect_deadline = deadline.min(tokio::time::Instant::now() + FORWARDING_TIMEOUT);
+        let stream = tokio::time::timeout_at(connect_deadline, tokio::net::TcpStream::connect(endpoint.addr))
+            .await.map_err(|_| StatusCode::GATEWAY_TIMEOUT)?
+            .map_err(|_| StatusCode::BAD_GATEWAY)?;
+        let io = TokioIo::new(stream);
+        let mut req_builder = Request::builder().method(method).uri(
+            path_and_query.parse::<Uri>().map_err(|_| StatusCode::BAD_REQUEST)?,
+        );
+        for (k, v) in &headers {
+            if k.as_str() != "host" { req_builder = req_builder.header(k, v); }
         }
-    }
-
-    let real_host = format!("{}:{}", target_app_name, endpoint.addr.port());
-    req_builder = req_builder.header("host", &real_host);
-
-    let forward_req = req_builder
-        .body(body)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    let response = if endpoint.h2c {
-        let (mut sender, conn) = http2::Builder::new(TokioExecutor::new())
-            .handshake(io)
-            .await
-            .map_err(|_| StatusCode::BAD_GATEWAY)?;
-        tokio::spawn(async move {
-            if let Err(error) = conn.await {
-                tracing::warn!(error = %error, "[INTERNAL-GW] h2 upstream connection ended with error");
-            }
-        });
-        tokio::time::timeout(FORWARDING_TIMEOUT, sender.send_request(forward_req))
-            .await
-            .map_err(|_| StatusCode::GATEWAY_TIMEOUT)?
-            .map_err(|_| StatusCode::BAD_GATEWAY)?
-    } else {
-        let (mut sender, conn) = http1::Builder::new()
-            .handshake(io)
-            .await
-            .map_err(|_| StatusCode::BAD_GATEWAY)?;
-        tokio::spawn(async move {
-            if let Err(error) = conn.await {
-                tracing::warn!(error = %error, "[INTERNAL-GW] h1 upstream connection ended with error");
-            }
-        });
-        tokio::time::timeout(FORWARDING_TIMEOUT, sender.send_request(forward_req))
-            .await
-            .map_err(|_| StatusCode::GATEWAY_TIMEOUT)?
-            .map_err(|_| StatusCode::BAD_GATEWAY)?
-    };
-
-    Ok(map_hyper_response(response))
+        let real_host = format!("{}:{}", target_app_name, endpoint.addr.port());
+        let forward_req = req_builder.header("host", &real_host).body(body)
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        let response = if endpoint.h2c {
+            let (mut sender, conn) = http2::Builder::new(TokioExecutor::new()).handshake(io).await
+                .map_err(|_| StatusCode::BAD_GATEWAY)?;
+            let mut connection = PendingForwardConnection(Some(tokio::spawn(async move {
+                if let Err(error) = conn.await {
+                    tracing::warn!(error = %error, "[INTERNAL-GW] h2 upstream connection ended with error");
+                }
+            })));
+            let response = sender.send_request(forward_req).await.map_err(|_| StatusCode::BAD_GATEWAY)?;
+            connection.keep_for_response_body();
+            response
+        } else {
+            let (mut sender, conn) = http1::Builder::new().handshake(io).await
+                .map_err(|_| StatusCode::BAD_GATEWAY)?;
+            let mut connection = PendingForwardConnection(Some(tokio::spawn(async move {
+                if let Err(error) = conn.await {
+                    tracing::warn!(error = %error, "[INTERNAL-GW] h1 upstream connection ended with error");
+                }
+            })));
+            let response = sender.send_request(forward_req).await.map_err(|_| StatusCode::BAD_GATEWAY)?;
+            connection.keep_for_response_body();
+            response
+        };
+        Ok(map_hyper_response(response))
+    }).await.map_err(|_| StatusCode::GATEWAY_TIMEOUT)?
 }
 
 fn map_hyper_response(response: http::Response<Incoming>) -> Response<axum::body::Body> {
@@ -603,10 +651,13 @@ async fn proxy_handler(
                 match cold_start(target_app_id.clone()).await {
                     Some(addr) => {
                         tracing::info!(%addr, "[INTERNAL-GW] cold start succeeded");
-                        gw.registry
-                            .resolve_endpoint(target_namespace, target_app_name)
-                            .await
-                            .unwrap_or(supervisor::network::RegisteredEndpoint { addr, h2c: false })
+                        registered_after_cold_start(
+                            &gw.registry,
+                            target_namespace,
+                            target_app_name,
+                            addr,
+                        )
+                        .await?
                     }
                     None => {
                         tracing::warn!(

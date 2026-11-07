@@ -1216,6 +1216,7 @@ async fn deploy_app_to_state(state: &PersistedClusterState, req: DeployRequest) 
     let config = AppConfig {
         id: app_id.clone(),
         fuel_quota: FuelQuota(req.fuel),
+        request_timeout_ms: None,
         memory_limit: MemoryPages((req.memory_mb * 1024 * 1024) / 65536),
         max_instances: req.max_instances,
         idle_timeout_secs: req.idle_timeout,

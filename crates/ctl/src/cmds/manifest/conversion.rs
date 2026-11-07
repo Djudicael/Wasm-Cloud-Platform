@@ -10,6 +10,8 @@ impl DeployManifest {
         let manifest: DeployManifest = toml::from_str(&content)
             .map_err(|e| anyhow::anyhow!("Invalid manifest TOML: {}", e))?;
         common::triggers::validate(&manifest.triggers).map_err(anyhow::Error::msg)?;
+        common::types::request_timeout_duration(manifest.fuel.request_timeout_ms)
+            .map_err(anyhow::Error::msg)?;
         Ok(manifest)
     }
 
@@ -24,6 +26,7 @@ impl DeployManifest {
         common::types::AppConfig {
             id: app_id,
             fuel_quota: common::types::FuelQuota(self.fuel.quota),
+            request_timeout_ms: self.fuel.request_timeout_ms,
             memory_limit: common::types::MemoryPages(self.fuel.memory_pages),
             max_instances: self.fuel.max_instances,
             idle_timeout_secs: self.fuel.idle_timeout_secs,
@@ -235,6 +238,7 @@ pub fn manifest_from_config(
             wasm_bind_port: app_config.wasm_bind_port,
         },
         fuel: FuelManifestSection {
+            request_timeout_ms: app_config.request_timeout_ms,
             quota: app_config.fuel_quota.0,
             memory_pages: app_config.memory_limit.0,
             max_instances: app_config.max_instances,

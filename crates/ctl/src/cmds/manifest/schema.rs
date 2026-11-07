@@ -100,6 +100,8 @@ impl Default for AppManifestSection {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct FuelManifestSection {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_timeout_ms: Option<u32>,
     #[serde(default = "default_quota")]
     pub quota: u64,
     #[serde(default = "default_memory_pages")]
@@ -129,6 +131,7 @@ fn default_idle_timeout() -> u64 {
 impl Default for FuelManifestSection {
     fn default() -> Self {
         FuelManifestSection {
+            request_timeout_ms: None,
             quota: default_quota(),
             memory_pages: default_memory_pages(),
             max_instances: default_max_instances(),
