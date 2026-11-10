@@ -1898,8 +1898,19 @@ async fn main() -> anyhow::Result<()> {
     let cold_start_supervisor = supervisor.clone();
     let cold_start = Arc::new(move |app_id: common::types::AppId| {
         let sup = cold_start_supervisor.clone();
-        Box::pin(async move { sup.ensure_instance(&app_id).await.ok() })
-            as futures::future::BoxFuture<'static, Option<std::net::SocketAddr>>
+        Box::pin(async move {
+            match sup.ensure_instance(&app_id).await {
+                Ok(address) => Some(address),
+                Err(error) => {
+                    tracing::warn!(
+                        app_id = %app_id.0,
+                        error = %error,
+                        "node-local cold start refused"
+                    );
+                    None
+                }
+            }
+        }) as futures::future::BoxFuture<'static, Option<std::net::SocketAddr>>
     });
 
     // Initialize Prometheus metrics

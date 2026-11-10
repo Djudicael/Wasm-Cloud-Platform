@@ -38,6 +38,40 @@ fn base_instance_policy() -> InstancePolicy {
     }
 }
 
+#[test]
+fn execution_model_detection_does_not_allocate_tables_or_relax_instance_limits() {
+    let runtime = WasmRuntime::new().unwrap();
+    let wasm = wat::parse_str(
+        r#"(component
+            (core module $m
+                (table 10475 funcref)
+                (func (export "run")))
+            (core instance $i (instantiate $m))
+            (func (export "run") (canon lift (core func $i "run"))))"#,
+    )
+    .unwrap();
+    let artifact = runtime.compile(&wasm).unwrap();
+    let prepared = runtime.prepare(&artifact, base_config()).unwrap();
+    assert_eq!(prepared.execution_model(), ComponentExecutionModel::WasiCli);
+    let error = match prepared.spawn_instance(vec![], 8080, None) {
+        Ok(_) => panic!("default table limit must still reject execution"),
+        Err(error) => error,
+    };
+    assert!(error.to_string().contains("table"), "{error}");
+
+    let mut config = base_config();
+    config.extended_limits = Some(common::types::ExtendedLimitsConfig {
+        max_table_elements: Some(11_000),
+        max_open_fds: None,
+        max_fs_write_bytes: None,
+        max_net_egress_bytes: None,
+        max_outbound_connections: None,
+    });
+    let prepared = runtime.prepare(&artifact, config).unwrap();
+    let mut instance = prepared.spawn_instance(vec![], 8080, None).unwrap();
+    assert!(instance.run().trap.is_none());
+}
+
 fn compile_and_run_component(component_wat: &str) -> crate::executor::ExecutionStats {
     let runtime = WasmRuntime::new().expect("Failed to create WasmRuntime");
     let wasm_bytes = wat::parse_str(component_wat).expect("failed to parse component WAT");
@@ -348,6 +382,52 @@ fn test_run_supports_top_level_run_fallback() {
 }
 
 #[test]
+fn execution_model_detection_preserves_interface_semver_resolution() {
+    let runtime = WasmRuntime::new().unwrap();
+    for (template, original, replacement, expected) in [
+        (
+            no_op_component_with_wasi_http_incoming_handler_interface(),
+            "wasi:http/incoming-handler@0.2.3",
+            "wasi:http/incoming-handler@0.2.6",
+            Some(ComponentExecutionModel::WasiHttpIncomingHandler),
+        ),
+        (
+            no_op_component_with_wasi_http_incoming_handler_interface(),
+            "wasi:http/incoming-handler@0.2.3",
+            "wasi:http/incoming-handler@0.2.12",
+            Some(ComponentExecutionModel::WasiHttpIncomingHandler),
+        ),
+        (
+            no_op_component_with_wasi_cli_run_interface(),
+            "wasi:cli/run@0.2.6",
+            "wasi:cli/run@0.2.99",
+            Some(ComponentExecutionModel::WasiCli),
+        ),
+        (
+            no_op_component_with_wasi_http_incoming_handler_interface(),
+            "wasi:http/incoming-handler@0.2.3",
+            "wasi:http/incoming-handler@0.4.0",
+            None,
+        ),
+    ] {
+        assert!(template.contains(original));
+        let wasm = wat::parse_str(template.replace(original, replacement)).unwrap();
+        let artifact = runtime.compile(&wasm).unwrap();
+        let result = runtime.prepare(&artifact, base_config());
+        match expected {
+            Some(model) => assert_eq!(result.unwrap().execution_model(), model),
+            None => {
+                let error = match result {
+                    Ok(_) => panic!("unsupported interface version must be rejected"),
+                    Err(error) => error,
+                };
+                assert!(error.to_string().contains("component export not supported"));
+            }
+        }
+    }
+}
+
+#[test]
 fn test_prepare_detects_wasi_http_incoming_handler_components() {
     let runtime = WasmRuntime::new().expect("Failed to create WasmRuntime");
     let wasm_bytes = wat::parse_str(no_op_component_with_wasi_http_incoming_handler_interface())
@@ -457,7 +537,10 @@ fn test_spawn_instance_fails_for_missing_allowed_filesystem_path() {
     let runtime = WasmRuntime::new().expect("Failed to create WasmRuntime");
     let wasm_bytes = wat::parse_str(no_op_component_with_wasi_cli_run_interface()).unwrap();
     let artifact = runtime.compile(&wasm_bytes).unwrap();
-    let err = match runtime.prepare(&artifact, config) {
+    // Model detection is metadata-only; filesystem capabilities are opened when
+    // an instance is created, where the missing-path refusal must still apply.
+    let prepared = runtime.prepare(&artifact, config).unwrap();
+    let err = match prepared.spawn_instance(vec![], 8080, None) {
         Ok(_) => panic!("missing preopen path should fail"),
         Err(err) => err,
     };

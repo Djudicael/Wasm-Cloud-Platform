@@ -1047,26 +1047,46 @@ fn detect_component_execution_model(
             .map_err(|e| PlatformError::runtime(format!("P3 service contract error: {e}")))?;
         return Ok(ComponentExecutionModel::WasiHttpIncomingHandler);
     }
-    let state = build_store_state(config, Vec::new(), config.wasm_bind_port, None, None)?;
-    let mut store = Store::new(engine, state);
-    store.limiter(|s| &mut s.limiter);
-    configure_request_store(&mut store, config.fuel_quota, config.request_timeout_ms)?;
+    // Classification must not execute component start functions or allocate its
+    // memories/tables. Actual instance creation applies the application's limits.
     let linker = build_runtime_linker(engine)?;
-    let instance = linker.instantiate(&mut store, module).map_err(|e| {
-        PlatformError::runtime(format!("instantiation error during model detection: {e}"))
+    linker.instantiate_pre(module).map_err(|e| {
+        PlatformError::runtime(format!(
+            "pre-instantiation error during model detection: {e}"
+        ))
     })?;
-
-    match detect_execution_model_from_instance(&mut store, &instance) {
-        ResolvedExecutionModel::WasiCliRun(_) | ResolvedExecutionModel::TopLevelEntryPoint(_) => {
-            Ok(ComponentExecutionModel::WasiCli)
-        }
-        ResolvedExecutionModel::WasiHttpIncomingHandler { .. } => {
-            Ok(ComponentExecutionModel::WasiHttpIncomingHandler)
-        }
-        ResolvedExecutionModel::Unknown => Err(PlatformError::runtime(
-            "component export not supported: expected wasi:cli/run, run, _start, or wasi:http/incoming-handler",
-        )),
+    use wasmtime::component::types::ComponentItem;
+    // Component lookup preserves Wasmtime's semver-aware interface resolution,
+    // just like Instance::get_export_index; ComponentType lookup is exact only.
+    let has_interface_function = |interface: &str, function: &str| {
+        let Some((ComponentItem::ComponentInstance(_), index)) = module.get_export(None, interface)
+        else {
+            return false;
+        };
+        module
+            .get_export(Some(&index), function)
+            .is_some_and(|(item, _)| matches!(item, ComponentItem::ComponentFunc(_)))
+    };
+    if WASI_CLI_RUN_INTERFACES
+        .iter()
+        .any(|name| has_interface_function(name, "run"))
+        || top_level_entry_point_candidates().iter().any(|name| {
+            module
+                .get_export(None, *name)
+                .is_some_and(|(item, _)| matches!(item, ComponentItem::ComponentFunc(_)))
+        })
+    {
+        return Ok(ComponentExecutionModel::WasiCli);
     }
+    if WASI_HTTP_INCOMING_HANDLER_INTERFACES
+        .iter()
+        .any(|name| has_interface_function(name, "handle"))
+    {
+        return Ok(ComponentExecutionModel::WasiHttpIncomingHandler);
+    }
+    Err(PlatformError::runtime(
+        "component export not supported: expected wasi:cli/run, run, _start, or wasi:http/incoming-handler",
+    ))
 }
 
 impl Drop for RunningInstance {

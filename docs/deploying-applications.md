@@ -1422,3 +1422,18 @@ all defaults, including the 10000-element table cap. This is an application
 limit, not a global runtime increase; fuel and linear-memory ceilings remain
 separate. For a large C++ WASI component, size its table cap explicitly before
 deployment rather than weakening the default for unrelated applications.
+
+P2 execution-model detection inspects export types and validates linker imports
+without instantiating the component. Preparing or restoring an artifact therefore
+does not allocate its tables or execute its core start functions merely to identify
+the execution model. Actual instance creation still applies the application's
+resource limits: a table requiring more than 10000 elements needs an explicit
+adequate application limit. Successful detection alone does not prove that the
+component can instantiate or handle a request within that profile. P3 service
+contract validation keeps its existing path.
+
+For an internal gateway cold-start failure, inspect the node's
+`node-local cold start refused` warning. Its `app_id` identifies the exact
+version requested and `error` records the supervisor's refusal (for example,
+an unavailable local dependency or paused admission). The gateway keeps its
+existing HTTP failure response; this diagnostic does not bypass admission.
