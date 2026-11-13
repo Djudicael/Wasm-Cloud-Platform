@@ -146,6 +146,25 @@ async fn real_component_outgoing_http_obeys_network_and_supervisor_policy() {
         } else {
             assert!(body.starts_with("denied:"), "{body}");
         }
+        // More than the unchanged default 64-descriptor table capacity, in one
+        // WASI invocation. Every call owns fresh request-options; both permitted
+        // and denied responses must release them before the next call.
+        let request = hyper::Request::builder()
+            .uri("http://probe/probe/http/repeat?count=128")
+            .body(Empty::<Bytes>::new())
+            .unwrap();
+        let response = tokio::time::timeout(Duration::from_secs(20), sender.send_request(request))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(response.status().is_success());
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let body = std::str::from_utf8(&body).unwrap();
+        if tcp && !denied && !extra_denial && profile.is_none() && connection_limit != Some(0) {
+            assert_eq!(body, "attempts:128;last:status:200");
+        } else {
+            assert!(body.starts_with("attempts:128;last:denied:"), "{body}");
+        }
         drop(sender);
         connection.abort();
         let _ = instance.shutdown_tx.send(());
@@ -157,7 +176,7 @@ async fn real_component_outgoing_http_obeys_network_and_supervisor_policy() {
     }
     assert_eq!(
         received.load(Ordering::Relaxed),
-        1,
+        129,
         "denied guests must never connect"
     );
     backend_task.abort();

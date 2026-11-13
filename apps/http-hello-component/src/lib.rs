@@ -58,6 +58,14 @@ impl bindings::exports::wasi::http::incoming_handler::Guest for HttpHelloCompone
             "/probe/connections/hold" => probe_connection_pressure(&path),
             "/probe/fds/hold" => probe_fd_pressure(&path),
             "/probe/http/get" => probe_outbound_http(),
+            "/probe/http/repeat" => {
+                let attempts = query_u32(&path, "count", 128).clamp(1, 256);
+                let mut last = String::new();
+                for _ in 0..attempts {
+                    last = probe_outbound_http_options(true);
+                }
+                format!("attempts:{attempts};last:{last}")
+            }
             "/probe/tcp/write" => probe_socket_write(false),
             "/probe/udp/write" => probe_socket_write(true),
             "/probe/tcp/read" => probe_socket_stall(false),
@@ -155,9 +163,13 @@ fn probe_socket_write(udp: bool) -> String {
 }
 
 fn probe_outbound_http() -> String {
+    probe_outbound_http_options(false)
+}
+
+fn probe_outbound_http_options(with_options: bool) -> String {
     use bindings::wasi::http::{
         outgoing_handler,
-        types::{Method, OutgoingRequest, Scheme},
+        types::{Method, OutgoingRequest, RequestOptions, Scheme},
     };
     let Ok(target) = std::env::var("RESOURCE_PROBE_HTTP_TARGET") else {
         return "http_probe_not_configured".into();
@@ -177,7 +189,13 @@ fn probe_outbound_http() -> String {
     request
         .set_path_with_query(Some(&format!("/{path}")))
         .unwrap();
-    let future = match outgoing_handler::handle(request, None) {
+    let options = with_options.then(|| {
+        let options = RequestOptions::new();
+        options.set_connect_timeout(Some(3_000_000_000)).unwrap();
+        options.set_first_byte_timeout(Some(3_000_000_000)).unwrap();
+        options
+    });
+    let future = match outgoing_handler::handle(request, options) {
         Ok(future) => future,
         Err(error) => return format!("denied:{error:?}"),
     };

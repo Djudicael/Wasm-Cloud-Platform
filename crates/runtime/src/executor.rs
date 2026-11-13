@@ -4,6 +4,7 @@ use crate::limits::{
 };
 use crate::policy_tracker::{PolicyCounters, PolicyEnforcer};
 mod http_policy;
+mod http_resources;
 mod observations;
 mod p3;
 mod triggers;
@@ -203,6 +204,8 @@ fn build_runtime_linker(engine: &Engine) -> Result<Linker<StoreState>, PlatformE
         .map_err(|e| PlatformError::runtime(format!("wasi linker error: {e}")))?;
     add_only_http_to_linker_sync(&mut linker)
         .map_err(|e| PlatformError::runtime(format!("wasi:http linker error: {e}")))?;
+    http_resources::add_to_linker(&mut linker)
+        .map_err(|e| PlatformError::runtime(format!("HTTP resource linker error: {e}")))?;
     socket_egress::add_to_linker(&mut linker)
         .map_err(|e| PlatformError::runtime(format!("socket egress linker error: {e}")))?;
     socket_deadlines::add_to_linker(&mut linker, false)
@@ -216,6 +219,8 @@ fn build_async_http_linker(engine: &Engine) -> Result<Linker<StoreState>, Platfo
         .map_err(|e| PlatformError::runtime(format!("wasi linker error: {e}")))?;
     add_only_http_to_linker_async(&mut linker)
         .map_err(|e| PlatformError::runtime(format!("wasi:http linker error: {e}")))?;
+    http_resources::add_to_linker(&mut linker)
+        .map_err(|e| PlatformError::runtime(format!("HTTP resource linker error: {e}")))?;
     socket_egress::add_to_linker(&mut linker)
         .map_err(|e| PlatformError::runtime(format!("socket egress linker error: {e}")))?;
     socket_deadlines::add_to_linker(&mut linker, true)

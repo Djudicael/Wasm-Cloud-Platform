@@ -230,6 +230,15 @@ for the fixed deadlines, response-size cap, and compatibility implications.
 To exercise real outgoing-handler guest imports in WSL, build the fixture and
 run the explicit integration test:
 
+The P2 linker releases the owned `request-options` handle after delegating to
+Wasmtime's HTTP handler. This compensates for the pinned Wasmtime 48.0.1 handler
+cloning the options without deleting their consumed resource-table entry.
+The filesystem `max_open_fds` resource-table ceiling remains unchanged. The
+guest regression performs 128 consecutive requests with fresh timeout options
+inside one invocation, including denied destinations, to exercise cleanup
+beyond the default 64-handle ceiling. HTTP policy checks and transport behavior
+remain delegated to the existing handler.
+
 ```bash
 export CARGO_TARGET_DIR=/tmp/wasm-cloud-platform-target
 cargo build --locked -p http-hello-component --target wasm32-wasip2
